@@ -275,12 +275,11 @@ export component Welcome inherits Rectangle {
             }
         }
 
-        // Quick Connect card — fills the remaining height *when there are
-        // sessions* so the list can scroll (#116); when empty it stays at its
-        // natural height right under the header (a spacer below soaks up the rest)
-        // so the empty placeholder doesn't get stranded at the bottom (#131-ux).
+        // Quick Connect card — always fills the remaining height so the panel
+        // doesn't jump when the first session is added (the empty placeholder
+        // stretches to fill just like the session list does) (#214).
         Rectangle {
-            vertical-stretch: (root.compact || root.sessions.length > 0) ? 1 : 0;
+            vertical-stretch: 1;
             background: Theme.bg-panel;
             border-radius: Theme.radius-md;
             border-width: 1px;
@@ -341,7 +340,7 @@ export component Welcome inherits Rectangle {
                 }
 
                 if sessions.length == 0 : Rectangle {
-                    height: 120px;
+                    vertical-stretch: 1;
                     background: Theme.bg-root;
                     border-radius: Theme.radius-sm;
                     border-width: 1px;
@@ -494,9 +493,5 @@ export component Welcome inherits Rectangle {
                 }
             }
         }
-
-        // No sessions → soak up the leftover height below the natural-height card
-        // so it sits right under the header instead of stranded at the bottom.
-        if !root.compact && root.sessions.length == 0 : Rectangle { vertical-stretch: 1; }
     }
 }
