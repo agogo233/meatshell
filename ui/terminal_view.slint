@@ -576,6 +576,68 @@ export component TerminalView inherits Rectangle {
                                 && (key-capture.cursor-blink || !Theme.window-focused);
                         }
 
+                        // Top-most transparent interaction layer. On macOS,
+                        // scroll events over rendered terminal text may not reach
+                        // the older body TouchArea below the spans, so keep the
+                        // terminal's click/select/wheel handling above all text
+                        // while leaving the visual output untouched (#198).
+                        body-touch-overlay := TouchArea {
+                            mouse-cursor: text;
+                            pointer-event(ev) => {
+                                if (ev.kind == PointerEventKind.down) {
+                                    ime-input.focus();
+                                    if (ev.button == PointerEventButton.right) {
+                                        root.ctx-x = self.mouse-x;
+                                        root.ctx-y = self.mouse-y;
+                                        ctx-menu.show();
+                                    } else if (ev.button == PointerEventButton.left) {
+                                        root.selecting = true;
+                                        root.select-start(
+                                            floor(self.mouse-y / root.cell-h),
+                                            floor(self.mouse-x / root.cell-w));
+                                    }
+                                } else if (ev.kind == PointerEventKind.up) {
+                                    if (ev.button == PointerEventButton.middle) {
+                                        root.paste-from-clipboard();
+                                        ime-input.focus();
+                                    } else if (ev.button == PointerEventButton.left
+                                            && root.selecting) {
+                                        root.selecting = false;
+                                        root.autoscroll-dir = 0;
+                                        root.select-end();
+                                    }
+                                }
+                            }
+                            moved => {
+                                if (root.selecting) {
+                                    root.select-update(
+                                        floor(self.mouse-y / root.cell-h),
+                                        floor(self.mouse-x / root.cell-w));
+                                    if (!root.is-alt-screen) {
+                                        root.vis-y = self.mouse-y + 8px + flickable.viewport-y;
+                                        if (root.vis-y < 0) {
+                                            root.autoscroll-dir = -1;
+                                        } else if (root.vis-y > flickable.height) {
+                                            root.autoscroll-dir = 1;
+                                        } else {
+                                            root.autoscroll-dir = 0;
+                                        }
+                                    }
+                                }
+                            }
+                            scroll-event(ev) => {
+                                if (root.is-alt-screen) {
+                                    root.terminal-wheel(
+                                        ev.delta-y > 0 ? 1 : -1,
+                                        floor(self.mouse-x / root.cell-w),
+                                        floor(self.mouse-y / root.cell-h));
+                                } else {
+                                    root.terminal-scroll(ev.delta-y > 0 ? 3 : -3);
+                                }
+                                accept
+                            }
+                        }
+
                         // --- Right-click context menu ---------------------
                         ctx-menu := PopupWindow {
                             x: root.ctx-x;

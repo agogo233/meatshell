@@ -1337,9 +1337,22 @@ pub fn run() -> Result<()> {
                 } else {
                     WinActivity::Background
                 };
+                let prev = ev_activity.get();
                 ev_activity.set(act);
                 if let Some(win) = weak.upgrade() {
                     win.set_window_focused(act == WinActivity::Active);
+                    if prev == WinActivity::Hidden && act != WinActivity::Hidden {
+                        win.set_terminal_restore_cover(true);
+                        let weak2 = weak.clone();
+                        slint::Timer::single_shot(
+                            std::time::Duration::from_millis(120),
+                            move || {
+                                if let Some(w) = weak2.upgrade() {
+                                    w.set_terminal_restore_cover(false);
+                                }
+                            },
+                        );
+                    }
                 }
             };
             match event {

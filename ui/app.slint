@@ -449,6 +449,7 @@ export component AppWindow inherits Window {
     // double-click on the title-bar icon / X shouldn't drop active sessions.
     in-out property <bool> confirm-close-open: false;
     callback confirm-close-yes();                  // quit the app for real
+    in-out property <bool> terminal-restore-cover: false;
     // Host-key confirmation (#109-5). Rust opens this when a server presents an
     // unknown / changed host key; the user's answer flows back via the callbacks
     // and Rust closes the dialog.
@@ -1335,8 +1336,18 @@ export component AppWindow inherits Window {
                     select-end() => { root.term-select-end(term.id); }
                     select-autoscroll(dir) => { root.term-select-autoscroll(term.id, dir); }
                 }
+
+                // Windows may show the terminal model being reconstructed when
+                // restoring from minimize (#183). Briefly cover the terminal area
+                // until the restore repaint settles; the underlying PTY/buffer is
+                // untouched.
+                if root.terminal-restore-cover && pane.active-id != "welcome" && pane.tabs.length > 0 : Rectangle {
+                    width: parent.width;
+                    height: parent.height;
+                    background: Theme.term-bg;
                 }
-                }
+            }
+            }
             }
 
             // Draggable splitters between panes. Single pane => the model is
