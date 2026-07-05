@@ -1,7 +1,41 @@
 # Changelog / 更新日志
 
 All notable changes are documented here. 本文件记录所有重要变更。
-中英对照（English first, 中文在后）.
+中英对照（中文在前，English after）.
+
+## [0.5.5] - 2026-07-05
+
+### 新增 / Added
+
+- **支持分屏合并 (#216)。** 标签页右键菜单新增「Merge panes」，可将当前分屏的所有标签合并到其它 pane，并自动折叠空分屏。
+- **支持拖到标签栏合并分屏。** 像 IDEA 一样，将某个分屏里的标签拖到另一个分屏的标签栏后释放，即可把标签移入目标标签组；源分屏移空后会自动合并回单窗口。
+
+### 改进 / Changed
+
+- **优化当前标签页识别度 (#200)。** 暗色模式下当前标签页使用更明确的层级底色；开启壁纸时会从壁纸取色，让标签栏更沉浸。
+- **标签页关闭按钮固定在右侧。** 短标签名不再把关闭按钮挤到中间，所有标签的关闭入口位置保持一致。
+- **关闭确认弹窗按钮接入主题色。** 关闭应用确认弹窗不再使用系统默认蓝色按钮，主按钮会跟随主题和壁纸取色。
+
+### 修复 / Fixed
+
+- **修复 less 搜索高亮不可见 (#217)。** 正确处理默认前景/背景色下的 reverse-video 反色序列，使 `less` 中 `/` 或 `?` 搜索命中能够正常显示高亮。
+
+---
+
+### Added
+
+- **Split-pane merging (#216).** The tab context menu now includes "Merge panes", moving all tabs from the current split pane into another pane and collapsing the emptied pane automatically.
+- **Drag-to-tab-strip pane merge.** Like IDEA, dragging a tab from one split pane onto another pane's tab strip moves it into that tab group; if the source pane becomes empty, it collapses back into a single window.
+
+### Changed
+
+- **Improve active-tab visibility (#200).** Dark mode now gives the active tab a clearer surface level, while wallpaper mode derives the active-tab colour from the wallpaper for a more immersive look.
+- **Pin tab close buttons to the right edge.** Short tab names no longer pull the close button toward the middle, keeping the close affordance aligned across tabs.
+- **Theme the close-confirmation buttons.** The app-close confirmation dialog now uses themed buttons instead of the platform-default blue button, so the primary action follows the current theme and wallpaper accent.
+
+### Fixed
+
+- **Fix invisible `less` search highlights (#217).** Reverse-video sequences with default foreground/background colours now render a visible background, so `/` and `?` matches in `less` are highlighted correctly.
 
 ## [0.5.4] - 2026-07-04
 
