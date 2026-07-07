@@ -373,6 +373,47 @@ fn apply_window_chrome(window: &slint::Window) {
 #[cfg(not(windows))]
 fn apply_window_chrome(_window: &slint::Window) {}
 
+fn clamp_window_size_to_monitor(window: &slint::Window, preferred: Option<(f32, f32)>) -> Option<(f32, f32)> {
+    use i_slint_backend_winit::winit::dpi::{LogicalPosition, LogicalSize};
+
+    window.with_winit_window(|ww| {
+        let scale = ww.scale_factor().max(0.01);
+        let monitor = ww.current_monitor()?;
+        let monitor_size = monitor.size();
+        let monitor_pos = monitor.position();
+        let max_w = (monitor_size.width as f64 / scale - 16.0).max(1.0) as f32;
+        let max_h = (monitor_size.height as f64 / scale - 16.0).max(1.0) as f32;
+        let min_w = 960.0_f32.min(max_w);
+        let min_h = 600.0_f32.min(max_h);
+        let current = ww.inner_size();
+        let current_w = (current.width as f64 / scale) as f32;
+        let current_h = (current.height as f64 / scale) as f32;
+        let (want_w, want_h) = preferred.unwrap_or((current_w, current_h));
+        let target_w = want_w.clamp(min_w, max_w);
+        let target_h = want_h.clamp(min_h, max_h);
+
+        if (target_w - current_w).abs() > 0.5
+            || (target_h - current_h).abs() > 0.5
+            || preferred.is_some()
+        {
+            let _ = ww.request_inner_size(LogicalSize::new(target_w as f64, target_h as f64));
+        }
+
+        if (target_w - want_w).abs() > 0.5 || (target_h - want_h).abs() > 0.5 {
+            let mon_w = monitor_size.width as f64 / scale;
+            let mon_h = monitor_size.height as f64 / scale;
+            let mon_x = monitor_pos.x as f64 / scale;
+            let mon_y = monitor_pos.y as f64 / scale;
+            ww.set_outer_position(LogicalPosition::new(
+                mon_x + (mon_w - target_w as f64).max(0.0) / 2.0,
+                mon_y + (mon_h - target_h as f64).max(0.0) / 2.0,
+            ));
+        }
+
+        Some((target_w, target_h))
+    })?
+}
+
 #[cfg(target_os = "linux")]
 fn schedule_slint_pointer_ungrab<T>(weak: slint::Weak<T>)
 where
@@ -693,7 +734,9 @@ pub fn run() -> Result<()> {
         // Restore the user's preferred window size, if any (#dock).
         let (ww, wh) = s.window_size();
         if ww > 0.0 && wh > 0.0 {
-            window.window().set_size(slint::LogicalSize::new(ww, wh));
+            let _ = clamp_window_size_to_monitor(&window.window(), Some((ww, wh)));
+        } else {
+            let _ = clamp_window_size_to_monitor(&window.window(), None);
         }
     }
     {
@@ -3389,8 +3432,14 @@ fn save_layout(win: &AppWindow, store: &Rc<RefCell<ConfigStore>>) {
     s.set_welcome_sidebar_dock(win.get_welcome_sidebar_dock().to_string());
     s.set_welcome_collapsed(win.get_welcome_collapsed());
     // A maximized size isn't a useful "preferred" size to restore to, so only
-    // remember the windowed size.
-    if !win.get_window_maximized() && w > 200.0 && h > 200.0 {
+    // remember the windowed size. Ask the native window too, because the Slint
+    // property can lag during startup/shutdown on frameless Windows (#234).
+    let native_maximized = win
+        .window()
+        .with_winit_window(|ww| ww.is_maximized())
+        .unwrap_or_else(|| win.get_window_maximized());
+    if !native_maximized && w > 200.0 && h > 200.0 {
+        let (w, h) = clamp_window_size_to_monitor(&win.window(), Some((w, h))).unwrap_or((w, h));
         s.set_window_size(w, h);
     }
     let _ = s.save();
