@@ -265,8 +265,8 @@ fn default_parity() -> String {
 fn default_wallpaper() -> String {
     // Serde default for the `wallpaper` field: kept at the old "幻想 3048" so an
     // *existing* config that predates the field stays on tech — `migrate_defaults`
-    // then upgrades those still-on-tech users to miku (and leaves real choices
-    // alone). Brand-new installs get miku straight from `fresh_config`.
+    // then advances default-following users through the migration chain. Brand-new
+    // installs get the current default straight from `fresh_config`.
     "builtin:tech".to_string()
 }
 
@@ -277,12 +277,12 @@ const DEFAULT_WALLPAPER_TRANSPARENCY: f32 = 0.38;
 const DEFAULT_WALLPAPER_OVERLAY: f32 = 1.0 - DEFAULT_WALLPAPER_TRANSPARENCY;
 
 /// A brand-new config (no file yet, or the old one was corrupt). Seeds the
-/// new-user default layout (#new-user-defaults): miku wallpaper, welcome page as
+/// new-user default layout (#new-user-defaults): ms wallpaper, welcome page as
 /// a left sidebar, resource panel docked right, 38% wallpaper transparency, and
 /// marks the migration done so it isn't re-applied.
 fn fresh_config() -> ConfigFile {
     ConfigFile {
-        wallpaper: "builtin:miku".to_string(),
+        wallpaper: "builtin:ms".to_string(),
         welcome_as_sidebar: true,
         sidebar_dock: "right".to_string(),
         wallpaper_overlay: DEFAULT_WALLPAPER_OVERLAY,
@@ -641,7 +641,7 @@ pub struct ConfigFile {
     pub update_check_disabled: bool,
     /// One-time default-layout migration marker (#new-user-defaults). 0 = config
     /// predates the migration. `migrate_defaults` bumps it to `DEFAULTS_REV` after
-    /// pushing the new look (miku wallpaper / welcome-as-sidebar / right-docked
+    /// pushing the new look (default wallpaper / welcome-as-sidebar / right-docked
     /// resource panel / wallpaper overlay) to users still sitting on old defaults.
     #[serde(default)]
     pub defaults_rev: u32,
@@ -1504,9 +1504,9 @@ mod tests {
     }
 
     #[test]
-    fn wallpaper_defaults_to_tech_but_keeps_explicit_choice() {
+    fn wallpaper_defaults_to_ms_but_keeps_explicit_choice() {
         // Fresh install (no file).
-        assert_eq!(fresh_config().wallpaper, "builtin:tech");
+        assert_eq!(fresh_config().wallpaper, "builtin:ms");
         // User upgrading from before the feature: JSON without the key.
         let cfg: ConfigFile = serde_json::from_str("{}").unwrap();
         assert_eq!(cfg.wallpaper, "builtin:tech");
@@ -1516,6 +1516,14 @@ mod tests {
         // A custom choice is preserved.
         let cfg: ConfigFile = serde_json::from_str(r#"{"wallpaper":"builtin:light"}"#).unwrap();
         assert_eq!(cfg.wallpaper, "builtin:light");
+
+        let mut cfg = ConfigFile {
+            wallpaper: "builtin:miku".to_string(),
+            defaults_rev: DEFAULTS_REV,
+            ..ConfigFile::default()
+        };
+        assert!(!migrate_defaults(&mut cfg));
+        assert_eq!(cfg.wallpaper, "builtin:miku");
     }
 
     #[test]

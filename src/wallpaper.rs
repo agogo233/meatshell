@@ -51,6 +51,7 @@ pub fn load(id: &str) -> Option<Wallpaper> {
         "builtin:dark" => render_builtin(true),
         "builtin:tech" => render_tech(),
         "builtin:miku" => decode_miku()?,
+        "builtin:ms" => decode_ms()?,
         path => decode_custom(path)?,
     };
     let palette = derive_palette(&buf);
@@ -62,7 +63,10 @@ pub fn load(id: &str) -> Option<Wallpaper> {
 
 /// True if `id` names one of the procedurally-drawn built-ins.
 pub fn is_builtin(id: &str) -> bool {
-    id == "builtin:light" || id == "builtin:dark" || id == "builtin:tech" || id == "builtin:miku"
+    matches!(
+        id,
+        "builtin:light" | "builtin:dark" | "builtin:tech" | "builtin:miku" | "builtin:ms"
+    )
 }
 
 // ── Built-in wallpapers ───────────────────────────────────────────────────────
@@ -224,6 +228,13 @@ fn decode_custom(path: &str) -> Option<SharedPixelBuffer<Rgba8Pixel>> {
 /// image). The asset is pre-compressed to 2560×1440 (#new-user-defaults).
 fn decode_miku() -> Option<SharedPixelBuffer<Rgba8Pixel>> {
     const BYTES: &[u8] = include_bytes!("../assets/miku.jpg");
+    Some(to_buffer(image::load_from_memory(BYTES).ok()?.to_rgba8()))
+}
+
+/// The bundled default wallpaper (#231), embedded so packaged builds do not
+/// depend on an external asset file at runtime.
+fn decode_ms() -> Option<SharedPixelBuffer<Rgba8Pixel>> {
+    const BYTES: &[u8] = include_bytes!("../assets/ms.jpg");
     Some(to_buffer(image::load_from_memory(BYTES).ok()?.to_rgba8()))
 }
 

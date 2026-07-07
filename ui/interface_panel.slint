@@ -204,7 +204,7 @@ export component InterfacePanel inherits Rectangle {
     property <bool> wp-is-custom:
         root.current-wallpaper != "" && root.current-wallpaper != "builtin:light"
         && root.current-wallpaper != "builtin:dark" && root.current-wallpaper != "builtin:tech"
-        && root.current-wallpaper != "builtin:miku";
+        && root.current-wallpaper != "builtin:miku" && root.current-wallpaper != "builtin:ms";
 
     callback set-term-font(string);
     callback set-term-font-size(int);
@@ -472,6 +472,21 @@ export component InterfacePanel inherits Rectangle {
                             }
                         }
                         Text { text: root.lang-en ? "Fantasy 3048" : "幻想3048"; font-size: 11px * Theme.panel-font;
+                               color: Theme.text-secondary; horizontal-alignment: center; }
+                    }
+                    VerticalLayout {
+                        spacing: 5px;
+                        WallpaperSwatch {
+                            width: 100px;
+                            selected: root.current-wallpaper == "builtin:ms";
+                            clicked => { root.set-wallpaper("builtin:ms"); }
+                            Image {
+                                width: 100%; height: 100%;
+                                source: @image-url("../assets/ms.jpg");
+                                image-fit: cover;
+                            }
+                        }
+                        Text { text: "MS"; font-size: 11px * Theme.panel-font;
                                color: Theme.text-secondary; horizontal-alignment: center; }
                     }
                     VerticalLayout {
