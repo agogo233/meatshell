@@ -161,6 +161,16 @@ meatshell/
   <img src="docs/screenshots/sponsor-wechat.png" alt="微信赞赏码" width="260">
 </p>
 
+## 发版
+
+不要直接手动修改 `Cargo.toml` 后再打标签。使用发布脚本，让 Git tag 指向的提交本身就已经包含正确版本号：
+
+```powershell
+.\scripts\release.ps1 v0.5.7 -Push
+```
+
+脚本会更新 `Cargo.toml` / `Cargo.lock`，运行 `cargo check --locked`，验证 `meatshell --version`，提交 `Release v0.5.7`，创建 annotated tag，并推送当前分支和 tag。更多细节见 [docs/release.md](docs/release.md)。
+
 ## License
 
 MIT OR Apache-2.0（双许可）。

@@ -159,6 +159,20 @@ meatshell/
   `StrictHostKeyChecking=no`); wire up known-hosts verification before
   production use.
 
+## Release
+
+Do not bump `Cargo.toml` by hand and then create a tag. Use the release helper
+so the tag points at a commit that already contains the matching Cargo version:
+
+```powershell
+.\scripts\release.ps1 v0.5.7 -Push
+```
+
+The script updates `Cargo.toml` / `Cargo.lock`, runs `cargo check --locked`,
+verifies `meatshell --version`, commits `Release v0.5.7`, creates an annotated
+tag, and pushes the current branch plus the tag. See
+[docs/release.md](docs/release.md) for details.
+
 ## License
 
 Dual-licensed under MIT OR Apache-2.0.
