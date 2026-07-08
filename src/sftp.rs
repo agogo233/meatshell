@@ -349,7 +349,7 @@ async fn run_sftp(
     // Keep the jump-host connection alive for the whole SFTP session — the
     // direct-tcpip tunnel rides on it (#211). Declared here so it lives to the
     // end of the function; `_`-prefixed so it isn't flagged unused.
-    let _jump_keepalive;
+    let mut _jump_keepalive;
     // Tunnel through an SSH jump host (#211), the same proxy as the shell (#7),
     // or connect directly.
     let mut handle = match &jump {
@@ -358,7 +358,7 @@ async fn run_sftp(
                 j,
                 &session.host,
                 session.port,
-                config,
+                config.clone(),
                 sftp_handler(&session, &events),
                 &events,
             )
@@ -374,13 +374,17 @@ async fn run_sftp(
                     let stream = crate::proxy::connect(&p, &session.host, session.port)
                         .await
                         .with_context(|| format!("sftp proxy connect {} failed", addr))?;
-                    client::connect_stream(config, stream, sftp_handler(&session, &events))
+                    client::connect_stream(config.clone(), stream, sftp_handler(&session, &events))
                         .await
                         .with_context(|| format!("sftp connect {} failed", addr))?
                 }
-                None => client::connect(config, addr.as_str(), sftp_handler(&session, &events))
-                    .await
-                    .with_context(|| format!("sftp connect {} failed", addr))?,
+                None => client::connect(
+                    config.clone(),
+                    addr.as_str(),
+                    sftp_handler(&session, &events),
+                )
+                .await
+                .with_context(|| format!("sftp connect {} failed", addr))?,
             }
         }
     };
@@ -394,10 +398,71 @@ async fn run_sftp(
 
     // --- Authenticate (same method as the shell session) -------------------
     let authed = match session.auth {
-        AuthMethod::Password => handle
-            .authenticate_password(&user, password.as_str())
-            .await
-            .context("sftp password auth failed")?,
+        AuthMethod::Password => {
+            let mut ok = handle
+                .authenticate_password(&user, password.as_str())
+                .await
+                .context("sftp password auth failed")?;
+            if !ok {
+                // Match the shell session's fallback: russh can hang if a second
+                // auth method is attempted on the same failed handle, so reconnect
+                // before trying keyboard-interactive (#86, #186).
+                let _ = handle.disconnect(Disconnect::ByApplication, "", "").await;
+                handle = match &jump {
+                    Some(j) => {
+                        let (h, jh) = crate::ssh::connect_target_via_jump(
+                            j,
+                            &session.host,
+                            session.port,
+                            config.clone(),
+                            sftp_handler(&session, &events),
+                            &events,
+                        )
+                        .await
+                        .with_context(|| format!("sftp reconnect {} via jump failed", addr))?;
+                        _jump_keepalive = Some(jh);
+                        h
+                    }
+                    None => {
+                        _jump_keepalive = None;
+                        match crate::proxy::resolve(&session.proxy) {
+                            Some(p) => {
+                                let stream = crate::proxy::connect(&p, &session.host, session.port)
+                                    .await
+                                    .with_context(|| {
+                                        format!("sftp proxy reconnect {} failed", addr)
+                                    })?;
+                                client::connect_stream(
+                                    config.clone(),
+                                    stream,
+                                    sftp_handler(&session, &events),
+                                )
+                                .await
+                                .with_context(|| format!("sftp reconnect {} failed", addr))?
+                            }
+                            None => client::connect(
+                                config.clone(),
+                                addr.as_str(),
+                                sftp_handler(&session, &events),
+                            )
+                            .await
+                            .with_context(|| format!("sftp reconnect {} failed", addr))?,
+                        }
+                    }
+                };
+                ok = crate::ssh::keyboard_interactive_auth(
+                    &mut handle,
+                    &user,
+                    password.as_str(),
+                    &session.id,
+                    &session.host,
+                    &events,
+                )
+                .await
+                .context("sftp keyboard-interactive auth failed")?;
+            }
+            ok
+        }
         AuthMethod::Key => {
             // An encrypted private key needs its passphrase; reuse the session's
             // password field for it (empty = unencrypted), exactly like the shell

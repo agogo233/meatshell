@@ -141,6 +141,9 @@ msgstr "仅本次会话记住"
 msgid "Please enter a host / IP address."
 msgstr "请输入主机 / IP 地址。"
 
+msgid "Please enter a serial port."
+msgstr "请输入串口。"
+
 msgid "Cancel"
 msgstr "取消"
 
@@ -152,6 +155,21 @@ msgstr "创建"
 
 msgid "Connect"
 msgstr "连接"
+
+msgid "Test connection"
+msgstr "测试连接"
+
+msgid "Testing..."
+msgstr "测试中..."
+
+msgid "Connection OK"
+msgstr "连接正常"
+
+msgid "Connection failed"
+msgstr "连接失败"
+
+msgid "Connection timed out"
+msgstr "连接超时"
 
 msgid "SFTP not connected"
 msgstr "SFTP 未连接"

@@ -141,6 +141,9 @@ msgstr "Remember for this session"
 msgid "Please enter a host / IP address."
 msgstr "Please enter a host / IP address."
 
+msgid "Please enter a serial port."
+msgstr "Please enter a serial port."
+
 msgid "Cancel"
 msgstr "Cancel"
 
@@ -152,6 +155,21 @@ msgstr "Create"
 
 msgid "Connect"
 msgstr "Connect"
+
+msgid "Test connection"
+msgstr "Test connection"
+
+msgid "Testing..."
+msgstr "Testing..."
+
+msgid "Connection OK"
+msgstr "Connection OK"
+
+msgid "Connection failed"
+msgstr "Connection failed"
+
+msgid "Connection timed out"
+msgstr "Connection timed out"
 
 msgid "SFTP not connected"
 msgstr "SFTP not connected"

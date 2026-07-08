@@ -596,6 +596,7 @@ export component AppWindow inherits Window {
     in-out property <string> dialog-flow: "none";
     in-out property <bool> dialog-disable-shell-integration: false;
     in-out property <string> dialog-note;
+    in-out property <string> dialog-test-status;
 
     // Delete-confirmation modal state (#28).
     in-out property <bool> confirm-delete-open: false;
@@ -619,6 +620,7 @@ export component AppWindow inherits Window {
     callback toggle-group(string /* group */);
     callback remove-session(string /* session-id */);
     callback session-dialog-submit(SessionDraft);
+    callback session-dialog-test(SessionDraft);
     callback session-dialog-cancel();
     callback session-dialog-pick-key();
     // Port forwards for the session being edited (#56).
@@ -3137,8 +3139,10 @@ export component AppWindow inherits Window {
         draft-flow <=> root.dialog-flow;
         draft-disable-shell-integration <=> root.dialog-disable-shell-integration;
         draft-note <=> root.dialog-note;
+        test-status <=> root.dialog-test-status;
         forwards: root.dialog-forwards;
         submit(draft) => { root.session-dialog-submit(draft); }
+        test-connection(draft) => { root.session-dialog-test(draft); }
         cancel => { root.session-dialog-cancel(); }
         pick-key-file => { root.session-dialog-pick-key(); }
         add-forward(n, k, b, p, h, hp) => { root.add-forward(n, k, b, p, h, hp); }

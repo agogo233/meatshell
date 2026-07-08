@@ -108,7 +108,11 @@ fn term_buf(bufs: &TermBuffers, tab_id: &str) -> Option<TermBufferHandle> {
     bufs.lock().unwrap().get(tab_id).cloned()
 }
 
-fn with_term_buf<R>(bufs: &TermBuffers, tab_id: &str, f: impl FnOnce(&mut TermBuffer) -> R) -> Option<R> {
+fn with_term_buf<R>(
+    bufs: &TermBuffers,
+    tab_id: &str,
+    f: impl FnOnce(&mut TermBuffer) -> R,
+) -> Option<R> {
     let h = term_buf(bufs, tab_id)?;
     let mut guard = h.lock().unwrap();
     Some(f(&mut guard))
@@ -381,7 +385,10 @@ fn apply_window_chrome(window: &slint::Window) {
 #[cfg(not(windows))]
 fn apply_window_chrome(_window: &slint::Window) {}
 
-fn clamp_window_size_to_monitor(window: &slint::Window, preferred: Option<(f32, f32)>) -> Option<(f32, f32)> {
+fn clamp_window_size_to_monitor(
+    window: &slint::Window,
+    preferred: Option<(f32, f32)>,
+) -> Option<(f32, f32)> {
     use i_slint_backend_winit::winit::dpi::{LogicalPosition, LogicalSize};
 
     window.with_winit_window(|ww| {
@@ -2109,8 +2116,7 @@ fn jump_candidates(
     exclude_id: &str,
     current_jump_id: &str,
 ) -> (ModelRc<SharedString>, ModelRc<SharedString>, i32) {
-    let mut labels: Vec<SharedString> =
-        vec![t("无（直接连接）", "None (direct)").into()];
+    let mut labels: Vec<SharedString> = vec![t("无（直接连接）", "None (direct)").into()];
     let mut ids: Vec<SharedString> = vec!["".into()];
     let mut selected: i32 = 0;
     for s in store.sessions() {
@@ -2283,6 +2289,7 @@ fn wire_session_callbacks(
             w.set_dialog_key_path("".into());
             w.set_dialog_key_inline("".into());
             w.set_dialog_key_inline_mode(false);
+            w.set_dialog_test_status("".into());
             w.set_dialog_proxy_type("none".into());
             w.set_dialog_proxy_hostport("".into());
             w.set_dialog_group("".into());
@@ -2487,6 +2494,7 @@ fn wire_session_callbacks(
                 w.set_dialog_key_path(session.private_key_path.clone().into());
                 w.set_dialog_key_inline("".into());
                 w.set_dialog_key_inline_mode(!session.private_key_inline.is_empty());
+                w.set_dialog_test_status("".into());
                 let (proxy_type, proxy_hostport) = split_proxy(&session.proxy);
                 w.set_dialog_proxy_type(proxy_type.into());
                 w.set_dialog_proxy_hostport(proxy_hostport.into());
@@ -2767,6 +2775,71 @@ fn wire_session_callbacks(
             if let Some(w) = weak.upgrade() {
                 w.set_dialog_open(false);
             }
+        });
+    }
+
+    // Test connection from the session dialog. This is intentionally lightweight:
+    // it checks network reachability for the current host/port without saving the
+    // draft or opening a terminal tab.
+    {
+        let weak = window.as_weak();
+        let runtime = runtime.clone();
+        window.on_session_dialog_test(move |draft: SessionDraft| {
+            let kind = draft.kind.to_string();
+            if kind == "serial" {
+                let port_name = draft.serial_port.to_string();
+                let baud = if draft.baud_rate <= 0 {
+                    115_200
+                } else {
+                    draft.baud_rate as u32
+                };
+                let weak_done = weak.clone();
+                runtime.spawn(async move {
+                    let message = match tokio::task::spawn_blocking(move || {
+                        serialport::new(&port_name, baud)
+                            .timeout(std::time::Duration::from_millis(800))
+                            .open()
+                    })
+                    .await
+                    {
+                        Ok(Ok(_)) => t("连接正常", "Connection OK").to_string(),
+                        Ok(Err(e)) => format!("{}: {e}", t("连接失败", "Connection failed")),
+                        Err(e) => format!("{}: {e}", t("连接失败", "Connection failed")),
+                    };
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(w) = weak_done.upgrade() {
+                            w.set_dialog_test_status(message.into());
+                        }
+                    });
+                });
+                return;
+            }
+            let host = draft.host.to_string();
+            let default_port = if kind == "telnet" { 23 } else { 22 };
+            let port = if draft.port <= 0 {
+                default_port
+            } else {
+                draft.port as u16
+            };
+            let weak_done = weak.clone();
+            runtime.spawn(async move {
+                let target = format!("{host}:{port}");
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    tokio::net::TcpStream::connect((host.as_str(), port)),
+                )
+                .await;
+                let message = match result {
+                    Ok(Ok(_)) => t("连接正常", "Connection OK").to_string(),
+                    Ok(Err(e)) => format!("{}: {e}", t("连接失败", "Connection failed")),
+                    Err(_) => format!("{}: {target}", t("连接超时", "Connection timed out")),
+                };
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(w) = weak_done.upgrade() {
+                        w.set_dialog_test_status(message.into());
+                    }
+                });
+            });
         });
     }
 
@@ -3245,11 +3318,7 @@ fn start_session_in_tab(tab_id: &str, session: Session, ctx: &ConnectCtx) {
                 for evt in ui_batch {
                     match evt {
                         SessionEvent::Output(chunk) => {
-                            ingest_terminal_output(
-                                &bufs_thread,
-                                &tab_id_pump,
-                                chunk.as_bytes(),
-                            );
+                            ingest_terminal_output(&bufs_thread, &tab_id_pump, chunk.as_bytes());
                             had_output = true;
                         }
                         other => ui_only.push(other),
@@ -6724,17 +6793,19 @@ fn wire_key_input(
     {
         let bufs = bufs.clone();
         window.on_copy_terminal_text(move |tab_id: SharedString| {
-            let text = term_buf(&bufs, tab_id.as_str()).map(|h| {
-                let buf = h.lock().unwrap();
-                // Copy the drag-selection when there is one, else the
-                // whole displayed screen.
-                let sel = buf.extract_selection_text();
-                if sel.is_empty() {
-                    buf.displayed_text.join("\n")
-                } else {
-                    sel
-                }
-            }).unwrap_or_default();
+            let text = term_buf(&bufs, tab_id.as_str())
+                .map(|h| {
+                    let buf = h.lock().unwrap();
+                    // Copy the drag-selection when there is one, else the
+                    // whole displayed screen.
+                    let sel = buf.extract_selection_text();
+                    if sel.is_empty() {
+                        buf.displayed_text.join("\n")
+                    } else {
+                        sel
+                    }
+                })
+                .unwrap_or_default();
             // Run the clipboard write on a dedicated OS thread.  arboard's
             // Windows backend opens the clipboard and pumps Win32 messages;
             // doing that on the Slint/winit event-loop thread re-enters the
@@ -6826,7 +6897,8 @@ fn wire_key_input(
                     matches = compute_find_matches(&buf.displayed_text, &q);
                 }
                 (matches, jumped)
-            }).unwrap_or_default();
+            })
+            .unwrap_or_default();
             if let Some(win) = weak.upgrade() {
                 if jumped {
                     rebuild_tab_display(&win, &bufs_find, &tid);
@@ -6982,7 +7054,8 @@ fn wire_key_input(
                 } else {
                     Some(extracted)
                 }
-            }).flatten();
+            })
+            .flatten();
             match text {
                 Some(t) if !t.is_empty() => {
                     // Auto-copy on release (select-to-copy, PuTTY style).
@@ -7004,7 +7077,9 @@ fn wire_key_input(
         let weak = window.as_weak();
         window.on_term_select_autoscroll(move |tab_id: SharedString, dir: i32| {
             let tid = tab_id.to_string();
-            let Some(h) = term_buf(&bufs_sel, &tid) else { return };
+            let Some(h) = term_buf(&bufs_sel, &tid) else {
+                return;
+            };
             {
                 let mut buf = h.lock().unwrap();
                 // No scrollback on the alternate screen (vim/btop own the view).
@@ -8252,8 +8327,7 @@ impl TermBuffer {
                     last_content = r as i32;
                 }
                 for hs in runs {
-                    let (fg, bg) =
-                        vt_span_colors(hs.fg, hs.bg, hs.bold, hs.inverse, self.is_dark);
+                    let (fg, bg) = vt_span_colors(hs.fg, hs.bg, hs.bold, hs.inverse, self.is_dark);
                     spans.push(TermSpan {
                         cjk: contains_cjk(&hs.text),
                         text: hs.text.into(),
@@ -8310,8 +8384,7 @@ impl TermBuffer {
                 &live[idx - hist_len]
             };
             for hs in &line.1 {
-                let (fg, bg) =
-                    vt_span_colors(hs.fg, hs.bg, hs.bold, hs.inverse, self.is_dark);
+                let (fg, bg) = vt_span_colors(hs.fg, hs.bg, hs.bold, hs.inverse, self.is_dark);
                 spans.push(TermSpan {
                     text: hs.text.clone().into(),
                     fg,

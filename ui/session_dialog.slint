@@ -114,8 +114,8 @@ component GroupCombo inherits VerticalLayout {
         height: 32px;
         border-radius: Theme.radius-sm;
         border-width: 1px;
-        border-color: ginput.has-focus ? Theme.accent : Theme.border-subtle;
-        background: Theme.bg-root;
+    border-color: ginput.has-focus ? Theme.accent : Theme.border-strong;
+    background: Theme.bg-elevated;
 
         ginput := TextInput {
             x: 10px;
@@ -217,8 +217,8 @@ component JumpCombo inherits VerticalLayout {
         height: 32px;
         border-radius: Theme.radius-sm;
         border-width: 1px;
-        border-color: jump-ta.has-hover ? Theme.accent : Theme.border-subtle;
-        background: Theme.bg-root;
+    border-color: jump-ta.has-hover ? Theme.accent : Theme.border-strong;
+    background: Theme.bg-elevated;
 
         jump-ta := TouchArea {
             mouse-cursor: pointer;
@@ -324,6 +324,7 @@ export component SessionDialog inherits Rectangle {
     in-out property <string> draft-flow: "none";
     in-out property <bool> draft-disable-shell-integration: false;
     in-out property <string> draft-note;
+    in-out property <string> test-status;
 
     // Port forwards / tunnels (#56). `forwards` is the current list (fed from
     // Rust); the nf-* properties hold the add-form fields.
@@ -337,6 +338,7 @@ export component SessionDialog inherits Rectangle {
     property <bool> show-advanced: false;   // collapse proxy + forwarding (#56)
 
     callback submit(SessionDraft);
+    callback test-connection(SessionDraft);
     callback cancel();
     callback add-forward(string /* name */, string /* kind */, string /* bind */, int /* port */,
                          string /* host */, int /* host-port */);
@@ -344,7 +346,7 @@ export component SessionDialog inherits Rectangle {
     callback pick-key-file();   // open a native file picker for the private key
 
     visible: is-open;
-    background: #000000aa;
+    background: #00000080;
 
     // Clear the host-required flag each time the dialog opens (#110).
     changed is-open => { if (self.is-open) { self.host-missing = false; } }
@@ -352,7 +354,6 @@ export component SessionDialog inherits Rectangle {
     // Swallow clicks on the backdrop
     TouchArea {
         width: 100%; height: 100%;
-        clicked => { root.cancel(); }
     }
 
     Rectangle {
@@ -360,7 +361,7 @@ export component SessionDialog inherits Rectangle {
         // Height follows the content, but never exceeds the window — past that
         // the body scrolls (the dialog grows with the advanced section / many
         // port forwards) (#56).
-        height: min(body.preferred-height, parent.height - 40px);
+        height: min(body.preferred-height + 53px, parent.height - 40px);
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         background: Theme.bg-panel;
@@ -375,21 +376,66 @@ export component SessionDialog inherits Rectangle {
             width: 100%; height: 100%;
         }
 
+        VerticalLayout {
+            spacing: 0px;
+
+        Rectangle {
+            width: 100%;
+            height: 52px;
+            background: Theme.bg-panel-alt;
+            border-radius: Theme.radius-lg;
+
+            HorizontalLayout {
+                padding-left: 20px;
+                padding-right: 10px;
+                spacing: 10px;
+
+                Text {
+                    text: is-editing ? @tr("Edit session") : @tr("New session");
+                    color: Theme.text-primary;
+                    font-size: Theme.fs-lg;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+
+                Rectangle {
+                    width: 32px;
+                    height: 32px;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: Theme.radius-sm;
+                    background: close-ta.has-hover ? Theme.bg-hover : transparent;
+                    close-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.cancel(); }
+                    }
+                    Text {
+                        text: "\u{E5CD}";
+                        font-family: "Material Icons";
+                        color: Theme.text-secondary;
+                        font-size: 18px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            width: 100%;
+            height: 1px;
+            background: Theme.border-subtle;
+        }
+
         Flickable {
             width: 100%;
-            height: 100%;
+            vertical-stretch: 1;
             viewport-width: self.width;
             viewport-height: body.preferred-height;
             body := VerticalLayout {
                 padding: 20px;
                 spacing: 12px;
-
-            Text {
-                text: is-editing ? @tr("Edit session") : @tr("New session");
-                color: Theme.text-primary;
-                font-size: Theme.fs-xl;
-                font-weight: 600;
-            }
 
             // Connection type selector (always shown).
             VerticalLayout {
@@ -420,6 +466,8 @@ export component SessionDialog inherits Rectangle {
             }
 
             LabeledInput {
+                input-background: Theme.bg-elevated;
+                idle-border: Theme.border-strong;
                 label: @tr("Name");
                 placeholder: @tr("e.g. production web-01");
                 value <=> root.draft-name;
@@ -436,6 +484,8 @@ export component SessionDialog inherits Rectangle {
 
             // Free-form note — extra info to keep with the session (B站 suggestion).
             LabeledInput {
+                input-background: Theme.bg-elevated;
+                idle-border: Theme.border-strong;
                 label: @tr("Note (optional)");
                 placeholder: @tr("Anything to remember about this host");
                 value <=> root.draft-note;
@@ -445,12 +495,16 @@ export component SessionDialog inherits Rectangle {
             if root.draft-kind != "serial" : HorizontalLayout {
                 spacing: 10px;
                 LabeledInput {
+                    input-background: Theme.bg-elevated;
+                    idle-border: Theme.border-strong;
                     label: @tr("Host / IP");
                     placeholder: "192.168.1.10";
                     value <=> root.draft-host;
                     horizontal-stretch: 2;
                 }
                 LabeledInput {
+                    input-background: Theme.bg-elevated;
+                    idle-border: Theme.border-strong;
                     label: @tr("Port");
                     placeholder: root.draft-kind == "telnet" ? "23" : "22";
                     value <=> root.draft-port;
@@ -467,6 +521,8 @@ export component SessionDialog inherits Rectangle {
 
             // ── SSH-only: user + auth ───────────────────────────────────────
             if root.draft-kind == "ssh" : LabeledInput {
+                input-background: Theme.bg-elevated;
+                idle-border: Theme.border-strong;
                 label: @tr("Username");
                 placeholder: @tr("Prompted on connect if blank");
                 value <=> root.draft-user;
@@ -495,6 +551,8 @@ export component SessionDialog inherits Rectangle {
             }
 
             if root.draft-kind == "ssh" && root.draft-auth == "password" : LabeledInput {
+                input-background: Theme.bg-elevated;
+                idle-border: Theme.border-strong;
                 label: @tr("Password");
                 placeholder: root.is-editing ? @tr("Leave blank to keep the current password") : "••••••••";
                 password: true;
@@ -530,8 +588,8 @@ export component SessionDialog inherits Rectangle {
                         horizontal-stretch: 1;
                         border-radius: Theme.radius-sm;
                         border-width: 1px;
-                        border-color: keyin.has-focus ? Theme.accent : Theme.border-subtle;
-                        background: Theme.bg-root;
+                        border-color: keyin.has-focus ? Theme.accent : Theme.border-strong;
+                        background: Theme.bg-elevated;
                         keyin := TextInput {
                             x: 10px; y: 0px;
                             width: parent.width - 20px;
@@ -584,8 +642,8 @@ export component SessionDialog inherits Rectangle {
                         horizontal-stretch: 1;
                         border-radius: Theme.radius-sm;
                         border-width: 1px;
-                        border-color: keytext.has-focus ? Theme.accent : Theme.border-subtle;
-                        background: Theme.bg-root;
+                        border-color: keytext.has-focus ? Theme.accent : Theme.border-strong;
+                        background: Theme.bg-elevated;
                         keytext := TextInput {
                             x: 10px;
                             y: 8px;
@@ -620,6 +678,8 @@ export component SessionDialog inherits Rectangle {
             // password field; blank means the key isn't encrypted (or, when
             // editing, keep the saved passphrase).
             if root.draft-kind == "ssh" && root.draft-auth == "key" : LabeledInput {
+                input-background: Theme.bg-elevated;
+                idle-border: Theme.border-strong;
                 label: @tr("Key passphrase");
                 placeholder: root.is-editing
                     ? @tr("Leave blank to keep the current passphrase")
@@ -630,12 +690,16 @@ export component SessionDialog inherits Rectangle {
 
             // ── Serial-only fields ──────────────────────────────────────────
             if root.draft-kind == "serial" : LabeledInput {
+                input-background: Theme.bg-elevated;
+                idle-border: Theme.border-strong;
                 label: @tr("Serial port");
                 placeholder: "COM3  /  /dev/ttyUSB0";
                 value <=> root.draft-serial-port;
             }
 
             if root.draft-kind == "serial" : LabeledInput {
+                input-background: Theme.bg-elevated;
+                idle-border: Theme.border-strong;
                 label: @tr("Baud rate");
                 placeholder: "115200";
                 value <=> root.draft-baud;
@@ -718,6 +782,8 @@ export component SessionDialog inherits Rectangle {
                     SegOption { label: "HTTP"; active: root.draft-proxy-type == "http"; clicked => { root.draft-proxy-type = "http"; } }
                 }
                 if root.draft-proxy-type != "none" : LabeledInput {
+                    input-background: Theme.bg-elevated;
+                    idle-border: Theme.border-strong;
                     label: @tr("Proxy address");
                     placeholder: "127.0.0.1:1080";
                     value <=> root.draft-proxy-hostport;
@@ -876,8 +942,58 @@ export component SessionDialog inherits Rectangle {
             }
 
             HorizontalLayout {
-                alignment: end;
                 spacing: 8px;
+                GhostButton {
+                    text: @tr("Test connection");
+                    clicked => {
+                        if (root.draft-kind != "serial" && root.draft-host == "") {
+                            root.host-missing = true;
+                            return;
+                        }
+                        if (root.draft-kind == "serial" && root.draft-serial-port == "") {
+                            root.test-status = @tr("Please enter a serial port.");
+                            return;
+                        }
+                        root.host-missing = false;
+                        root.test-status = @tr("Testing...");
+                        root.test-connection({
+                            id: root.draft-id,
+                            name: root.draft-name,
+                            kind: root.draft-kind,
+                            host: root.draft-host,
+                            port: root.draft-port.to-float(),
+                            user: root.draft-user,
+                            auth: root.draft-auth,
+                            password: root.draft-password,
+                            private-key-path: root.draft-key-path,
+                            private-key-inline: root.draft-key-inline,
+                            private-key-inline-mode: root.draft-key-inline-mode,
+                            proxy: (root.draft-proxy-type == "none" || root.draft-proxy-hostport == "") ? ""
+                                 : root.draft-proxy-type == "http" ? "http://" + root.draft-proxy-hostport
+                                 : "socks5://" + root.draft-proxy-hostport,
+                            group: root.draft-group,
+                            serial-port: root.draft-serial-port,
+                            baud-rate: root.draft-baud.to-float(),
+                            data-bits: root.draft-data-bits.to-float(),
+                            stop-bits: root.draft-stop-bits.to-float(),
+                            parity: root.draft-parity,
+                            flow-control: root.draft-flow,
+                            disable-shell-integration: root.draft-disable-shell-integration,
+                            note: root.draft-note,
+                            jump-session-id: (root.draft-jump-index > 0 && root.draft-jump-index < root.jump-ids.length)
+                                ? root.jump-ids[root.draft-jump-index] : "",
+                        });
+                    }
+                }
+                if root.test-status != "" : Text {
+                    text: root.test-status;
+                    color: root.test-status == @tr("Connection OK") ? Theme.success : Theme.text-muted;
+                    font-size: Theme.fs-xs;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+                if root.test-status == "" : Rectangle { horizontal-stretch: 1; }
                 GhostButton {
                     text: @tr("Cancel");
                     clicked => { root.cancel(); }
@@ -921,6 +1037,7 @@ export component SessionDialog inherits Rectangle {
                     }
                 }
             }
+        }
         }
         }
     }

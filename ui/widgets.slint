@@ -105,6 +105,8 @@ export component LabeledInput inherits VerticalLayout {
     in-out property <string> value;
     in property <bool> password: false;
     in property <bool> auto-focus: false;   // grab focus when shown (dialog fields)
+    in property <brush> input-background: Theme.bg-root;
+    in property <brush> idle-border: Theme.border-subtle;
     callback accepted();   // Enter pressed in the field
     callback canceled();   // Esc pressed in the field (#140-3)
     spacing: 4px;
@@ -120,8 +122,8 @@ export component LabeledInput inherits VerticalLayout {
         height: 32px;
         border-radius: Theme.radius-sm;
         border-width: 1px;
-        border-color: input.has-focus ? Theme.accent : Theme.border-subtle;
-        background: Theme.bg-root;
+        border-color: input.has-focus ? Theme.accent : root.idle-border;
+        background: root.input-background;
 
         input := TextInput {
             x: 10px;
