@@ -7206,6 +7206,13 @@ fn webdav_auth_header(username: &str, password: &str) -> Option<String> {
     ))
 }
 
+fn webdav_auth_req(mut req: ureq::Request, auth: Option<&str>) -> ureq::Request {
+    if let Some(auth) = auth {
+        req = req.set("Authorization", auth);
+    }
+    req
+}
+
 #[derive(Debug)]
 struct WebDavAcceptAnyCertVerifier;
 
@@ -7322,6 +7329,74 @@ fn webdav_error(e: ureq::Error) -> anyhow::Error {
     }
 }
 
+fn webdav_parent_dirs(url: &str) -> Vec<String> {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return Vec::new();
+    };
+    let Some((authority, path)) = rest.split_once('/') else {
+        return Vec::new();
+    };
+    let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    if parts.len() <= 1 {
+        return Vec::new();
+    }
+    let mut dirs = Vec::with_capacity(parts.len() - 1);
+    let mut current = format!("{scheme}://{authority}");
+    for part in parts.iter().take(parts.len() - 1) {
+        current.push('/');
+        current.push_str(part);
+        current.push('/');
+        dirs.push(current.clone());
+        current.pop();
+    }
+    dirs
+}
+
+fn webdav_dir_missing_or_no_create_error() -> anyhow::Error {
+    anyhow::anyhow!(
+        "{}",
+        t(
+            "文件夹不存在也无权限创建",
+            "folder does not exist and cannot be created"
+        )
+    )
+}
+
+fn webdav_dir_exists(agent: &ureq::Agent, url: &str, auth: Option<&str>) -> Result<bool> {
+    let req = webdav_auth_req(agent.request("PROPFIND", url).set("Depth", "0"), auth);
+    match req.call() {
+        Ok(_) => Ok(true),
+        Err(ureq::Error::Status(status, _)) if status == 404 || status == 409 => Ok(false),
+        Err(ureq::Error::Status(status, _)) if status == 401 || status == 403 || status == 405 => {
+            Err(webdav_dir_missing_or_no_create_error())
+        }
+        Err(e) => Err(webdav_error(e)),
+    }
+}
+
+fn webdav_create_dir(agent: &ureq::Agent, url: &str, auth: Option<&str>) -> Result<()> {
+    let req = webdav_auth_req(agent.request("MKCOL", url), auth);
+    match req.call() {
+        Ok(_) => Ok(()),
+        Err(ureq::Error::Status(status, _)) if status == 405 => Ok(()),
+        Err(ureq::Error::Status(status, _))
+            if status == 401 || status == 403 || status == 404 || status == 409 =>
+        {
+            Err(webdav_dir_missing_or_no_create_error())
+        }
+        Err(e) => Err(webdav_error(e)),
+    }
+}
+
+fn webdav_ensure_parent_dirs(agent: &ureq::Agent, url: &str, auth: Option<&str>) -> Result<()> {
+    for dir in webdav_parent_dirs(url) {
+        if !webdav_dir_exists(agent, &dir, auth)? {
+            webdav_create_dir(agent, &dir, auth)?;
+        }
+    }
+    Ok(())
+}
+
 fn webdav_put_json(
     base_url: &str,
     remote_path: &str,
@@ -7332,11 +7407,12 @@ fn webdav_put_json(
 ) -> Result<()> {
     let url = webdav_url(base_url, remote_path)?;
     let agent = webdav_agent(accept_invalid_certs);
-    let mut req = agent.put(&url).set("Content-Type", "application/json");
     let auth = webdav_auth_header(username, password);
-    if let Some(auth) = auth.as_deref() {
-        req = req.set("Authorization", auth);
-    }
+    webdav_ensure_parent_dirs(&agent, &url, auth.as_deref())?;
+    let req = webdav_auth_req(
+        agent.put(&url).set("Content-Type", "application/json"),
+        auth.as_deref(),
+    );
     req.send_string(&json).map(|_| ()).map_err(webdav_error)
 }
 
@@ -7349,11 +7425,8 @@ fn webdav_get_json(
 ) -> Result<String> {
     let url = webdav_url(base_url, remote_path)?;
     let agent = webdav_agent(accept_invalid_certs);
-    let mut req = agent.get(&url);
     let auth = webdav_auth_header(username, password);
-    if let Some(auth) = auth.as_deref() {
-        req = req.set("Authorization", auth);
-    }
+    let req = webdav_auth_req(agent.get(&url), auth.as_deref());
     req.call()
         .map_err(webdav_error)?
         .into_string()
