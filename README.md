@@ -93,12 +93,12 @@ open /Applications/meatshell.app
 - [x] 出站代理（SOCKS5 / HTTP）
 - [x] 导入 `~/.ssh/config`
 - [x] 会话密码加密存储（ChaCha20-Poly1305）
+- [x] 已知主机（`known_hosts`）校验 + 首次连接确认
+- [x] 多标签页终端分屏
 
 ### 计划中
 
-- [ ] 已知主机 (known_hosts) 校验
 - [ ] 会话密码改用 OS 钥匙串存储
-- [x] 多标签页终端分屏
 
 ## 技术栈
 
@@ -149,8 +149,8 @@ meatshell/
   反馈方式。
 - 应用事件循环是单线程（Slint 要求），所有跨线程 UI 更新通过
   `slint::invoke_from_event_loop` 回调。
-- 目前 `check_server_key` 接受任意服务端密钥（类似 `StrictHostKeyChecking=no`），
-  生产使用前请接入 known_hosts 校验。
+- SSH / SFTP 共享 `known_hosts` 校验逻辑：首次连接会确认并记住主机密钥，
+  后续密钥变化会再次提示。
 
 ## 赞赏 / 请我喝杯咖啡
 
@@ -166,10 +166,10 @@ meatshell/
 不要直接手动修改 `Cargo.toml` 后再打标签。使用发布脚本，让 Git tag 指向的提交本身就已经包含正确版本号：
 
 ```powershell
-.\scripts\release.ps1 v0.5.7 -Push
+.\scripts\release.ps1 v0.6.0 -Push
 ```
 
-脚本会更新 `Cargo.toml` / `Cargo.lock`，运行 `cargo check --locked`，验证 `meatshell --version`，提交 `Release v0.5.7`，创建 annotated tag，并推送当前分支和 tag。更多细节见 [docs/release.md](docs/release.md)。
+脚本会更新 `Cargo.toml` / `Cargo.lock`，运行 `cargo check --locked`，验证 `meatshell --version`，提交 `Release v0.6.0`，创建 annotated tag，并推送当前分支和 tag。更多细节见 [docs/release.md](docs/release.md)。
 
 ## License
 
