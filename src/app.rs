@@ -1683,13 +1683,16 @@ pub fn run() -> Result<()> {
     // OS file drag-and-drop → upload to the active session's SFTP directory,
     // but only when the file is dropped over the file-list area.
     {
-        use i_slint_backend_winit::winit::event::WindowEvent as WEvent;
+        use i_slint_backend_winit::winit::event::{MouseScrollDelta, WindowEvent as WEvent};
         use i_slint_backend_winit::EventResult;
         let weak = window.as_weak();
         let sh = sftp_handles.clone();
+        let wheel_bufs = bufs.clone();
         let close_handles = handles.clone();
         let ev_store = store.clone();
         let ev_activity = activity.clone();
+        let mut last_cursor_logical: Option<(f32, f32)> = None;
+        let mut macos_wheel_accum = 0.0_f32;
         // Track the inputs that make up WinActivity; recompute on each change.
         let mut focused = true;
         let mut minimized = false;
@@ -1736,6 +1739,41 @@ pub fn run() -> Result<()> {
                 WEvent::DroppedFile(path) => {
                     if let Some(win) = weak.upgrade() {
                         handle_file_drop(&win, &sh, path.clone());
+                    }
+                }
+                WEvent::CursorMoved { position, .. } => {
+                    if let Some(win) = weak.upgrade() {
+                        let scale = win.window().scale_factor().max(0.01) as f64;
+                        let p = position.to_logical::<f64>(scale);
+                        last_cursor_logical = Some((p.x as f32, p.y as f32));
+                    }
+                }
+                WEvent::MouseWheel { delta, .. } if cfg!(target_os = "macos") => {
+                    let Some((x, y)) = last_cursor_logical else {
+                        return EventResult::Propagate;
+                    };
+                    let Some(win) = weak.upgrade() else {
+                        return EventResult::Propagate;
+                    };
+                    let wheel_lines = match delta {
+                        MouseScrollDelta::LineDelta(_, dy) => dy * 3.0,
+                        MouseScrollDelta::PixelDelta(p) => {
+                            let scale = win.window().scale_factor().max(0.01) as f64;
+                            let p = p.to_logical::<f64>(scale);
+                            p.y as f32 / 18.0
+                        }
+                    };
+                    if wheel_lines.abs() < f32::EPSILON {
+                        return EventResult::Propagate;
+                    }
+                    macos_wheel_accum += wheel_lines;
+                    let whole = macos_wheel_accum.trunc() as i32;
+                    if whole == 0 {
+                        return EventResult::Propagate;
+                    }
+                    macos_wheel_accum -= whole as f32;
+                    if handle_macos_terminal_wheel(&win, &wheel_bufs, x, y, whole) {
+                        return EventResult::PreventDefault;
                     }
                 }
                 WEvent::Focused(f) => {
@@ -1935,6 +1973,144 @@ fn active_sftp_path(win: &AppWindow, tab_id: &str) -> String {
         }
     }
     String::new()
+}
+
+fn handle_macos_terminal_wheel(
+    win: &AppWindow,
+    bufs: &TermBuffers,
+    x: f32,
+    y: f32,
+    lines: i32,
+) -> bool {
+    let Some(hit) = terminal_wheel_hit(win, bufs, x, y) else {
+        return false;
+    };
+    if hit.is_alt {
+        win.invoke_terminal_wheel(hit.tab_id.into(), lines.signum(), hit.col, hit.row);
+    } else {
+        win.invoke_terminal_scroll(hit.tab_id.into(), lines);
+    }
+    true
+}
+
+struct TerminalWheelHit {
+    tab_id: String,
+    is_alt: bool,
+    col: i32,
+    row: i32,
+}
+
+fn terminal_wheel_hit(
+    win: &AppWindow,
+    bufs: &TermBuffers,
+    x: f32,
+    y: f32,
+) -> Option<TerminalWheelHit> {
+    let active = win.get_active_tab_id().to_string();
+    if active.is_empty() || active == "welcome" {
+        return None;
+    }
+
+    let size = win.window().size();
+    let scale = win.window().scale_factor().max(0.01) as f32;
+    let mut area_x = 0.0_f32;
+    let mut area_y = if win.get_custom_titlebar() {
+        38.0
+    } else if win.get_is_mac() {
+        28.0
+    } else {
+        0.0
+    };
+    let mut area_w = size.width as f32 / scale;
+    let mut area_h = size.height as f32 / scale - area_y;
+
+    if win.get_welcome_as_sidebar() {
+        let dock = win.get_welcome_sidebar_dock().to_string();
+        let sidebar_strip_outside = !win.get_welcome_collapsed()
+            && win.get_sidebar_collapsed()
+            && win.get_sidebar_dock().as_str() == dock.as_str();
+        let welcome_taken = (if win.get_welcome_collapsed() {
+            36.0
+        } else {
+            win.get_welcome_sidebar_width()
+        }) + if sidebar_strip_outside { 36.0 } else { 0.0 };
+        shrink_edge(&mut area_x, &mut area_y, &mut area_w, &mut area_h, &dock, welcome_taken);
+    }
+
+    let side_dock = win.get_sidebar_dock().to_string();
+    let side_take = if win.get_sidebar_collapsed() {
+        36.0
+    } else if side_dock == "left" || side_dock == "right" {
+        win.get_sidebar_width() + 4.0
+    } else {
+        win.get_sidebar_height() + 4.0
+    };
+    shrink_edge(&mut area_x, &mut area_y, &mut area_w, &mut area_h, &side_dock, side_take);
+
+    let panes = win.get_panes();
+    let pane = (0..panes.row_count())
+        .filter_map(|i| panes.row_data(i))
+        .find(|p| p.active_id.as_str() == active.as_str())?;
+    let mut term_x = area_x + pane.x;
+    let mut term_y = area_y + pane.y + 40.0; // tab strip
+    let mut term_w = pane.w;
+    let mut term_h = (pane.h - 40.0).max(0.0);
+
+    let terms = win.get_terminals();
+    let term_state = (0..terms.row_count())
+        .filter_map(|i| terms.row_data(i))
+        .find(|t| t.id.as_str() == active.as_str())?;
+
+    // TerminalView starts with a 24px status line, then the SFTP dock-region.
+    term_y += 24.0;
+    term_h = (term_h - 24.0).max(0.0);
+
+    let sftp_dock = win.get_sftp_dock().to_string();
+    let sftp_take = if term_state.sftp_collapsed {
+        36.0
+    } else if sftp_dock == "left" || sftp_dock == "right" {
+        term_state.sftp_panel_width + 4.0
+    } else {
+        term_state.sftp_panel_height + 4.0
+    };
+    shrink_edge(&mut term_x, &mut term_y, &mut term_w, &mut term_h, &sftp_dock, sftp_take);
+
+    // Leave the command bar to TextInput/history handling; wheel fallback is for
+    // terminal output only.
+    term_h = (term_h - 34.0).max(0.0);
+    if x < term_x || y < term_y || x > term_x + term_w || y > term_y + term_h {
+        return None;
+    }
+
+    let h = term_buf(bufs, &active)?;
+    let guard = h.lock().ok()?;
+    let screen = guard.parser.screen();
+    let (rows, cols) = screen.size();
+    let cell_w = (term_w / cols.max(1) as f32).max(1.0);
+    let cell_h = (term_h / rows.max(1) as f32).max(1.0);
+    Some(TerminalWheelHit {
+        tab_id: active,
+        is_alt: screen.alternate_screen(),
+        col: ((x - term_x) / cell_w).floor() as i32,
+        row: ((y - term_y) / cell_h).floor() as i32,
+    })
+}
+
+fn shrink_edge(x: &mut f32, y: &mut f32, w: &mut f32, h: &mut f32, dock: &str, amount: f32) {
+    let amount = amount.max(0.0);
+    match dock {
+        "left" => {
+            *x += amount;
+            *w = (*w - amount).max(0.0);
+        }
+        "right" => *w = (*w - amount).max(0.0),
+        "top" => {
+            *y += amount;
+            *h = (*h - amount).max(0.0);
+        }
+        "bottom" => *h = (*h - amount).max(0.0),
+        _ => {}
+    }
 }
 
 /// Current mouse cursor position in physical screen pixels (Windows).

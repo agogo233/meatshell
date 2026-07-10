@@ -3,6 +3,18 @@
 All notable changes are documented here. 本文件记录所有重要变更。
 中英对照（中文在前，English after）.
 
+## [Unreleased]
+
+### 修复 / Fixed
+
+- **修复 macOS 触控板无法滚动终端的问题 (#252)。** 终端滚动命中层显式铺满输出区域，并在 macOS 上增加 winit 级触控板滚轮兜底；触控板双指滚动会进入终端回滚/alt-screen 滚轮逻辑，不再只能拖动右侧滚动条。
+
+---
+
+### Fixed
+
+- **Fix terminal scrolling with the macOS trackpad (#252).** The terminal scroll hit layer now explicitly covers the output area, and macOS gets a winit-level trackpad wheel fallback; two-finger scrolling feeds the terminal scrollback/alt-screen wheel path instead of requiring the scrollbar thumb.
+
 ## [0.6.0] - 2026-07-10
 
 ### 新增 / Added

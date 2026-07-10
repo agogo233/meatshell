@@ -452,6 +452,10 @@ export component TerminalView inherits Rectangle {
                         // to it) and restores focus on every click; middle-click
                         // also pastes, matching the bottom strip.
                         body-touch := TouchArea {
+                            x: 0px;
+                            y: 0px;
+                            width: parent.width;
+                            height: parent.height;
                             mouse-cursor: text;
                             pointer-event(ev) => {
                                 if (ev.kind == PointerEventKind.down) {
@@ -594,6 +598,10 @@ export component TerminalView inherits Rectangle {
                         // terminal's click/select/wheel handling above all text
                         // while leaving the visual output untouched (#198).
                         body-touch-overlay := TouchArea {
+                            x: 0px;
+                            y: 0px;
+                            width: parent.width;
+                            height: parent.height;
                             mouse-cursor: text;
                             pointer-event(ev) => {
                                 if (ev.kind == PointerEventKind.down) {
