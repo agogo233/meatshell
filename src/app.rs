@@ -3446,12 +3446,7 @@ fn sorted_sftp_entries_from_model(
 fn sort_sftp_entries(entries: &mut [SftpEntry], key: &str, dir: i32) {
     use std::cmp::Ordering;
 
-    let name_cmp = |a: &SftpEntry, b: &SftpEntry| {
-        a.name
-            .to_lowercase()
-            .cmp(&b.name.to_lowercase())
-            .then_with(|| a.name.cmp(&b.name))
-    };
+    let name_cmp = |a: &SftpEntry, b: &SftpEntry| natural_name_cmp(&a.name, &b.name);
     let default_cmp = |a: &SftpEntry, b: &SftpEntry| match (a.is_dir, b.is_dir) {
         (true, false) => Ordering::Less,
         (false, true) => Ordering::Greater,
@@ -3491,6 +3486,61 @@ fn sort_sftp_entries(entries: &mut [SftpEntry], key: &str, dir: i32) {
             ord
         }
     });
+}
+
+fn natural_name_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    natural_ascii_cmp(&a.to_lowercase(), &b.to_lowercase()).then_with(|| a.cmp(b))
+}
+
+fn natural_ascii_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    let ab = a.as_bytes();
+    let bb = b.as_bytes();
+    let mut ai = 0;
+    let mut bi = 0;
+    while ai < ab.len() && bi < bb.len() {
+        let ad = ab[ai].is_ascii_digit();
+        let bd = bb[bi].is_ascii_digit();
+        if ad && bd {
+            let a_start = ai;
+            let b_start = bi;
+            while ai < ab.len() && ab[ai].is_ascii_digit() {
+                ai += 1;
+            }
+            while bi < bb.len() && bb[bi].is_ascii_digit() {
+                bi += 1;
+            }
+
+            let mut a_sig = a_start;
+            let mut b_sig = b_start;
+            while a_sig < ai && ab[a_sig] == b'0' {
+                a_sig += 1;
+            }
+            while b_sig < bi && bb[b_sig] == b'0' {
+                b_sig += 1;
+            }
+
+            let a_len = ai - a_sig;
+            let b_len = bi - b_sig;
+            let ord = a_len
+                .cmp(&b_len)
+                .then_with(|| ab[a_sig..ai].cmp(&bb[b_sig..bi]))
+                .then_with(|| (ai - a_start).cmp(&(bi - b_start)));
+            if ord != Ordering::Equal {
+                return ord;
+            }
+            continue;
+        }
+
+        let ord = ab[ai].cmp(&bb[bi]);
+        if ord != Ordering::Equal {
+            return ord;
+        }
+        ai += 1;
+        bi += 1;
+    }
+    ab.len().cmp(&bb.len())
 }
 
 /// Push a value into a fixed-length ring buffer (newest at the end).
@@ -9032,6 +9082,58 @@ mod key_tests {
 #[cfg(test)]
 mod selection_tests {
     use super::*;
+
+    fn sftp_entry(name: &str, is_dir: bool) -> SftpEntry {
+        SftpEntry {
+            name: name.into(),
+            full_path: format!("/{name}").into(),
+            is_dir,
+            size: String::new().into(),
+            size_bytes: 0.0,
+            modified: String::new().into(),
+            modified_ts: 0.0,
+            mode: 0,
+            selected: false,
+        }
+    }
+
+    fn sftp_names(entries: &[SftpEntry]) -> Vec<String> {
+        entries.iter().map(|e| e.name.to_string()).collect()
+    }
+
+    #[test]
+    fn sftp_name_sort_uses_natural_numeric_order() {
+        let mut entries = vec![
+            sftp_entry("file100", false),
+            sftp_entry("file10", false),
+            sftp_entry("file2", false),
+            sftp_entry("file11", false),
+            sftp_entry("file1", false),
+        ];
+        sort_sftp_entries(&mut entries, "name", 1);
+        assert_eq!(
+            sftp_names(&entries),
+            vec!["file1", "file2", "file10", "file11", "file100"]
+        );
+
+        sort_sftp_entries(&mut entries, "name", -1);
+        assert_eq!(
+            sftp_names(&entries),
+            vec!["file100", "file11", "file10", "file2", "file1"]
+        );
+    }
+
+    #[test]
+    fn sftp_default_sort_keeps_dirs_first_with_natural_names() {
+        let mut entries = vec![
+            sftp_entry("file100", false),
+            sftp_entry("dir10", true),
+            sftp_entry("file11", false),
+            sftp_entry("dir2", true),
+        ];
+        sort_sftp_entries(&mut entries, "", 0);
+        assert_eq!(sftp_names(&entries), vec!["dir2", "dir10", "file11", "file100"]);
+    }
 
     fn hist_line(s: &str) -> Line {
         (s.to_string(), Vec::new(), false)
