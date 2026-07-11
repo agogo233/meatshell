@@ -3,6 +3,18 @@
 All notable changes are documented here. 本文件记录所有重要变更。
 中英对照（中文在前，English after）.
 
+## [Unreleased]
+
+### 修复 / Fixed
+
+- **移除点击标签页时复制标签名称的旧行为。** 点击标签页现在只负责切换会话，多窗口/分屏标签交互不再污染剪贴板。
+
+---
+
+### Fixed
+
+- **Remove the old copy-title-on-tab-click behavior.** Clicking a tab now only switches sessions, so multi-window/split-pane tab interaction no longer overwrites the clipboard.
+
 ## [0.6.0] - 2026-07-10
 
 ### 修复 / Fixed

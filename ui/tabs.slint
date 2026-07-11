@@ -15,7 +15,6 @@ component SingleTab inherits Rectangle {
     in property <bool> active;
     callback selected();
     callback closed();
-    callback title-copy(string /* title */);
     // Drag-to-reorder (v0.5): emitted while dragging when the tab should hop one
     // slot left (-1) or right (+1). The model reorders and the tab follows.
     callback reorder(int /* dir */);
@@ -68,7 +67,6 @@ component SingleTab inherits Rectangle {
             } else if (e.kind == PointerEventKind.up) {
                 if (root.pressing && !root.dragging) {
                     root.selected();
-                    root.title-copy(root.info.title);
                 } else if (root.pressing && root.dragging) {
                     root.drag-dropped(self.absolute-position.x + self.mouse-x,
                                       self.absolute-position.y + self.mouse-y);
@@ -181,7 +179,6 @@ export component TabBar inherits Rectangle {
     in property <length> reserve-right: 0px;
     callback tab-selected(string);
     callback tab-closed(string);
-    callback tab-title-copy(string);
     callback new-tab();
     // Drag-to-reorder: move the tab at `from` one slot in `dir` (#v0.5).
     callback tab-reorder(int /* from */, int /* dir */);
@@ -227,7 +224,6 @@ export component TabBar inherits Rectangle {
                     info: tab;
                     active: tab.id == root.active-id;
                     selected => { root.tab-selected(tab.id); }
-                    title-copy(title) => { root.tab-title-copy(title); }
                     closed => { root.tab-closed(tab.id); }
                     reorder(dir) => { root.tab-reorder(i, dir); }
                     context-requested(ax, ay) => {
