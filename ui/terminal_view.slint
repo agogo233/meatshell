@@ -109,6 +109,7 @@ export component TerminalView inherits Rectangle {
     in property <[TabInfo]> sftp-transfer-targets: [];
     in property <string> sftp-sort-key: "";
     in property <int> sftp-sort-dir: 0;
+    in property <bool> sftp-available: true;
     in property <[TunnelInfo]> tunnels: [];
 
     // Per-session now (#v0.5): the AppWindow stores these in each TerminalState
@@ -1476,7 +1477,7 @@ export component TerminalView inherits Rectangle {
 
         // --- SFTP resize splitter (orientation follows the dock edge) -------
         Rectangle {
-            visible: !root.sftp-collapsed;   // gone when collapsed (like the resource splitter)
+            visible: root.sftp-available && !root.sftp-collapsed;   // gone when collapsed (like the resource splitter)
             x: root.sftp-dock == "left"   ? parent.sf-w
              : root.sftp-dock == "right"  ? parent.width - parent.sf-w - 4px
              : 0px;
@@ -1531,7 +1532,7 @@ export component TerminalView inherits Rectangle {
         }
 
         // --- SFTP panel — positioned on the docked edge ---------------------
-        SftpPanel {
+        if root.sftp-available : SftpPanel {
             x: root.sftp-dock == "right"  ? parent.width - parent.sf-w : 0px;
             y: root.sftp-dock == "bottom" ? parent.height - parent.sf-h : 0px;
             width:  root.sftp-horizontal ? parent.sf-w : parent.width;
@@ -1636,7 +1637,13 @@ export component TerminalView inherits Rectangle {
             height: root.sftp-horizontal ? parent.height : parent.sf-h;
             dock-edge: root.sftp-dock;
             glyph: "\u{E2C7}";   // folder — SFTP
-            expand => { root.set-sftp-collapsed(false); }
+            tooltip: root.sftp-available ? "SFTP" : @tr("SFTP not available");
+            enabled: root.sftp-available;
+            expand => {
+                if (root.sftp-available) {
+                    root.set-sftp-collapsed(false);
+                }
+            }
         }
         }
     }

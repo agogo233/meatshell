@@ -410,6 +410,18 @@ pub struct ProcInfo {
     pub command: String,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct SystemDetails {
+    pub overview: Vec<(String, String)>,
+    pub cpu_info: Vec<(String, String)>,
+    pub gpu_info: Vec<(String, String)>,
+    pub cpu_usage: Vec<(String, String)>,
+    pub memory: Vec<(String, String)>,
+    pub swap: Vec<(String, String)>,
+    pub networks: Vec<(String, String, String, String, String)>,
+    pub filesystems: Vec<(String, String, String, String, String)>,
+}
+
 /// One SSH tunnel row shown in the runtime tunnel panel (#206).
 #[derive(Debug, Clone)]
 pub struct RuntimeTunnelInfo {
@@ -484,6 +496,8 @@ pub enum SessionEvent {
         disks: Vec<(String, u64, u64)>,
         /// Top processes by CPU (#23). Empty if the host's `ps` is unusable.
         procs: Vec<ProcInfo>,
+        /// Detailed system information for the detached system-info window.
+        sys: SystemDetails,
     },
 
     /// A command the user ran in the terminal, captured via the shell hook
@@ -1118,7 +1132,7 @@ async fn run_session(
     // pid/user/pcpu/pmem/args, each line clipped to 200 chars so a giant command
     // line can't bloat the stream. A host whose `ps` lacks `--sort`/`-o` simply
     // yields nothing (2>/dev/null), degrading to an empty process list.
-    const MON_CMD: &[u8] = b"PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH; while :; do awk '/^cpu /{print}' /proc/stat; awk '/^(MemTotal|MemAvailable|SwapTotal|SwapFree):/{print}' /proc/meminfo; cat /proc/net/dev; echo __DF__; df -kP 2>/dev/null; echo __PS__; ps -eo pid,user,pcpu,pmem,args --sort=-pcpu 2>/dev/null | head -n 41 | cut -c -200; echo __MSTICK__; sleep 2; done\n";
+    const MON_CMD: &[u8] = b"PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH; while :; do awk '/^cpu /{print}' /proc/stat; awk '/^(MemTotal|MemAvailable|SwapTotal|SwapFree|Buffers|Cached):/{print}' /proc/meminfo; cat /proc/net/dev; echo __DF__; df -kP 2>/dev/null; echo __PS__; ps -eo pid,user,pcpu,pmem,args --sort=-pcpu 2>/dev/null | head -n 41 | cut -c -200; echo __SYS__; { . /etc/os-release 2>/dev/null; echo OS=${PRETTY_NAME:-$(uname -o 2>/dev/null)}; }; echo KERNEL=$(uname -s 2>/dev/null); echo KERNEL_RELEASE=$(uname -r 2>/dev/null); echo ARCH=$(uname -m 2>/dev/null); echo HOSTNAME=$(hostname 2>/dev/null); echo IPS=$(hostname -I 2>/dev/null); echo UPTIME=$(uptime -p 2>/dev/null); echo LOAD=$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null); awk -F: '/model name|Hardware/{gsub(/^[ \\t]+/,\"\",$2); print \"CPU_MODEL=\"$2; exit}' /proc/cpuinfo 2>/dev/null; echo CPU_CORES=$(grep -c '^processor' /proc/cpuinfo 2>/dev/null); awk -F: '/cache size/{gsub(/^[ \\t]+/,\"\",$2); print \"CPU_CACHE=\"$2; exit}' /proc/cpuinfo 2>/dev/null; awk -F: '/bogomips/{gsub(/^[ \\t]+/,\"\",$2); print \"CPU_BOGO=\"$2; exit}' /proc/cpuinfo 2>/dev/null; lspci 2>/dev/null | awk -F': ' '/VGA|3D|Display/{print \"GPU=\" $2; exit}'; echo __MSTICK__; sleep 2; done\n";
     // Skip the resource monitor entirely when shell integration is off (a
     // non-POSIX / Windows server) — the /proc-based loop only spews errors there
     // (#140).
@@ -1493,8 +1507,11 @@ fn parse_monitor_block(
     let mut have_cpu = false;
     let mut mem_total = 0u64;
     let mut mem_avail = 0u64;
+    let mut mem_buffers = 0u64;
+    let mut mem_cached = 0u64;
     let mut swap_total = 0u64;
     let mut swap_free = 0u64;
+    let mut cpu_nums: Vec<u64> = Vec::new();
     // Raw /proc/net/dev counters this sample: iface -> (rx_bytes, tx_bytes).
     let mut net_now: Vec<(String, u64, u64)> = Vec::new();
     // Filesystems from `df -kP`: (mount, available_bytes, total_bytes).
@@ -1507,12 +1524,14 @@ fn parse_monitor_block(
     let mut seen_fs: std::collections::HashSet<(u64, u64)> = std::collections::HashSet::new();
     // Processes from `ps` (#23): top-by-CPU rows.
     let mut procs: Vec<ProcInfo> = Vec::new();
+    let mut sys_kv: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     // The sample is split into sections by `echo` markers; everything before the
     // first marker is the cpu/mem/net block.
     enum Section {
         Top,
         Df,
         Ps,
+        Sys,
     }
     let mut section = Section::Top;
 
@@ -1528,6 +1547,10 @@ fn parse_monitor_block(
         }
         if line == "__PS__" {
             section = Section::Ps;
+            continue;
+        }
+        if line == "__SYS__" {
+            section = Section::Sys;
             continue;
         }
         match section {
@@ -1552,6 +1575,12 @@ fn parse_monitor_block(
                 }
                 continue;
             }
+            Section::Sys => {
+                if let Some((k, v)) = line.split_once('=') {
+                    sys_kv.insert(k.trim().to_string(), v.trim().to_string());
+                }
+                continue;
+            }
             Section::Top => {}
         }
         if let Some(rest) = line.strip_prefix("cpu ") {
@@ -1566,11 +1595,16 @@ fn parse_monitor_block(
                 cpu_total = nums.iter().copied().fold(0u64, u64::saturating_add);
                 cpu_idle = nums[3].saturating_add(nums.get(4).copied().unwrap_or(0)); // idle + iowait
                 have_cpu = true;
+                cpu_nums = nums;
             }
         } else if let Some(v) = line.strip_prefix("MemTotal:") {
             mem_total = parse_meminfo_kib(v);
         } else if let Some(v) = line.strip_prefix("MemAvailable:") {
             mem_avail = parse_meminfo_kib(v);
+        } else if let Some(v) = line.strip_prefix("Buffers:") {
+            mem_buffers = parse_meminfo_kib(v);
+        } else if let Some(v) = line.strip_prefix("Cached:") {
+            mem_cached = parse_meminfo_kib(v);
         } else if let Some(v) = line.strip_prefix("SwapTotal:") {
             swap_total = parse_meminfo_kib(v);
         } else if let Some(v) = line.strip_prefix("SwapFree:") {
@@ -1586,6 +1620,7 @@ fn parse_monitor_block(
     let now = std::time::Instant::now();
     let elapsed = now.duration_since(*prev_net_at).as_secs_f64().max(0.001);
     let mut net: Vec<(String, u64, u64)> = Vec::new();
+    let net_counters = net_now.clone();
     if !net_now.is_empty() {
         for (iface, rx, tx) in &net_now {
             if let Some((prx, ptx)) = prev_net.get(iface) {
@@ -1627,6 +1662,19 @@ fn parse_monitor_block(
         return None;
     }
 
+    let sys = build_system_details(
+        &sys_kv,
+        &cpu_nums,
+        mem_total,
+        mem_avail,
+        mem_buffers,
+        mem_cached,
+        swap_total,
+        swap_free,
+        &net_counters,
+        &disks,
+    );
+
     Some(SessionEvent::ResourceStats {
         cpu_percent,
         mem_used_kib: mem_total.saturating_sub(mem_avail),
@@ -1636,7 +1684,144 @@ fn parse_monitor_block(
         net,
         disks,
         procs,
+        sys,
     })
+}
+
+fn sys_value(sys: &std::collections::HashMap<String, String>, key: &str) -> String {
+    sys.get(key)
+        .filter(|v| !v.trim().is_empty())
+        .cloned()
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn kib_size(kib: u64) -> String {
+    format_size(kib.saturating_mul(1024))
+}
+
+fn percent_text(used: u64, total: u64) -> String {
+    if total == 0 {
+        "-".to_string()
+    } else {
+        format!("{:.1}%", used as f64 * 100.0 / total as f64)
+    }
+}
+
+fn cpu_usage_rows(nums: &[u64]) -> Vec<(String, String)> {
+    let labels = [
+        ("用户", "User"),
+        ("Nice", "Nice"),
+        ("系统", "System"),
+        ("空闲", "Idle"),
+        ("IO", "IO"),
+        ("硬件中断", "IRQ"),
+        ("软件中断", "SoftIRQ"),
+        ("实时", "Steal"),
+    ];
+    let total = nums.iter().copied().fold(0u64, u64::saturating_add);
+    labels
+        .iter()
+        .enumerate()
+        .map(|(idx, (zh, en))| {
+            let value = nums.get(idx).copied().unwrap_or(0);
+            let pct = if total == 0 {
+                "0.0%".to_string()
+            } else {
+                format!("{:.1}%", value as f64 * 100.0 / total as f64)
+            };
+            (t(zh, en).to_string(), pct)
+        })
+        .collect()
+}
+
+fn build_system_details(
+    sys: &std::collections::HashMap<String, String>,
+    cpu_nums: &[u64],
+    mem_total: u64,
+    mem_avail: u64,
+    mem_buffers: u64,
+    mem_cached: u64,
+    swap_total: u64,
+    swap_free: u64,
+    net_counters: &[(String, u64, u64)],
+    disks: &[(String, u64, u64)],
+) -> SystemDetails {
+    let mem_used = mem_total.saturating_sub(mem_avail);
+    let swap_used = swap_total.saturating_sub(swap_free);
+    let cpu_model = sys_value(sys, "CPU_MODEL");
+    let gpu = sys.get("GPU").cloned().unwrap_or_default();
+    let gpu_info = if gpu.trim().is_empty() {
+        Vec::new()
+    } else {
+        vec![
+            (t("名称", "Name").to_string(), gpu),
+            (t("厂商", "Vendor").to_string(), "-".to_string()),
+            (t("驱动", "Driver").to_string(), "-".to_string()),
+            (t("内存", "Memory").to_string(), "-".to_string()),
+        ]
+    };
+
+    SystemDetails {
+        overview: vec![
+            (t("操作系统", "Operating system").to_string(), sys_value(sys, "OS")),
+            (t("内核版本", "Kernel version").to_string(), sys_value(sys, "KERNEL_RELEASE")),
+            (t("主机名称", "Hostname").to_string(), sys_value(sys, "HOSTNAME")),
+            (t("IP", "IP").to_string(), sys_value(sys, "IPS")),
+            (t("负载", "Load").to_string(), sys_value(sys, "LOAD")),
+            (t("内核", "Kernel").to_string(), sys_value(sys, "KERNEL")),
+            (t("硬件架构", "Architecture").to_string(), sys_value(sys, "ARCH")),
+            (t("连接", "Connection").to_string(), sys_value(sys, "IPS")),
+            (t("运行", "Uptime").to_string(), sys_value(sys, "UPTIME")),
+        ],
+        cpu_info: vec![
+            (t("名称", "Name").to_string(), cpu_model),
+            (t("核心数", "Cores").to_string(), sys_value(sys, "CPU_CORES")),
+            (t("频率", "Frequency").to_string(), "-".to_string()),
+            (t("缓存", "Cache").to_string(), sys_value(sys, "CPU_CACHE")),
+            ("BogoMips".to_string(), sys_value(sys, "CPU_BOGO")),
+        ],
+        gpu_info,
+        cpu_usage: cpu_usage_rows(cpu_nums),
+        memory: vec![
+            (t("总计", "Total").to_string(), kib_size(mem_total)),
+            (t("已使用", "Used").to_string(), kib_size(mem_used)),
+            (t("剩余", "Free").to_string(), kib_size(mem_avail)),
+            (t("已用", "Usage").to_string(), percent_text(mem_used, mem_total)),
+            (t("缓冲", "Buffers").to_string(), kib_size(mem_buffers)),
+            (t("缓存", "Cached").to_string(), kib_size(mem_cached)),
+        ],
+        swap: vec![
+            (t("总计", "Total").to_string(), kib_size(swap_total)),
+            (t("已使用", "Used").to_string(), kib_size(swap_used)),
+            (t("剩余", "Free").to_string(), kib_size(swap_free)),
+            (t("已用", "Usage").to_string(), percent_text(swap_used, swap_total)),
+        ],
+        networks: net_counters
+            .iter()
+            .map(|(name, rx, tx)| {
+                (
+                    name.clone(),
+                    format_size(*tx),
+                    format_size(*rx),
+                    "-".to_string(),
+                    "-".to_string(),
+                )
+            })
+            .collect(),
+        filesystems: disks
+            .iter()
+            .map(|(mount, avail, total)| {
+                let used = total.saturating_sub(*avail);
+                (
+                    mount.clone(),
+                    format_size(*total),
+                    percent_text(used, *total),
+                    format_size(*avail),
+                    mount.clone(),
+                )
+            })
+            .collect(),
+    }
 }
 
 /// Parse one `ps -eo pid,user,pcpu,pmem,args` line into a [`ProcInfo`]. The

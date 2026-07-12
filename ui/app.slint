@@ -24,9 +24,10 @@ import { LabeledInput, PrimaryButton, GhostButton, DockExpandButton, IconButton,
 import { TerminalView, TermSpan, TermMatch, QuickCmd } from "terminal_view.slint";
 import { SftpEntry, SftpTreeNode, TunnelInfo } from "sftp_panel.slint";
 import { ProcWindow, ProcRow } from "proc_window.slint";
+import { SystemInfoWindow, SysInfoRow, SysMetricRow, SysNetRow } from "system_info_window.slint";
 import { InterfacePanel } from "interface_panel.slint";
-// Re-export so `slint::include_modules!` generates the ProcWindow Rust type.
-export { ProcWindow }
+// Re-export so `slint::include_modules!` generates the detached Rust window types.
+export { ProcWindow, SystemInfoWindow }
 import { ComboBox, SpinBox, LineEdit, Button, ScrollView, CheckBox, Palette } from "std-widgets.slint";
 
 export { SessionInfo, SessionDraft, TabInfo, SftpEntry, SftpTreeNode, TunnelInfo, QuickCmd, PortFwd }
@@ -69,6 +70,7 @@ export struct TerminalState {
     sftp-selected-count: int,   // checked entries in the SFTP panel (#100)
     sftp-sort-key: string,      // ""|"name"|"size"|"modified" (#248)
     sftp-sort-dir: int,         // 0 default / 1 asc / -1 desc (#248)
+    sftp-available: bool,       // false for local/serial/telnet sessions
     tunnels: [TunnelInfo],      // runtime SSH tunnels (#206)
     sftp-collapsed: bool,       // SFTP panel minimised — per session (#v0.5)
     sftp-panel-height: length,  // SFTP panel extent (bottom dock) — per session
@@ -332,6 +334,18 @@ export component AppWindow inherits Window {
     callback open-processes();
     in property <bool> proc-available;       // a live remote session is active
     in property <[ProcRow]> proc-list;       // top remote processes by CPU
+    callback open-system-info();
+    in property <[SysMetricRow]> sys-metrics;
+    in property <[SysNetRow]> sys-net-rows;
+    in property <[DiskInfo]> sys-disks;
+    in property <[SysInfoRow]> sys-overview-rows;
+    in property <[SysInfoRow]> sys-cpu-info-rows;
+    in property <[SysInfoRow]> sys-gpu-info-rows;
+    in property <[SysInfoRow]> sys-cpu-usage-rows;
+    in property <[SysInfoRow]> sys-memory-rows;
+    in property <[SysInfoRow]> sys-swap-rows;
+    in property <[SysInfoRow]> sys-network-rows;
+    in property <[SysInfoRow]> sys-filesystem-rows;
     // Command bar (#55): quick commands + history, fed from Rust.
     in property <[QuickCmd]> quick-commands;
     in property <[string]> command-history;          // oldest first (newest last, #113)
@@ -1048,6 +1062,7 @@ export component AppWindow inherits Window {
             proc-available: root.proc-available;
             app-version: root.app-version;
             select-net-iface(i) => { root.select-net-iface(i); }
+            show-system-info() => { root.open-system-info(); }
             show-processes() => { root.open-processes(); }
             copy-host(h) => { root.copy-text(h); }   // reuse the clipboard helper (#192)
             // Drag the sidebar header to dock it to another edge. Coordinates
@@ -1294,6 +1309,7 @@ export component AppWindow inherits Window {
                     sftp-selected-count: term.sftp-selected-count;
                     sftp-sort-key: term.sftp-sort-key;
                     sftp-sort-dir: term.sftp-sort-dir;
+                    sftp-available: term.sftp-available;
                     tunnels: term.tunnels;
                     quick-commands: root.quick-commands;
                     command-history: root.command-history;

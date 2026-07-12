@@ -274,6 +274,8 @@ pub enum SessionKind {
     Serial,
     /// Plain Telnet over TCP, for legacy network gear (#17).
     Telnet,
+    /// Local shell process on this machine (PowerShell/CMD/WSL/$SHELL).
+    Local,
 }
 
 impl SessionKind {
@@ -282,6 +284,7 @@ impl SessionKind {
             SessionKind::Ssh => "ssh",
             SessionKind::Serial => "serial",
             SessionKind::Telnet => "telnet",
+            SessionKind::Local => "local",
         }
     }
 
@@ -289,6 +292,7 @@ impl SessionKind {
         match s {
             "serial" => SessionKind::Serial,
             "telnet" => SessionKind::Telnet,
+            "local" => SessionKind::Local,
             _ => SessionKind::Ssh,
         }
     }

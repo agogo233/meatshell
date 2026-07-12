@@ -26,6 +26,7 @@ component SessionRow inherits Rectangle {
     // Full session list — group-header is non-empty once per group, so the
     // "move to group" submenu can iterate it to list each group exactly once.
     in property <[SessionInfo]> all-sessions;
+    property <bool> system-row: root.session.group == "system";
 
     height: 36px;
     border-radius: Theme.radius-sm;
@@ -69,7 +70,7 @@ component SessionRow inherits Rectangle {
                 spacing: 2px;
 
                 // Edit
-                Rectangle {
+                if !root.system-row : Rectangle {
                     height: 28px;
                     border-radius: Theme.radius-sm;
                     background: edit-ta.has-hover ? Theme.bg-hover : transparent;
@@ -86,7 +87,7 @@ component SessionRow inherits Rectangle {
                 }
 
                 // Duplicate — clone this session as a starting point (#41).
-                Rectangle {
+                if !root.system-row : Rectangle {
                     height: 28px;
                     border-radius: Theme.radius-sm;
                     background: dup-ta.has-hover ? Theme.bg-hover : transparent;
@@ -103,7 +104,7 @@ component SessionRow inherits Rectangle {
                 }
 
                 // Delete (red tint)
-                Rectangle {
+                if !root.system-row : Rectangle {
                     height: 28px;
                     border-radius: Theme.radius-sm;
                     background: del-ta.has-hover ? #cc333320 : transparent;
@@ -119,11 +120,11 @@ component SessionRow inherits Rectangle {
                     }
                 }
 
-                Rectangle { height: 1px; background: Theme.border-subtle; }
+                if !root.system-row : Rectangle { height: 1px; background: Theme.border-subtle; }
 
                 // "Move to" hint — labels the group list below so the user knows
                 // these entries move the session into that folder.
-                HorizontalLayout {
+                if !root.system-row : HorizontalLayout {
                     padding-left: 10px;
                     padding-top: 2px;
                     spacing: 6px;
@@ -135,7 +136,7 @@ component SessionRow inherits Rectangle {
                 // per group (incl. empty folders), so iterating the full list
                 // yields each group once; the current group is skipped.
                 for s[i] in root.all-sessions : Rectangle {
-                    visible: s.group-header != "" && s.group-header != root.session.group;
+                    visible: !root.system-row && s.group-header != "" && s.group-header != root.session.group;
                     height: self.visible ? 28px : 0px;
                     border-radius: Theme.radius-sm;
                     background: mv-ta.has-hover ? Theme.bg-hover : transparent;
@@ -166,7 +167,7 @@ component SessionRow inherits Rectangle {
             border-radius: 3px;
             background: Theme.bg-elevated;
             Text {
-                text: "\u{E875}";   // Material Icons "dns" — server/host glyph
+                text: root.system-row ? "\u{E30A}" : "\u{E875}";   // terminal / server
                 font-family: "Material Icons";
                 color: Theme.text-secondary;
                 font-size: Theme.fs-sm;
@@ -184,7 +185,7 @@ component SessionRow inherits Rectangle {
             overflow: elide;
         }
         Text {
-            text: session.host + ":" + session.port;
+            text: session.port > 0 ? session.host + ":" + session.port : session.host;
             color: Theme.text-secondary;
             font-size: Theme.fs-sm;
             vertical-alignment: center;
@@ -416,7 +417,7 @@ export component Welcome inherits Rectangle {
                                 // empty); right-click opens the group menu.
                                 clicked => { root.toggle-group(session.group); }
                                 pointer-event(e) => {
-                                    if (e.kind == PointerEventKind.down && e.button == PointerEventButton.right) {
+                                    if (session.group != "system" && e.kind == PointerEventKind.down && e.button == PointerEventButton.right) {
                                         gmx = self.mouse-x;
                                         gmy = self.mouse-y;
                                         grp-menu.show();

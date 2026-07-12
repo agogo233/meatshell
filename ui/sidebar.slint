@@ -295,12 +295,41 @@ component StatsBlock inherits VerticalLayout {
     in property <float> swap-percent;
     in property <string> mem-detail;
     in property <string> swap-detail;
+    callback show-system-info();
     callback show-processes();
     spacing: 6px;
     HorizontalLayout {
         spacing: 6px;
-        Text { text: root.resource-title; color: Theme.text-secondary; font-size: Theme.fs-sm;
-               vertical-alignment: center; horizontal-stretch: 1; }
+        Rectangle {
+            height: 20px;
+            horizontal-stretch: 1;
+            border-radius: Theme.radius-sm;
+            background: sys-ta.has-hover ? Theme.bg-hover : transparent;
+            sys-ta := TouchArea { mouse-cursor: pointer; clicked => { root.show-system-info(); } }
+            Text {
+                x: 4px;
+                width: parent.width - 8px;
+                text: root.resource-title;
+                color: Theme.text-secondary;
+                font-size: Theme.fs-sm;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+        Rectangle {
+            width: 22px; height: 20px;
+            border-radius: Theme.radius-sm;
+            background: info-ta.has-hover ? Theme.bg-hover : transparent;
+            info-ta := TouchArea { mouse-cursor: pointer; clicked => { root.show-system-info(); } }
+            Text {
+                text: "\u{E88E}";
+                font-family: "Material Icons";
+                color: Theme.text-secondary;
+                font-size: Theme.fs-sm;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
         if root.proc-available : Rectangle {
             width: 52px; height: 20px;
             border-radius: Theme.radius-sm;
@@ -425,6 +454,7 @@ export component Sidebar inherits Rectangle {
     // always matches Cargo.toml without hand-editing this file.
     in property <string> app-version;
     callback select-net-iface(string);
+    callback show-system-info();         // open the system-information window
     callback show-processes();           // open the process monitor popup (#23)
     callback copy-host(string);          // copy the connection IP/host to clipboard (#192)
     // Drag-to-dock: the header strip is a grab handle; coordinates are reported
@@ -492,6 +522,7 @@ export component Sidebar inherits Rectangle {
                 resource-title: root.resource-title; proc-available: root.proc-available;
                 cpu-percent: root.cpu-percent; mem-percent: root.mem-percent; swap-percent: root.swap-percent;
                 mem-detail: root.mem-detail; swap-detail: root.swap-detail;
+                show-system-info() => { root.show-system-info(); }
                 show-processes() => { root.show-processes(); }
             }
             Rectangle { height: 1px; background: Theme.border-subtle; }
@@ -545,6 +576,7 @@ export component Sidebar inherits Rectangle {
                     resource-title: root.resource-title; proc-available: root.proc-available;
                     cpu-percent: root.cpu-percent; mem-percent: root.mem-percent; swap-percent: root.swap-percent;
                     mem-detail: root.mem-detail; swap-detail: root.swap-detail;
+                    show-system-info() => { root.show-system-info(); }
                     show-processes() => { root.show-processes(); }
                 }
             }
