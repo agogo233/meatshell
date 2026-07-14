@@ -589,6 +589,13 @@ pub struct ConfigFile {
     /// Force regular terminal text to render with a bold face (#262).
     #[serde(default)]
     pub terminal_bold: bool,
+    /// Stored inverted so missing/legacy config keeps the automatic plain-text
+    /// output highlighter enabled by default.
+    #[serde(default)]
+    pub output_highlight_disabled: bool,
+    /// Built-in output highlight preset: "log" (default) or "devops".
+    #[serde(default)]
+    pub output_highlight_preset: String,
     /// Global UI scale in percent (#100). 0 = default (100%).
     #[serde(default)]
     pub ui_scale: u32,
@@ -997,6 +1004,31 @@ impl ConfigStore {
 
     pub fn set_terminal_bold(&mut self, bold: bool) {
         self.cache.terminal_bold = bold;
+    }
+
+    /// Whether client-side highlighting of otherwise unstyled output is active.
+    pub fn output_highlight_enabled(&self) -> bool {
+        !self.cache.output_highlight_disabled
+    }
+
+    pub fn set_output_highlight_enabled(&mut self, enabled: bool) {
+        self.cache.output_highlight_disabled = !enabled;
+    }
+
+    /// Selected built-in rule set. Unknown values safely fall back to the
+    /// conservative log-level preset for forward/backward compatibility.
+    pub fn output_highlight_preset(&self) -> &str {
+        match self.cache.output_highlight_preset.as_str() {
+            "devops" => "devops",
+            _ => "log",
+        }
+    }
+
+    pub fn set_output_highlight_preset(&mut self, preset: String) {
+        self.cache.output_highlight_preset = match preset.as_str() {
+            "devops" => "devops".to_string(),
+            _ => "log".to_string(),
+        };
     }
 
     /// Global UI scale in percent (#100). Defaults to 100.
@@ -1713,6 +1745,28 @@ mod tests {
         };
         assert!(!migrate_defaults(&mut cfg));
         assert_eq!(cfg.wallpaper, "builtin:miku");
+    }
+
+    #[test]
+    fn output_highlight_defaults_and_preset_validation() {
+        let mut store = temp_store();
+        assert!(store.output_highlight_enabled());
+        assert_eq!(store.output_highlight_preset(), "log");
+
+        store.set_output_highlight_enabled(false);
+        store.set_output_highlight_preset("devops".to_string());
+        assert!(!store.output_highlight_enabled());
+        assert_eq!(store.output_highlight_preset(), "devops");
+
+        store.set_output_highlight_preset("future-preset".to_string());
+        assert_eq!(store.output_highlight_preset(), "log");
+
+        // An older settings file without either field retains the feature that
+        // shipped in the previous version: enabled with the log preset.
+        let legacy: ConfigFile = serde_json::from_str("{}").unwrap();
+        store.cache = legacy;
+        assert!(store.output_highlight_enabled());
+        assert_eq!(store.output_highlight_preset(), "log");
     }
 
     #[test]

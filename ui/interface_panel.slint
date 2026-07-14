@@ -181,6 +181,8 @@ export component InterfacePanel inherits Rectangle {
     in property <string> term-font-family;
     in property <length> term-font-size;
     in-out property <bool> term-font-bold;
+    in-out property <bool> output-highlight-enabled;
+    in-out property <string> output-highlight-preset;
     in property <float> ui-scale;
     in-out property <bool> sftp-follow-cd;
     in-out property <bool> collapse-sidebar-default;
@@ -210,6 +212,7 @@ export component InterfacePanel inherits Rectangle {
     callback set-term-font(string);
     callback set-term-font-size(int);
     callback set-term-font-bold(bool);
+    callback set-output-highlight(bool, string);
     callback set-ui-scale(int);
     callback set-panel-font(int);   // settings-panel font scale, percent
     callback set-sftp-follow-cd(bool);
@@ -245,6 +248,11 @@ export component InterfacePanel inherits Rectangle {
                     icon: "\u{E167}"; label: root.lang-en ? "Font" : "字体";
                     active: root.ifd-page == "font";
                     clicked => { root.ifd-page = "font"; }
+                }
+                NavItem {
+                    icon: "\u{E8D4}"; label: root.lang-en ? "Output" : "输出高亮";
+                    active: root.ifd-page == "output";
+                    clicked => { root.ifd-page = "output"; }
                 }
                 NavItem {
                     icon: "\u{E1BC}"; label: root.lang-en ? "Wallpaper" : "壁纸";
@@ -376,6 +384,70 @@ export component InterfacePanel inherits Rectangle {
                         color: Theme.term-fg;
                         vertical-alignment: center;
                         height: parent.height;
+                    }
+                }
+            }
+
+            // --- Output highlighting page -----------------------------
+            if root.ifd-page == "output" : VerticalLayout {
+                padding-left: 20px;
+                padding-right: 20px;
+                padding-top: 14px;
+                spacing: 0;
+                alignment: start;
+
+                SectionHeader { text: root.lang-en ? "OUTPUT HIGHLIGHTING" : "输出高亮"; height: 24px; }
+                SettingRow {
+                    label: root.lang-en ? "Highlight plain terminal output" : "高亮纯文本终端输出";
+                    desc: root.lang-en
+                        ? "Adds client-side colours only when the program did not provide ANSI styling."
+                        : "仅在程序未提供 ANSI 样式时由客户端补充颜色。";
+                    Switch {
+                        on: root.output-highlight-enabled;
+                        toggled(v) => {
+                            root.output-highlight-enabled = v;
+                            root.set-output-highlight(v, root.output-highlight-preset);
+                        }
+                    }
+                }
+                SettingRow {
+                    label: root.lang-en ? "Built-in rule set" : "内置规则集";
+                    desc: root.lang-en
+                        ? "Log levels is conservative; DevOps also recognises deployment and health states."
+                        : "日志级别更保守；DevOps 还识别部署与健康状态。";
+                    show-divider: false;
+                    ComboBox {
+                        width: 190px;
+                        enabled: root.output-highlight-enabled;
+                        model: [root.lang-en ? "Log levels" : "日志级别", "DevOps"];
+                        current-value: root.output-highlight-preset == "devops"
+                            ? "DevOps"
+                            : (root.lang-en ? "Log levels" : "日志级别");
+                        selected(v) => {
+                            root.output-highlight-preset = v == "DevOps" ? "devops" : "log";
+                            root.set-output-highlight(
+                                root.output-highlight-enabled,
+                                root.output-highlight-preset);
+                        }
+                    }
+                }
+
+                Rectangle { height: 18px; }
+                SectionHeader { text: root.lang-en ? "PREVIEW" : "预览"; height: 22px; }
+                Rectangle {
+                    height: root.output-highlight-preset == "devops" ? 116px : 92px;
+                    background: Theme.term-bg;
+                    border-radius: 6px;
+                    border-width: 1px;
+                    border-color: Theme.border-subtle;
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 5px;
+                        Text { text: "DEBUG cache lookup"; color: root.output-highlight-enabled ? Theme.text-muted : Theme.term-fg; font-family: Theme.term-font-family; font-size: 12px; }
+                        Text { text: "INFO server ready"; color: root.output-highlight-enabled ? Theme.accent : Theme.term-fg; font-family: Theme.term-font-family; font-size: 12px; }
+                        Text { text: "WARN disk nearly full"; color: root.output-highlight-enabled ? Theme.warning : Theme.term-fg; font-family: Theme.term-font-family; font-size: 12px; }
+                        Text { text: "ERROR connection failed"; color: root.output-highlight-enabled ? Theme.danger : Theme.term-fg; font-family: Theme.term-font-family; font-size: 12px; }
+                        if root.output-highlight-preset == "devops" : Text { text: "SUCCESS deployment completed"; color: root.output-highlight-enabled ? Theme.success : Theme.term-fg; font-family: Theme.term-font-family; font-size: 12px; }
                     }
                 }
             }

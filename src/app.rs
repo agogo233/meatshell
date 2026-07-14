@@ -27,6 +27,9 @@ struct TermBuffer {
     /// Stored here so the event-pump threads can render new output with the
     /// correct palette without needing a window reference.
     is_dark: bool,
+    /// Client-side highlighting for plain output. Stored per buffer so render
+    /// workers do not need to borrow the UI/config state.
+    output_highlight: OutputHighlightPreset,
     /// Drag selection in ABSOLUTE scrollback coordinates: each endpoint is a
     /// `(combined_row, col)` where `combined_row` indexes the virtual buffer of
     /// `history` lines followed by the live screen rows.  Absolute (rather than
@@ -76,6 +79,25 @@ enum CsiState {
     Esc,
     /// Inside a CSI sequence (after `ESC [`), scanning params/intermediates.
     Csi,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OutputHighlightPreset {
+    Off,
+    Log,
+    DevOps,
+}
+
+impl OutputHighlightPreset {
+    fn from_settings(enabled: bool, preset: &str) -> Self {
+        if !enabled {
+            Self::Off
+        } else if preset == "devops" {
+            Self::DevOps
+        } else {
+            Self::Log
+        }
+    }
 }
 
 /// Max UI renders per second for a tab under sustained output (#209).
@@ -770,6 +792,8 @@ pub fn run() -> Result<()> {
         }
         window.set_term_font_size(s.font_size() as f32);
         window.set_term_font_bold(s.terminal_bold());
+        window.set_output_highlight_enabled(s.output_highlight_enabled());
+        window.set_output_highlight_preset(s.output_highlight_preset().into());
         window.set_ui_scale(s.ui_scale() as f32 / 100.0); // global UI zoom (#100)
         window.set_panel_font(s.panel_font() as f32 / 100.0); // settings-panel font scale
     }
@@ -1059,6 +1083,25 @@ pub fn run() -> Result<()> {
             }
             if let Some(w) = weak.upgrade() {
                 w.set_term_font_family(family);
+            }
+        });
+    }
+    // Output highlighting: persist the switch/preset and immediately rebuild
+    // every open terminal, including scrollback captured before the change.
+    {
+        let weak = window.as_weak();
+        let store = store.clone();
+        let bufs = bufs.clone();
+        window.on_set_output_highlight(move |enabled, preset: SharedString| {
+            let preset = preset.to_string();
+            {
+                let mut s = store.borrow_mut();
+                s.set_output_highlight_enabled(enabled);
+                s.set_output_highlight_preset(preset.clone());
+                let _ = s.save();
+            }
+            if let Some(w) = weak.upgrade() {
+                apply_output_highlight(&w, &bufs, enabled, &preset);
             }
         });
     }
@@ -3526,12 +3569,17 @@ fn wire_session_callbacks(
             // terminal-resize callback). 5000-line scrollback is stored for
             // future scroll-navigation support.
             let is_dark_now = weak.upgrade().map(|w| w.get_dark_mode()).unwrap_or(true);
+            let output_highlight = OutputHighlightPreset::from_settings(
+                store.borrow().output_highlight_enabled(),
+                store.borrow().output_highlight_preset(),
+            );
             bufs.lock().unwrap().insert(
                 tab_id.clone(),
                 Arc::new(Mutex::new(TermBuffer {
                     parser: vt100::Parser::new(24, 80, 5000),
                     find_query: String::new(),
                     is_dark: is_dark_now,
+                    output_highlight,
                     sel_anchor: None,
                     sel_focus: None,
                     sel_ranges: Vec::new(),
@@ -4994,6 +5042,25 @@ fn apply_dark_mode(window: &AppWindow, bufs: &TermBuffers, dark: bool) {
     let tab_ids: Vec<String> = bufs.lock().unwrap().keys().cloned().collect();
     for tid in tab_ids {
         rebuild_tab_display(window, bufs, &tid);
+    }
+}
+
+fn apply_output_highlight(
+    window: &AppWindow,
+    bufs: &TermBuffers,
+    enabled: bool,
+    preset: &str,
+) {
+    let mode = OutputHighlightPreset::from_settings(enabled, preset);
+    {
+        let handles: Vec<_> = bufs.lock().unwrap().values().cloned().collect();
+        for handle in handles {
+            handle.lock().unwrap().output_highlight = mode;
+        }
+    }
+    let tab_ids: Vec<String> = bufs.lock().unwrap().keys().cloned().collect();
+    for tab_id in tab_ids {
+        rebuild_tab_display(window, bufs, &tab_id);
     }
 }
 
@@ -9417,13 +9484,6 @@ fn build_row(screen: &vt100::Screen, r: u16, cols: u16) -> Line {
             cells,
         });
     }
-    // Plain-text logs often omit ANSI styling entirely. Add a conservative
-    // severity-token highlight on the normal screen while preserving every
-    // colour chosen by the remote program. Alternate-screen TUIs (vim/nano/
-    // htop) are deliberately left styled by the application.
-    if !screen.alternate_screen() {
-        runs = highlight_plain_log_levels(runs);
-    }
     (plain, runs, screen.row_wrapped(r))
 }
 
@@ -9431,7 +9491,13 @@ fn build_row(screen: &vt100::Screen, r: u16, cols: u16) -> Line {
 /// terminal run. Uppercase standalone levels cover conventional text logs;
 /// lowercase values are accepted only in a structured `level=...` / JSON field
 /// to avoid colouring ordinary prose that happens to contain words like "error".
-fn highlight_plain_log_levels(runs: Vec<HistSpan>) -> Vec<HistSpan> {
+fn highlight_plain_output(
+    runs: Vec<HistSpan>,
+    preset: OutputHighlightPreset,
+) -> Vec<HistSpan> {
+    if preset == OutputHighlightPreset::Off {
+        return runs;
+    }
     const SEARCH_COLS: i32 = 96;
 
     let mut out = Vec::with_capacity(runs.len() + 2);
@@ -9443,7 +9509,7 @@ fn highlight_plain_log_levels(runs: Vec<HistSpan>) -> Vec<HistSpan> {
             && !run.inverse;
         let max_chars = SEARCH_COLS.saturating_sub(run.col) as usize;
         let Some((start, end, ansi_index)) = eligible
-            .then(|| log_level_marker(&run.text, max_chars))
+            .then(|| output_highlight_marker(&run.text, max_chars, preset))
             .flatten()
         else {
             out.push(run);
@@ -9551,6 +9617,103 @@ fn log_level_marker(text: &str, max_chars: usize) -> Option<(usize, usize, u8)> 
                 && ascii_word_boundary(lower_bytes, pos, pos + word.len())
             {
                 return Some((pos, pos + word.len(), colour));
+            }
+        }
+    }
+    None
+}
+
+fn output_highlight_marker(
+    text: &str,
+    max_chars: usize,
+    preset: OutputHighlightPreset,
+) -> Option<(usize, usize, u8)> {
+    let log = log_level_marker(text, max_chars);
+    if preset != OutputHighlightPreset::DevOps {
+        return log;
+    }
+    let ops = devops_marker(text, max_chars);
+    match (log, ops) {
+        (Some(a), Some(b)) => Some(if a.0 <= b.0 { a } else { b }),
+        (Some(marker), None) | (None, Some(marker)) => Some(marker),
+        (None, None) => None,
+    }
+}
+
+/// Additional deployment/operations states used by the DevOps preset. The list
+/// intentionally avoids ambiguous short words such as OK/UP/DOWN.
+fn devops_marker(text: &str, max_chars: usize) -> Option<(usize, usize, u8)> {
+    const STATES: [(&str, u8); 15] = [
+        ("UNHEALTHY", 9),
+        ("SUCCEEDED", 10),
+        ("SUCCESS", 10),
+        ("FAILURE", 9),
+        ("FAILED", 9),
+        ("TIMEOUT", 9),
+        ("DENIED", 9),
+        ("DEGRADED", 11),
+        ("RETRYING", 11),
+        ("PENDING", 11),
+        ("HEALTHY", 10),
+        ("READY", 10),
+        ("PASSED", 10),
+        ("RETRY", 11),
+        ("FAIL", 9),
+    ];
+
+    let bytes = text.as_bytes();
+    let mut best: Option<(usize, usize, u8)> = None;
+    for (word, colour) in STATES {
+        for (start, _) in text.match_indices(word) {
+            if text[..start].chars().count() >= max_chars
+                || !ascii_word_boundary(bytes, start, start + word.len())
+            {
+                continue;
+            }
+            let candidate = (start, start + word.len(), colour);
+            if best.map_or(true, |current| start < current.0) {
+                best = Some(candidate);
+            }
+            break;
+        }
+    }
+    if best.is_some() {
+        return best;
+    }
+
+    let lower = text.to_ascii_lowercase();
+    let lower_bytes = lower.as_bytes();
+    for key in ["status", "state", "result"] {
+        for (key_start, _) in lower.match_indices(key) {
+            if text[..key_start].chars().count() >= max_chars
+                || !ascii_word_boundary(lower_bytes, key_start, key_start + key.len())
+            {
+                continue;
+            }
+            let mut pos = key_start + key.len();
+            if lower_bytes.get(pos) == Some(&b'"') {
+                pos += 1;
+            }
+            while lower_bytes.get(pos).is_some_and(u8::is_ascii_whitespace) {
+                pos += 1;
+            }
+            if !matches!(lower_bytes.get(pos).copied(), Some(b'=') | Some(b':')) {
+                continue;
+            }
+            pos += 1;
+            while lower_bytes.get(pos).is_some_and(u8::is_ascii_whitespace) {
+                pos += 1;
+            }
+            if matches!(lower_bytes.get(pos).copied(), Some(b'"') | Some(b'\'')) {
+                pos += 1;
+            }
+            for (word, colour) in STATES {
+                let word = word.to_ascii_lowercase();
+                if lower[pos..].starts_with(&word)
+                    && ascii_word_boundary(lower_bytes, pos, pos + word.len())
+                {
+                    return Some((pos, pos + word.len(), colour));
+                }
             }
         }
     }
@@ -9983,6 +10146,11 @@ impl TermBuffer {
             let s = self.parser.screen();
             for r in 0..rows {
                 let (plain, runs, _wrapped) = build_row(s, r, cols);
+                let runs = if is_alt {
+                    runs
+                } else {
+                    highlight_plain_output(runs, self.output_highlight)
+                };
                 if !runs.is_empty() {
                     last_content = r as i32;
                 }
@@ -10043,7 +10211,8 @@ impl TermBuffer {
             } else {
                 &live[idx - hist_len]
             };
-            for hs in &line.1 {
+            let runs = highlight_plain_output(line.1.clone(), self.output_highlight);
+            for hs in &runs {
                 let (fg, bg) = vt_span_colors(hs.fg, hs.bg, hs.bold, hs.inverse, self.is_dark);
                 spans.push(TermSpan {
                     text: hs.text.clone().into(),
@@ -10565,6 +10734,7 @@ mod selection_tests {
             parser,
             find_query: String::new(),
             is_dark: false,
+            output_highlight: OutputHighlightPreset::Log,
             sel_anchor: None,
             sel_focus: None,
             sel_ranges: Vec::new(),
@@ -10747,10 +10917,13 @@ mod log_highlight_tests {
 
     #[test]
     fn highlights_uppercase_level_and_preserves_columns() {
-        let runs = highlight_plain_log_levels(vec![plain_run(
-            "2026-07-14T10:20:30Z ERROR request failed",
-            0,
-        )]);
+        let runs = highlight_plain_output(
+            vec![plain_run(
+                "2026-07-14T10:20:30Z ERROR request failed",
+                0,
+            )],
+            OutputHighlightPreset::Log,
+        );
         assert_eq!(runs.len(), 3);
         assert_eq!(runs[1].text, "ERROR");
         assert_eq!(runs[1].col, 21);
@@ -10763,7 +10936,10 @@ mod log_highlight_tests {
     #[test]
     fn highlights_structured_lowercase_level_only() {
         let json = r#"{"level":"warn","message":"disk nearly full"}"#;
-        let runs = highlight_plain_log_levels(vec![plain_run(json, 4)]);
+        let runs = highlight_plain_output(
+            vec![plain_run(json, 4)],
+            OutputHighlightPreset::Log,
+        );
         let level = runs
             .iter()
             .find(|run| run.text == "warn")
@@ -10778,7 +10954,7 @@ mod log_highlight_tests {
     fn preserves_existing_ansi_styles() {
         let mut coloured = plain_run("ERROR", 0);
         coloured.fg = vt100::Color::Idx(2);
-        let runs = highlight_plain_log_levels(vec![coloured]);
+        let runs = highlight_plain_output(vec![coloured], OutputHighlightPreset::Log);
         assert_eq!(runs.len(), 1);
         assert!(matches!(runs[0].fg, vt100::Color::Idx(2)));
         assert!(!runs[0].bold);
@@ -10796,5 +10972,45 @@ mod log_highlight_tests {
             .expect("alternate-screen text should still render");
         assert!(matches!(level.fg, vt100::Color::Default));
         assert!(!level.bold);
+    }
+
+    #[test]
+    fn off_preset_leaves_plain_levels_untouched() {
+        let runs = highlight_plain_output(
+            vec![plain_run("ERROR request failed", 0)],
+            OutputHighlightPreset::Off,
+        );
+        assert_eq!(runs.len(), 1);
+        assert!(matches!(runs[0].fg, vt100::Color::Default));
+        assert!(!runs[0].bold);
+    }
+
+    #[test]
+    fn devops_preset_adds_deployment_and_structured_states() {
+        let success = highlight_plain_output(
+            vec![plain_run("deploy SUCCESS", 0)],
+            OutputHighlightPreset::DevOps,
+        );
+        let token = success
+            .iter()
+            .find(|run| run.text == "SUCCESS")
+            .expect("DevOps success should be highlighted");
+        assert!(matches!(token.fg, vt100::Color::Idx(10)));
+
+        let json = highlight_plain_output(
+            vec![plain_run(r#"{"status":"failed"}"#, 0)],
+            OutputHighlightPreset::DevOps,
+        );
+        let token = json
+            .iter()
+            .find(|run| run.text == "failed")
+            .expect("structured DevOps state should be highlighted");
+        assert!(matches!(token.fg, vt100::Color::Idx(9)));
+
+        let conservative = highlight_plain_output(
+            vec![plain_run("deploy SUCCESS", 0)],
+            OutputHighlightPreset::Log,
+        );
+        assert_eq!(conservative.len(), 1);
     }
 }
