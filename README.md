@@ -78,7 +78,7 @@ open /Applications/meatshell.app
 
 - [x] FinalShell 风格 UI，深色 / 浅色 / 跟随系统主题
 - [x] 本机 + 远端资源监控（CPU / 内存 / 交换 / 网络 / 磁盘）
-- [x] 远端进程监控（按 CPU 排序的只读进程表）
+- [x] 远端进程监控（按 CPU 排序、PID 复制与权限确认后结束进程）
 - [x] 完整 VT/ANSI 终端模拟（btop / htop / vim 全屏正常渲染）
 - [x] 多标签页（欢迎页 + 多个会话）
 - [x] 会话管理：新建 / 编辑 / 删除 / 分组，本地 JSON 持久化，导出 / 导入

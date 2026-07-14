@@ -83,7 +83,7 @@ open /Applications/meatshell.app
 
 - [x] FinalShell-style UI with dark / light / follow-system themes
 - [x] Local + remote resource monitoring (CPU / memory / swap / network / disk)
-- [x] Remote process monitor (read-only table sorted by CPU)
+- [x] Remote process monitor (CPU-sorted table with PID copy and permission-aware termination)
 - [x] Full VT/ANSI terminal emulation (btop / htop / vim render correctly)
 - [x] Tabs (welcome page + multiple sessions)
 - [x] Session management: create / edit / delete / groups, local JSON, export / import

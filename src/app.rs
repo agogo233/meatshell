@@ -252,6 +252,7 @@ type SftpLastCwd = Arc<Mutex<HashMap<String, String>>>;
 #[derive(Clone, Default)]
 struct TabStatus {
     host: String,       // "root@192.168.100.2"
+    user: String,       // effective SSH login user, for process ownership checks
     session_id: String, // saved-session id, used to reconnect in place (#79)
     state: u8,          // 0 = connecting, 1 = connected, 2 = disconnected
     cpu: f32,           // 0.0..1.0
@@ -722,6 +723,12 @@ pub fn run() -> Result<()> {
         });
     }
     {
+        proc_win.on_copy_pid(move |pid: SharedString| {
+            let text = pid.to_string();
+            std::thread::spawn(move || clipboard_set_text(text));
+        });
+    }
+    {
         // Frameless titlebar drag, via winit on the process window's own handle.
         let weak = proc_win.as_weak();
         proc_win.on_win_drag(move || {
@@ -757,6 +764,7 @@ pub fn run() -> Result<()> {
             pw.set_host(main.get_connection_state());
             sync_proc_theme(&main, &pw);
             let _ = pw.show();
+            place_process_window(&main, &pw);
             pw.window().with_winit_window(|ww| ww.focus_window());
         });
     }
@@ -1524,6 +1532,69 @@ pub fn run() -> Result<()> {
     let tab_statuses: TabStatuses = Arc::new(Mutex::new(HashMap::new()));
     let local_snap: LocalSnap = Arc::new(Mutex::new(SystemSnapshot::default()));
     let local_net_hist: NetHist = Arc::new(Mutex::new(vec![0.0; NET_HISTORY_LEN]));
+
+    {
+        let proc_weak = proc_win.as_weak();
+        let handles = handles.clone();
+        let statuses = tab_statuses.clone();
+        let runtime = runtime.clone();
+        proc_win.on_terminate_process(move |tab_id: SharedString, pid: SharedString, password: SharedString| {
+            let tab_id = tab_id.to_string();
+            let Ok(pid) = pid.parse::<u32>() else {
+                set_process_action_error(&proc_weak, t("无效的 PID", "Invalid PID"));
+                return;
+            };
+
+            // Re-check the source tab, PID, and owner against the latest sample;
+            // the main window may have switched tabs since the menu was opened.
+            let ownership = {
+                let states = statuses.lock().unwrap();
+                states.get(&tab_id).map_or_else(
+                    || Err(t("当前会话不可用", "The current session is unavailable")),
+                    |status| status.procs.iter().find(|p| p.pid == pid)
+                        .map(|process| process_needs_root(&status.user, &process.user))
+                        .ok_or_else(|| t("进程已退出", "The process has already exited")),
+                )
+            };
+            let needs_root = match ownership {
+                Ok(value) => value,
+                Err(message) => {
+                    set_process_action_error(&proc_weak, message);
+                    return;
+                }
+            };
+            if needs_root && password.is_empty() {
+                set_process_action_error(
+                    &proc_weak,
+                    t("请输入管理员（sudo）密码", "Enter the administrator (sudo) password"),
+                );
+                return;
+            }
+
+            let root_password = needs_root.then(|| crate::config::Secret::new(password.to_string()));
+            let response = handles.borrow().get(&tab_id)
+                .map(|handle| handle.kill_process(pid, root_password));
+            let Some(response) = response else {
+                set_process_action_error(&proc_weak, t("SSH 会话不可用", "The SSH session is unavailable"));
+                return;
+            };
+
+            let done_weak = proc_weak.clone();
+            runtime.spawn(async move {
+                let result = response.await.unwrap_or_else(|_| crate::ssh::ProcessKillResult {
+                    success: false,
+                    message: t("SSH 会话已关闭", "The SSH session has closed").to_string(),
+                });
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(pw) = done_weak.upgrade() {
+                        pw.set_action_busy(false);
+                        pw.set_action_error(!result.success);
+                        pw.set_action_status(result.message.into());
+                    }
+                });
+            });
+        });
+    }
 
     // --- Wire callbacks --------------------------------------------------
     wire_session_callbacks(
@@ -3617,6 +3688,7 @@ fn wire_session_callbacks(
                 tab_id.clone(),
                 TabStatus {
                     host: conn_label.clone(),
+                    user: session.user.clone(),
                     session_id: id.clone(),
                     state: 0,
                     ..Default::default()
@@ -4253,18 +4325,60 @@ fn disk_model(disks: &[(String, u64, u64)]) -> ModelRc<DiskInfo> {
 
 /// Build the process-monitor model for the popup (#23). `cpu`/`mem` are
 /// pre-formatted to one decimal; `cpu_frac` (0..1) drives the row's load bar.
-fn proc_rows(procs: &[ProcInfo]) -> Vec<ProcRow> {
+fn set_process_action_error(weak: &slint::Weak<ProcWindow>, message: &str) {
+    if let Some(window) = weak.upgrade() {
+        window.set_action_busy(false);
+        window.set_action_error(true);
+        window.set_action_status(message.into());
+    }
+}
+
+/// A root login can signal any process directly. Non-root logins may signal
+/// only their own processes; root and other users' processes require `su`.
+fn process_needs_root(current_user: &str, process_user: &str) -> bool {
+    current_user != "root" && process_user != current_user
+}
+
+fn proc_rows(procs: &[ProcInfo], current_user: &str, tab_id: &str) -> Vec<ProcRow> {
     procs
         .iter()
         .map(|p| ProcRow {
+            tab_id: tab_id.into(),
             pid: p.pid.to_string().into(),
             user: p.user.clone().into(),
             cpu: format!("{:.1}", p.cpu).into(),
             mem: format!("{:.1}", p.mem).into(),
             command: p.command.clone().into(),
             cpu_frac: (p.cpu / 100.0).clamp(0.0, 1.0),
+            own_process: !process_needs_root(current_user, &p.user),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod process_row_tests {
+    use super::*;
+
+    #[test]
+    fn marks_owner_and_preserves_source_tab() {
+        let input = vec![
+            ProcInfo { pid: 10, user: "alice".into(), cpu: 1.0, mem: 2.0, command: "own".into() },
+            ProcInfo { pid: 11, user: "root".into(), cpu: 3.0, mem: 4.0, command: "other".into() },
+        ];
+        let rows = proc_rows(&input, "alice", "term-a");
+        assert!(rows[0].own_process);
+        assert!(!rows[1].own_process);
+        assert!(rows.iter().all(|row| row.tab_id.as_str() == "term-a"));
+    }
+
+    #[test]
+    fn privilege_rules_match_effective_login_user() {
+        assert!(!process_needs_root("alice", "alice"));
+        assert!(process_needs_root("alice", "root"));
+        assert!(process_needs_root("alice", "bob"));
+        assert!(!process_needs_root("root", "root"));
+        assert!(!process_needs_root("root", "alice"));
+    }
 }
 
 fn metric_rows(
@@ -4734,6 +4848,29 @@ fn place_system_info_window(main: &AppWindow, sys: &SystemInfoWindow) {
         let _ = ww.request_inner_size(LogicalSize::new(target_w, target_h));
         ww.set_outer_position(LogicalPosition::new(x, y));
         let _ = scale; // documents that all values above are already logical.
+    });
+}
+
+/// Center the process monitor on the same physical monitor as the main window.
+/// Physical coordinates avoid logical/physical rounding errors when the two
+/// displays use different DPI scale factors. Keep the user's current process
+/// window size; opening it should reposition, not reset a manual resize.
+fn place_process_window(main: &AppWindow, process: &ProcWindow) {
+    use i_slint_backend_winit::winit::dpi::PhysicalPosition;
+
+    let monitor = main
+        .window()
+        .with_winit_window(|ww| ww.current_monitor().or_else(|| ww.primary_monitor()))
+        .flatten();
+    let Some(monitor) = monitor else { return };
+    let origin = monitor.position();
+    let monitor_size = monitor.size();
+
+    process.window().with_winit_window(|ww| {
+        let window_size = ww.outer_size();
+        let x = origin.x + monitor_size.width.saturating_sub(window_size.width) as i32 / 2;
+        let y = origin.y + monitor_size.height.saturating_sub(window_size.height) as i32 / 2;
+        ww.set_outer_position(PhysicalPosition::new(x, y));
     });
 }
 
@@ -5360,13 +5497,13 @@ fn refresh_sidebar(
     // instead of replacing it — replacing would break the sharing. Only a live
     // remote session has process data; default to empty and let the connected
     // branch below fill it in.
-    let set_procs = |win: &AppWindow, procs: &[ProcInfo]| {
+    let set_procs = |win: &AppWindow, procs: &[ProcInfo], current_user: &str, tab_id: &str| {
         if let Some(vm) = win
             .get_proc_list()
             .as_any()
             .downcast_ref::<VecModel<ProcRow>>()
         {
-            vm.set_vec(proc_rows(procs));
+            vm.set_vec(proc_rows(procs, current_user, tab_id));
         }
     };
     let set_system_models =
@@ -5458,7 +5595,7 @@ fn refresh_sidebar(
             }
         };
     win.set_proc_available(false);
-    set_procs(win, &[]);
+    set_procs(win, &[], "", "");
 
     let active = win.get_active_tab_id().to_string();
     let status = if active == "welcome" {
@@ -5491,7 +5628,7 @@ fn refresh_sidebar(
             win.set_net_ifaces(ModelRc::from(Rc::new(VecModel::from(ifaces))));
             win.set_disks(disk_model(&st.disks));
             win.set_proc_available(true);
-            set_procs(win, &st.procs);
+            set_procs(win, &st.procs, &st.user, &active);
             set_system_models(
                 win,
                 st.cpu,
@@ -5699,7 +5836,8 @@ fn apply_session_event_to_window(
             swap_total_kib,
             net,
             disks,
-            procs,
+            current_user: _,
+            procs: _,
             sys,
         } => {
             if let Some(st) = statuses.lock().unwrap().get_mut(tab_id) {
@@ -5710,7 +5848,6 @@ fn apply_session_event_to_window(
                 st.swap_total_kib = swap_total_kib;
                 st.net = net;
                 st.disks = disks;
-                st.procs = procs;
                 st.sys = sys;
                 // A sample means the channel is alive → treat as connected.
                 if st.state != 1 {
@@ -5719,6 +5856,20 @@ fn apply_session_event_to_window(
                 // Append the selected interface's total rate to its sparkline.
                 let (_, rx, tx) = selected_iface(st);
                 push_ring(&mut st.net_hist, (rx + tx) as f32);
+            }
+            if win.get_active_tab_id().as_str() == tab_id {
+                refresh_sidebar(win, statuses, local, local_net_hist);
+            }
+        }
+        SessionEvent::ProcessStats {
+            current_user,
+            procs,
+        } => {
+            if let Some(st) = statuses.lock().unwrap().get_mut(tab_id) {
+                if !current_user.is_empty() {
+                    st.user = current_user;
+                }
+                st.procs = procs;
             }
             if win.get_active_tab_id().as_str() == tab_id {
                 refresh_sidebar(win, statuses, local, local_net_hist);

@@ -497,3 +497,27 @@ msgstr "Copied"
 
 msgid "Clear sort"
 msgstr "Clear sort"
+
+msgid "Terminate process"
+msgstr "Terminate process"
+
+msgid "PID copied"
+msgstr "PID copied"
+
+msgid "Terminate this process? It may lose unsaved data."
+msgstr "Terminate this process? It may lose unsaved data."
+
+msgid "This process belongs to root or another user. Enter your administrator (sudo) password to continue."
+msgstr "This process belongs to root or another user. Enter your administrator (sudo) password to continue."
+
+msgid "Administrator password"
+msgstr "Administrator password"
+
+msgid "Enter sudo password"
+msgstr "Enter sudo password"
+
+msgid "Terminating process..."
+msgstr "Terminating process..."
+
+msgid "Terminate"
+msgstr "Terminate"

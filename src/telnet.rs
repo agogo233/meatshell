@@ -180,6 +180,12 @@ async fn run_telnet(
                         let _ = wr.flush().await;
                     }
                     Some(SessionCommand::AddTunnel { .. }) | Some(SessionCommand::StopTunnel(_)) => {}
+                    Some(SessionCommand::KillProcess { reply, .. }) => {
+                        let _ = reply.send(crate::ssh::ProcessKillResult {
+                            success: false,
+                            message: t("Telnet 不支持远程进程操作", "Remote process control is unavailable for Telnet sessions").into(),
+                        });
+                    }
                     Some(SessionCommand::Close) | None => break,
                 }
             }

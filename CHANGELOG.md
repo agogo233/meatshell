@@ -7,17 +7,31 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ### 新增 / Added
 
+- **进程监视支持居中打开、复制 PID 与安全结束进程。** 进程窗口每次打开时会在主窗口当前所在屏幕居中，并保留用户调整后的窗口尺寸。窗口中的 PID 现在可点击复制；右键进程行可发起结束操作，菜单在右键松开后才显示，避免同一次鼠标事件跳过确认。非 root 登录者结束本人进程时会先二次确认，结束 root 或其他用户的进程则必须输入当前登录用户的管理员（sudo）密码；登录用户本身为 root 时无需再次输入密码。操作通过独立 SSH exec 通道执行，不写入交互终端或命令历史；密码输入关闭回显并使用可清零密文承载，执行前还会重新校验来源会话、PID 与属主，避免切换标签后误操作。
 - **纯文本日志级别自动高亮。** 终端会为未携带 ANSI 颜色的 `TRACE`、`DEBUG`、`INFO`、`NOTICE`、`WARN`、`WARNING`、`ERROR`、`FATAL`、`CRITICAL` 和 `PANIC` 级别标记增加主题自适应颜色；结构化日志中的 `level=error` / JSON level 字段也受支持。远端程序已有的 ANSI 样式以及 vim、nano、htop 等全屏 TUI 保持不变。
 - **新增输出高亮设置与 DevOps 规则集。** 设置 → 输出高亮可即时启用或关闭客户端高亮，并在保守的“日志级别”与扩展的“DevOps”规则集之间切换；DevOps 模式额外识别部署结果、重试、健康状态及结构化 `status` / `state` / `result` 字段，切换时会同步重绘当前终端与历史输出。
 - **支持自定义输出高亮规则。** 设置 → 输出高亮现在可添加关键词或正则表达式规则，选择是否区分大小写、仅高亮匹配文字或高亮整行，并从红、黄、绿、青、紫、灰六种颜色中选择；规则可单独启停或删除，会持久化并即时应用于当前终端和历史输出。无效正则会在保存前提示，用户规则优先于内置规则但不会覆盖远端 ANSI 样式。
+
+### 修复 / Fixed
+
+- **修复进程列表停止刷新以及 root 进程无法结束。** 进程采样现已拆分到独立的轻量 SSH 通道，不再被可能卡住的 `df`、`lspci` 等系统信息探测拖死；提权改为与手工操作一致的 `sudo -S`，使用关闭回显的 PTY，等待密码提示后再以回车提交当前登录用户的 sudo 密码，避免 `su root` 在 root 账户被锁定时始终认证失败。进程控制各阶段、远端安全输出及耗时会写入 `error.log`，密码内容始终脱敏。结束操作仍使用可正常清理资源的 `SIGTERM`（`kill -15`）。
+- **修复结束 root 进程时密码弹窗导致程序闪退。** 条件弹窗中的密码输入框不再在 Slint 布局初始化阶段同步抢占焦点，而是在下一轮事件循环、布局完成后自动聚焦，避免触发属性递归检测；同一修复也覆盖 MFA 动态输入框。
+- **移除终端底部多余的焦点恢复行。** 终端输出区原先保留的 16px 焦点恢复条会显示第二个 I-beam 鼠标光标并占用约一行空间；现已由覆盖整个终端主体的聚焦层接管，隐藏 IME 输入点缩为跟随真实终端光标的 1×1 锚点，释放完整终端高度。
 
 ---
 
 ### Added
 
+- **Center the process monitor, copy PIDs, and safely terminate remote processes.** The process window now opens centered on the main window's current screen while preserving its user-adjusted size. PIDs are clickable to copy, and a row context menu can terminate a process; the menu opens on right-button release so the same pointer event cannot skip confirmation. Non-root logins must confirm their own processes and provide the connected user's administrator (sudo) password for root or other users' processes, while a root login needs no additional password. Actions run through a separate SSH exec channel without entering the interactive terminal or command history, password echo is disabled, secrets use zeroizing storage, and the source session, PID, and owner are revalidated before execution.
 - **Automatically highlight plain-text log levels.** The terminal now adds theme-aware colours to unstyled `TRACE`, `DEBUG`, `INFO`, `NOTICE`, `WARN`, `WARNING`, `ERROR`, `FATAL`, `CRITICAL`, and `PANIC` markers, including structured `level=error` and JSON level fields. Existing ANSI styling and alternate-screen TUIs such as vim, nano, and htop remain untouched.
 - **Add output-highlighting settings and a DevOps preset.** Settings → Output Highlighting can now enable or disable client-side highlighting immediately and switch between the conservative Log Levels preset and an expanded DevOps preset. DevOps mode also recognises deployment results, retries, health states, and structured `status` / `state` / `result` fields; switching presets redraws both live and historical output.
 - **Support custom output-highlighting rules.** Settings → Output Highlighting can now add keyword or regular-expression rules with case sensitivity, matching-text or whole-line scope, and red, yellow, green, cyan, magenta, or gray colours. Rules can be enabled individually or removed, persist across launches, and apply immediately to live and historical output. Invalid regexes are rejected before saving; user rules take priority over built-in presets without overriding remote ANSI styling.
+
+### Fixed
+
+- **Fix frozen process lists and root-process termination.** Process sampling now runs on a dedicated lightweight SSH channel, so a blocked `df`, `lspci`, or other system-information probe cannot freeze stale PIDs in the process window. Privilege elevation now matches manual operation through `sudo -S`: an echo-disabled PTY waits for the prompt and submits the connected user's sudo password, avoiding the guaranteed failure of `su root` on hosts with a locked root account. Process-control stages, safe remote output, and timings are written to `error.log` with the password always redacted. Termination still uses the cleanup-friendly `SIGTERM` (`kill -15`).
+- **Fix the crash when opening the root-password prompt.** Password fields created inside conditional dialogs now request focus on the next event-loop turn, after Slint has completed layout, instead of synchronously during initialization and triggering the property-recursion guard. The same fix also protects dynamic MFA inputs.
+- **Remove the redundant terminal focus-recovery row.** The terminal previously reserved a 16px focus strip that showed a second I-beam pointer and consumed roughly one output row. Full-body focus handling now replaces it, while the hidden IME input is a 1×1 anchor that follows the real terminal cursor, restoring the full terminal height.
 
 ## [0.6.2]
 

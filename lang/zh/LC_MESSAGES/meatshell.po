@@ -497,3 +497,27 @@ msgstr "已复制"
 
 msgid "Clear sort"
 msgstr "清除排序"
+
+msgid "Terminate process"
+msgstr "结束进程"
+
+msgid "PID copied"
+msgstr "已复制 PID"
+
+msgid "Terminate this process? It may lose unsaved data."
+msgstr "确定结束此进程吗？未保存的数据可能会丢失。"
+
+msgid "This process belongs to root or another user. Enter your administrator (sudo) password to continue."
+msgstr "此进程属于 root 或其他用户，请输入当前登录用户的管理员（sudo）密码后继续。"
+
+msgid "Administrator password"
+msgstr "管理员（sudo）密码"
+
+msgid "Enter sudo password"
+msgstr "请输入 sudo 密码"
+
+msgid "Terminating process..."
+msgstr "正在结束进程..."
+
+msgid "Terminate"
+msgstr "结束进程"
