@@ -14,6 +14,7 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ### 修复 / Fixed
 
+- **修复 Windows 11 双屏不同分辨率/缩放下的窗口定位与最大化恢复（#254、#272）。** 设置卡片在被拖动或缩放后，每次重新打开都会按主窗口当前可用尺寸重新约束大小并居中，不再沿用另一块屏幕上的旧逻辑坐标；主窗口从遮挡、失焦或 DPI 切换中恢复时会主动触发两次重绘，并在原生最大化标记与当前显示器几何尺寸明显不一致时重新应用最大化，避免窗口右侧消失或只显示旧屏幕大小的渲染区域。
 - **修复进程列表停止刷新以及 root 进程无法结束。** 进程采样现已拆分到独立的轻量 SSH 通道，不再被可能卡住的 `df`、`lspci` 等系统信息探测拖死；提权改为与手工操作一致的 `sudo -S`，使用关闭回显的 PTY，等待密码提示后再以回车提交当前登录用户的 sudo 密码，避免 `su root` 在 root 账户被锁定时始终认证失败。进程控制各阶段、远端安全输出及耗时会写入 `error.log`，密码内容始终脱敏。结束操作仍使用可正常清理资源的 `SIGTERM`（`kill -15`）。
 - **修复结束 root 进程时密码弹窗导致程序闪退。** 条件弹窗中的密码输入框不再在 Slint 布局初始化阶段同步抢占焦点，而是在下一轮事件循环、布局完成后自动聚焦，避免触发属性递归检测；同一修复也覆盖 MFA 动态输入框。
 - **移除终端底部多余的焦点恢复行。** 终端输出区原先保留的 16px 焦点恢复条会显示第二个 I-beam 鼠标光标并占用约一行空间；现已由覆盖整个终端主体的聚焦层接管，隐藏 IME 输入点缩为跟随真实终端光标的 1×1 锚点，释放完整终端高度。
@@ -29,6 +30,7 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ### Fixed
 
+- **Fix window placement and maximized recovery on Windows 11 mixed-resolution/DPI displays (#254, #272).** After the settings card has been dragged or resized, every reopen now constrains it to the main window's current available size and recenters it instead of retaining logical coordinates from another display. When the main window returns from occlusion, lost focus, or a DPI transition, it requests two redraws and reapplies maximization if the native maximized flag no longer matches the current monitor geometry, preventing a missing right side or a render surface stuck at the previous display size.
 - **Fix frozen process lists and root-process termination.** Process sampling now runs on a dedicated lightweight SSH channel, so a blocked `df`, `lspci`, or other system-information probe cannot freeze stale PIDs in the process window. Privilege elevation now matches manual operation through `sudo -S`: an echo-disabled PTY waits for the prompt and submits the connected user's sudo password, avoiding the guaranteed failure of `su root` on hosts with a locked root account. Process-control stages, safe remote output, and timings are written to `error.log` with the password always redacted. Termination still uses the cleanup-friendly `SIGTERM` (`kill -15`).
 - **Fix the crash when opening the root-password prompt.** Password fields created inside conditional dialogs now request focus on the next event-loop turn, after Slint has completed layout, instead of synchronously during initialization and triggering the property-recursion guard. The same fix also protects dynamic MFA inputs.
 - **Remove the redundant terminal focus-recovery row.** The terminal previously reserved a 16px focus strip that showed a second I-beam pointer and consumed roughly one output row. Full-body focus handling now replaces it, while the hidden IME input is a 1×1 anchor that follows the real terminal cursor, restoring the full terminal height.

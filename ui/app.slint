@@ -427,6 +427,20 @@ export component AppWindow inherits Window {
     property <length> ifd-base-h;
     property <length> ifd-grab-x;
     property <length> ifd-grab-y;
+
+    // A drag/resize assignment breaks the initial centering bindings. Recenter
+    // every time the modal opens so coordinates from a larger/DPI-different
+    // monitor can never leave the settings card outside the current window.
+    changed interface-open => {
+        if (root.interface-open) {
+            root.ifd-dragging = false;
+            root.ifd-resizing = false;
+            root.ifd-w = clamp(root.ifd-w, 640px, max(640px, root.width - 56px));
+            root.ifd-h = clamp(root.ifd-h, 420px, max(420px, root.height - 56px));
+            root.ifd-x = round((root.width - root.ifd-w) / 2 / 1px) * 1px;
+            root.ifd-y = round((root.height - root.ifd-h) / 2 / 1px) * 1px;
+        }
+    }
     callback set-term-font(string);                // apply + persist font family
     callback set-term-font-size(int);              // apply + persist font size (px)
     callback set-term-font-bold(bool);             // apply + persist bold terminal text

@@ -534,6 +534,89 @@ fn clamp_window_size_to_monitor(
     })?
 }
 
+/// Detect the Windows mixed-DPI failure where the native maximized flag stays
+/// set but the HWND keeps a much smaller geometry from the previous monitor.
+/// Normal maximized work areas may be a little smaller because of the taskbar;
+/// only a large mismatch is considered stale.
+fn maximized_geometry_needs_repair(
+    window_width: u32,
+    window_height: u32,
+    monitor_width: u32,
+    monitor_height: u32,
+) -> bool {
+    window_width.saturating_mul(4) < monitor_width.saturating_mul(3)
+        || window_height.saturating_mul(4) < monitor_height.saturating_mul(3)
+}
+
+/// Ask the renderer to repaint after the window becomes visible again and, on
+/// Windows, repair a stale maximized rectangle caused by crossing monitors with
+/// different DPI scales (#272). The second redraw runs after the window manager
+/// has applied the restore/maximize transition.
+fn refresh_revealed_main_window(weak: slint::Weak<AppWindow>) {
+    let Some(win) = weak.upgrade() else { return };
+    let repair = win
+        .window()
+        .with_winit_window(|ww| {
+            ww.request_redraw();
+            if !cfg!(windows) || !ww.is_maximized() {
+                return false;
+            }
+            let Some(monitor) = ww.current_monitor() else {
+                return false;
+            };
+            let outer = ww.outer_size();
+            let screen = monitor.size();
+            let stale = maximized_geometry_needs_repair(
+                outer.width,
+                outer.height,
+                screen.width,
+                screen.height,
+            );
+            if stale {
+                tracing::warn!(
+                    "repairing stale maximized geometry: window={}x{} monitor={}x{} scale={}",
+                    outer.width,
+                    outer.height,
+                    screen.width,
+                    screen.height,
+                    ww.scale_factor(),
+                );
+                ww.set_maximized(false);
+            }
+            stale
+        })
+        .unwrap_or(false);
+
+    let weak2 = weak.clone();
+    slint::Timer::single_shot(std::time::Duration::from_millis(60), move || {
+        if let Some(win) = weak2.upgrade() {
+            win.window().with_winit_window(|ww| {
+                if repair {
+                    ww.set_maximized(true);
+                }
+                ww.request_redraw();
+            });
+        }
+    });
+}
+
+#[cfg(test)]
+mod mixed_dpi_window_tests {
+    use super::maximized_geometry_needs_repair;
+
+    #[test]
+    fn repairs_large_maximized_geometry_mismatch() {
+        assert!(maximized_geometry_needs_repair(604, 1384, 1080, 1501));
+        assert!(maximized_geometry_needs_repair(1920, 1000, 3840, 2160));
+    }
+
+    #[test]
+    fn accepts_taskbar_sized_maximized_work_area() {
+        assert!(!maximized_geometry_needs_repair(1920, 1040, 1920, 1080));
+        assert!(!maximized_geometry_needs_repair(2560, 1400, 2560, 1440));
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn schedule_slint_pointer_ungrab<T>(weak: slint::Weak<T>)
 where
@@ -2150,10 +2233,22 @@ pub fn run() -> Result<()> {
                 WEvent::Focused(f) => {
                     focused = *f;
                     apply_activity(focused, minimized, occluded);
+                    if *f {
+                        refresh_revealed_main_window(weak.clone());
+                    }
                 }
                 WEvent::Occluded(o) => {
                     occluded = *o;
                     apply_activity(focused, minimized, occluded);
+                    if !*o {
+                        refresh_revealed_main_window(weak.clone());
+                    }
+                }
+                WEvent::ScaleFactorChanged { .. } => {
+                    // Moving a maximized frameless window between mixed-DPI
+                    // monitors can leave Win11 reporting "maximized" while the
+                    // native rectangle/render surface still has the old size.
+                    refresh_revealed_main_window(weak.clone());
                 }
                 WEvent::Resized(size) => {
                     // A 0-sized resize is how Windows reports a minimize; track it
