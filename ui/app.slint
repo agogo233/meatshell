@@ -335,6 +335,7 @@ export component AppWindow inherits Window {
     in property <bool> proc-available;       // a live remote session is active
     in property <[ProcRow]> proc-list;       // top remote processes by CPU
     callback open-system-info();
+    in property <bool> system-info-available; // connected Linux session only (#268)
     in property <[SysMetricRow]> sys-metrics;
     in property <[SysNetRow]> sys-net-rows;
     in property <[DiskInfo]> sys-disks;
@@ -1090,6 +1091,7 @@ export component AppWindow inherits Window {
             net-selected: root.net-selected;
             net-show-selector: root.net-show-selector;
             disks: root.disks;
+            system-info-available: root.system-info-available;
             proc-available: root.proc-available;
             app-version: root.app-version;
             select-net-iface(i) => { root.select-net-iface(i); }

@@ -889,6 +889,11 @@ pub fn run() -> Result<()> {
             let (Some(main), Some(sw)) = (win_weak.upgrade(), sys_weak.upgrade()) else {
                 return;
             };
+            // Detailed system information is remote-only. Keep this guard even
+            // though the sidebar hides/disables its affordance when unavailable.
+            if !main.get_system_info_available() {
+                return;
+            }
             sw.set_host(main.get_conn_host());
             sw.set_connection_state(main.get_connection_state());
             sw.set_resource_title(main.get_resource_title());
@@ -5690,6 +5695,7 @@ fn refresh_sidebar(
             }
         };
     win.set_proc_available(false);
+    win.set_system_info_available(false);
     set_procs(win, &[], "", "");
 
     let active = win.get_active_tab_id().to_string();
@@ -5723,6 +5729,7 @@ fn refresh_sidebar(
             win.set_net_ifaces(ModelRc::from(Rc::new(VecModel::from(ifaces))));
             win.set_disks(disk_model(&st.disks));
             win.set_proc_available(true);
+            win.set_system_info_available(true);
             set_procs(win, &st.procs, &st.user, &active);
             set_system_models(
                 win,
@@ -5752,8 +5759,8 @@ fn refresh_sidebar(
                 "".into(),
                 "".into(),
                 Vec::new(),
-                disk_rows(&snap.disks),
-                local_system_details(&snap),
+                Vec::new(),
+                SystemDetails::default(),
             );
         }
         // Still connecting.
@@ -5772,8 +5779,8 @@ fn refresh_sidebar(
                 "".into(),
                 "".into(),
                 Vec::new(),
-                disk_rows(&snap.disks),
-                local_system_details(&snap),
+                Vec::new(),
+                SystemDetails::default(),
             );
         }
         // Welcome tab (or unknown) → local machine top + bottom.
@@ -5795,8 +5802,8 @@ fn refresh_sidebar(
                     up: format_bytes_per_sec(snap.net_tx_per_sec).into(),
                     down: format_bytes_per_sec(snap.net_rx_per_sec).into(),
                 }],
-                disk_rows(&snap.disks),
-                local_system_details(&snap),
+                Vec::new(),
+                SystemDetails::default(),
             );
         }
     }

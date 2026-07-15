@@ -289,6 +289,7 @@ component StatusBlock inherits Rectangle {
 // Resource title + Processes button + CPU/Memory/Swap rows.
 component StatsBlock inherits VerticalLayout {
     in property <string> resource-title;
+    in property <bool> system-info-available;
     in property <bool> proc-available;
     in property <float> cpu-percent;
     in property <float> mem-percent;
@@ -304,8 +305,12 @@ component StatsBlock inherits VerticalLayout {
             height: 20px;
             horizontal-stretch: 1;
             border-radius: Theme.radius-sm;
-            background: sys-ta.has-hover ? Theme.bg-hover : transparent;
-            sys-ta := TouchArea { mouse-cursor: pointer; clicked => { root.show-system-info(); } }
+            background: root.system-info-available && sys-ta.has-hover ? Theme.bg-hover : transparent;
+            sys-ta := TouchArea {
+                enabled: root.system-info-available;
+                mouse-cursor: root.system-info-available ? pointer : default;
+                clicked => { root.show-system-info(); }
+            }
             Text {
                 x: 4px;
                 width: parent.width - 8px;
@@ -316,7 +321,7 @@ component StatsBlock inherits VerticalLayout {
                 overflow: elide;
             }
         }
-        Rectangle {
+        if root.system-info-available : Rectangle {
             width: 22px; height: 20px;
             border-radius: Theme.radius-sm;
             background: info-ta.has-hover ? Theme.bg-hover : transparent;
@@ -431,6 +436,7 @@ component DiskBlock inherits Rectangle {
 // @tr("Status") column but kept minimal for the v0.1 baseline.
 export component Sidebar inherits Rectangle {
     in property <string> connection-state: @tr("Not connected");
+    in property <bool> system-info-available; // connected Linux session only (#268)
     in property <string> conn-host;                  // clean IP/host to copy (#192)
     in property <int> conn-state;                    // 0 gray / 1 green / 2 yellow
     in property <string> resource-title: @tr("Local resources");
@@ -519,7 +525,9 @@ export component Sidebar inherits Rectangle {
             }
             Rectangle { height: 1px; background: Theme.border-subtle; }
             StatsBlock {
-                resource-title: root.resource-title; proc-available: root.proc-available;
+                resource-title: root.resource-title;
+                system-info-available: root.system-info-available;
+                proc-available: root.proc-available;
                 cpu-percent: root.cpu-percent; mem-percent: root.mem-percent; swap-percent: root.swap-percent;
                 mem-detail: root.mem-detail; swap-detail: root.swap-detail;
                 show-system-info() => { root.show-system-info(); }
@@ -573,7 +581,9 @@ export component Sidebar inherits Rectangle {
                     collapse() => { root.toggle-collapse(); }
                 }
                 StatsBlock {
-                    resource-title: root.resource-title; proc-available: root.proc-available;
+                    resource-title: root.resource-title;
+                    system-info-available: root.system-info-available;
+                    proc-available: root.proc-available;
                     cpu-percent: root.cpu-percent; mem-percent: root.mem-percent; swap-percent: root.swap-percent;
                     mem-detail: root.mem-detail; swap-detail: root.swap-detail;
                     show-system-info() => { root.show-system-info(); }

@@ -15,6 +15,7 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ### 修复 / Fixed
 
+- **不再采集或显示本地系统详情（#268）。** 详细系统信息现在仅对当前已连接的 Linux SSH 会话开放；欢迎页、本地终端、连接中及已断开的会话会隐藏侧栏信息按钮并禁用标题入口，同时清空详情模型。Windows 启动时不再为本机 GPU 等详情启动 PowerShell/CIM 探测，避免启动卡顿和窗口闪烁；侧栏的本机 CPU、内存、网络及磁盘概览保持不变。
 - **修复 Windows 11 双屏不同分辨率/缩放下的窗口定位与最大化恢复（#254、#272）。** 设置卡片在被拖动或缩放后，每次重新打开都会按主窗口当前可用尺寸重新约束大小并居中，不再沿用另一块屏幕上的旧逻辑坐标；主窗口从遮挡、失焦或 DPI 切换中恢复时会主动触发两次重绘，并在原生最大化标记与当前显示器几何尺寸明显不一致时重新应用最大化，避免窗口右侧消失或只显示旧屏幕大小的渲染区域。
 - **修复进程列表停止刷新以及 root 进程无法结束。** 进程采样现已拆分到独立的轻量 SSH 通道，不再被可能卡住的 `df`、`lspci` 等系统信息探测拖死；提权改为与手工操作一致的 `sudo -S`，使用关闭回显的 PTY，等待密码提示后再以回车提交当前登录用户的 sudo 密码，避免 `su root` 在 root 账户被锁定时始终认证失败。进程控制各阶段、远端安全输出及耗时会写入 `error.log`，密码内容始终脱敏。结束操作仍使用可正常清理资源的 `SIGTERM`（`kill -15`）。
 - **修复结束 root 进程时密码弹窗导致程序闪退。** 条件弹窗中的密码输入框不再在 Slint 布局初始化阶段同步抢占焦点，而是在下一轮事件循环、布局完成后自动聚焦，避免触发属性递归检测；同一修复也覆盖 MFA 动态输入框。
@@ -32,6 +33,7 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ### Fixed
 
+- **Stop collecting and exposing local system details (#268).** Detailed system information is now available only for the active connected Linux SSH session. Welcome, local-terminal, connecting, and disconnected states hide the sidebar info button, disable the resource-title entry point, and clear detail models. Windows startup no longer launches PowerShell/CIM probes for local GPU details, preventing startup stalls and console flashes, while the sidebar's local CPU, memory, network, and disk summary remains available.
 - **Fix window placement and maximized recovery on Windows 11 mixed-resolution/DPI displays (#254, #272).** After the settings card has been dragged or resized, every reopen now constrains it to the main window's current available size and recenters it instead of retaining logical coordinates from another display. When the main window returns from occlusion, lost focus, or a DPI transition, it requests two redraws and reapplies maximization if the native maximized flag no longer matches the current monitor geometry, preventing a missing right side or a render surface stuck at the previous display size.
 - **Fix frozen process lists and root-process termination.** Process sampling now runs on a dedicated lightweight SSH channel, so a blocked `df`, `lspci`, or other system-information probe cannot freeze stale PIDs in the process window. Privilege elevation now matches manual operation through `sudo -S`: an echo-disabled PTY waits for the prompt and submits the connected user's sudo password, avoiding the guaranteed failure of `su root` on hosts with a locked root account. Process-control stages, safe remote output, and timings are written to `error.log` with the password always redacted. Termination still uses the cleanup-friendly `SIGTERM` (`kill -15`).
 - **Fix the crash when opening the root-password prompt.** Password fields created inside conditional dialogs now request focus on the next event-loop turn, after Slint has completed layout, instead of synchronously during initialization and triggering the property-recursion guard. The same fix also protects dynamic MFA inputs.
