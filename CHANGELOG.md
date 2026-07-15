@@ -5,6 +5,8 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-07-16
+
 ### 新增 / Added
 
 - **终端支持彩色 emoji（#269）。** 终端输出会按完整 Unicode grapheme 识别普通 emoji、肤色修饰、旗帜和 ZWJ 家庭/职业组合，并以缓存的 Twemoji 彩色图像替代 Slint software/femtovg 渲染器产生的单色字体轮廓；图像仍严格占用原终端单元格，普通文字、ANSI 样式、CJK、选择与光标定位保持不变。
