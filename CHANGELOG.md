@@ -7,6 +7,7 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ### 修复 / Fixed
 
+- **修复 Windows 运行期间无法通过安装程序更新的问题（#267）。** 用户确认退出后，MeatShell 会记录关闭状态、隐藏主窗口及附属窗口、主动关闭 SSH/本地终端/SFTP 工作线程并清空活动会话，然后退出事件循环。Windows Installer 或 Restart Manager 随后重复发送的关闭请求会直接放行，不再反复弹出确认框或进入无法关闭的状态；确认按钮连续点击也只执行一次退出流程。
 - **修复 Debian 桌面端 nano 中 `Ctrl+X` 错误进入搜索的问题（#274）。** Slint 在 Debian 及其衍生桌面环境按下 Ctrl 时可能先产生 `U+0011` 或 `U+0016` 裸修饰键标记；MeatShell 会依据客户端本机 `/etc/os-release` 仅在 Debian 系发行版精准过滤这些标记，避免 nano 先收到 `Ctrl+Q`。真正的 `Ctrl+X`、`Ctrl+R` 等控制组合仍按原字节发送，Windows、macOS 及其他 Linux 发行版保持原逻辑。
 - **修复超长多行粘贴无法确认的问题（#271）。** 短内容继续使用紧凑确认框；超过 600 个字符或 12 行的 AI 提示词及其他长文本会自动切换为最大 `1160×760`、受主窗口边界约束的滚动审阅界面，完整显示粘贴内容，并将取消/粘贴按钮固定在底部。关闭应用时会临时隐藏粘贴审阅框，确保退出确认始终位于最上层；取消退出后，未发送的粘贴内容会原样恢复。
 
@@ -14,6 +15,7 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ### Fixed
 
+- **Fix updates getting stuck while MeatShell is running on Windows (#267).** After the user confirms exit, MeatShell records the shutdown state, hides the main and detached windows, actively closes SSH/local-terminal/SFTP workers, clears live sessions, and then exits the event loop. Repeated close requests from Windows Installer or Restart Manager pass through without reopening the prompt or leaving the application uncloseable, and repeated clicks execute shutdown only once.
 - **Fix `Ctrl+X` opening search instead of exiting nano on Debian desktops (#274).** Slint may emit a bare `U+0011` or `U+0016` modifier marker when Ctrl is pressed on Debian and derivative desktops. MeatShell now consults the client's local `/etc/os-release` and filters those exact markers only for Debian-family distributions, preventing nano from receiving an unintended `Ctrl+Q`. Real `Ctrl+X`, `Ctrl+R`, and other control combinations keep their original bytes, while Windows, macOS, and other Linux distributions retain their previous behaviour.
 - **Fix unconfirmable long multi-line pastes (#271).** Short content keeps the compact confirmation card, while AI prompts and other text exceeding 600 characters or 12 lines automatically use a scrollable review surface up to `1160×760`, constrained to the main window. The complete paste remains reviewable and the Cancel/Paste actions stay fixed at the bottom. Requesting application exit temporarily hides paste review so the quit confirmation is always topmost; cancelling exit restores the unsent paste unchanged.
 

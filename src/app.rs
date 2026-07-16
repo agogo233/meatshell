@@ -6,7 +6,7 @@
 //!   * Manage the tab list + per-tab `SessionHandle` map.
 //!   * Route Slint callbacks to the right domain module.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -276,6 +276,10 @@ struct TabStatus {
 type TabStatuses = Arc<Mutex<HashMap<String, TabStatus>>>;
 /// Last local-machine sample (shown on the welcome tab).
 type LocalSnap = Arc<Mutex<SystemSnapshot>>;
+
+fn should_block_close(exit_confirmed: bool, has_live_sessions: bool) -> bool {
+    !exit_confirmed && has_live_sessions
+}
 
 // Slint generates types into this scope.
 slint::include_modules!();
@@ -2089,6 +2093,11 @@ pub fn run() -> Result<()> {
         Hidden,     // minimized / occluded → paused
     }
     let activity = Rc::new(std::cell::Cell::new(WinActivity::Active));
+    // Once the user confirms shutdown, every subsequent native/custom close
+    // request must pass through without reopening the modal. Windows Installer
+    // and Restart Manager may issue more than one close request while replacing
+    // the executable (#267).
+    let exit_confirmed = Rc::new(Cell::new(false));
 
     // --- System sampler (1 Hz) ------------------------------------------
     let sampler = Rc::new(Mutex::new(SystemSampler::new()));
@@ -2150,6 +2159,7 @@ pub fn run() -> Result<()> {
         let close_handles = handles.clone();
         let ev_store = store.clone();
         let ev_activity = activity.clone();
+        let ev_exit_confirmed = exit_confirmed.clone();
         let mut last_cursor_logical: Option<(f32, f32)> = None;
         let mut macos_wheel_accum = 0.0_f32;
         // Track the inputs that make up WinActivity; recompute on each change.
@@ -2273,14 +2283,19 @@ pub fn run() -> Result<()> {
                 WEvent::CloseRequested => {
                     // Confirm before closing if there are open session tabs (#88),
                     // so a stray double-click on the title-bar icon / X / Alt+F4
-                    // doesn't silently drop live sessions. The confirm dialog's
-                    // "Close" calls quit_event_loop to actually exit.
-                    if !close_handles.borrow().is_empty() {
+                    // doesn't silently drop live sessions. Installer/Restart
+                    // Manager may send repeated requests, so never intercept
+                    // again after the user has confirmed shutdown (#267).
+                    if should_block_close(
+                        ev_exit_confirmed.get(),
+                        !close_handles.borrow().is_empty(),
+                    ) {
                         if let Some(win) = weak.upgrade() {
                             win.set_confirm_close_open(true);
                         }
                         return EventResult::PreventDefault;
                     }
+                    ev_exit_confirmed.set(true);
                     // No sessions → the window is about to close; persist layout.
                     if let Some(win) = weak.upgrade() {
                         save_layout(&win, &ev_store);
@@ -2294,10 +2309,44 @@ pub fn run() -> Result<()> {
     // Confirm-close dialog "Close" → actually quit the event loop (#88).
     {
         let weak = window.as_weak();
+        let proc_weak = proc_win.as_weak();
+        let sys_weak = sys_win.as_weak();
         let cc_store = store.clone();
+        let close_handles = handles.clone();
+        let close_sftp_handles = sftp_handles.clone();
+        let close_exit_confirmed = exit_confirmed.clone();
         window.on_confirm_close_yes(move || {
+            // Guard against a double click and against another close request
+            // arriving from Windows Installer while shutdown is in progress.
+            if close_exit_confirmed.replace(true) {
+                return;
+            }
             if let Some(w) = weak.upgrade() {
+                w.set_confirm_close_open(false);
                 save_layout(&w, &cc_store);
+                let _ = w.hide();
+            }
+            if let Some(w) = proc_weak.upgrade() {
+                let _ = w.hide();
+            }
+            if let Some(w) = sys_weak.upgrade() {
+                let _ = w.hide();
+            }
+            // Ask every worker to stop before the runtime/event loop is torn
+            // down. Clearing the maps also makes any repeated close request see
+            // no live sessions and pass through immediately.
+            {
+                let mut sessions = close_handles.borrow_mut();
+                for handle in sessions.values() {
+                    handle.close();
+                }
+                sessions.clear();
+            }
+            if let Ok(mut sftp) = close_sftp_handles.lock() {
+                for handle in sftp.values() {
+                    handle.close();
+                }
+                sftp.clear();
             }
             let _ = slint::quit_event_loop();
         });
@@ -2331,10 +2380,15 @@ pub fn run() -> Result<()> {
         let weak = window.as_weak();
         let close_handles = handles.clone();
         let wc_store = store.clone();
+        let wc_exit_confirmed = exit_confirmed.clone();
         window.on_win_close(move || {
             if let Some(w) = weak.upgrade() {
                 // Mirror the native-X behaviour: confirm if sessions are open.
-                if close_handles.borrow().is_empty() {
+                if !should_block_close(
+                    wc_exit_confirmed.get(),
+                    !close_handles.borrow().is_empty(),
+                ) {
+                    wc_exit_confirmed.set(true);
                     save_layout(&w, &wc_store);
                     let _ = slint::quit_event_loop();
                 } else {
@@ -11462,6 +11516,14 @@ mod key_tests {
         assert!(paste_requires_large_review(&"a".repeat(601)));
         assert!(!paste_requires_large_review(&vec!["line"; 12].join("\r\n")));
         assert!(paste_requires_large_review(&vec!["line"; 13].join("\r\n")));
+    }
+
+    #[test]
+    fn confirmed_exit_never_reopens_close_prompt() {
+        assert!(should_block_close(false, true));
+        assert!(!should_block_close(false, false));
+        assert!(!should_block_close(true, true));
+        assert!(!should_block_close(true, false));
     }
 }
 
