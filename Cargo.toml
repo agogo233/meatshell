@@ -68,6 +68,15 @@ zeroize = "1"
 # (HTTP CONNECT proxies are handled in src/proxy.rs without an extra crate.)
 tokio-socks = "0.5"
 base64 = "0.22"
+# Native PuTTY PPK v2/v3 private-key loading (#281). Conversion stays entirely
+# in memory: AES-CBC decrypts encrypted key blobs, Argon2 handles PPKv3 key
+# derivation, and HMAC verifies the file before it reaches the SSH parser.
+aes = "0.8"
+argon2 = "0.5"
+cbc = "0.1"
+hmac = "0.12"
+sha1 = "0.10"
+sha2 = "0.10"
 # Enumerate installed system fonts for the Interface (font) settings picker.
 fontdb = "0.16"
 # Cross-platform serial port access for the Serial session type (#14, #17).

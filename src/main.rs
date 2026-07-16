@@ -11,6 +11,7 @@ mod i18n;
 mod known_hosts;
 mod local;
 mod panes;
+mod ppk;
 mod proxy;
 mod serial;
 mod sftp;

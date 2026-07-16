@@ -5,6 +5,10 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ## [Unreleased]
 
+### 新增 / Added
+
+- **原生支持 PuTTY / MobaXterm 的 PPK 私钥（#281）。** SSH、SFTP 与跳板连接现在可直接加载 PPKv2 和 PPKv3 文件，支持 RSA、Ed25519 及 NIST ECDSA 密钥，并支持 PPKv2 的 SHA-1 派生及 PPKv3 的 Argon2 加密私钥。PPK 会先在内存中完成 AES-CBC 解密和 HMAC 完整性校验，再转换为 russh 使用的密钥对象；不会调用外部 `puttygen`，也不会将转换后的私钥写入临时文件。私钥选择器同时加入 `.ppk` 类型，粘贴的 PPK 内容也可自动识别。
+
 ### 修复 / Fixed
 
 - **修复主窗口无法记住上次调整大小的问题（#278）。** 配置中的窗口尺寸会由首个原生 `Resized` 事件驱动恢复；若 Slint 的默认 `1440×900` 初始化随后覆盖请求，后续尺寸事件会继续重新应用保存值，直到原生窗口实际达到目标尺寸后才允许写回配置，不再依赖固定延迟或机器启动速度。窗口尚未归属具体显示器时会回退到主显示器，最大化、最小化及安装更新期间的临时尺寸不会覆盖用户选择；恢复过程会写入 `[WINDOW_SIZE]` 诊断日志。
@@ -13,6 +17,10 @@ All notable changes are documented here. 本文件记录所有重要变更。
 - **修复超长多行粘贴无法确认的问题（#271）。** 短内容继续使用紧凑确认框；超过 600 个字符或 12 行的 AI 提示词及其他长文本会自动切换为最大 `1160×760`、受主窗口边界约束的滚动审阅界面，完整显示粘贴内容，并将取消/粘贴按钮固定在底部。关闭应用时会临时隐藏粘贴审阅框，确保退出确认始终位于最上层；取消退出后，未发送的粘贴内容会原样恢复。
 
 ---
+
+### Added
+
+- **Add native PuTTY / MobaXterm PPK private-key support (#281).** SSH, SFTP, and jump-host connections can now load PPKv2 and PPKv3 files directly, including RSA, Ed25519, and NIST ECDSA keys, with encrypted keys supported through the PPKv2 SHA-1 derivation scheme and PPKv3 Argon2. PPK data is decrypted with AES-CBC, authenticated with HMAC, and converted to russh key objects entirely in memory. MeatShell neither invokes an external `puttygen` nor writes converted private keys to temporary files. The key picker includes `.ppk`, and pasted PPK content is detected automatically.
 
 ### Fixed
 

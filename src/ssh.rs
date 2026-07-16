@@ -54,6 +54,10 @@ pub(crate) fn load_session_private_key(session: &Session, pass: &str) -> Result<
     let pass = if pass.is_empty() { None } else { Some(pass) };
     let inline = session.private_key_inline.as_str().trim();
     if !inline.is_empty() {
+        if crate::ppk::is_ppk(inline.as_bytes()) {
+            return crate::ppk::decode_ppk(inline.as_bytes(), pass.unwrap_or_default())
+                .context("failed to parse pasted PuTTY private key");
+        }
         return decode_secret_key(inline, pass).context("failed to parse pasted private key");
     }
 
@@ -70,6 +74,16 @@ pub(crate) fn load_session_private_key(session: &Session, pass: &str) -> Result<
         .strip_suffix(".pub")
         .map(str::to_string)
         .unwrap_or(normalised);
+    if Path::new(&key_path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("ppk"))
+    {
+        let raw = std::fs::read(&key_path)
+            .with_context(|| format!("failed to read PuTTY key {key_path}"))?;
+        return crate::ppk::decode_ppk(&raw, pass.unwrap_or_default())
+            .with_context(|| format!("failed to load PuTTY key {key_path}"));
+    }
     load_secret_key(Path::new(&key_path), pass)
         .with_context(|| format!("failed to load key {key_path}"))
 }
