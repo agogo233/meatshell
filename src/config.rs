@@ -1839,6 +1839,33 @@ mod tests {
     }
 
     #[test]
+    fn saved_password_encrypts_and_decrypts_without_changes() {
+        let mut store = temp_store();
+        let password = "p@ss word!^&*中文";
+        store.cache.sessions.push(Session {
+            name: "windows-password".into(),
+            host: "192.168.100.2".into(),
+            port: 22,
+            user: "root".into(),
+            password: Secret::new(password),
+            ..Session::new_empty()
+        });
+
+        store.save().unwrap();
+        let raw = std::fs::read_to_string(&store.path).unwrap();
+        assert!(!raw.contains(password));
+        let disk: ConfigFile = serde_json::from_str(&raw).unwrap();
+        let encrypted = disk.sessions[0].password.as_str();
+        assert!(encrypted.starts_with(ConfigStore::ENC_PREFIX));
+        assert_eq!(
+            ConfigStore::try_decrypt(&store.key, encrypted).as_deref(),
+            Some(password)
+        );
+
+        let _ = std::fs::remove_file(&store.path);
+    }
+
+    #[test]
     fn export_import_roundtrip_preserves_password() {
         let mut a = temp_store();
         a.cache.sessions.push(Session {

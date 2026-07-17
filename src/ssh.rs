@@ -1265,6 +1265,64 @@ pub(crate) const COMPAT_CIPHER: &[russh::cipher::Name] = &[
     russh::cipher::TRIPLE_DES_CBC, // legacy fallback
 ];
 
+fn ssh_client_config() -> Arc<client::Config> {
+    Arc::new(client::Config {
+        // Keep idle connections alive (#160). The terminal usually has the
+        // resource-monitor channel streaming every 2 s, but with shell
+        // integration disabled (#140) it can go idle and be dropped by
+        // NAT / firewall / server timeouts.
+        keepalive_interval: Some(std::time::Duration::from_secs(30)),
+        // Match the normal terminal connection exactly, including compatibility
+        // fallbacks for older servers and network equipment (#172).
+        preferred: russh::Preferred {
+            kex: std::borrow::Cow::Borrowed(COMPAT_KEX),
+            cipher: std::borrow::Cow::Borrowed(COMPAT_CIPHER),
+            ..russh::Preferred::DEFAULT
+        },
+        ..<_>::default()
+    })
+}
+
+/// Perform the same SSH handshake and authentication as a real terminal
+/// connection, but disconnect immediately after authentication succeeds.
+/// Prompt events are returned through `events` so the session dialog can reuse
+/// the normal host-key, missing-credential, and MFA UI (#276).
+pub async fn test_session_auth(
+    session: Session,
+    jump: Option<Session>,
+    events: UnboundedSender<SessionEvent>,
+) -> Result<()> {
+    let config = ssh_client_config();
+    let (mut handle, mut jump_handle) =
+        connect_ssh(&session, jump.as_ref(), config.clone(), &events).await?;
+
+    let auth = authenticate_session(
+        &mut handle,
+        &mut jump_handle,
+        &session,
+        jump.as_ref(),
+        config,
+        &events,
+    )
+    .await?;
+
+    let result = match auth {
+        AuthResult::Success => Ok(()),
+        AuthResult::Cancelled => Err(anyhow!("login cancelled")),
+        AuthResult::Failed => Err(anyhow!("authentication failed")),
+    };
+
+    let _ = handle
+        .disconnect(Disconnect::ByApplication, "connection test complete", "")
+        .await;
+    if let Some(jump_handle) = jump_handle {
+        let _ = jump_handle
+            .disconnect(Disconnect::ByApplication, "connection test complete", "")
+            .await;
+    }
+    result
+}
+
 async fn run_session(
     session: Session,
     jump: Option<Session>,
@@ -1281,24 +1339,7 @@ async fn run_session(
         session.port
     )));
 
-    let config = Arc::new(client::Config {
-        // Keep idle connections alive (#160). The terminal usually has the
-        // resource-monitor channel streaming every 2 s, but with shell
-        // integration disabled (#140) it can go idle and be dropped by
-        // NAT / firewall / server timeouts. A 30 s keepalive prevents that;
-        // keepalive_max (default 3) closes a genuinely dead connection.
-        keepalive_interval: Some(std::time::Duration::from_secs(30)),
-        // Offer legacy KEX (group14/group1-sha1) and CBC ciphers as fallbacks so
-        // old servers / network gear negotiate instead of failing with
-        // "No common algorithm" (#172). Modern algorithms stay first, so a capable
-        // server still picks a strong one.
-        preferred: russh::Preferred {
-            kex: std::borrow::Cow::Borrowed(COMPAT_KEX),
-            cipher: std::borrow::Cow::Borrowed(COMPAT_CIPHER),
-            ..russh::Preferred::DEFAULT
-        },
-        ..<_>::default()
-    });
+    let config = ssh_client_config();
 
     let (mut handle, mut jump_handle) =
         connect_ssh(&session, jump.as_ref(), config.clone(), &events).await?;

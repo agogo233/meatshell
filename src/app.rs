@@ -202,8 +202,8 @@ use crate::config::{
 use crate::i18n::t;
 use crate::sftp::{spawn_sftp, SftpHandle};
 use crate::ssh::{
-    format_mtime, format_size, spawn_session, ProcInfo, SessionCommand, SessionEvent, SessionHandle,
-    SystemDetails,
+    format_mtime, format_size, spawn_session, test_session_auth, ProcInfo, SessionCommand,
+    SessionEvent, SessionHandle, SystemDetails,
 };
 use crate::system::{format_bytes_per_sec, format_mem, SystemSampler, SystemSnapshot};
 
@@ -3192,6 +3192,82 @@ fn wsl_available() -> bool {
 // Session callbacks (welcome page + dialog)
 // ---------------------------------------------------------------------------
 
+/// Build the effective session represented by the dialog. When editing, blank
+/// secret fields retain their saved values because real passwords and pasted
+/// private keys are deliberately never echoed back into the UI (#10, #276).
+fn session_from_draft(
+    draft: &SessionDraft,
+    existing: Option<&Session>,
+    forwards: Vec<crate::config::PortForward>,
+) -> Session {
+    let password = if draft.password.is_empty() {
+        existing.map(|s| s.password.clone()).unwrap_or_default()
+    } else {
+        Secret::new(draft.password.to_string())
+    };
+    let private_key_inline = if draft.private_key_inline_mode {
+        if draft.private_key_inline.is_empty() {
+            existing
+                .map(|s| s.private_key_inline.clone())
+                .unwrap_or_default()
+        } else {
+            Secret::new(draft.private_key_inline.to_string())
+        }
+    } else {
+        Secret::default()
+    };
+    let private_key_path = if draft.private_key_inline_mode {
+        String::new()
+    } else {
+        draft.private_key_path.to_string().replace('\\', "/")
+    };
+    let kind = SessionKind::from_str(&draft.kind.to_string());
+    let auto_name = match kind {
+        SessionKind::Serial => format!("{} @{}", draft.serial_port, draft.baud_rate),
+        _ if draft.user.trim().is_empty() => draft.host.to_string(),
+        _ => format!("{}@{}", draft.user, draft.host),
+    };
+    let default_port = if kind == SessionKind::Telnet { 23 } else { 22 };
+
+    Session {
+        id: draft.id.to_string(),
+        name: if draft.name.is_empty() {
+            auto_name
+        } else {
+            draft.name.to_string()
+        },
+        host: draft.host.to_string(),
+        port: if draft.port <= 0 {
+            default_port
+        } else {
+            draft.port as u16
+        },
+        user: draft.user.to_string(),
+        auth: AuthMethod::from_str(&draft.auth.to_string()),
+        password,
+        private_key_path,
+        private_key_inline,
+        proxy: draft.proxy.to_string(),
+        last_used: None,
+        group: draft.group.to_string(),
+        kind,
+        serial_port: draft.serial_port.to_string(),
+        baud_rate: if draft.baud_rate <= 0 {
+            115_200
+        } else {
+            draft.baud_rate as u32
+        },
+        data_bits: draft.data_bits as u8,
+        stop_bits: draft.stop_bits as u8,
+        parity: draft.parity.to_string(),
+        flow_control: draft.flow_control.to_string(),
+        forwards,
+        disable_shell_integration: draft.disable_shell_integration,
+        note: draft.note.to_string(),
+        jump_session_id: draft.jump_session_id.to_string(),
+    }
+}
+
 fn wire_session_callbacks(
     window: &AppWindow,
     store: Rc<RefCell<ConfigStore>>,
@@ -3736,12 +3812,14 @@ fn wire_session_callbacks(
         });
     }
 
-    // Test connection from the session dialog. This is intentionally lightweight:
-    // it checks network reachability for the current host/port without saving the
-    // draft or opening a terminal tab.
+    // Test connection from the session dialog. SSH tests use the same handshake,
+    // host-key verification, proxy/jump routing, and authentication as a real
+    // terminal connection (#276). Telnet and serial retain reachability tests.
     {
         let weak = window.as_weak();
         let runtime = runtime.clone();
+        let store = store.clone();
+        let edit_forwards = edit_forwards.clone();
         window.on_session_dialog_test(move |draft: SessionDraft| {
             let kind = draft.kind.to_string();
             if kind == "serial" {
@@ -3772,14 +3850,103 @@ fn wire_session_callbacks(
                 });
                 return;
             }
-            let host = draft.host.to_string();
-            let default_port = if kind == "telnet" { 23 } else { 22 };
-            let port = if draft.port <= 0 {
-                default_port
-            } else {
-                draft.port as u16
-            };
+
+            let existing = store.borrow().get(draft.id.as_str()).cloned();
+            let session = session_from_draft(
+                &draft,
+                existing.as_ref(),
+                edit_forwards.borrow().clone(),
+            );
             let weak_done = weak.clone();
+
+            if kind == "ssh" {
+                let jump = resolve_jump(&store, &session);
+                let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+                runtime.spawn(async move {
+                    let mut test = Box::pin(test_session_auth(session, jump, events_tx));
+                    let result = loop {
+                        tokio::select! {
+                            result = &mut test => break result,
+                            event = events_rx.recv() => {
+                                let Some(event) = event else { continue };
+                                if matches!(
+                                    event,
+                                    SessionEvent::HostKeyPrompt { .. }
+                                        | SessionEvent::CredentialPrompt { .. }
+                                        | SessionEvent::MfaPrompt { .. }
+                                ) {
+                                    let weak_prompt = weak_done.clone();
+                                    let _ = slint::invoke_from_event_loop(move || {
+                                        let Some(w) = weak_prompt.upgrade() else { return };
+                                        match event {
+                                            SessionEvent::HostKeyPrompt {
+                                                host,
+                                                port,
+                                                key_type,
+                                                fingerprint,
+                                                changed,
+                                                responder,
+                                            } => enqueue_hostkey_prompt(
+                                                &w,
+                                                host,
+                                                port,
+                                                key_type,
+                                                fingerprint,
+                                                changed,
+                                                responder,
+                                            ),
+                                            SessionEvent::CredentialPrompt {
+                                                session_id,
+                                                host,
+                                                user,
+                                                need_user,
+                                                need_password,
+                                                responder,
+                                            } => enqueue_cred_prompt(
+                                                &w,
+                                                session_id,
+                                                host,
+                                                user,
+                                                need_user,
+                                                need_password,
+                                                responder,
+                                            ),
+                                            SessionEvent::MfaPrompt {
+                                                session_id,
+                                                host,
+                                                prompt,
+                                                echo,
+                                                responder,
+                                            } => enqueue_mfa_prompt(
+                                                &w,
+                                                session_id,
+                                                host,
+                                                prompt,
+                                                echo,
+                                                responder,
+                                            ),
+                                            _ => {}
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                    };
+                    let message = match result {
+                        Ok(()) => t("连接正常", "Connection OK").to_string(),
+                        Err(e) => format!("{}: {e:#}", t("连接失败", "Connection failed")),
+                    };
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(w) = weak_done.upgrade() {
+                            w.set_dialog_test_status(message.into());
+                        }
+                    });
+                });
+                return;
+            }
+
+            let host = session.host;
+            let port = session.port;
             runtime.spawn(async move {
                 let target = format!("{host}:{port}");
                 let result = tokio::time::timeout(
