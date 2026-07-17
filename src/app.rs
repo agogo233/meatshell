@@ -944,6 +944,11 @@ pub fn run() -> Result<()> {
         }
         window.set_term_font_size(s.font_size() as f32);
         window.set_term_font_bold(s.terminal_bold());
+        window.set_term_cursor_style(s.terminal_cursor_style().into());
+        if let Some(color) = parse_hex_color(s.terminal_cursor_color()) {
+            window.set_term_cursor_color_hex(s.terminal_cursor_color().into());
+            window.set_term_cursor_color(color);
+        }
         window.set_output_highlight_enabled(s.output_highlight_enabled());
         window.set_output_highlight_preset(s.output_highlight_preset().into());
         window.set_output_highlight_rules(output_highlight_rule_model(&s));
@@ -1226,6 +1231,26 @@ pub fn run() -> Result<()> {
     {
         let weak = window.as_weak();
         let store = store.clone();
+        window.on_set_term_cursor_color(move |value: SharedString| {
+            let Some(color) = parse_hex_color(value.as_str()) else {
+                return false;
+            };
+            {
+                let mut s = store.borrow_mut();
+                if !s.set_terminal_cursor_color(value.as_str()) {
+                    return false;
+                }
+                let _ = s.save();
+            }
+            if let Some(w) = weak.upgrade() {
+                w.set_term_cursor_color(color);
+            }
+            true
+        });
+    }
+    {
+        let weak = window.as_weak();
+        let store = store.clone();
         let bufs = bufs.clone();
         window.on_add_output_highlight_rule(
             move |pattern: SharedString,
@@ -1353,6 +1378,22 @@ pub fn run() -> Result<()> {
             }
             if let Some(w) = weak.upgrade() {
                 w.set_term_font_bold(bold);
+            }
+        });
+    }
+    {
+        let weak = window.as_weak();
+        let store = store.clone();
+        window.on_set_term_cursor_style(move |style: SharedString| {
+            let normalized = {
+                let mut s = store.borrow_mut();
+                s.set_terminal_cursor_style(style.to_string());
+                let normalized = s.terminal_cursor_style().to_string();
+                let _ = s.save();
+                normalized
+            };
+            if let Some(w) = weak.upgrade() {
+                w.set_term_cursor_style(normalized.into());
             }
         });
     }
@@ -5555,6 +5596,17 @@ fn output_highlight_rule_model(store: &ConfigStore) -> ModelRc<OutputRuleItem> {
         })
         .collect();
     ModelRc::from(Rc::new(VecModel::from(rows)))
+}
+
+fn parse_hex_color(value: &str) -> Option<slint::Color> {
+    let digits = value.trim().strip_prefix('#').unwrap_or(value.trim());
+    if digits.len() != 6 || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let red = u8::from_str_radix(&digits[0..2], 16).ok()?;
+    let green = u8::from_str_radix(&digits[2..4], 16).ok()?;
+    let blue = u8::from_str_radix(&digits[4..6], 16).ok()?;
+    Some(slint::Color::from_rgb_u8(red, green, blue))
 }
 
 fn validate_output_highlight_rule(
