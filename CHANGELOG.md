@@ -5,6 +5,16 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ## [Unreleased]
 
+### 修复 / Fixed
+
+- **修复跨平台多行文本粘贴格式错位（#284）。** 终端现在会跟随远端 shell、编辑器或复用器请求的括号粘贴模式，将剪贴板内容作为单个受保护的数据块发送，从而保留 Windows 到 Linux 粘贴时的换行、缩进和多行布局；未启用该模式的程序仍会把 CRLF/LF 统一转换为终端回车。
+
+---
+
+### Fixed
+
+- **Fix cross-platform multi-line paste formatting (#284).** The terminal now honors bracketed-paste mode requested by the remote shell, editor, or multiplexer and sends clipboard contents as one protected payload, preserving line endings, indentation, and multi-line layout when pasting from Windows to Linux. Applications without bracketed-paste support keep the existing CRLF/LF-to-terminal-return normalization.
+
 ## [0.6.4] - 2026-07-17
 
 ### 新增 / Added

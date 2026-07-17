@@ -8830,6 +8830,7 @@ fn wire_key_input(
     // Middle-click / Ctrl+Shift+V: paste clipboard text into PTY.
     {
         let handles = handles.clone();
+        let bufs = bufs.clone();
         let weak = window.as_weak();
         window.on_paste_from_clipboard(move |tab_id: SharedString| {
             // Clone the (Send) command sender for this tab so the clipboard read
@@ -8841,6 +8842,7 @@ fn wire_key_input(
                 .get(tab_id.as_str())
                 .map(|h| h.commands.clone());
             let Some(sender) = sender else { return };
+            let bracketed = terminal_uses_bracketed_paste(&bufs, tab_id.as_str());
             let weak = weak.clone();
             let tab_id = tab_id.to_string();
             std::thread::spawn(move || {
@@ -8859,9 +8861,7 @@ fn wire_key_input(
                                 }
                             });
                         } else {
-                            // Normalise line endings to a single CR so the
-                            // terminal receives the same input on every OS.
-                            let bytes = normalize_pasted_newlines(&text).into_bytes();
+                            let bytes = encode_pasted_text(&text, bracketed);
                             let _ = sender.send(SessionCommand::RawInput(bytes));
                         }
                     }
@@ -8874,6 +8874,7 @@ fn wire_key_input(
     // Accept a previously reviewed multi-line paste (#262).
     {
         let handles_paste = handles.clone();
+        let bufs_paste = bufs.clone();
         let weak = window.as_weak();
         window.on_paste_confirmed(move |tab_id: SharedString| {
             let Some(sender) = handles_paste
@@ -8885,9 +8886,10 @@ fn wire_key_input(
             };
             let Some(w) = weak.upgrade() else { return };
             let text = w.get_paste_confirm_text().to_string();
-            let _ = sender.send(SessionCommand::RawInput(
-                normalize_pasted_newlines(&text).into_bytes(),
-            ));
+            let bracketed = terminal_uses_bracketed_paste(&bufs_paste, tab_id.as_str());
+            let _ = sender.send(SessionCommand::RawInput(encode_pasted_text(
+                &text, bracketed,
+            )));
             w.set_paste_confirm_open(false);
         });
     }
@@ -9772,6 +9774,40 @@ fn split_proxy(url: &str) -> (String, String) {
 /// package and drop the rest. Collapsing every CRLF/LF to one CR fixes it.
 fn normalize_pasted_newlines(text: &str) -> String {
     text.replace("\r\n", "\r").replace('\n', "\r")
+}
+
+/// Encode clipboard text according to the mode requested by the remote
+/// application. Bracketed paste lets shells and editors distinguish pasted
+/// text from typed keystrokes, preserving multi-line layout and indentation.
+fn encode_pasted_text(text: &str, bracketed: bool) -> Vec<u8> {
+    if !bracketed {
+        return normalize_pasted_newlines(text).into_bytes();
+    }
+
+    // A pasted ESC could forge the end marker; Ctrl+C also terminates bracketed
+    // paste in some shells. Match established terminal-emulator behaviour by
+    // filtering both before wrapping the payload.
+    let filtered = text.replace(['\x1b', '\x03'], "");
+    let mut bytes = Vec::with_capacity(filtered.len() + 12);
+    bytes.extend_from_slice(b"\x1b[200~");
+    bytes.extend_from_slice(filtered.as_bytes());
+    bytes.extend_from_slice(b"\x1b[201~");
+    bytes
+}
+
+fn terminal_uses_bracketed_paste(bufs: &TermBuffers, tab_id: &str) -> bool {
+    let buffer = bufs
+        .lock()
+        .ok()
+        .and_then(|buffers| buffers.get(tab_id).cloned());
+    buffer
+        .and_then(|buffer| {
+            buffer
+                .lock()
+                .ok()
+                .map(|buffer| buffer.parser.screen().bracketed_paste())
+        })
+        .unwrap_or(false)
 }
 
 fn should_drop_debian_bare_ctrl_marker(key: &str, ctrl: bool, workaround: bool) -> bool {
@@ -11618,6 +11654,22 @@ mod key_tests {
     }
 
     #[test]
+    fn paste_uses_remote_bracketed_paste_mode() {
+        assert_eq!(
+            encode_pasted_text("first\r\n  second", true),
+            b"\x1b[200~first\r\n  second\x1b[201~"
+        );
+        assert_eq!(
+            encode_pasted_text("safe\x1b[201~\x03text", true),
+            b"\x1b[200~safe[201~text\x1b[201~"
+        );
+        assert_eq!(
+            encode_pasted_text("first\r\nsecond", false),
+            b"first\rsecond"
+        );
+    }
+
+    #[test]
     fn long_pastes_switch_to_large_review() {
         assert!(!paste_requires_large_review("short prompt\nsecond line"));
         assert!(!paste_requires_large_review(&"a".repeat(600)));
@@ -11726,6 +11778,23 @@ mod selection_tests {
             csi_state: CsiState::Normal,
             raw: std::collections::VecDeque::new(),
         }
+    }
+
+    #[test]
+    fn paste_tracks_remote_bracketed_paste_state() {
+        let bufs = TermBuffers::default();
+        let mut buffer = make_buf(2, 20, &[], &[], 0);
+        buffer.parser.process(b"\x1b[?2004h");
+        bufs.lock()
+            .unwrap()
+            .insert("tab".into(), Arc::new(Mutex::new(buffer)));
+
+        assert!(terminal_uses_bracketed_paste(&bufs, "tab"));
+        assert!(!terminal_uses_bracketed_paste(&bufs, "missing"));
+
+        let buffer = term_buf(&bufs, "tab").unwrap();
+        buffer.lock().unwrap().parser.process(b"\x1b[?2004l");
+        assert!(!terminal_uses_bracketed_paste(&bufs, "tab"));
     }
 
     #[test]
