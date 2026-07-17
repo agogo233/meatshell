@@ -35,21 +35,12 @@ component SingleTab inherits Rectangle {
     width: clamp(100px, 64px + info.title_len * 7px * Theme.ui-scale, 320px);
     horizontal-stretch: 0;
     border-radius: Theme.radius-sm;
-    border-width: active ? 1px : 0px;
-    border-color: active ? Theme.tab-active-border : transparent;
+    border-width: active ? 2px : 0px;
+    border-color: active ? Theme.accent : transparent;
     background: dragging ? Theme.bg-active
         : (active ? Theme.tab-active-bg
         : (touch.has-hover ? Theme.bg-hover : transparent));
     animate background { duration: 120ms; }
-
-    if active : Rectangle {
-        x: 8px;
-        y: 0px;
-        width: parent.width - 16px;
-        height: 2px;
-        border-radius: 1px;
-        background: Theme.accent;
-    }
 
     // Declared FIRST so the HorizontalLayout's children (close button) are at
     // a higher z-order and receive their own click events.
