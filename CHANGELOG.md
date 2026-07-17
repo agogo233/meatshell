@@ -11,6 +11,7 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ### 修复 / Fixed
 
+- **缩短 SSH 会话终端首屏等待时间。** SSH 认证和 PTY 建立后会立即读取并显示首个终端输出，不再同步等待 shell integration、SFTP、资源监控和进程监控；SFTP 在终端就绪后启动，轻量资源采样、进程列表与一次性详细系统信息再按优先级分阶段后台加载。新增 `[SESSION_START]` 分阶段耗时日志，便于区分网络握手、认证、PTY 和首屏输出耗时。
 - **修复跨平台多行文本粘贴格式错位（#284）。** 终端现在会跟随远端 shell、编辑器或复用器请求的括号粘贴模式，将剪贴板内容作为单个受保护的数据块发送，从而保留 Windows 到 Linux 粘贴时的换行、缩进和多行布局；未启用该模式的程序仍会把 CRLF/LF 统一转换为终端回车。
 - **优化当前标签的高亮样式（#283）。** 移除标签内部突兀的顶部横条，改用主题强调色光条完整包裹当前标签，在壁纸和不同明暗主题下保持清晰可辨。
 - **修复“测试连接”未验证 SSH 凭据的问题（#276）。** SSH 测试现在复用正式终端连接的握手与认证流程，实际校验密码、keyboard-interactive、私钥及口令，并遵循代理、跳板机和主机密钥验证；编辑连接时留空的密码会继续使用已保存凭据。新增包含空格、符号和中文的密码加密落盘回归测试，避免端口可达被误报为登录成功。
@@ -23,6 +24,7 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ### Fixed
 
+- **Reduce SSH terminal time-to-first-frame.** The first PTY output is now read and displayed immediately after SSH authentication and terminal creation instead of synchronously waiting for shell integration, SFTP, resource monitoring, and process monitoring. SFTP starts after the terminal is ready, followed by staged background loading for lightweight resources, processes, and one-shot detailed system information. New `[SESSION_START]` stage timings distinguish transport, authentication, PTY, and first-output latency.
 - **Fix cross-platform multi-line paste formatting (#284).** The terminal now honors bracketed-paste mode requested by the remote shell, editor, or multiplexer and sends clipboard contents as one protected payload, preserving line endings, indentation, and multi-line layout when pasting from Windows to Linux. Applications without bracketed-paste support keep the existing CRLF/LF-to-terminal-return normalization.
 - **Improve active-tab highlighting (#283).** The distracting inset top bar is replaced with a complete accent-colour outline around the active tab, keeping it identifiable across wallpapers and light or dark themes.
 - **Fix connection tests that did not validate SSH credentials (#276).** SSH tests now reuse the real terminal handshake and authentication flow, validating passwords, keyboard-interactive authentication, private keys and passphrases while honoring proxies, jump hosts, and host-key verification. Blank password fields while editing reuse saved credentials, and a persistence regression test covers passwords containing spaces, symbols, and Chinese text so an open port is no longer reported as a successful login.

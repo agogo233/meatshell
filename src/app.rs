@@ -4397,17 +4397,30 @@ fn start_session_in_tab(tab_id: &str, session: Session, ctx: &ConnectCtx) {
     };
     ctx.handles.borrow_mut().insert(tab_id.to_string(), handle);
 
-    // Separate SFTP connection for the same session (SSH only).
-    let sftp_evt_tx = if has_sftp {
+    // Separate SFTP connection for the same session (SSH only). It waits for
+    // the interactive PTY to report Connected so a second SSH handshake cannot
+    // contend with terminal startup on the same host/network path.
+    let (sftp_evt_tx, sftp_ready_tx) = if has_sftp {
         let (sftp_tx, sftp_rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
-        let sftp_handle = spawn_sftp(ctx.runtime.handle(), session, jump, sftp_tx);
-        ctx.sftp_handles
-            .lock()
-            .unwrap()
-            .insert(tab_id.to_string(), sftp_handle);
-        Some(sftp_rx)
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+        let sftp_runtime = ctx.runtime.clone();
+        let sftp_task_runtime = sftp_runtime.clone();
+        let sftp_handles = ctx.sftp_handles.clone();
+        let sftp_tab_id = tab_id.to_string();
+        sftp_runtime.spawn(async move {
+            if ready_rx.await.is_err() {
+                return;
+            }
+            tokio::task::yield_now().await;
+            let sftp_handle =
+                spawn_sftp(sftp_task_runtime.handle(), session, jump, sftp_tx);
+            if let Ok(mut handles) = sftp_handles.lock() {
+                handles.insert(sftp_tab_id, sftp_handle);
+            }
+        });
+        (Some(sftp_rx), Some(ready_tx))
     } else {
-        None
+        (None, None)
     };
 
     // --- Shell event pump (dedicated thread) ---
@@ -4425,6 +4438,7 @@ fn start_session_in_tab(tab_id: &str, session: Session, ctx: &ConnectCtx) {
         let render_gates_pump = ctx.render_gates.clone();
         std::thread::spawn(move || {
             let mut shell_rx = rx;
+            let mut sftp_ready_tx = sftp_ready_tx;
             let mut cwd_debounce: Option<tokio::task::JoinHandle<()>> = None;
             // Reusable scratch so a fast firehose doesn't reallocate every batch.
             let mut drained: Vec<SessionEvent> = Vec::new();
@@ -4454,6 +4468,12 @@ fn start_session_in_tab(tab_id: &str, session: Session, ctx: &ConnectCtx) {
                 let mut ui_batch: Vec<SessionEvent> = Vec::with_capacity(drained.len());
                 for evt in drained.drain(..) {
                     match evt {
+                        SessionEvent::Connected => {
+                            if let Some(ready) = sftp_ready_tx.take() {
+                                let _ = ready.send(());
+                            }
+                            ui_batch.push(SessionEvent::Connected);
+                        }
                         SessionEvent::CwdChanged(cwd) => {
                             // Shared map (not a thread-local) so manual SFTP
                             // navigation can clear the entry — then the very next
@@ -6331,7 +6351,9 @@ fn apply_session_event_to_window(
                 st.swap_total_kib = swap_total_kib;
                 st.net = net;
                 st.disks = disks;
-                st.sys = sys;
+                if let Some(sys) = sys {
+                    st.sys = sys;
+                }
                 // A sample means the channel is alive → treat as connected.
                 if st.state != 1 {
                     st.state = 1;
