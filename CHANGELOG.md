@@ -5,20 +5,32 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ## [Unreleased]
 
-- 改进侧边停靠的 SFTP 面板窄宽布局：提高最小宽度，提前切换双行紧凑工具栏，并将次要路径操作收纳到“更多”菜单，避免拖窄时控件压缩错位
-- 修复 KDE Wayland 下恢复持久化窗口尺寸后渲染与点击坐标可能偏移的问题；Wayland 现在采用合成器实际配置的启动尺寸，不再调用仅具建议性质的窗口尺寸恢复请求（#286）
-- 将会话端口转发改为可直接保存的多行表单：“添加”只新增一组输入框，所有已填写的规则会在保存时统一校验并持久化，不再出现“待添加表单”和“已添加摘要”两套界面（#277）
-- 修复 Windows 下反复切换中英文输入法后用户名、密码及其他输入框可能无法继续输入的问题（#236）
+
+## [0.6.6] - 2026-07-23
 
 ### 新增 / Added
 
 - **快捷指令支持主窗口四向停靠（#215）。** “设置 → 界面 → 侧栏”新增“快捷命令作为侧栏”开关；开启后，现有快捷指令弹窗底部“管理”旁才显示拖拽把手，可将快捷指令拖到与快速连接、资源面板相同的主窗口停靠层，并在左、右、上、下边缘显示吸附高亮。成功停靠后，命令栏里的原快捷入口会隐藏，只保留侧栏或收起后的单个闪电图标；同边已有收起工具条时，闪电、快速连接与资源图标会合并到同一列（上/下停靠时为同一行），不再各占一列。只有该边没有其他收起面板时才单独创建工具条。同一边缘只允许一个面板展开，面板方向、尺寸及收起状态会持久保存。
+
+### 修复 / Fixed
+
+- **改进侧边停靠的 SFTP 面板窄宽布局。** 提高面板最小宽度，提前切换双行紧凑工具栏，并将次要路径操作收纳到“更多”菜单；路径输入框在独立行中保留稳定间距，避免拖窄时控件压缩、重叠或错位。
+- **修复 KDE Wayland 下窗口恢复后的点击偏移（#286）。** Wayland 现在采用合成器实际配置的启动尺寸，不再调用仅具建议性质的窗口尺寸恢复请求，避免渲染位置与点击坐标不一致。
+- **简化会话端口转发规则编辑（#277）。** 端口转发改为可直接保存的多行表单：“添加”只新增一组输入框，所有已填写规则会在保存时统一校验并持久化，不再同时显示“待添加表单”和“已添加摘要”两套界面。
+- **修复 Windows 输入法切换后输入框失效（#236）。** 反复切换中英文输入法后，用户名、密码及其他输入框现在仍可继续输入。
 
 ---
 
 ### Added
 
 - **Dock quick commands on any main-window edge (#215).** Interface → Sidebars now includes a “Quick commands as a sidebar” switch. Once enabled, a drag handle appears beside “Manage” in the existing popup and can dock the commands at the same main-window layer as Quick Connect and Resources, with snap highlighting on every edge. After docking, the original command-bar entry is hidden and only the sidebar or its single collapsed lightning icon remains. On an edge with an existing collapsed tool strip, the Quick Commands, Quick Connect, and Resources icons share one column (or one row for top/bottom docks) instead of reserving separate strips; a standalone strip is created only when needed. Only one panel may stay expanded on an edge, and the dock edge, size, and collapsed state persist.
+
+### Fixed
+
+- **Improve the narrow layout of side-docked SFTP panels.** Increase the panel minimum width, switch to the compact two-row toolbar earlier, and move secondary path actions into the More menu. The path input keeps stable spacing on its own row, preventing controls from being squeezed, overlapped, or misaligned when the panel is narrowed.
+- **Fix click offsets after restoring a window on KDE Wayland (#286).** Wayland now uses the startup size actually configured by the compositor instead of requesting restoration through advisory-only window sizing, keeping rendered content aligned with pointer coordinates.
+- **Simplify session port-forward rule editing (#277).** Port forwards now use a directly savable multi-row form. Add only creates another input row, and every completed rule is validated and persisted together on save instead of showing separate pending and added-rule interfaces.
+- **Fix text fields becoming unusable after switching IMEs on Windows (#236).** Username, password, and other text fields continue accepting input after repeatedly switching between Chinese and English input methods.
 
 ## [0.6.5] - 2026-07-17
 

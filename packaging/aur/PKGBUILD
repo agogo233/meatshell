@@ -5,7 +5,7 @@
 # .github/workflows/aur-publish.yml keeps pkgver + checksums in sync on each
 # release; you can also `makepkg -si` this file directly.
 pkgname=meatshell-bin
-pkgver=0.6.5
+pkgver=0.6.6
 pkgrel=1
 pkgdesc="Lightweight FinalShell-style SSH/SFTP/terminal client (Rust + Slint)"
 arch=('x86_64' 'aarch64')
