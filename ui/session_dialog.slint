@@ -6,7 +6,10 @@ import { LabeledInput, PrimaryButton, GhostButton } from "widgets.slint";
 export struct PortFwd {
     kind: string,
     name: string,
-    summary: string,
+    bind-addr: string,
+    bind-port: string,
+    host: string,
+    host-port: string,
 }
 
 export struct SessionDraft {
@@ -68,6 +71,7 @@ component SegOption inherits Rectangle {
 component MiniInput inherits Rectangle {
     in property <string> placeholder;
     in-out property <string> value;
+    callback edited(string);
     height: 30px;
     horizontal-stretch: 1;
     border-radius: Theme.radius-sm;
@@ -84,6 +88,7 @@ component MiniInput inherits Rectangle {
         vertical-alignment: center;
         single-line: true;
         text <=> root.value;
+        edited => { root.edited(root.value); }
     }
     if root.value == "" : Text {
         x: 8px;
@@ -92,6 +97,92 @@ component MiniInput inherits Rectangle {
         color: Theme.text-muted;
         font-size: Theme.fs-md;
         vertical-alignment: center;
+    }
+}
+
+// Every forwarding rule stays editable in-place. "Add" creates another row
+// of this same form instead of converting the current form into a summary (#277).
+component PortForwardRow inherits VerticalLayout {
+    in property <PortFwd> forward;
+    in property <int> index;
+    callback updated(int, PortFwd);
+    callback remove(int);
+
+    property <string> kind: forward.kind;
+    property <string> name: forward.name;
+    property <string> bind-addr: forward.bind-addr;
+    property <string> bind-port: forward.bind-port;
+    property <string> host: forward.host;
+    property <string> host-port: forward.host-port;
+
+    function notify-updated() {
+        root.updated(root.index, {
+            kind: root.kind,
+            name: root.name,
+            bind-addr: root.bind-addr,
+            bind-port: root.bind-port,
+            host: root.host,
+            host-port: root.host-port,
+        });
+    }
+
+    spacing: 6px;
+    padding: 8px;
+
+    HorizontalLayout {
+        spacing: 6px;
+        SegOption { label: @tr("Local (-L)"); active: root.kind == "local"; clicked => { root.kind = "local"; root.notify-updated(); } }
+        SegOption { label: @tr("Remote (-R)"); active: root.kind == "remote"; clicked => { root.kind = "remote"; root.notify-updated(); } }
+        SegOption { label: @tr("Dynamic (-D)"); active: root.kind == "dynamic"; clicked => { root.kind = "dynamic"; root.notify-updated(); } }
+        Rectangle {
+            width: 30px;
+            height: 30px;
+            border-radius: Theme.radius-sm;
+            background: remove-area.has-hover ? Theme.danger.with-alpha(0.18) : transparent;
+            remove-area := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.remove(root.index); }
+            }
+            Text {
+                text: "\u{E5CD}";
+                font-family: "Material Icons";
+                color: Theme.danger;
+                font-size: Theme.fs-sm;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+    MiniInput {
+        placeholder: @tr("Name (optional)");
+        value <=> root.name;
+        edited(value) => { root.name = value; root.notify-updated(); }
+    }
+    HorizontalLayout {
+        spacing: 6px;
+        MiniInput {
+            placeholder: "127.0.0.1";
+            value <=> root.bind-addr;
+            edited(value) => { root.bind-addr = value; root.notify-updated(); }
+        }
+        MiniInput {
+            placeholder: @tr("Listen port");
+            value <=> root.bind-port;
+            edited(value) => { root.bind-port = value; root.notify-updated(); }
+        }
+    }
+    if root.kind != "dynamic" : HorizontalLayout {
+        spacing: 6px;
+        MiniInput {
+            placeholder: @tr("Target host");
+            value <=> root.host;
+            edited(value) => { root.host = value; root.notify-updated(); }
+        }
+        MiniInput {
+            placeholder: @tr("Target port");
+            value <=> root.host-port;
+            edited(value) => { root.host-port = value; root.notify-updated(); }
+        }
     }
 }
 
@@ -326,22 +417,15 @@ export component SessionDialog inherits Rectangle {
     in-out property <string> draft-note;
     in-out property <string> test-status;
 
-    // Port forwards / tunnels (#56). `forwards` is the current list (fed from
-    // Rust); the nf-* properties hold the add-form fields.
+    // Port forwards / tunnels (#56). Every row is an editable form (#277).
     in property <[PortFwd]> forwards;
-    property <string> nf-kind: "local";   // "local" | "remote" | "dynamic"
-    property <string> nf-name;            // optional rule label (#100)
-    property <string> nf-bind: "127.0.0.1";
-    property <string> nf-port;
-    property <string> nf-host;
-    property <string> nf-host-port;
     property <bool> show-advanced: false;   // collapse proxy + forwarding (#56)
 
     callback submit(SessionDraft);
     callback test-connection(SessionDraft);
     callback cancel();
-    callback add-forward(string /* name */, string /* kind */, string /* bind */, int /* port */,
-                         string /* host */, int /* host-port */);
+    callback add-forward();
+    callback update-forward(int /* index */, PortFwd);
     callback delete-forward(int /* index */);
     callback pick-key-file();   // open a native file picker for the private key
 
@@ -349,7 +433,11 @@ export component SessionDialog inherits Rectangle {
     background: #00000080;
 
     // Clear the host-required flag each time the dialog opens (#110).
-    changed is-open => { if (self.is-open) { self.host-missing = false; } }
+    changed is-open => {
+        if (self.is-open) {
+            self.host-missing = false;
+        }
+    }
 
     // Swallow clicks on the backdrop
     TouchArea {
@@ -868,86 +956,21 @@ export component SessionDialog inherits Rectangle {
                     font-size: Theme.fs-sm;
                 }
 
-                // Existing forwards, each with a delete button.
-                for f[i] in root.forwards : Rectangle {
-                    height: 30px;
-                    border-radius: Theme.radius-sm;
-                    background: Theme.bg-root;
-                    HorizontalLayout {
-                        padding-left: 8px; padding-right: 4px; spacing: 6px;
-                        if f.name != "" : Text {
-                            text: f.name;
-                            color: Theme.accent;
-                            font-size: Theme.fs-sm;
-                            font-weight: 600;
-                            font-family: Theme.ui-font-family;
-                            vertical-alignment: center;
-                            overflow: elide;
-                        }
-                        Text {
-                            text: f.summary;
-                            color: Theme.text-primary;
-                            font-size: Theme.fs-sm;
-                            font-family: Theme.ui-font-family;
-                            vertical-alignment: center;
-                            horizontal-stretch: 1;
-                            overflow: elide;
-                        }
-                        Rectangle {
-                            width: 24px;
-                            y: (parent.height - self.height) / 2;
-                            height: 24px;
-                            border-radius: Theme.radius-sm;
-                            background: fdel.has-hover ? Theme.danger.with-alpha(0.18) : transparent;
-                            fdel := TouchArea {
-                                mouse-cursor: pointer;
-                                clicked => { root.delete-forward(i); }
-                            }
-                            Text { text: "\u{E5CD}"; font-family: "Material Icons";
-                                   color: Theme.danger; font-size: Theme.fs-sm;
-                                   horizontal-alignment: center; vertical-alignment: center; }
-                        }
-                    }
-                }
-
-                // Add form: kind selector, then bind/port (+ target for L/R).
-                HorizontalLayout {
-                    spacing: 6px;
-                    SegOption { label: @tr("Local (-L)"); active: root.nf-kind == "local"; clicked => { root.nf-kind = "local"; } }
-                    SegOption { label: @tr("Remote (-R)"); active: root.nf-kind == "remote"; clicked => { root.nf-kind = "remote"; } }
-                    SegOption { label: @tr("Dynamic (-D)"); active: root.nf-kind == "dynamic"; clicked => { root.nf-kind = "dynamic"; } }
-                }
-                MiniInput { placeholder: @tr("Name (optional)"); value <=> root.nf-name; }
-                HorizontalLayout {
-                    spacing: 6px;
-                    MiniInput { placeholder: "127.0.0.1"; value <=> root.nf-bind; }
-                    MiniInput { placeholder: @tr("Listen port"); value <=> root.nf-port; }
-                }
-                if root.nf-kind != "dynamic" : HorizontalLayout {
-                    spacing: 6px;
-                    MiniInput { placeholder: @tr("Target host"); value <=> root.nf-host; }
-                    MiniInput { placeholder: @tr("Target port"); value <=> root.nf-host-port; }
+                for f[i] in root.forwards : PortForwardRow {
+                    forward: f;
+                    index: i;
+                    updated(index, value) => { root.update-forward(index, value); }
+                    remove(index) => { root.delete-forward(index); }
                 }
                 HorizontalLayout {
                     alignment: end;
                     PrimaryButton {
                         text: @tr("Add");
-                        clicked => {
-                            root.add-forward(root.nf-name, root.nf-kind, root.nf-bind, root.nf-port.to-float(),
-                                             root.nf-host, root.nf-host-port.to-float());
-                            root.nf-name = "";
-                            root.nf-port = "";
-                            root.nf-host = "";
-                            root.nf-host-port = "";
-                        }
+                        clicked => { root.add-forward(); }
                     }
                 }
                 Text {
-                    text: root.nf-kind == "local"
-                        ? @tr("-L: local port → target reached from the server")
-                        : (root.nf-kind == "remote"
-                            ? @tr("-R: server port → target reached from here")
-                            : @tr("-D: local SOCKS5 proxy"));
+                    text: @tr("-L: local port → target reached from the server; -R: server port → target reached from here; -D: local SOCKS5 proxy");
                     color: Theme.text-muted;
                     font-size: Theme.fs-xs;
                 }

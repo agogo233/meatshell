@@ -2245,7 +2245,7 @@ pub fn run() -> Result<()> {
         // Apply the Win11 rounded-corner hint once, on the first event (the HWND
         // reliably exists by then, unlike a pre-run timer) (#166).
         let mut chrome_done = false;
-        window.window().on_winit_window_event(move |_w, event| {
+        window.window().on_winit_window_event(move |slint_window, event| {
             if !chrome_done {
                 chrome_done = true;
                 if let Some(win) = weak.upgrade() {
@@ -2281,6 +2281,17 @@ pub fn run() -> Result<()> {
                 }
             };
             match event {
+                #[cfg(target_os = "windows")]
+                WEvent::Ime(i_slint_backend_winit::winit::event::Ime::Disabled) => {
+                    // Windows emits Ime::Disabled when a composition ends, including
+                    // while switching between Chinese and English input methods. The
+                    // Slint winit backend intentionally ignores this notification, so
+                    // after several switches the native input context can remain
+                    // detached and every TextInput appears to stop accepting keys
+                    // (#236). Re-associate the window with its current default IME;
+                    // the focused Slint TextInput keeps owning text input as before.
+                    slint_window.with_winit_window(|window| window.set_ime_allowed(true));
+                }
                 WEvent::DroppedFile(path) => {
                     if let Some(win) = weak.upgrade() {
                         handle_file_drop(&win, &sh, path.clone());
@@ -2325,6 +2336,9 @@ pub fn run() -> Result<()> {
                     focused = *f;
                     apply_activity(focused, minimized, occluded);
                     if *f {
+                        #[cfg(target_os = "windows")]
+                        slint_window.with_winit_window(|window| window.set_ime_allowed(true));
+
                         // Some window managers deliver the first Resized event
                         // before the native window belongs to a monitor. Focus
                         // is a reliable second opportunity to seed restoration;
@@ -3386,8 +3400,8 @@ fn wire_session_callbacks(
     // Working set of port forwards (#56) for the session being created/edited.
     // The forward add/delete callbacks mutate it; saving reads it into
     // Session.forwards; opening the dialog (new/edit) resets it.
-    let edit_forwards: Rc<RefCell<Vec<crate::config::PortForward>>> =
-        Rc::new(RefCell::new(Vec::new()));
+    let edit_forwards: Rc<RefCell<Vec<PortFwd>>> =
+        Rc::new(RefCell::new(vec![blank_forward_draft()]));
 
     // New session -> open dialog with blank draft.
     let weak = window.as_weak();
@@ -3395,9 +3409,9 @@ fn wire_session_callbacks(
     let store_ng = store.clone();
     window.on_new_session_clicked(move || {
         if let Some(w) = weak.upgrade() {
-            ef_new.borrow_mut().clear();
+            *ef_new.borrow_mut() = vec![blank_forward_draft()];
             w.set_session_groups(session_groups_model(&store_ng.borrow()));
-            w.set_dialog_forwards(forward_model(&[]));
+            w.set_dialog_forwards(forward_model(&ef_new.borrow()));
             let empty = Session::new_empty();
             let (jump_labels, jump_ids, jump_idx) =
                 jump_candidates(&store_ng.borrow(), &empty.id, "");
@@ -3605,10 +3619,13 @@ fn wire_session_callbacks(
             let Some(session) = store.get(&id) else {
                 return;
             };
-            *ef_edit.borrow_mut() = session.forwards.clone();
+            *ef_edit.borrow_mut() = forward_drafts(&session.forwards);
+            if ef_edit.borrow().is_empty() {
+                ef_edit.borrow_mut().push(blank_forward_draft());
+            }
             if let Some(w) = weak.upgrade() {
                 w.set_session_groups(session_groups_model(&store));
-                w.set_dialog_forwards(forward_model(&session.forwards));
+                w.set_dialog_forwards(forward_model(&ef_edit.borrow()));
                 w.set_dialog_id(session.id.clone().into());
                 w.set_dialog_name(session.name.clone().into());
                 w.set_dialog_host(session.host.clone().into());
@@ -3807,6 +3824,15 @@ fn wire_session_callbacks(
         let edit_forwards = edit_forwards.clone();
         window.on_session_dialog_submit(move |draft: SessionDraft| {
             let id = draft.id.to_string();
+            let forwards = match validated_port_forwards(&edit_forwards.borrow()) {
+                Ok(forwards) => forwards,
+                Err(message) => {
+                    if let Some(w) = weak.upgrade() {
+                        w.set_dialog_test_status(message.into());
+                    }
+                    return;
+                }
+            };
             // The edit dialog never echoes the real password (issue #10): a blank
             // field while editing means "keep the existing password" rather than
             // "clear it".  Only overwrite when the user actually typed something.
@@ -3886,7 +3912,7 @@ fn wire_session_callbacks(
                 stop_bits: draft.stop_bits as u8,
                 parity: draft.parity.to_string(),
                 flow_control: draft.flow_control.to_string(),
-                forwards: edit_forwards.borrow().clone(),
+                forwards,
                 disable_shell_integration: draft.disable_shell_integration,
                 note: draft.note.to_string(),
                 jump_session_id: draft.jump_session_id.to_string(),
@@ -3945,11 +3971,16 @@ fn wire_session_callbacks(
             }
 
             let existing = store.borrow().get(draft.id.as_str()).cloned();
-            let session = session_from_draft(
-                &draft,
-                existing.as_ref(),
-                edit_forwards.borrow().clone(),
-            );
+            let forwards = match validated_port_forwards(&edit_forwards.borrow()) {
+                Ok(forwards) => forwards,
+                Err(message) => {
+                    if let Some(w) = weak.upgrade() {
+                        w.set_dialog_test_status(message.into());
+                    }
+                    return;
+                }
+            };
+            let session = session_from_draft(&draft, existing.as_ref(), forwards);
             let weak_done = weak.clone();
 
             if kind == "ssh" {
@@ -4098,38 +4129,28 @@ fn wire_session_callbacks(
         });
     }
 
-    // Add a port forward to the session being edited (#56).
+    // Add another editable port-forward row (#56, #277).
     {
         let weak = window.as_weak();
         let ef = edit_forwards.clone();
-        window.on_add_forward(
-            move |name: SharedString,
-                  kind: SharedString,
-                  bind_addr: SharedString,
-                  bind_port: i32,
-                  host: SharedString,
-                  host_port: i32| {
-                let kind = kind.to_string();
-                // Local/remote need a target host; dynamic doesn't.
-                if bind_port <= 0 || bind_port > 65535 {
-                    return;
-                }
-                if kind != "dynamic" && (host.trim().is_empty() || host_port <= 0) {
-                    return;
-                }
-                ef.borrow_mut().push(crate::config::PortForward {
-                    kind,
-                    name: name.trim().to_string(),
-                    bind_addr: bind_addr.trim().to_string(),
-                    bind_port: bind_port as u16,
-                    host: host.trim().to_string(),
-                    host_port: host_port.max(0) as u16,
-                });
-                if let Some(w) = weak.upgrade() {
-                    w.set_dialog_forwards(forward_model(&ef.borrow()));
-                }
-            },
-        );
+        window.on_add_forward(move || {
+            ef.borrow_mut().push(blank_forward_draft());
+            if let Some(w) = weak.upgrade() {
+                w.set_dialog_forwards(forward_model(&ef.borrow()));
+            }
+        });
+    }
+    // Keep each editable row in the Rust-side working set. Saving validates and
+    // converts all non-empty rows together, so no separate "added" state exists.
+    {
+        let ef = edit_forwards.clone();
+        window.on_update_forward(move |index: i32, forward: PortFwd| {
+            let i = index as usize;
+            let mut forwards = ef.borrow_mut();
+            if i < forwards.len() {
+                forwards[i] = forward;
+            }
+        });
     }
     // Delete a port forward by index (#56).
     {
@@ -4141,6 +4162,9 @@ fn wire_session_callbacks(
                 let mut v = ef.borrow_mut();
                 if i < v.len() {
                     v.remove(i);
+                }
+                if v.is_empty() {
+                    v.push(blank_forward_draft());
                 }
             }
             if let Some(w) = weak.upgrade() {
@@ -5558,31 +5582,142 @@ fn quick_cmd_model(
     ModelRc::from(Rc::new(VecModel::from(rows)))
 }
 
-/// Build the port-forward list model for the session dialog (#56). Each row is
-/// a one-line human summary (`-L 127.0.0.1:8080 → host:80`).
-fn forward_model(forwards: &[crate::config::PortForward]) -> ModelRc<PortFwd> {
-    let rows: Vec<PortFwd> = forwards
+fn blank_forward_draft() -> PortFwd {
+    PortFwd {
+        kind: "local".into(),
+        name: "".into(),
+        bind_addr: "127.0.0.1".into(),
+        bind_port: "".into(),
+        host: "".into(),
+        host_port: "".into(),
+    }
+}
+
+fn forward_drafts(forwards: &[crate::config::PortForward]) -> Vec<PortFwd> {
+    forwards
         .iter()
-        .map(|f| {
-            let bind = if f.bind_addr.trim().is_empty() {
-                "127.0.0.1"
+        .map(|forward| PortFwd {
+            kind: forward.kind.clone().into(),
+            name: forward.name.clone().into(),
+            bind_addr: if forward.bind_addr.trim().is_empty() {
+                "127.0.0.1".into()
             } else {
-                f.bind_addr.trim()
-            };
-            let summary = match f.kind.as_str() {
-                "local" => format!("-L {}:{} → {}:{}", bind, f.bind_port, f.host, f.host_port),
-                "remote" => format!("-R {}:{} → {}:{}", bind, f.bind_port, f.host, f.host_port),
-                "dynamic" => format!("-D {}:{} (SOCKS5)", bind, f.bind_port),
-                _ => String::new(),
-            };
-            PortFwd {
-                kind: f.kind.clone().into(),
-                name: f.name.clone().into(),
-                summary: summary.into(),
-            }
+                forward.bind_addr.trim().into()
+            },
+            bind_port: forward.bind_port.to_string().into(),
+            host: forward.host.clone().into(),
+            host_port: if forward.kind == "dynamic" {
+                "".into()
+            } else {
+                forward.host_port.to_string().into()
+            },
         })
-        .collect();
-    ModelRc::from(Rc::new(VecModel::from(rows)))
+        .collect()
+}
+
+fn forward_model(forwards: &[PortFwd]) -> ModelRc<PortFwd> {
+    ModelRc::from(Rc::new(VecModel::from(forwards.to_vec())))
+}
+
+fn validated_port_forwards(
+    drafts: &[PortFwd],
+) -> std::result::Result<Vec<crate::config::PortForward>, String> {
+    let mut forwards = Vec::new();
+    for draft in drafts {
+        let is_blank = draft.name.trim().is_empty()
+            && draft.bind_port.trim().is_empty()
+            && draft.host.trim().is_empty()
+            && draft.host_port.trim().is_empty();
+        if is_blank {
+            continue;
+        }
+
+        let bind_port = draft
+            .bind_port
+            .trim()
+            .parse::<u16>()
+            .ok()
+            .filter(|port| *port > 0)
+            .ok_or_else(|| {
+                t(
+                    "请输入有效的监听端口（1-65535）",
+                    "Enter a valid listen port (1-65535).",
+                )
+                .to_string()
+            })?;
+        let kind = draft.kind.as_str();
+        let (host, host_port) = if kind == "dynamic" {
+            (String::new(), 0)
+        } else {
+            let host = draft.host.trim();
+            let host_port = draft
+                .host_port
+                .trim()
+                .parse::<u16>()
+                .ok()
+                .filter(|port| *port > 0);
+            if host.is_empty() || host_port.is_none() {
+                return Err(t(
+                    "请输入目标主机和有效的目标端口（1-65535）",
+                    "Enter a target host and a valid target port (1-65535).",
+                )
+                .to_string());
+            }
+            (host.to_string(), host_port.unwrap())
+        };
+
+        forwards.push(crate::config::PortForward {
+            kind: kind.to_string(),
+            name: draft.name.trim().to_string(),
+            bind_addr: if draft.bind_addr.trim().is_empty() {
+                "127.0.0.1".to_string()
+            } else {
+                draft.bind_addr.trim().to_string()
+            },
+            bind_port,
+            host,
+            host_port,
+        });
+    }
+    Ok(forwards)
+}
+
+#[cfg(test)]
+mod port_forward_draft_tests {
+    use super::{blank_forward_draft, validated_port_forwards};
+
+    #[test]
+    fn blank_rows_are_ignored_when_saving() {
+        assert!(validated_port_forwards(&[blank_forward_draft()])
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn filled_rows_are_saved_without_an_add_step() {
+        let mut local = blank_forward_draft();
+        local.bind_port = "8080".into();
+        local.host = "service.internal".into();
+        local.host_port = "80".into();
+
+        let mut dynamic = blank_forward_draft();
+        dynamic.kind = "dynamic".into();
+        dynamic.bind_port = "1080".into();
+
+        let forwards = validated_port_forwards(&[local, dynamic]).unwrap();
+        assert_eq!(forwards.len(), 2);
+        assert_eq!(forwards[0].bind_port, 8080);
+        assert_eq!(forwards[0].host, "service.internal");
+        assert_eq!(forwards[1].kind, "dynamic");
+        assert_eq!(forwards[1].host_port, 0);
+    }
+
+    #[test]
+    fn partially_filled_rows_block_saving() {
+        let mut draft = blank_forward_draft();
+        draft.bind_port = "8080".into();
+        assert!(validated_port_forwards(&[draft]).is_err());
+    }
 }
 
 /// Collect the full paths of the checked SFTP entries for a tab (#100).

@@ -157,15 +157,6 @@ meatshell/
 - SSH / SFTP 共享 `known_hosts` 校验逻辑：首次连接会确认并记住主机密钥，
   后续密钥变化会再次提示。
 
-## 赞赏 / 请我喝杯咖啡
-
-觉得作品还不错的话，请我喝杯咖啡吧 ☕
-
-<p align="center">
-  <strong>亮出网络乞丐乞讨专用码</strong><br>
-  <img src="docs/screenshots/sponsor-wechat.png" alt="微信赞赏码" width="260">
-</p>
-
 ## 发版
 
 不要直接手动修改 `Cargo.toml` 后再打标签。使用发布脚本，让 Git tag 指向的提交本身就已经包含正确版本号：
