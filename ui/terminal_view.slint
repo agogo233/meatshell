@@ -538,10 +538,11 @@ export component TerminalView inherits Rectangle {
         vertical-stretch: 1;
         // Collapsed → shrink to the 36px ToolStrip icon bar at the docked edge
         // (M5), click its icon to re-expand. The 4px splitter is gone collapsed.
-        // Side-docked toolbar has a compact 190px layout. Clamp legacy/saved
-        // widths below that floor so its controls never enter the terminal (#285).
+        // Side-docked SFTP needs enough room for its compact action row and a
+        // usable path field. Clamp legacy/saved widths below that floor instead
+        // of letting Slint squeeze controls out of alignment.
         property <length> sf-w: root.sftp-collapsed ? 36px
-            : root.sftp-horizontal ? max(190px, root.sftp-panel-width)
+            : root.sftp-horizontal ? max(300px, root.sftp-panel-width)
             : root.sftp-panel-width;
         property <length> sf-h: root.sftp-collapsed ? 36px : root.sftp-panel-height;
         property <length> sp:   root.sftp-collapsed ? 0px : 4px;
@@ -1731,13 +1732,13 @@ export component TerminalView inherits Rectangle {
                 moved => {
                     if (root.sftp-dragging) {
                         if (root.sftp-horizontal) {
-                            // Floor matches SftpPanel's compact toolbar layout;
-                            // narrower widths would force controls over terminal.
+                            // Floor matches SftpPanel's compact two-row toolbar;
+                            // narrower widths make the path field and actions unusable.
                             root.set-sftp-panel-width(clamp(
                                 root.sftp-dock == "right"
                                     ? dock-region.width - ((self.absolute-position.x + self.mouse-x) - dock-region.absolute-position.x)
                                     : (self.absolute-position.x + self.mouse-x) - dock-region.absolute-position.x,
-                                190px, max(200px, dock-region.width - 200px)));
+                                300px, max(310px, dock-region.width - 200px)));
                         } else {
                             root.set-sftp-panel-height(clamp(
                                 root.sftp-dock == "bottom"

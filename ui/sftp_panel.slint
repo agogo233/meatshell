@@ -106,9 +106,10 @@ export component SftpPanel inherits Rectangle {
     property <string> tunnel-bind-port: "1080";
     property <string> tunnel-host: "127.0.0.1";
     property <string> tunnel-host-port: "80";
-    // Side-docked panels use icon tabs and keep only primary actions when the
-    // width cannot accommodate the full horizontal toolbar (#285).
-    property <bool> narrow-toolbar: !root.show-tree && root.width < 360px;
+    // The full toolbar needs roughly 480px once a useful path field is included.
+    // Below that, switch deliberately to a two-row compact layout instead of
+    // allowing fixed-size controls to squeeze the path and each other (#285).
+    property <bool> narrow-toolbar: !root.show-tree && root.width < 480px;
 
     // --- Callbacks ---------------------------------------------------------
     callback toggle-collapsed();    // minimise / restore the panel
@@ -181,7 +182,10 @@ export component SftpPanel inherits Rectangle {
             height: root.narrow-toolbar && root.panel-mode == "files" ? 62px : 34px;
             background: Theme.bg-panel-alt;
 
-            HorizontalLayout {
+            VerticalLayout {
+                spacing: 6px;
+
+                HorizontalLayout {
                 height: 34px;
                 padding-left: 6px;
                 padding-right: 6px;
@@ -254,6 +258,10 @@ export component SftpPanel inherits Rectangle {
                         vertical-alignment: center;
                     }
                 }
+
+                // In compact mode keep navigation tabs at the left and primary
+                // actions aligned at the right. The path gets the full second row.
+                if root.narrow-toolbar : Rectangle { horizontal-stretch: 1; }
 
                 // Editable path bar: type or paste a path and press Enter to
                 // jump there; copy / paste-jump buttons sit right after it (#54).
@@ -371,6 +379,70 @@ export component SftpPanel inherits Rectangle {
                     }
                 }
 
+                // Secondary path actions move into an overflow menu in compact
+                // mode so they never compete with the path field for width.
+                compact-more-btn := Rectangle {
+                    visible: root.narrow-toolbar && root.panel-mode == "files";
+                    width: 24px;
+                    height: 22px;
+                    border-radius: Theme.radius-sm;
+                    background: compact-more-ta.has-hover ? Theme.bg-hover : transparent;
+                    compact-more-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { compact-more-menu.show(); }
+                    }
+                    Text {
+                        text: "\u{E5D4}";
+                        font-family: "Material Icons";
+                        color: Theme.text-secondary;
+                        font-size: Theme.fs-md;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    compact-more-menu := PopupWindow {
+                        x: parent.width - self.width;
+                        y: parent.height + 2px;
+                        width: 142px;
+                        height: 4 * 27px + 8px;
+                        Rectangle {
+                            background: Theme.bg-panel;
+                            border-radius: Theme.radius-sm;
+                            border-width: 1px;
+                            border-color: Theme.border-strong;
+                            drop-shadow-blur: 12px;
+                            drop-shadow-color: #00000060;
+                            VerticalLayout {
+                                padding: 4px;
+                                spacing: 1px;
+                                SftpMenuItem {
+                                    label: @tr("Up one level");
+                                    clicked => { root.navigate(".."); }
+                                }
+                                SftpMenuItem {
+                                    label: @tr("Copy path");
+                                    clicked => {
+                                        compact-path-input.select-all();
+                                        compact-path-input.copy();
+                                        compact-path-input.clear-selection();
+                                    }
+                                }
+                                SftpMenuItem {
+                                    label: @tr("Paste and go");
+                                    clicked => {
+                                        compact-path-input.select-all();
+                                        compact-path-input.paste();
+                                        root.navigate(compact-path-input.text);
+                                    }
+                                }
+                                SftpMenuItem {
+                                    label: @tr("Refresh");
+                                    clicked => { root.refresh(root.current-path); }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Batch actions on checked entries — only when something's checked (#100).
                 if root.panel-mode == "files" && root.selected-count > 0 && !root.narrow-toolbar : Text {
                     text: "✓" + root.selected-count;
@@ -423,32 +495,36 @@ export component SftpPanel inherits Rectangle {
                            color: Theme.text-secondary; font-size: Theme.fs-md;
                            horizontal-alignment: center; vertical-alignment: center; }
                 }
-            }
+                }
 
-            // Preserve path navigation in the side-docked compact layout by
-            // moving it to its own row instead of squeezing every control into
-            // one horizontal line (#285).
-            Rectangle {
-                visible: root.narrow-toolbar && root.panel-mode == "files";
-                x: 6px;
-                y: 34px;
-                width: parent.width - 12px;
-                height: 22px;
-                border-radius: Theme.radius-sm;
-                background: Theme.bg-root;
-                border-width: 1px;
-                border-color: compact-path-input.has-focus ? Theme.accent : Theme.border-subtle;
-                compact-path-input := TextInput {
-                    x: 6px;
-                    width: parent.width - 12px;
-                    height: parent.height;
-                    text: root.current-path;
-                    color: Theme.text-primary;
-                    font-family: Theme.ui-font-family;
-                    font-size: Theme.fs-sm;
-                    vertical-alignment: center;
-                    single-line: true;
-                    accepted => { root.navigate(self.text); }
+                // Preserve path navigation in the side-docked compact layout by
+                // moving it to a real second layout row. The layout spacing keeps
+                // a stable gutter regardless of first-row alignment/padding.
+                HorizontalLayout {
+                    visible: root.narrow-toolbar && root.panel-mode == "files";
+                    height: self.visible ? 22px : 0px;
+                    padding-left: 6px;
+                    padding-right: 6px;
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 22px;
+                        border-radius: Theme.radius-sm;
+                        background: Theme.bg-root;
+                        border-width: 1px;
+                        border-color: compact-path-input.has-focus ? Theme.accent : Theme.border-subtle;
+                        compact-path-input := TextInput {
+                            x: 6px;
+                            width: parent.width - 12px;
+                            height: parent.height;
+                            text: root.current-path;
+                            color: Theme.text-primary;
+                            font-family: Theme.ui-font-family;
+                            font-size: Theme.fs-sm;
+                            vertical-alignment: center;
+                            single-line: true;
+                            accepted => { root.navigate(self.text); }
+                        }
+                    }
                 }
             }
         }
