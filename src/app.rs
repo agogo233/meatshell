@@ -501,6 +501,19 @@ fn clamp_window_size_to_monitor(
     use i_slint_backend_winit::winit::dpi::{LogicalPosition, LogicalSize};
 
     window.with_winit_window(|ww| {
+        #[cfg(target_os = "linux")]
+        {
+            use i_slint_backend_winit::winit::platform::wayland::WindowExtWayland;
+
+            // Wayland compositors own the final surface size. A
+            // request_inner_size call is only advisory and KWin may configure a
+            // different size, leaving Slint's rendered and input geometries out
+            // of sync (#286). Let the compositor choose the startup size.
+            if ww.xdg_toplevel().is_some() {
+                return None;
+            }
+        }
+
         let scale = ww.scale_factor().max(0.01);
         // Before `Window::run()` makes the native window visible, winit often
         // has no current monitor yet. Falling back to the primary monitor lets
@@ -539,6 +552,20 @@ fn clamp_window_size_to_monitor(
 
         Some((target_w, target_h))
     })?
+}
+
+#[cfg(target_os = "linux")]
+fn is_wayland_window(window: &slint::Window) -> bool {
+    use i_slint_backend_winit::winit::platform::wayland::WindowExtWayland;
+
+    window
+        .with_winit_window(|ww| ww.xdg_toplevel().is_some())
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_wayland_window(_window: &slint::Window) -> bool {
+    false
 }
 
 /// Detect the Windows mixed-DPI failure where the native maximized flag stays
@@ -2345,20 +2372,29 @@ pub fn run() -> Result<()> {
                         // request_inner_size will produce the Resized event that
                         // verifies the native window actually reached the target.
                         if !ev_window_size_tracking_ready.get() {
-                            if let (Some(win), Some(preferred)) =
-                                (weak.upgrade(), ev_pending_window_size_restore.get())
-                            {
-                                if let Some(target) =
-                                    clamp_window_size_to_monitor(&win.window(), Some(preferred))
-                                {
+                            if let Some(win) = weak.upgrade() {
+                                if is_wayland_window(&win.window()) {
+                                    ev_pending_window_size_restore.set(None);
+                                    ev_window_size_tracking_ready.set(true);
                                     tracing::info!(
-                                        "[WINDOW_SIZE] focus retry saved={:.0}x{:.0} \
-                                         target={:.0}x{:.0}",
-                                        preferred.0,
-                                        preferred.1,
-                                        target.0,
-                                        target.1,
+                                        "[WINDOW_SIZE] skipped persisted-size restore on Wayland"
                                     );
+                                } else if let Some(preferred) =
+                                    ev_pending_window_size_restore.get()
+                                {
+                                    if let Some(target) = clamp_window_size_to_monitor(
+                                        &win.window(),
+                                        Some(preferred),
+                                    ) {
+                                        tracing::info!(
+                                            "[WINDOW_SIZE] focus retry saved={:.0}x{:.0} \
+                                             target={:.0}x{:.0}",
+                                            preferred.0,
+                                            preferred.1,
+                                            target.0,
+                                            target.1,
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -2391,6 +2427,20 @@ pub fn run() -> Result<()> {
                             .with_winit_window(|ww| ww.is_maximized())
                             .unwrap_or(false);
                         win.set_window_maximized(maxed);
+                        if !ev_window_size_tracking_ready.get()
+                            && is_wayland_window(&win.window())
+                        {
+                            // The configure size in this event is authoritative
+                            // on Wayland. Accept and persist that actual size;
+                            // never chase the advisory saved size (#286).
+                            ev_pending_window_size_restore.set(None);
+                            ev_window_size_tracking_ready.set(true);
+                            tracing::info!(
+                                "[WINDOW_SIZE] accepted compositor size {}x{} on Wayland",
+                                size.width,
+                                size.height
+                            );
+                        }
                         if !ev_window_size_tracking_ready.get() {
                             if let Some(preferred) = ev_pending_window_size_restore.get() {
                                 let scale = win.window().scale_factor().max(0.01);
