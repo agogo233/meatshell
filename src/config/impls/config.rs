@@ -224,14 +224,16 @@ fn normalize_hex_color(value: &str) -> Option<String> {
 
 /// A brand-new config (no file yet, or the old one was corrupt). Seeds the
 /// new-user default layout (#new-user-defaults): ms wallpaper, welcome page as
-/// a left sidebar, resource panel docked right, 15% wallpaper transparency, and
-/// marks the migration done so it isn't re-applied.
+/// a left sidebar, resource panel docked right, 15% wallpaper transparency,
+/// update check disabled (no network on startup, fork A), and marks the
+/// migration done so it isn't re-applied.
 fn fresh_config() -> ConfigFile {
     ConfigFile {
         wallpaper: "builtin:ms".to_string(),
         welcome_as_sidebar: true,
         sidebar_dock: "right".to_string(),
         wallpaper_overlay: DEFAULT_WALLPAPER_OVERLAY,
+        update_check_disabled: true,
         defaults_rev: DEFAULTS_REV,
         ..ConfigFile::default()
     }

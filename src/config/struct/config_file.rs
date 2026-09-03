@@ -16,6 +16,10 @@ fn default_wsl_home() -> String {
     "~".to_string()
 }
 
+fn default_true() -> bool {
+    true
+}
+
 // Testing-stage MCP defaults. Switch these serde defaults to false before the
 // feature is promoted from preview to a stable release.
 fn default_mcp_preview_enabled() -> bool {
@@ -68,6 +72,10 @@ pub(crate) fn default_quick_panel_height() -> f32 {
 }
 
 /// On-disk layout. Keep additive to ease forward-compat.
+/// NOTE: `ConfigFile::default()` yields `update_check_disabled=false` (derive),
+/// but serde missing field and `fresh_config()` yield `true` (= disabled, no
+/// network on startup). Do not construct new-user configs via `Default`; use
+/// `fresh_config()` or serde deserialization.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ConfigFile {
     #[serde(default)]
@@ -260,10 +268,9 @@ pub struct ConfigFile {
     /// Settings-panel font scale, percent (80–160). 0 = 100% default (v0.5).
     #[serde(default)]
     pub panel_font: u32,
-    /// Disable the startup "new version available" check (#184). Default false =
-    /// keep checking (preserves existing behaviour for upgrading users); turning
-    /// it on stops the GitHub releases query and the banner.
-    #[serde(default)]
+    /// Disable the startup "new version available" check (#184). Default true =
+    /// no network on startup; user can opt-in via Settings (#184, fork A).
+    #[serde(default = "default_true")]
     pub update_check_disabled: bool,
     /// Enable the local stdio MCP server (`meatshell mcp serve`).
     #[serde(default = "default_mcp_preview_enabled")]
