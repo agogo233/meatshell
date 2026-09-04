@@ -771,6 +771,8 @@ async fn run_sftp(
                 let sftp = sftp.clone();
                 let handle = handle.clone();
                 let events = events.clone();
+                let rate_kbps = queue.rate_limit_kbps;
+                let preserve_mtime = queue.preserve_mtime;
                 // Register a cancel flag up-front so CancelTransfer can flip it (#100).
                 let id = Uuid::new_v4().to_string();
                 let cancel = Arc::new(AtomicBool::new(false));
@@ -2106,7 +2108,7 @@ async fn download_impl(
             drop(local_file);
             let when =
                 std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs as u64);
-            if let Ok(mut f) = std::fs::OpenOptions::new().write(true).open(local) {
+            if let Ok(f) = std::fs::OpenOptions::new().write(true).open(local) {
                 let _ = f.set_modified(when);
             }
         }

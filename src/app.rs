@@ -49,7 +49,7 @@ use self::window::*;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Max bytes merged into one Output event before starting a fresh chunk (#209).
 /// Keeps a single UI callback from spending hundreds of ms in vt100 ingest.
@@ -6708,7 +6708,7 @@ fn wire_key_input(
                     .find(|h| h.row == row && col >= h.col && col < h.col + h.len)
                     .map(|h| (h.kind, h.value.clone()))
             });
-            let Some((kind, value)) = hit else {
+            let Some(Some((kind, value))) = hit else {
                 return false;
             };
             match kind {

@@ -508,9 +508,9 @@ export component AppWindow inherits Window {
     in-out property <length> quick-panel-width: 260px;
     in-out property <length> quick-panel-height: 220px;
     in-out property <string> quick-panel-dock: "right";
-    property <string> quick-external-command;
-    property <bool> quick-external-send-enter;
-    property <int> quick-external-sequence;
+    in-out property <string> quick-external-command;
+    in-out property <bool> quick-external-send-enter;
+    in-out property <int> quick-external-sequence;
     in property <[string]> command-history;          // oldest first (newest last, #113)
     in property <[string]> history-view;             // filtered dropdown, oldest first (newest last, #101)
     callback run-command(string /* tab-id */, string /* cmd */, bool /* to-all */);
