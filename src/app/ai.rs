@@ -134,69 +134,73 @@ fn truncate_str(s: &str, max_chars: usize) -> String {
 
 // ── UI model helpers (UI thread only) ────────────────────────────────────
 
-fn ai_message_model(window: &AppWindow) -> Option<&VecModel<AiMessage>> {
-    window
-        .get_ai_messages()
-        .as_any()
-        .downcast_ref::<VecModel<AiMessage>>()
+/// Run `f` with the AI conversation model. The `ModelRc` returned by
+/// `get_ai_messages` is owned here (it cannot lend references out), so the
+/// downcast and the access both happen inside this scope.
+fn with_ai_model<R>(
+    window: &AppWindow,
+    f: impl FnOnce(&VecModel<AiMessage>) -> R,
+) -> Option<R> {
+    let rc = window.get_ai_messages();
+    let vm = rc.as_any().downcast_ref::<VecModel<AiMessage>>()?;
+    Some(f(vm))
 }
 
 fn push_ai_message(window: &AppWindow, role: &str, content: &str) {
-    if let Some(vm) = ai_message_model(window) {
+    with_ai_model(window, |vm| {
         vm.push(AiMessage {
             role: role.into(),
             content: content.into(),
         });
-    }
+    });
 }
 
 /// Append a streamed delta to the trailing assistant placeholder row.
 fn append_ai_delta(window: &AppWindow, delta: &str) {
-    let Some(vm) = ai_message_model(window) else {
-        return;
-    };
-    let Some(last) = vm.row_count().checked_sub(1) else {
-        return;
-    };
-    let Some(mut row) = vm.row_data(last) else {
-        return;
-    };
-    if row.role.as_str() != "assistant" {
-        return;
-    }
-    let mut content = row.content.to_string();
-    content.push_str(delta);
-    row.content = content.into();
-    vm.set_row_data(last, row);
+    with_ai_model(window, |vm| {
+        let Some(last) = vm.row_count().checked_sub(1) else {
+            return;
+        };
+        let Some(mut row) = vm.row_data(last) else {
+            return;
+        };
+        if row.role.as_str() != "assistant" {
+            return;
+        }
+        let mut content = row.content.to_string();
+        content.push_str(delta);
+        row.content = content.into();
+        vm.set_row_data(last, row);
+    });
 }
 
 /// Snapshot the conversation as (role, content) pairs for the next request.
 /// Error rows are never sent back to the API, and the window never starts
 /// mid-turn (a leading assistant answer without its user question is dropped).
 fn ai_history(window: &AppWindow, max_messages: usize) -> Vec<(String, String)> {
-    let Some(vm) = ai_message_model(window) else {
-        return Vec::new();
-    };
-    let mut rows = Vec::new();
-    for i in 0..vm.row_count() {
-        let Some(row) = vm.row_data(i) else { continue };
-        let role = row.role.to_string();
-        if role != "user" && role != "assistant" {
-            continue;
+    with_ai_model(window, |vm| {
+        let mut rows = Vec::new();
+        for i in 0..vm.row_count() {
+            let Some(row) = vm.row_data(i) else { continue };
+            let role = row.role.to_string();
+            if role != "user" && role != "assistant" {
+                continue;
+            }
+            let content = row.content.trim().to_string();
+            if content.is_empty() {
+                continue;
+            }
+            rows.push((role, content));
         }
-        let content = row.content.trim().to_string();
-        if content.is_empty() {
-            continue;
+        if rows.len() > max_messages {
+            rows.drain(..rows.len() - max_messages);
+            while rows.first().map(|(r, _)| r.as_str()) == Some("assistant") {
+                rows.remove(0);
+            }
         }
-        rows.push((role, content));
-    }
-    if rows.len() > max_messages {
-        rows.drain(..rows.len() - max_messages);
-        while rows.first().map(|(r, _)| r.as_str()) == Some("assistant") {
-            rows.remove(0);
-        }
-    }
-    rows
+        rows
+    })
+    .unwrap_or_default()
 }
 
 fn flush_delta(
@@ -249,9 +253,8 @@ fn stream_chat(
     .to_string();
 
     let agent = ai_agent(AI_STREAM_READ_TIMEOUT);
-    let mut req = agent
-        .post(chat_completions_url(&base_url))
-        .set("Content-Type", "application/json");
+    let url = chat_completions_url(&base_url);
+    let mut req = agent.post(url.as_str()).set("Content-Type", "application/json");
     if !api_key.is_empty() {
         req = req.set("Authorization", &format!("Bearer {api_key}"));
     }
@@ -342,7 +345,7 @@ fn finish_stream(
         if let Some(err) = err {
             // Drop the empty assistant placeholder so a failed request leaves
             // just the error bubble instead of a blank row.
-            if let Some(vm) = ai_message_model(&w) {
+            with_ai_model(&w, |vm| {
                 let last = vm.row_count().checked_sub(1);
                 if let Some(i) = last {
                     let is_blank = vm
@@ -353,7 +356,7 @@ fn finish_stream(
                         vm.remove(i);
                     }
                 }
-            }
+            });
             push_ai_message(&w, "error", &err);
         }
         w.set_ai_busy(false);
@@ -376,9 +379,8 @@ fn response_error(resp: ureq::Response) -> String {
 
 fn fetch_models(base_url: &str, api_key: &str) -> Result<Vec<SharedString>, String> {
     let agent = ai_agent(AI_MODELS_READ_TIMEOUT);
-    let mut req = agent
-        .get(models_url(base_url))
-        .set("Accept", "application/json");
+    let url = models_url(base_url);
+    let mut req = agent.get(url.as_str()).set("Accept", "application/json");
     if !api_key.is_empty() {
         req = req.set("Authorization", &format!("Bearer {api_key}"));
     }
@@ -526,10 +528,13 @@ pub(super) fn wire_ai_callbacks(
             // Clear the draft only now that the message is accepted; a failed
             // validation above leaves the user's text in the input box.
             w.set_ai_draft("".into());
+            // FnMut callbacks run once per invocation: everything captured by
+            // the spawn closure must be cloned per call.
             cancel.store(false, Ordering::Relaxed);
             let my_gen = generation.fetch_add(1, Ordering::Relaxed) + 1;
             let weak = weak.clone();
             let generation = generation.clone();
+            let cancel = cancel.clone();
             std::thread::spawn(move || {
                 stream_chat(
                     weak,
@@ -562,9 +567,7 @@ pub(super) fn wire_ai_callbacks(
         window.on_clear_ai_messages(move || {
             cancel.store(true, Ordering::Relaxed);
             let Some(w) = weak.upgrade() else { return };
-            if let Some(vm) = ai_message_model(&w) {
-                vm.set_vec(Vec::new());
-            }
+            with_ai_model(&w, |vm| vm.set_vec(Vec::new()));
         });
     }
 
