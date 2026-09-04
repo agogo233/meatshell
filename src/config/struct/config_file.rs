@@ -306,3 +306,17 @@ pub(crate) struct ExportFile {
     pub(crate) meatshell_export: u32,
     pub(crate) sessions: Vec<Session>,
 }
+
+/// Portable quick-commands export (#55 companion): names, commands and group
+/// names only — no secrets, so unlike [`ExportFile`] the JSON stays plaintext.
+/// `groups` preserves *empty* groups too (a command's own `group` field only
+/// covers non-empty ones).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct QuickCommandsExportFile {
+    /// Format marker / version so the schema can evolve later.
+    pub(crate) meatshell_quick_commands: u32,
+    #[serde(default)]
+    pub(crate) commands: Vec<QuickCommand>,
+    #[serde(default)]
+    pub(crate) groups: Vec<String>,
+}

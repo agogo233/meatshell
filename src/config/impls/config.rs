@@ -1793,6 +1793,98 @@ impl ConfigStore {
             .with_context(|| format!("failed to read {}", path.display()))?;
         self.import_json(&raw)
     }
+
+    /// Export quick commands + group names to a portable JSON string. No
+    /// secrets are involved, so (unlike [`Self::export_json`]) the file stays
+    /// plaintext. Returns the number of commands.
+    pub fn quick_commands_export_json(&self) -> Result<(String, usize)> {
+        let out = QuickCommandsExportFile {
+            meatshell_quick_commands: 1,
+            commands: self.cache.quick_commands.clone(),
+            groups: self.cache.quick_groups.clone(),
+        };
+        Ok((serde_json::to_string_pretty(&out)?, out.commands.len()))
+    }
+
+    /// Export quick commands to a portable JSON file at a user-chosen path.
+    pub fn quick_commands_export_to(&self, path: &Path) -> Result<usize> {
+        let (raw, count) = self.quick_commands_export_json()?;
+        fs::write(path, raw).with_context(|| format!("failed to write {}", path.display()))?;
+        Ok(count)
+    }
+
+    /// Import quick commands from a MeatShell export (wrapper object) or a
+    /// bare `QuickCommand` array. Merge semantics: blank name/command entries
+    /// and exact name+command+group duplicates are skipped; the file's
+    /// `groups` list (empty-group placeholders) is merged into the group
+    /// names. The store is saved if anything changed. Returns `(added,
+    /// skipped)`.
+    pub fn quick_commands_import_json(&mut self, raw: &str) -> Result<(usize, usize)> {
+        let (commands, groups) = match serde_json::from_str::<QuickCommandsExportFile>(raw) {
+            Ok(file) => (file.commands, file.groups),
+            Err(wrapper_error) => {
+                // Fall back to a bare array so hand-written / third-party
+                // lists import without the version wrapper.
+                let commands = serde_json::from_str::<Vec<QuickCommand>>(raw).with_context(
+                    || {
+                        format!(
+                            "not a valid MeatShell quick-commands export file; MeatShell parser: {wrapper_error}"
+                        )
+                    },
+                )?;
+                (commands, Vec::new())
+            }
+        };
+
+        let mut added = 0usize;
+        let mut skipped = 0usize;
+        for c in commands {
+            // Same validation as the interactive Add flow: trimmed name/group,
+            // non-blank name + command.
+            let name = c.name.trim().to_string();
+            let group = c.group.trim().to_string();
+            if name.is_empty() || c.command.trim().is_empty() {
+                skipped += 1;
+                continue;
+            }
+            // Dedup against the growing list, so repeats inside the file
+            // itself are skipped too.
+            let dup = self.cache.quick_commands.iter().any(|x| {
+                x.name == name && x.command == c.command && x.group == group
+            });
+            if dup {
+                skipped += 1;
+                continue;
+            }
+            self.cache.quick_commands.push(QuickCommand {
+                name,
+                command: c.command,
+                group,
+                send_enter: c.send_enter,
+            });
+            added += 1;
+        }
+        // Empty groups only exist in `quick_groups`; groups referenced by
+        // commands are derived by the model itself.
+        let groups_before = self.cache.quick_groups.len();
+        for g in &groups {
+            self.add_quick_group(g.clone());
+        }
+        // Same trade-off as `import_json`: on save failure the cache already
+        // holds the merged entries (a later save persists them); the error is
+        // surfaced to the user via the hint.
+        if added > 0 || self.cache.quick_groups.len() != groups_before {
+            self.save()?;
+        }
+        Ok((added, skipped))
+    }
+
+    /// Import quick commands from a MeatShell export file at a user path.
+    pub fn quick_commands_import_from(&mut self, path: &Path) -> Result<(usize, usize)> {
+        let raw = fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        self.quick_commands_import_json(&raw)
+    }
 }
 
 #[cfg(test)]
@@ -2426,5 +2518,48 @@ mod tests {
         assert!(!store.reorder_session("a", -1));
         assert!(!store.reorder_session("x", 1));
         assert!(!store.reorder_session("nope", 1));
+    }
+
+    #[test]
+    fn quick_commands_import_merges_dedupes_and_filters() {
+        let mut store = temp_store();
+        store.set_quick_commands(vec![QuickCommand {
+            name: "ls".into(),
+            command: "ls -al".into(),
+            group: "misc".into(),
+            send_enter: true,
+        }]);
+        let file = r#"{
+            "meatshell_quick_commands": 1,
+            "commands": [
+                {"name":"ls","command":"ls -al","group":"misc","send_enter":true},
+                {"name":"df","command":"df -h","group":"tools"},
+                {"name":"  ","command":"echo hi"},
+                {"name":"no-cmd","command":"   "}
+            ],
+            "groups": ["tools", "empty-one"]
+        }"#;
+        // dup + blank name + blank command skipped; "df" added.
+        assert_eq!(store.quick_commands_import_json(file).unwrap(), (1, 3));
+        assert_eq!(store.quick_commands().len(), 2);
+        assert!(store.quick_groups().contains(&"tools".to_string()));
+        assert!(store.quick_groups().contains(&"empty-one".to_string()));
+        // Re-importing the same file is idempotent: nothing added.
+        assert_eq!(store.quick_commands_import_json(file).unwrap(), (0, 4));
+    }
+
+    #[test]
+    fn quick_commands_import_accepts_bare_array_and_rejects_garbage() {
+        let mut store = temp_store();
+        let arr = r#"[{"name":"top","command":"top"}]"#;
+        assert_eq!(store.quick_commands_import_json(arr).unwrap(), (1, 0));
+        // serde defaults: send_enter = true, group = "".
+        assert!(store.quick_commands()[0].send_enter);
+        assert!(store.quick_commands()[0].group.is_empty());
+        assert!(store.quick_commands_import_json("not json").is_err());
+        // A sessions-export object must not pass as a quick-commands file.
+        assert!(store
+            .quick_commands_import_json(r#"{"meatshell_export":1,"sessions":[]}"#)
+            .is_err());
     }
 }

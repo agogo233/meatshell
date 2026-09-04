@@ -5407,6 +5407,7 @@ fn wire_key_input(
                 w.set_qcm_group(c.group.into());
                 w.set_qcm_send_enter(c.send_enter);
                 w.set_qcm_edit_index(index);
+                w.set_qcm_io_hint("".into());
                 w.set_quick_cmd_manage_open(true);
             }
         });
@@ -5556,6 +5557,68 @@ fn wire_key_input(
             }
             if let Some(w) = weak.upgrade() {
                 w.set_quick_commands(quick_cmd_model(&store_rc.borrow(), &collapsed.borrow()));
+            }
+        });
+    }
+    // Quick-command export: whole list → portable plaintext JSON (no secrets
+    // involved, unlike the sessions export). Result shows in the dialog hint.
+    {
+        let store_rc = store.clone();
+        let weak = window.as_weak();
+        window.on_export_quick_commands(move || {
+            let Some(path) = rfd::FileDialog::new()
+                .set_file_name("meatshell-quick-commands.json")
+                .add_filter("JSON", &["json"])
+                .save_file()
+            else {
+                return;
+            };
+            let res = store_rc.borrow().quick_commands_export_to(&path);
+            if let Some(w) = weak.upgrade() {
+                let hint = match res {
+                    Ok(n) => format!("{} {}", t("已导出快捷命令", "exported"), n),
+                    Err(e) => format!("{}: {}", t("导出失败", "export failed"), e),
+                };
+                w.set_qcm_io_hint(hint.into());
+            }
+        });
+    }
+    // Quick-command import: merge from a JSON file (dedup by name+command+
+    // group; blank name/command entries skipped). Rebuild the shared model so
+    // command bar + sidebar + dialog all pick the new entries up.
+    {
+        let store_rc = store.clone();
+        let weak = window.as_weak();
+        let collapsed = collapsed_quick_groups.clone();
+        window.on_import_quick_commands(move || {
+            let Some(path) = rfd::FileDialog::new()
+                .add_filter("JSON", &["json"])
+                .pick_file()
+            else {
+                return;
+            };
+            let res = store_rc.borrow_mut().quick_commands_import_from(&path);
+            if let Some(w) = weak.upgrade() {
+                match res {
+                    Ok((added, skipped)) => {
+                        w.set_qcm_io_hint(
+                            format!(
+                                "{} {} / {} {}",
+                                t("已导入", "imported"),
+                                added,
+                                t("跳过", "skipped"),
+                                skipped
+                            )
+                            .into(),
+                        );
+                        w.set_quick_commands(quick_cmd_model(&store_rc.borrow(), &collapsed.borrow()));
+                    }
+                    Err(e) => {
+                        w.set_qcm_io_hint(
+                            format!("{}: {}", t("导入失败", "import failed"), e).into(),
+                        );
+                    }
+                }
             }
         });
     }
@@ -6046,6 +6109,7 @@ fn wire_key_input(
                 w.set_qcm_group("".into());
                 w.set_qcm_send_enter(true);
                 w.set_qcm_edit_index(-1);
+                w.set_qcm_io_hint("".into());
                 w.set_quick_cmd_manage_open(true);
             }
         });

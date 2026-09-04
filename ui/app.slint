@@ -526,6 +526,7 @@ export component AppWindow inherits Window {
     in-out property <string> qcm-group;               // manage form: group field (#55)
     in-out property <bool> qcm-send-enter: true;      // click sends+executes (B站)
     in-out property <int> qcm-edit-index: -1;         // -1 = add, >=0 = edit that entry (#55)
+    in-out property <string> qcm-io-hint;             // import/export result line (dialog-inline)
     callback add-quick-command(string /* name */, string /* command */, string /* group */, bool /* send-enter */);
     callback save-quick-command(int /* index */, string /* name */, string /* command */, string /* group */, bool /* send-enter */);
     callback delete-quick-command(int /* index */);
@@ -540,6 +541,9 @@ export component AppWindow inherits Window {
     property <string> qcg-orig;                       // group dialog: "" = new, else rename target
     callback submit-quick-group(string /* orig */, string /* name */);
     callback delete-quick-group(string /* name */);
+    // Import/export the whole quick-command list via portable JSON files.
+    callback export-quick-commands();
+    callback import-quick-commands();
     in property <[TransferInfo]> transfers; // download/upload records (newest first)
     in property <[string]> about-libs;      // open-source libraries used
     in-out property <bool> lang-en: false;  // current UI language (false = 中文)
@@ -1865,6 +1869,7 @@ export component AppWindow inherits Window {
                             root.qcm-command = "";
                             root.qcm-group = "";
                             root.qcm-edit-index = -1;
+                            root.qcm-io-hint = "";
                             root.quick-cmd-manage-open = true;
                         }
                         quick-dock-drag-move(ax, ay) => {
@@ -2057,6 +2062,7 @@ export component AppWindow inherits Window {
                     root.qcm-command = "";
                     root.qcm-group = "";
                     root.qcm-edit-index = -1;
+                    root.qcm-io-hint = "";
                     root.quick-cmd-manage-open = true;
                 }
                 close => { root.quick-panel-collapsed = true; }
@@ -3438,9 +3444,28 @@ export component AppWindow inherits Window {
                     checked <=> root.qcm-send-enter;
                 }
 
-                // New (empty) group.
+                // Import / export + new (empty) group. The hint shows the last
+                // import/export result, cleared whenever the dialog reopens.
                 HorizontalLayout {
-                    Rectangle { horizontal-stretch: 1; }
+                    spacing: 8px;
+                    Text {
+                        text: root.qcm-io-hint;
+                        visible: root.qcm-io-hint != "";
+                        overflow: elide;
+                        color: Theme.text-muted;
+                        font-size: Theme.fs-xs;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                    }
+                    Rectangle { horizontal-stretch: root.qcm-io-hint == "" ? 1 : 0; }
+                    Button {
+                        text: root.lang-en ? "Export" : "导出";
+                        clicked => { root.export-quick-commands(); }
+                    }
+                    Button {
+                        text: root.lang-en ? "Import" : "导入";
+                        clicked => { root.import-quick-commands(); }
+                    }
                     Button {
                         text: root.lang-en ? "+ New group" : "+ 新建分组";
                         clicked => { root.qcg-orig = ""; root.qcg-name = ""; root.qcg-open = true; }
