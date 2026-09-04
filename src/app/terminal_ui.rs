@@ -176,19 +176,29 @@ pub(super) fn apply_terminal_resize(
 pub(super) fn rebuild_tab_display(win: &AppWindow, bufs: &TermBuffers, tab_id: &str) {
     let data = with_term_buf(bufs, tab_id, |buf| {
         let cols = buf.parser.screen().size().1;
-        let b = buf.render(); // also refreshes buf.displayed_text
+        let b = buf.render(); // also refreshes buf.displayed_text + buf.action_links
         let matches = compute_find_matches(&buf.displayed_text, &buf.find_query);
+        let links: Vec<TermMatch> = buf
+            .action_links
+            .iter()
+            .map(|h| TermMatch {
+                row: h.row,
+                col: h.col,
+                len: h.len,
+            })
+            .collect();
         let sel = buf.selection_rects_visible(cols);
         // Extent-based (not visible-rect-based): a selection scrolled out of
         // view still extracts text, so the ctx-menu item must stay available.
         let has_sel = buf.selection_has_extent();
-        (b, matches, sel, has_sel)
+        (b, matches, links, sel, has_sel)
     });
-    let Some((b, matches, sel, has_sel)) = data else {
+    let Some((b, matches, links, sel, has_sel)) = data else {
         return;
     };
     let spans = ModelRc::from(Rc::new(VecModel::from(b.spans)));
     let fm = ModelRc::from(Rc::new(VecModel::from(matches)));
+    let lm = ModelRc::from(Rc::new(VecModel::from(links)));
     let sm = ModelRc::from(Rc::new(VecModel::from(sel)));
     let (cr, cc, ru, alt) = (b.cursor_row, b.cursor_col, b.rows_used, b.is_alt);
     let (smax, soff) = (b.scroll_max, b.scroll_offset);
@@ -200,6 +210,7 @@ pub(super) fn rebuild_tab_display(win: &AppWindow, bufs: &TermBuffers, tab_id: &
         row.is_alt_screen = alt;
         row.mouse_tracked = b.mouse_tracked;
         row.find_matches = fm.clone();
+        row.link_matches = lm.clone();
         row.selection = sm.clone();
         row.has_selection = has_sel;
         row.scroll_max = smax;
@@ -291,6 +302,29 @@ pub(super) fn apply_custom_output_rules(
             handle.lock().unwrap().custom_highlight_rules = compiled.clone();
         }
     }
+    let tab_ids: Vec<String> = bufs.lock().unwrap().keys().cloned().collect();
+    for tab_id in tab_ids {
+        rebuild_tab_display(window, bufs, &tab_id);
+    }
+}
+
+/// Push the current action-link flags to every terminal buffer and refresh the
+/// window-level master switch, then re-render so underlines appear/disappear
+/// immediately. `flags` is all-false when the feature is off or the platform is
+/// excluded, which also clears existing hits on the next render.
+pub(super) fn apply_action_links(
+    window: &AppWindow,
+    bufs: &TermBuffers,
+    flags: crate::terminal::ActionLinkFlags,
+    enabled: bool,
+) {
+    {
+        let handles: Vec<_> = bufs.lock().unwrap().values().cloned().collect();
+        for handle in handles {
+            handle.lock().unwrap().action_link_flags = flags;
+        }
+    }
+    window.set_action_links_enabled(enabled);
     let tab_ids: Vec<String> = bufs.lock().unwrap().keys().cloned().collect();
     for tab_id in tab_ids {
         rebuild_tab_display(window, bufs, &tab_id);

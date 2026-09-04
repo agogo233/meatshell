@@ -177,11 +177,11 @@ use crate::ssh::{
 #[cfg(windows)]
 use crate::terminal::c0_letter_key_down;
 use crate::terminal::{
-    bare_ctrl_marker_workaround_enabled, cell_prefix, compile_output_rules,
+    bare_ctrl_marker_workaround_enabled, cell_prefix, compile_output_rules, default_command,
     encode_command_bar_input, encode_mouse_event, encode_pasted_text, is_terminal_interrupt,
     key_to_pty_bytes, paste_requires_large_review, should_drop_bare_ctrl_marker,
-    terminal_uses_bracketed_paste, CsiState, OutputHighlightPreset, RenderGates, TabRenderGate,
-    TermBuffer, TermBufferHandle, TermBuffers,
+    terminal_uses_bracketed_paste, ActionLinkKind, CsiState, OutputHighlightPreset, RenderGates,
+    TabRenderGate, TermBuffer, TermBufferHandle, TermBuffers,
 };
 #[cfg(test)]
 use crate::terminal::{
@@ -861,6 +861,10 @@ fn open_window(
         window.set_json_format_output(s.json_format_output());
         window.set_output_highlight_preset(s.output_highlight_preset().into());
         window.set_output_highlight_rules(output_highlight_rule_model(&s));
+        window.set_action_links_enabled(s.action_links_enabled());
+        window.set_action_links_ipv4(s.action_links_ipv4_pref());
+        window.set_action_links_host_port(s.action_links_host_port_pref());
+        window.set_action_links_url(s.action_links_url_pref());
         window.set_ui_scale(s.ui_scale() as f32 / 100.0); // global UI zoom (#100)
         window.set_panel_font(s.panel_font() as f32 / 100.0); // settings-panel font scale
         window.set_renderer_mode(s.renderer_mode().into());
@@ -1397,6 +1401,28 @@ fn open_window(
             }
             if let Some(w) = weak.upgrade() {
                 apply_output_highlight(&w, &bufs, enabled, &preset);
+            }
+        });
+    }
+    // Action links: persist the master + per-kind switches and refresh every
+    // open terminal immediately.
+    {
+        let weak = window.as_weak();
+        let store = store.clone();
+        let bufs = bufs.clone();
+        window.on_set_action_links(move |enabled, ipv4, host_port, url| {
+            {
+                let mut s = store.borrow_mut();
+                s.set_action_links_enabled(enabled);
+                s.set_action_links_ipv4(ipv4);
+                s.set_action_links_host_port(host_port);
+                s.set_action_links_url(url);
+                let _ = s.save();
+                let flags = action_link_flags(&s);
+                let effective = s.action_links_enabled();
+                if let Some(w) = weak.upgrade() {
+                    apply_action_links(&w, &bufs, flags, effective);
+                }
             }
         });
     }
@@ -4776,6 +4802,8 @@ fn wire_session_callbacks(
                     view_offset: 0,
                     scroll_accum: 0.0,
                     displayed_text: Vec::new(),
+                    action_links: Vec::new(),
+                    action_link_flags: action_link_flags(&store.borrow()),
                     csi_state: CsiState::Normal,
                     csi_pending: Vec::new(),
                     raw: std::collections::VecDeque::new(),
@@ -6241,6 +6269,7 @@ fn wire_key_input(
                 set_terminal_row(&win, &tid, |row| {
                     row.spans = ModelRc::from(Rc::new(VecModel::<TermSpan>::default()));
                     row.find_matches = ModelRc::from(Rc::new(VecModel::<TermMatch>::default()));
+                    row.link_matches = ModelRc::from(Rc::new(VecModel::<TermMatch>::default()));
                     row.selection = ModelRc::from(Rc::new(VecModel::<TermMatch>::default()));
                     row.has_selection = false;
                     row.cursor_row = 0;
@@ -6284,6 +6313,47 @@ fn wire_key_input(
                     row.find_matches = model.clone();
                 });
             }
+        });
+    }
+
+    // Ctrl+click on a terminal action link: open http(s) URLs in the browser,
+    // or fill a diagnostic command (ping / curl) for IPv4 / host:port hits.
+    // Returns true when a link was hit so the terminal skips drag-selection.
+    {
+        let bufs_link = bufs.clone();
+        let weak = window.as_weak();
+        window.on_action_link_click(move |tab_id: SharedString, row: i32, col: i32| -> bool {
+            let tid = tab_id.to_string();
+            let hit = with_term_buf(&bufs_link, &tid, |buf| {
+                buf.action_links
+                    .iter()
+                    .find(|h| h.row == row && col >= h.col && col < h.col + h.len)
+                    .map(|h| (h.kind, h.value.clone()))
+            });
+            let Some((kind, value)) = hit else {
+                return false;
+            };
+            match kind {
+                ActionLinkKind::Url => {
+                    #[cfg(windows)]
+                    let _ = std::process::Command::new("explorer").arg(&value).spawn();
+                    #[cfg(target_os = "macos")]
+                    let _ = std::process::Command::new("open").arg(&value).spawn();
+                    #[cfg(all(not(windows), not(target_os = "macos")))]
+                    let _ = std::process::Command::new("xdg-open").arg(&value).spawn();
+                }
+                ActionLinkKind::Ip | ActionLinkKind::HostPort => {
+                    if let Some(cmd) = default_command(kind, &value) {
+                        if let Some(win) = weak.upgrade() {
+                            let seq = win.get_quick_external_sequence() + 1;
+                            win.set_quick_external_command(cmd.into());
+                            win.set_quick_external_send_enter(false);
+                            win.set_quick_external_sequence(seq);
+                        }
+                    }
+                }
+            }
+            true
         });
     }
 
@@ -6635,6 +6705,20 @@ fn wire_key_input(
                 }
             },
         );
+    }
+}
+
+/// Build the per-kind action-link enable flags from config. The master switch
+/// collapses to all-false (so `scan_action_links` short-circuits) when the
+/// feature is off or the platform is excluded.
+fn action_link_flags(store: &ConfigStore) -> crate::terminal::ActionLinkFlags {
+    if !store.action_links_enabled() {
+        return crate::terminal::ActionLinkFlags::default();
+    }
+    crate::terminal::ActionLinkFlags {
+        ipv4: store.action_links_ipv4(),
+        host_port: store.action_links_host_port(),
+        url: store.action_links_url(),
     }
 }
 

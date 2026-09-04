@@ -1,7 +1,7 @@
 use crate::terminal::{
     build_row, cell_prefix, char_after_cell_end, char_at_cell_start, detect_scroll,
-    highlight_plain_output, render_term_span, BuiltScreen, CsiState, Line, TermBuffer, MAX_HISTORY,
-    RAW_CAP,
+    highlight_plain_output, render_term_span, scan_action_links, BuiltScreen, CsiState, Line,
+    TermBuffer, MAX_HISTORY, RAW_CAP,
 };
 use crate::ui::TermMatch;
 
@@ -38,6 +38,7 @@ impl TermBuffer {
         self.sel_focus = None;
         self.sel_ranges.clear();
         self.displayed_text = Vec::new();
+        self.action_links = Vec::new();
         self.csi_state = CsiState::Normal;
         self.csi_pending = Vec::new();
         self.raw = std::collections::VecDeque::new();
@@ -678,6 +679,13 @@ impl TermBuffer {
                 displayed.push(plain.trim_end().to_string());
             }
             self.displayed_text = displayed;
+            // Action links are suppressed on the alternate screen (TUI apps own
+            // the grid and their own mouse/keyboard handling).
+            self.action_links = if is_alt {
+                Vec::new()
+            } else {
+                scan_action_links(&self.displayed_text, &self.action_link_flags)
+            };
             let rows_used = if is_alt {
                 rows as i32
             } else {
@@ -734,6 +742,7 @@ impl TermBuffer {
             displayed.push(String::new());
         }
         self.displayed_text = displayed;
+        self.action_links = scan_action_links(&self.displayed_text, &self.action_link_flags);
         BuiltScreen {
             spans,
             cursor_row: -1, // hide the live cursor while viewing history

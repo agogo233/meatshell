@@ -36,6 +36,8 @@ fn make_buf(
         view_offset,
         scroll_accum: 0.0,
         displayed_text: Vec::new(),
+        action_links: Vec::new(),
+        action_link_flags: crate::terminal::ActionLinkFlags::default(),
         csi_state: CsiState::Normal,
         csi_pending: Vec::new(),
         raw: std::collections::VecDeque::new(),

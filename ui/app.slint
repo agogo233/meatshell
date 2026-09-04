@@ -60,6 +60,7 @@ export struct TerminalState {
     is-alt-screen: bool,
     mouse-tracked: bool,     // remote app wants mouse events (btop/htop/mc)
     find-matches: [TermMatch], // search-highlight rectangles
+    link-matches: [TermMatch], // action-link underline rectangles (IPv4/host:port/URL)
     selection: [TermMatch],    // drag-selection highlight rectangles
     has-selection: bool,       // live selection with extent → ctx-menu "Add as quick command"
 
@@ -513,6 +514,10 @@ export component AppWindow inherits Window {
     callback delete-history(int /* index */);   // remove a history entry (#96)
     callback delete-history-cmd(string /* cmd */);   // remove a history entry by command (#101)
     callback search-history(string /* query */);     // filter the history dropdown (#101)
+    // A modifier-click on a terminal action link resolves to an action in Rust;
+    // the callback returns true when a link was hit so the terminal skips its
+    // own drag-selection. The master enable flag is `action-links-enabled`.
+    callback action-link-click(string /* tab-id */, int /* row */, int /* col */) -> bool;
     in-out property <bool> quick-cmd-manage-open: false;  // manage dialog
     in-out property <length> qcm-dialog-width: 560px;
     in-out property <length> qcm-dialog-height: 560px;
@@ -567,6 +572,12 @@ export component AppWindow inherits Window {
     in-out property <string> output-highlight-preset: "log";
     in property <[OutputRuleItem]> output-highlight-rules;
     in-out property <string> output-highlight-rule-status;
+    // Terminal action links (IPv4 / host:port / http(s) URL) settings.
+    in-out property <bool> action-links-enabled: true;
+    in-out property <bool> action-links-ipv4: true;
+    in-out property <bool> action-links-host-port: true;
+    in-out property <bool> action-links-url: true;
+    callback set-action-links(bool, bool, bool, bool); // master, ipv4, host:port, url
     in-out property <float> ui-scale <=> Theme.ui-scale;   // global UI zoom (#100)
     in-out property <float> panel-font <=> Theme.panel-font;  // settings-panel font scale
     callback set-panel-font(int);                          // apply + persist (percent)
@@ -1863,6 +1874,9 @@ export component AppWindow inherits Window {
                         is-alt-screen: term.is-alt-screen;
                         mouse-tracked: term.mouse-tracked;
                         find-matches: term.find-matches;
+                        link-matches: term.link-matches;
+                        action-links-enabled: root.action-links-enabled;
+                        link-clicked(row, col) => { return root.action-link-click(term.id, row, col); }
                         selection: term.selection;
                         has-selection: term.has-selection;
                         sftp-panel-height: term.sftp-panel-height;
@@ -4836,6 +4850,10 @@ export component AppWindow inherits Window {
                     output-highlight-preset <=> root.output-highlight-preset;
                     output-highlight-rules: root.output-highlight-rules;
                     output-highlight-rule-status <=> root.output-highlight-rule-status;
+                    action-links-enabled <=> root.action-links-enabled;
+                    action-links-ipv4 <=> root.action-links-ipv4;
+                    action-links-host-port <=> root.action-links-host-port;
+                    action-links-url <=> root.action-links-url;
                     ui-scale: root.ui-scale;
                     sftp-follow-cd <=> root.sftp-follow-cd;
                     collapse-sidebar-default <=> root.collapse-sidebar-default;
@@ -4883,6 +4901,9 @@ export component AppWindow inherits Window {
                         root.set-output-highlight(enabled, preset);
                     }
                     set-json-format-output(enabled) => { root.set-json-format-output(enabled); }
+                    set-action-links(enabled, ipv4, host-port, url) => {
+                        root.set-action-links(enabled, ipv4, host-port, url);
+                    }
                     add-output-highlight-rule(pattern, regex, case-sensitive, whole-line, color) => {
                         root.add-output-highlight-rule(
                             pattern, regex, case-sensitive, whole-line, color)

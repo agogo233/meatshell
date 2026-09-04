@@ -1,6 +1,8 @@
 #[path = "struct/state.rs"]
 mod state;
 
+#[path = "impls/action_links.rs"]
+mod action_links;
 #[path = "impls/input.rs"]
 mod input;
 #[path = "impls/json_output.rs"]
@@ -41,6 +43,9 @@ pub(crate) use input::{
 pub(crate) use charset::CharsetTracker;
 pub(crate) use encoding::TerminalEncoding;
 pub(crate) use json_output::format_json_output;
+pub(crate) use action_links::{
+    default_command, scan_action_links, ActionLinkFlags, ActionLinkHit, ActionLinkKind,
+};
 #[cfg(any(target_os = "windows", test))]
 pub(crate) use input::windows_process_ctrl_release;
 #[cfg(any(target_os = "windows", test))]

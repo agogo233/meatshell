@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 
 use crate::terminal::charset::CharsetTracker;
+use crate::terminal::{ActionLinkFlags, ActionLinkHit};
 use crate::ui::TermSpan;
 
 #[cfg(any(target_os = "windows", test))]
@@ -41,6 +42,12 @@ pub(crate) struct TermBuffer {
     /// stepping a fixed amount per event.
     pub(crate) scroll_accum: f32,
     pub(crate) displayed_text: Vec<String>,
+    /// Action-link hits for the currently rendered window (recomputed in
+    /// `render()` from `displayed_text`). Empty on the alternate screen.
+    pub(crate) action_links: Vec<ActionLinkHit>,
+    /// Per-kind enable flags pushed from config; the master switch is folded
+    /// in by the caller (all-false when disabled).
+    pub(crate) action_link_flags: ActionLinkFlags,
     pub(crate) csi_state: CsiState,
     pub(crate) csi_pending: Vec<u8>,
     pub(crate) raw: VecDeque<u8>,

@@ -65,6 +65,8 @@ component SettingRow inherits Rectangle {
     in property <string> label;
     in property <string> desc;
     in property <bool> show-divider: true;
+    in property <bool> enabled: true;
+    opacity: root.enabled ? 1.0 : 0.45;
     VerticalLayout {
         HorizontalLayout {
             spacing: 14px;
@@ -375,6 +377,10 @@ export component InterfacePanel inherits Rectangle {
     in-out property <string> output-highlight-preset;
     in property <[OutputRuleItem]> output-highlight-rules;
     in-out property <string> output-highlight-rule-status;
+    in-out property <bool> action-links-enabled: true;
+    in-out property <bool> action-links-ipv4: true;
+    in-out property <bool> action-links-host-port: true;
+    in-out property <bool> action-links-url: true;
     in property <float> ui-scale;
     in-out property <bool> sftp-follow-cd;
     in-out property <bool> collapse-sidebar-default;
@@ -439,6 +445,7 @@ export component InterfacePanel inherits Rectangle {
     callback add-output-highlight-rule(string, bool, bool, bool, string) -> bool;
     callback remove-output-highlight-rule(int);
     callback set-output-highlight-rule-enabled(int, bool);
+    callback set-action-links(bool, bool, bool, bool); // master, ipv4, host:port, url
     callback set-ui-scale(int);
     callback set-panel-font(int);   // settings-panel font scale, percent
     callback set-renderer-mode(string);
@@ -977,6 +984,62 @@ export component InterfacePanel inherits Rectangle {
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
                             }
+                        }
+                    }
+                }
+
+                SectionHeader { text: root.lang-en ? "ACTION LINKS" : "动作链接"; height: 24px; }
+                SettingRow {
+                    label: root.lang-en ? "Clickable terminal links" : "终端可点击链接";
+                    desc: root.lang-en
+                        ? "Underline IPv4, host:port and http(s) URLs. Ctrl+click opens a URL or fills a diagnostic command."
+                        : "为 IPv4、host:port 和 http(s) 链接加下划线。Ctrl+单击打开链接或填入诊断命令。";
+                    Switch {
+                        on: root.action-links-enabled;
+                        toggled(v) => {
+                            root.action-links-enabled = v;
+                            root.set-action-links(v, root.action-links-ipv4,
+                                root.action-links-host-port, root.action-links-url);
+                        }
+                    }
+                }
+                SettingRow {
+                    label: root.lang-en ? "IPv4 addresses" : "IPv4 地址";
+                    enabled: root.action-links-enabled;
+                    Switch {
+                        on: root.action-links-ipv4;
+                        toggled(v) => {
+                            root.action-links-ipv4 = v;
+                            root.set-action-links(root.action-links-enabled, v,
+                                root.action-links-host-port, root.action-links-url);
+                        }
+                    }
+                }
+                SettingRow {
+                    label: root.lang-en ? "host:port endpoints" : "host:port 端点";
+                    enabled: root.action-links-enabled;
+                    Switch {
+                        on: root.action-links-host-port;
+                        toggled(v) => {
+                            root.action-links-host-port = v;
+                            root.set-action-links(root.action-links-enabled, root.action-links-ipv4,
+                                v, root.action-links-url);
+                        }
+                    }
+                }
+                SettingRow {
+                    label: root.lang-en ? "http(s) URLs" : "http(s) 链接";
+                    desc: root.lang-en
+                        ? "Only http and https are opened; other schemes are ignored."
+                        : "仅打开 http 与 https，其它协议一律忽略。";
+                    show-divider: false;
+                    enabled: root.action-links-enabled;
+                    Switch {
+                        on: root.action-links-url;
+                        toggled(v) => {
+                            root.action-links-url = v;
+                            root.set-action-links(root.action-links-enabled, root.action-links-ipv4,
+                                root.action-links-host-port, v);
                         }
                     }
                 }

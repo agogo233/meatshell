@@ -1062,6 +1062,20 @@ impl ConfigStore {
         self.cache.action_links_enabled && self.cache.action_links_ipv4
     }
 
+    /// Raw per-kind preference (ignores the master switch) — used to restore
+    /// the settings-panel checkbox state independently of the master toggle.
+    pub fn action_links_ipv4_pref(&self) -> bool {
+        self.cache.action_links_ipv4
+    }
+
+    pub fn action_links_host_port_pref(&self) -> bool {
+        self.cache.action_links_host_port
+    }
+
+    pub fn action_links_url_pref(&self) -> bool {
+        self.cache.action_links_url
+    }
+
     pub fn set_action_links_ipv4(&mut self, enabled: bool) {
         self.cache.action_links_ipv4 = enabled;
     }
