@@ -2106,7 +2106,7 @@ async fn download_impl(
             drop(local_file);
             let when =
                 std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs as u64);
-            if let Ok(f) = std::fs::OpenOptions::new().write(true).open(local) {
+            if let Ok(mut f) = std::fs::OpenOptions::new().write(true).open(local) {
                 let _ = f.set_modified(when);
             }
         }
