@@ -472,6 +472,14 @@ pub(super) fn apply_session_event_to_window(
                 }
             });
         }
+        SessionEvent::CommandMark(mark) => {
+            // Reflect the OSC 133 command-running state on the tab so the
+            // command-history dropdown can suppress itself while a program runs.
+            let running = matches!(mark, crate::ssh::CommandMark::CommandStart);
+            update_terminal(&|row: &mut TerminalState| {
+                row.command_running = running;
+            });
+        }
     }
 }
 

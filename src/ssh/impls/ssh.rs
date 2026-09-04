@@ -599,6 +599,58 @@ pub fn extract_osc_command(text: &str) -> Option<(String, std::ops::Range<usize>
     None
 }
 
+/// Find a shell-integration OSC 133 boundary (`ESC ] 133 ; A|B|C|D[;exit] BEL|ST`)
+/// passively emitted by the remote shell. Returns the mark and the byte range of
+/// the whole sequence so the caller can strip it before rendering. An incomplete
+/// sequence yields `None` (the next chunk completes it). We never inject these;
+/// shells that already emit them (some zsh/powerline setups) drive the
+/// "command running" flag.
+pub fn extract_osc133(text: &str) -> Option<(CommandMark, std::ops::Range<usize>)> {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] != 0x1b || bytes[i + 1] != b']' {
+            i += 1;
+            continue;
+        }
+        let seq_start = i;
+        let osc_start = i + 2;
+        i += 2;
+        let mut end = i;
+        let mut term_len = 0;
+        while end < bytes.len() {
+            if bytes[end] == 0x07 {
+                term_len = 1;
+                break;
+            } else if bytes[end] == 0x1b && end + 1 < bytes.len() && bytes[end + 1] == b'\\' {
+                term_len = 2;
+                break;
+            }
+            end += 1;
+        }
+        if end >= bytes.len() {
+            break; // incomplete — leave it for the next chunk
+        }
+        if let Ok(content) = std::str::from_utf8(&bytes[osc_start..end]) {
+            if let Some(rest) = content.strip_prefix("133;") {
+                let mark = match rest.chars().next() {
+                    Some('A') => CommandMark::PromptStart,
+                    Some('B') => CommandMark::PromptEnd,
+                    Some('C') => CommandMark::CommandStart,
+                    Some('D') => CommandMark::CommandEnd,
+                    _ => {
+                        i = end + term_len;
+                        continue;
+                    }
+                };
+                return Some((mark, seq_start..end + term_len));
+            }
+        }
+        i = end + term_len;
+    }
+    None
+}
+
 /// Percent-decode a URL path segment (e.g. `%20` → space).
 fn url_decode(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
@@ -2039,6 +2091,14 @@ async fn run_session(
                             }
                         }
 
+                        // Passively consume OSC 133 shell-integration boundaries
+                        // (never injected by us). Stripped so they don't render;
+                        // drives the "command running" flag for suggestion gating.
+                        while let Some((mark, range)) = extract_osc133(&text) {
+                            text.replace_range(range, "");
+                            let _ = events.send(SessionEvent::CommandMark(mark));
+                        }
+
                         for (response, append_enter) in trigger_engine.feed(&text) {
                             let mut bytes = response.as_str().as_bytes().to_vec();
                             if append_enter {
@@ -3170,6 +3230,42 @@ mod osc_command_tests {
         // No terminator yet → wait for more.
         assert!(extract_osc_command("\u{1b}]697;ls").is_none());
         assert!(extract_osc_command("plain text").is_none());
+    }
+}
+
+#[cfg(test)]
+mod osc133_tests {
+    use super::{CommandMark, extract_osc133};
+
+    #[test]
+    fn extracts_command_start_and_end() {
+        let (mark, range) = extract_osc133("x\u{1b}]133;C\u{07}y").expect("found");
+        assert_eq!(mark, CommandMark::CommandStart);
+        let mut s = "x\u{1b}]133;C\u{07}y".to_string();
+        s.replace_range(range, "");
+        assert_eq!(s, "xy");
+
+        let (mark, _) = extract_osc133("\u{1b}]133;D;0\u{07}").expect("found");
+        assert_eq!(mark, CommandMark::CommandEnd);
+    }
+
+    #[test]
+    fn extracts_prompt_marks_and_st() {
+        assert_eq!(
+            extract_osc133("\u{1b}]133;A\u{1b}\\").map(|(m, _)| m),
+            Some(CommandMark::PromptStart)
+        );
+        assert_eq!(
+            extract_osc133("\u{1b}]133;B\u{07}").map(|(m, _)| m),
+            Some(CommandMark::PromptEnd)
+        );
+    }
+
+    #[test]
+    fn ignores_other_osc_and_incomplete() {
+        assert!(extract_osc133("\u{1b}]7;file:///home\u{07}").is_none());
+        assert!(extract_osc133("\u{1b}]133;C").is_none()); // no terminator
+        assert!(extract_osc133("\u{1b}]133;Z\u{07}").is_none()); // unknown sub
     }
 }
 

@@ -23,6 +23,7 @@ fn make_buf(
         find_positions: Vec::new(),
         find_active: -1,
         search_history_mode: false,
+        command_running: false,
         is_dark: false,
         output_highlight: OutputHighlightPreset::Log,
         custom_highlight_rules: Vec::new(),

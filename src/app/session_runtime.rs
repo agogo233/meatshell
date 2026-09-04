@@ -263,6 +263,20 @@ pub(super) fn start_session_in_tab(tab_id: &str, session: Session, ctx: &Connect
                                 ui_batch.push(SessionEvent::Output(chunk));
                             }
                         }
+                        SessionEvent::CommandMark(mark) => {
+                            // Track "a command is running" on the buffer
+                            // off-thread; forward to the UI so the history
+                            // dropdown can suppress itself mid-program.
+                            if let Some(h) = crate::app::term_buf(&rt.bufs, &tab_id_pump) {
+                                if let Ok(mut buf) = h.lock() {
+                                    buf.command_running = matches!(
+                                        mark,
+                                        crate::ssh::CommandMark::CommandStart
+                                    );
+                                }
+                            }
+                            ui_batch.push(SessionEvent::CommandMark(mark));
+                        }
                         other => ui_batch.push(other),
                     }
                 }

@@ -24,6 +24,9 @@ pub(crate) struct TermBuffer {
     /// When true, search spans the whole scrollback with next/prev navigation;
     /// when false, only the visible window is highlighted (legacy behaviour).
     pub(crate) search_history_mode: bool,
+    /// True between OSC 133 `C` (command start) and `D`/`A` (end / next prompt).
+    /// Used to suppress command-history suggestions while a program is running.
+    pub(crate) command_running: bool,
     pub(crate) is_dark: bool,
     pub(crate) output_highlight: OutputHighlightPreset,
     pub(crate) custom_highlight_rules: Vec<CompiledOutputRule>,

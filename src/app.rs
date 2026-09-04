@@ -4896,6 +4896,7 @@ fn wire_session_callbacks(
                     find_positions: Vec::new(),
                     find_active: -1,
                     search_history_mode: store.borrow().search_history_mode(),
+                    command_running: false,
                     is_dark: is_dark_now,
                     output_highlight,
                     custom_highlight_rules,

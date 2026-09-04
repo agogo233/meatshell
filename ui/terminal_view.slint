@@ -624,6 +624,7 @@ export component TerminalView inherits Rectangle {
     in property <int> find-active: -1;      // current match index (-1 = none)
     in property <int> find-total: 0;        // total match count (history mode)
     in property <bool> search-history-mode: false;
+    in property <bool> command-running: false; // OSC 133: program executing
     callback terminal-scroll(float);         // scroll history by fractional lines (+ = up); Rust keeps the sub-line remainder so momentum decays smoothly
     // Wheel inside an alt-screen app (tmux/less/vim): forward to the program so it
     // scrolls, instead of doing nothing (#170). dir = +1 up / -1 down; col/row =
@@ -1718,7 +1719,9 @@ export component TerminalView inherits Rectangle {
                         edited => {
                             root.history-cursor = -1;
                             root.quick-open = false;
-                            root.history-autocomplete = self.text != "";
+                            // Suppress live suggestions while a program is running
+                            // (OSC 133), so typing into `less`/REPLs is not hijacked.
+                            root.history-autocomplete = self.text != "" && !root.command-running;
                             root.search-history(self.text);
                             root.history-open = root.history-autocomplete;
                             // Oldest→newest list: default-select the newest match.

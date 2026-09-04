@@ -8,6 +8,19 @@ use super::{
     RemoteTreeNode, RuntimeTunnelInfo, SessionCommand, SystemDetails,
 };
 
+/// A shell-integration command boundary from OSC 133.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandMark {
+    /// Prompt output begins (`133;A`).
+    PromptStart,
+    /// Prompt output ends, command input starts (`133;B`).
+    PromptEnd,
+    /// A command began executing (`133;C`).
+    CommandStart,
+    /// The command finished (`133;D[;exit]`).
+    CommandEnd,
+}
+
 /// Events emitted back to the UI thread.
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
@@ -84,9 +97,14 @@ pub enum SessionEvent {
         procs: Vec<ProcInfo>,
     },
 
-    /// A command the user ran in the terminal, captured via the shell hook
-    /// (OSC 697) so it can join the command-box history (#113).
-    CommandRan(String),
+/// A command the user ran in the terminal, captured via the shell hook
+/// (OSC 697) so it can join the command-box history (#113).
+CommandRan(String),
+
+/// A shell-integration command boundary reported via OSC 133 (passively parsed
+/// when the remote shell emits it; we never inject it by default). Drives the
+/// "is a command running" flag used to suppress history suggestions.
+CommandMark(CommandMark),
 
     /// Runtime tunnel state changed (#206).
     TunnelUpdate(Vec<RuntimeTunnelInfo>),
