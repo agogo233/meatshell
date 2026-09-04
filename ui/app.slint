@@ -794,6 +794,13 @@ export component AppWindow inherits Window {
     callback save-webdav-settings(bool, string, string, string, string, bool);
     callback webdav-upload();
     callback webdav-download();
+    // Passphrase-encrypted portable bundle (#P3-I): file + WebDAV round-trips.
+    in-out property <string> portable-passphrase;
+    in-out property <string> portable-status;
+    callback export-portable-bundle();
+    callback import-portable-bundle();
+    callback upload-portable-bundle();
+    callback download-portable-bundle();
     // --- AI assistant chat panel (OpenAI-compatible) -----------------------
     in-out property <bool> ai-panel-open: false;
     in-out property <length> ai-panel-width: 320px;
@@ -4901,6 +4908,8 @@ export component AppWindow inherits Window {
                     webdav-remote-path <=> root.webdav-remote-path;
                     webdav-accept-invalid-certs <=> root.webdav-accept-invalid-certs;
                     webdav-status <=> root.webdav-status;
+                    portable-passphrase <=> root.portable-passphrase;
+                    portable-status <=> root.portable-status;
                     ai-base-url <=> root.ai-base-url;
                     ai-api-key <=> root.ai-api-key;
                     ai-model <=> root.ai-model;
@@ -4970,6 +4979,10 @@ export component AppWindow inherits Window {
                     }
                     webdav-upload => { root.webdav-upload(); }
                     webdav-download => { root.webdav-download(); }
+                    export-portable-bundle => { root.export-portable-bundle(); }
+                    import-portable-bundle => { root.import-portable-bundle(); }
+                    upload-portable-bundle => { root.upload-portable-bundle(); }
+                    download-portable-bundle => { root.download-portable-bundle(); }
                     save-ai-settings(base-url, api-key, model) => {
                         root.save-ai-settings(base-url, api-key, model);
                     }

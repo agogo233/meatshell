@@ -2171,6 +2171,88 @@ impl ConfigStore {
         self.import_json(&raw)
     }
 
+    // ── Passphrase-encrypted portable bundle (#P3-I) ──────────────────────
+    //
+    // Unlike the fixed-key export above (obfuscation only), a *bundle* is
+    // sealed with a key derived from a user passphrase via Argon2id, so it can
+    // be carried between machines or pushed to WebDAV without exposing secrets.
+
+    /// Derive a 32-byte AEAD key from `passphrase` + `salt` using Argon2id.
+    fn bundle_key(passphrase: &str, salt: &[u8]) -> Result<zeroize::Zeroizing<[u8; 32]>> {
+        use argon2::{Algorithm, Argon2, Params, Version};
+        // m=64 MiB, t=3, p=1 — a deliberate cost for a rarely-run operation.
+        let params = Params::new(64 * 1024, 3, 1, Some(32))
+            .map_err(|e| anyhow::anyhow!("invalid Argon2 params: {e}"))?;
+        let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+        let mut material = zeroize::Zeroizing::new([0u8; 32]);
+        argon
+            .hash_password_into(passphrase.as_bytes(), salt, &mut *material)
+            .map_err(|e| anyhow::anyhow!("Argon2 KDF failed: {e}"))?;
+        Ok(material)
+    }
+
+    /// Seal the entire config (sessions + settings, secrets in plaintext) into a
+    /// passphrase-encrypted bundle string: `base64url("MPB1" ‖ salt‖ nonce ‖ ct)`.
+    pub fn export_bundle(&self, passphrase: &str) -> Result<String> {
+        use rand::RngCore as _;
+        if passphrase.is_empty() {
+            return Err(anyhow::anyhow!("empty passphrase"));
+        }
+        let json = serde_json::to_vec(&self.cache)?;
+        let mut salt = [0u8; 16];
+        OsRng.fill_bytes(&mut salt);
+        let key = Self::bundle_key(passphrase, &salt)?;
+        let cipher = ChaCha20Poly1305::new((&*key).into());
+        let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
+        let ct = cipher
+            .encrypt(&nonce, json.as_slice())
+            .map_err(|e| anyhow::anyhow!("bundle encrypt error: {e}"))?;
+        let mut blob = Vec::with_capacity(4 + salt.len() + nonce.len() + ct.len());
+        blob.extend_from_slice(b"MPB1");
+        blob.extend_from_slice(&salt);
+        blob.extend_from_slice(&nonce);
+        blob.extend_from_slice(&ct);
+        Ok(URL_SAFE_NO_PAD.encode(&blob))
+    }
+
+    /// Open a bundle produced by [`Self::export_bundle`], replacing the current
+    /// config wholesale. Returns the number of sessions restored.
+    pub fn import_bundle(&mut self, passphrase: &str, pack: &str) -> Result<usize> {
+        let blob = URL_SAFE_NO_PAD
+            .decode(pack.trim())
+            .map_err(|_| anyhow::anyhow!("not a valid bundle"))?;
+        if blob.len() < 4 + 16 + 12 || &blob[..4] != b"MPB1" {
+            return Err(anyhow::anyhow!("not a meatshell bundle"));
+        }
+        let salt = &blob[4..20];
+        let (nonce_bytes, ct) = blob[20..].split_at(12);
+        let key = Self::bundle_key(passphrase, salt)?;
+        let cipher = ChaCha20Poly1305::new((&*key).into());
+        let nonce = chacha20poly1305::Nonce::from_slice(nonce_bytes);
+        let plain = cipher
+            .decrypt(nonce, ct)
+            .map_err(|_| anyhow::anyhow!("wrong passphrase or corrupt bundle"))?;
+        let cfg: ConfigFile = serde_json::from_slice(&plain)?;
+        let n = cfg.sessions.len();
+        self.cache = cfg;
+        self.save()?;
+        Ok(n)
+    }
+
+    /// Write an encrypted bundle to `path`.
+    pub fn export_bundle_to(&self, path: &Path, passphrase: &str) -> Result<usize> {
+        let pack = self.export_bundle(passphrase)?;
+        fs::write(path, pack).with_context(|| format!("failed to write {}", path.display()))?;
+        Ok(self.cache.sessions.len())
+    }
+
+    /// Read and open an encrypted bundle from `path`.
+    pub fn import_bundle_from(&mut self, path: &Path, passphrase: &str) -> Result<usize> {
+        let pack = fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        self.import_bundle(passphrase, &pack)
+    }
+
     /// Export quick commands + group names to a portable JSON string. No
     /// secrets are involved, so (unlike [`Self::export_json`]) the file stays
     /// plaintext. Returns the number of commands.
@@ -2812,6 +2894,38 @@ mod tests {
         let _ = std::fs::remove_file(&export_path);
         let _ = std::fs::remove_file(&a.path);
         let _ = std::fs::remove_file(&b.path);
+    }
+
+    #[test]
+    fn bundle_roundtrip_and_wrong_passphrase() {
+        let mut a = temp_store();
+        a.cache.sessions.push(Session {
+            name: "pve".into(),
+            host: "10.0.0.9".into(),
+            port: 22,
+            user: "root".into(),
+            password: Secret::new("hunter2"),
+            ..Session::new_empty()
+        });
+
+        let pack = a.export_bundle("correct horse").unwrap();
+        // The bundle is opaque: no plaintext host or password leaks.
+        assert!(!pack.contains("hunter2"));
+        assert!(!pack.contains("10.0.0.9"));
+
+        // Right passphrase restores the session and its plaintext secret.
+        let mut b = temp_store();
+        assert_eq!(b.import_bundle("correct horse", &pack).unwrap(), 1);
+        assert_eq!(b.cache.sessions[0].password.as_str(), "hunter2");
+        assert_eq!(b.cache.sessions[0].host, "10.0.0.9");
+
+        // Wrong passphrase fails to authenticate (AEAD tag mismatch).
+        let mut c = temp_store();
+        assert!(c.import_bundle("wrong horse", &pack).is_err());
+
+        let _ = std::fs::remove_file(&a.path);
+        let _ = std::fs::remove_file(&b.path);
+        let _ = std::fs::remove_file(&c.path);
     }
 
     #[test]

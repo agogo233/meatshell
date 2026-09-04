@@ -4011,6 +4011,147 @@ fn wire_session_callbacks(
         });
     }
 
+    // ── Passphrase-encrypted portable bundle (#P3-I) ──────────────────────
+    // File export/import + WebDAV round-trip of the whole config, sealed with a
+    // key derived from the passphrase the user typed in the WebDAV settings page.
+    {
+        let weak = window.as_weak();
+        let store = store.clone();
+        window.on_export_portable_bundle(move || {
+            let Some(w) = weak.upgrade() else { return };
+            let pass = w.get_portable_passphrase().to_string();
+            if pass.is_empty() {
+                w.set_portable_status(
+                    t("请先填写便携包口令", "enter a bundle passphrase first").into(),
+                );
+                return;
+            }
+            if let Some(path) = rfd::FileDialog::new()
+                .set_file_name("meatshell.mpack")
+                .add_filter("MeatShell bundle", &["mpack"])
+                .save_file()
+            {
+                let res = store.borrow().export_bundle_to(&path, &pass);
+                if let Some(w) = weak.upgrade() {
+                    let msg = match res {
+                        Ok(n) => format!("{} {}", t("已导出便携包", "bundle exported"), n),
+                        Err(e) => format!("{}: {}", t("导出失败", "export failed"), e),
+                    };
+                    w.set_portable_status(msg.into());
+                }
+            }
+        });
+    }
+    {
+        let weak = window.as_weak();
+        let store = store.clone();
+        let sessions_model = sessions_model.clone();
+        let registry = registry.clone();
+        window.on_import_portable_bundle(move || {
+            let Some(w) = weak.upgrade() else { return };
+            let pass = w.get_portable_passphrase().to_string();
+            if pass.is_empty() {
+                w.set_portable_status(
+                    t("请先填写便携包口令", "enter a bundle passphrase first").into(),
+                );
+                return;
+            }
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("MeatShell bundle", &["mpack"])
+                .pick_file()
+            {
+                let res = store.borrow_mut().import_bundle_from(&path, &pass);
+                if let Some(w) = weak.upgrade() {
+                    let msg = match res {
+                        Ok(n) => {
+                            sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
+                            registry.broadcast_config_changed();
+                            format!("{} {}", t("已导入便携包", "bundle imported"), n)
+                        }
+                        Err(e) => format!("{}: {}", t("导入失败", "import failed"), e),
+                    };
+                    w.set_portable_status(msg.into());
+                }
+            }
+        });
+    }
+    {
+        let weak = window.as_weak();
+        let store = store.clone();
+        window.on_upload_portable_bundle(move || {
+            let Some(w) = weak.upgrade() else { return };
+            let pass = w.get_portable_passphrase().to_string();
+            let url = w.get_webdav_url().to_string();
+            let username = w.get_webdav_username().to_string();
+            let password = w.get_webdav_password().to_string();
+            let remote_path = w.get_webdav_remote_path().to_string();
+            let accept_invalid_certs = w.get_webdav_accept_invalid_certs();
+            if pass.is_empty() {
+                w.set_portable_status(
+                    t("请先填写便携包口令", "enter a bundle passphrase first").into(),
+                );
+                return;
+            }
+            let bundle_path = bundle_remote_path(&remote_path);
+            let res = store.borrow().export_bundle(&pass).and_then(|pack| {
+                let envelope = format!("{{\"meatshell_bundle\":1,\"data\":\"{pack}\"}}");
+                webdav_put_json(
+                    &url,
+                    &bundle_path,
+                    &username,
+                    &password,
+                    accept_invalid_certs,
+                    envelope,
+                )
+            });
+            if let Some(w) = weak.upgrade() {
+                let msg = match res {
+                    Ok(()) => t("便携包已上传", "bundle uploaded").to_string(),
+                    Err(e) => format!("{}: {}", t("上传失败", "upload failed"), e),
+                };
+                w.set_portable_status(msg.into());
+            }
+        });
+    }
+    {
+        let weak = window.as_weak();
+        let store = store.clone();
+        let sessions_model = sessions_model.clone();
+        let registry = registry.clone();
+        window.on_download_portable_bundle(move || {
+            let Some(w) = weak.upgrade() else { return };
+            let pass = w.get_portable_passphrase().to_string();
+            let url = w.get_webdav_url().to_string();
+            let username = w.get_webdav_username().to_string();
+            let password = w.get_webdav_password().to_string();
+            let remote_path = w.get_webdav_remote_path().to_string();
+            let accept_invalid_certs = w.get_webdav_accept_invalid_certs();
+            if pass.is_empty() {
+                w.set_portable_status(
+                    t("请先填写便携包口令", "enter a bundle passphrase first").into(),
+                );
+                return;
+            }
+            let bundle_path = bundle_remote_path(&remote_path);
+            let res = webdav_get_json(&url, &bundle_path, &username, &password, accept_invalid_certs)
+                .and_then(|body| {
+                    let pack = extract_bundle_data(&body)?;
+                    store.borrow_mut().import_bundle(&pass, &pack)
+                });
+            if let Some(w) = weak.upgrade() {
+                let msg = match res {
+                    Ok(n) => {
+                        sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
+                        registry.broadcast_config_changed();
+                        format!("{} {}", t("已导入便携包", "bundle imported"), n)
+                    }
+                    Err(e) => format!("{}: {}", t("下载失败", "download failed"), e),
+                };
+                w.set_portable_status(msg.into());
+            }
+        });
+    }
+
     // Edit -> open dialog prefilled.
     {
         let weak = window.as_weak();
@@ -7191,6 +7332,34 @@ fn parent_path(path: &str) -> String {
         Some(i) => trimmed[..i].to_string(),
         None => "/".to_string(),
     }
+}
+
+/// Derive the WebDAV path for the encrypted bundle from the configured
+/// connections path: swap the extension for `.mpack` so the two never collide.
+fn bundle_remote_path(connections_path: &str) -> String {
+    let p = connections_path.trim();
+    if p.is_empty() {
+        return "meatshell.mpack".to_string();
+    }
+    match p.rfind('.') {
+        Some(i) if i > p.rfind('/').unwrap_or(0) => format!("{}.mpack", &p[..i]),
+        _ => format!("{p}.mpack"),
+    }
+}
+
+/// Pull the base64url bundle out of the `{"meatshell_bundle":1,"data":"..."}`
+/// envelope written by the upload path.
+fn extract_bundle_data(body: &str) -> Result<String, anyhow::Error> {
+    let marker = "\"data\":\"";
+    let start = body
+        .find(marker)
+        .map(|i| i + marker.len())
+        .ok_or_else(|| anyhow::anyhow!("not a bundle envelope"))?;
+    let end = body[start..]
+        .find('"')
+        .map(|i| start + i)
+        .ok_or_else(|| anyhow::anyhow!("malformed bundle envelope"))?;
+    Ok(body[start..end].to_string())
 }
 
 #[cfg(test)]

@@ -399,6 +399,9 @@ export component InterfacePanel inherits Rectangle {
     in-out property <string> webdav-remote-path;
     in-out property <bool> webdav-accept-invalid-certs;
     in-out property <string> webdav-status;
+    // Passphrase-encrypted portable bundle (#P3-I).
+    in-out property <string> portable-passphrase;
+    in-out property <string> portable-status;
     // AI assistant chat (OpenAI-compatible). The key is stored encrypted at
     // rest by Rust; the panel visibility toggle persists the panel itself.
     in-out property <string> ai-base-url;
@@ -469,6 +472,10 @@ export component InterfacePanel inherits Rectangle {
     callback save-webdav-settings(bool, string, string, string, string, bool);
     callback webdav-upload();
     callback webdav-download();
+    callback export-portable-bundle();
+    callback import-portable-bundle();
+    callback upload-portable-bundle();
+    callback download-portable-bundle();
     callback save-ai-settings(string /* base-url */, string /* api-key */, string /* model */);
     callback discover-ai-models(string /* base-url */, string /* api-key */);
     callback set-ai-panel-enabled(bool);
@@ -1749,6 +1756,51 @@ export component InterfacePanel inherits Rectangle {
                 }
                 Text {
                     text: root.webdav-status;
+                    color: Theme.text-muted;
+                    font-size: 11px * Theme.panel-font;
+                    wrap: word-wrap;
+                }
+                SectionHeader { text: root.lang-en ? "PORTABLE BUNDLE" : "便携包"; height: 24px; }
+                Text {
+                    text: root.lang-en
+                        ? "Seal all sessions + settings into one file encrypted with a passphrase (Argon2id + ChaCha20-Poly1305). Import replaces the current config."
+                        : "用口令把全部连接与设置封装为单个文件（Argon2id + ChaCha20-Poly1305 加密）。导入会替换当前配置。";
+                    color: Theme.text-muted;
+                    font-size: 11px * Theme.panel-font;
+                    wrap: word-wrap;
+                }
+                LabeledInput {
+                    label: root.lang-en ? "Bundle passphrase" : "便携包口令";
+                    placeholder: root.lang-en ? "Required to export / import" : "导出与导入均需填写";
+                    password: true;
+                    value <=> root.portable-passphrase;
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+                    GhostButton {
+                        text: root.lang-en ? "Import file" : "导入文件";
+                        clicked => { root.import-portable-bundle(); }
+                    }
+                    GhostButton {
+                        text: root.lang-en ? "Export file" : "导出文件";
+                        clicked => { root.export-portable-bundle(); }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+                    GhostButton {
+                        text: root.lang-en ? "Download from WebDAV" : "从 WebDAV 下载";
+                        clicked => { root.download-portable-bundle(); }
+                    }
+                    PrimaryButton {
+                        text: root.lang-en ? "Upload to WebDAV" : "上传到 WebDAV";
+                        clicked => { root.upload-portable-bundle(); }
+                    }
+                }
+                Text {
+                    text: root.portable-status;
                     color: Theme.text-muted;
                     font-size: 11px * Theme.panel-font;
                     wrap: word-wrap;
