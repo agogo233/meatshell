@@ -6,6 +6,7 @@
 //!   * Manage the tab list + per-tab `SessionHandle` map.
 //!   * Route Slint callbacks to the right domain module.
 mod auth_dialogs;
+mod ai;
 pub(crate) mod core;
 #[cfg(windows)]
 mod jump_list;
@@ -27,6 +28,7 @@ mod terminal_ui;
 mod webdav;
 mod window;
 
+use self::ai::*;
 use self::auth_dialogs::*;
 use self::port_forward::*;
 use self::session_trigger::*;
@@ -1004,9 +1006,11 @@ fn open_window(
         let welcome_as_sidebar = s.welcome_as_sidebar();
         let quick_commands_as_sidebar = s.quick_commands_as_sidebar();
         let quick_panel_open = quick_commands_as_sidebar && s.quick_panel_open();
-        let quick_panel_collapsed = s.quick_panel_collapsed();
+        let mut quick_panel_collapsed = s.quick_panel_collapsed();
         let quick_panel_dock = s.quick_panel_dock();
         let welcome_sidebar_dock = s.welcome_sidebar_dock();
+        let ai_panel_dock = s.ai_panel_dock();
+        let ai_panel_open = s.ai_panel_open();
         let mut sidebar_collapsed = s.sidebar_collapsed().unwrap_or(collapse_sidebar);
         let mut welcome_collapsed = s.welcome_collapsed().unwrap_or(false);
         if welcome_as_sidebar
@@ -1022,6 +1026,19 @@ fn open_window(
             }
             if welcome_as_sidebar && welcome_sidebar_dock == quick_panel_dock {
                 welcome_collapsed = true;
+            }
+        }
+        // Same-edge squeeze for the AI panel (left-docked by default): at most
+        // one docked panel per edge after restore.
+        if ai_panel_open {
+            if sidebar_dock == ai_panel_dock {
+                sidebar_collapsed = true;
+            }
+            if welcome_as_sidebar && welcome_sidebar_dock == ai_panel_dock {
+                welcome_collapsed = true;
+            }
+            if quick_panel_open && quick_panel_dock == ai_panel_dock {
+                quick_panel_collapsed = true;
             }
         }
         window.set_collapse_sidebar_default(collapse_sidebar);
@@ -1041,6 +1058,15 @@ fn open_window(
         window.set_quick_panel_height(s.quick_panel_height());
         window.set_quick_panel_dock(quick_panel_dock.into());
         window.set_welcome_as_sidebar(welcome_as_sidebar);
+        // AI chat panel: restore the persisted docking layout + chat settings.
+        window.set_ai_panel_open(ai_panel_open);
+        window.set_ai_panel_enabled(ai_panel_open);
+        window.set_ai_panel_width(s.ai_panel_width());
+        window.set_ai_panel_height(s.ai_panel_height());
+        window.set_ai_panel_dock(ai_panel_dock.into());
+        window.set_ai_base_url(s.ai_base_url().into());
+        window.set_ai_api_key(s.ai_api_key().into());
+        window.set_ai_model(s.ai_model().into());
         window.set_welcome_sidebar_width(s.welcome_sidebar_width());
         window.set_welcome_sidebar_dock(welcome_sidebar_dock.into());
         window.set_welcome_collapsed(welcome_collapsed);
@@ -2433,6 +2459,10 @@ fn open_window(
         tab_titles.clone(),
     );
     wire_sftp_callbacks(&window, sftp_handles.clone(), sftp_last_cwd.clone());
+    // AI chat panel: install the (empty) conversation model before wiring the
+    // send/stream callbacks, which push into it via downcast.
+    window.set_ai_messages(ModelRc::from(Rc::new(VecModel::<AiMessage>::default())));
+    wire_ai_callbacks(&window, &store, &bufs);
     wire_key_input(
         &window,
         handles.clone(),
@@ -4938,6 +4968,10 @@ fn save_layout(win: &AppWindow, store: &Rc<RefCell<ConfigStore>>) {
     s.set_quick_panel_width(win.get_quick_panel_width());
     s.set_quick_panel_height(win.get_quick_panel_height());
     s.set_quick_panel_dock(win.get_quick_panel_dock().to_string());
+    s.set_ai_panel_open(win.get_ai_panel_open());
+    s.set_ai_panel_width(win.get_ai_panel_width());
+    s.set_ai_panel_height(win.get_ai_panel_height());
+    s.set_ai_panel_dock(win.get_ai_panel_dock().to_string());
     s.set_welcome_sidebar_width(win.get_welcome_sidebar_width());
     s.set_welcome_sidebar_dock(win.get_welcome_sidebar_dock().to_string());
     s.set_welcome_collapsed(win.get_welcome_collapsed());

@@ -578,3 +578,15 @@ msgstr "添加触发器"
 
 msgid "When expected text appears, send the response automatically. Responses are stored encrypted."
 msgstr "出现期望文本时自动发送回复。回复内容会加密保存。"
+
+msgid "Send to AI"
+msgstr "发送到 AI"
+
+msgid "AI assistant"
+msgstr "AI 助手"
+
+msgid "Ask about terminal output, errors, or commands"
+msgstr "询问终端输出、报错或命令相关问题"
+
+msgid "Ask the AI… (terminal selections arrive here)"
+msgstr "问问 AI…（终端选中文本会填到这里）"

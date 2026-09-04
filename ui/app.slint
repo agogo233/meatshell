@@ -21,7 +21,7 @@ import { Welcome, SessionInfo } from "welcome.slint";
 import { SessionDialog, SessionDraft, PortFwd, TriggerDraft } from "session_dialog.slint";
 import { ConfirmDialog } from "confirm_dialog.slint";
 import { LabeledInput, PrimaryButton, GhostButton, DockExpandButton, IconButton, ToolStrip } from "widgets.slint";
-import { TerminalView, TermSpan, TermMatch, QuickCmd, QuickDockPanel } from "terminal_view.slint";
+import { TerminalView, TermSpan, TermMatch, QuickCmd, QuickDockPanel, AIPanel, AiMessage } from "terminal_view.slint";
 import { SftpEntry, SftpTreeNode, TunnelInfo } from "sftp_panel.slint";
 import { ProcWindow, ProcRow } from "proc_window.slint";
 import { SystemInfoWindow, SysInfoRow, SysMetricRow, SysNetRow } from "system_info_window.slint";
@@ -761,6 +761,30 @@ export component AppWindow inherits Window {
     callback save-webdav-settings(bool, string, string, string, string, bool);
     callback webdav-upload();
     callback webdav-download();
+    // --- AI assistant chat panel (OpenAI-compatible) -----------------------
+    in-out property <bool> ai-panel-open: false;
+    in-out property <length> ai-panel-width: 320px;
+    in-out property <length> ai-panel-height: 420px;
+    in-out property <string> ai-panel-dock: "left";
+    in property <[AiMessage]> ai-messages;
+    in-out property <bool> ai-busy: false;
+    in-out property <string> ai-draft;
+    in property <int> ai-draft-revision: 0;    // bumped when terminal text lands in the draft
+    in property <string> ai-discover-state: "";  // "" | "busy" | "ok" | "error"
+    in property <string> ai-discover-error;
+    in property <[string]> ai-discovered-models;
+    in-out property <string> ai-base-url;
+    in-out property <string> ai-api-key;
+    in-out property <string> ai-model;
+    in-out property <bool> ai-panel-enabled: false;
+    callback send-ai-message(string);
+    callback stop-ai-message();
+    callback clear-ai-messages();
+    callback send-selection-to-ai(string /* tab-id */);
+    callback save-ai-settings(string /* base-url */, string /* api-key */, string /* model */);
+    callback discover-ai-models(string /* base-url */, string /* api-key */);
+    callback set-ai-panel-open(bool);
+    callback set-ai-panel-dock(string);
     in-out property <length> sftp-panel-height: 220px; // shared; lets Rust locate the drop zone
     in-out property <length> sftp-panel-width: 380px;  // SFTP extent when docked left/right
     in-out property <string> sftp-dock: "bottom";      // SFTP dock edge, shared across tabs
@@ -1035,6 +1059,9 @@ export component AppWindow inherits Window {
     // Context menu on a live selection: open the quick-command dialog with the
     // selected text pre-filled as the command.
     callback add-selection-to-quick(string /* tab-id */);
+    // Context menu on a live selection: put the text (redacted) into the AI
+    // panel draft box and open the panel — never auto-sends.
+    callback send-selection-to-ai(string /* tab-id */);
     // Recompute search highlights for a session's visible screen.
     callback find-query-changed(string /* tab-id */, string /* query */);
     // Scroll a session's scrollback history by N lines (+ = up/older).
@@ -1682,16 +1709,29 @@ export component AppWindow inherits Window {
                     !root.zen-mode && root.quick-panel-open && !root.quick-panel-collapsed ? root.quick-panel-height : 0px;
                 property <length> quick-sp:
                     !root.zen-mode && root.quick-panel-open && !root.quick-panel-collapsed ? 4px : 0px;
+                // AI chat panel geometry (mirrors the quick panel, dock "left" default).
+                property <bool> ai-horizontal:
+                    root.ai-panel-dock == "left" || root.ai-panel-dock == "right";
+                property <length> ai-w:
+                    !root.zen-mode && root.ai-panel-open ? root.ai-panel-width : 0px;
+                property <length> ai-h:
+                    !root.zen-mode && root.ai-panel-open ? root.ai-panel-height : 0px;
+                property <length> ai-sp:
+                    !root.zen-mode && root.ai-panel-open ? 4px : 0px;
 
                 central := Rectangle {
-                x: root.quick-panel-open && !root.quick-panel-collapsed && root.quick-panel-dock == "left"
-                    ? parent.quick-w + parent.quick-sp : 0px;
-                y: root.quick-panel-open && !root.quick-panel-collapsed && root.quick-panel-dock == "top"
-                    ? parent.quick-h + parent.quick-sp : 0px;
-                width: root.quick-panel-open && !root.quick-panel-collapsed && parent.quick-horizontal
-                    ? parent.width - parent.quick-w - parent.quick-sp : parent.width;
-                height: root.quick-panel-open && !root.quick-panel-collapsed && !parent.quick-horizontal
-                    ? parent.height - parent.quick-h - parent.quick-sp : parent.height;
+                // Each docked panel shrinks only its own axis: quick-w/ai-w
+                // (and -h/-sp) are already 0px while closed or in zen mode.
+                x: (root.quick-panel-dock == "left" ? parent.quick-w + parent.quick-sp : 0px)
+                    + (root.ai-panel-dock == "left" ? parent.ai-w + parent.ai-sp : 0px);
+                y: (root.quick-panel-dock == "top" ? parent.quick-h + parent.quick-sp : 0px)
+                    + (root.ai-panel-dock == "top" ? parent.ai-h + parent.ai-sp : 0px);
+                width: parent.width
+                    - (parent.quick-horizontal ? parent.quick-w + parent.quick-sp : 0px)
+                    - (parent.ai-horizontal ? parent.ai-w + parent.ai-sp : 0px);
+                height: parent.height
+                    - (!parent.quick-horizontal ? parent.quick-h + parent.quick-sp : 0px)
+                    - (!parent.ai-horizontal ? parent.ai-h + parent.ai-sp : 0px);
                 clip: true;
                 // Split-pane area (v0.5): panes tile this rect; each pane has its own
                 // tab strip + active terminal / welcome. Rust flattens the split tree
@@ -1976,6 +2016,7 @@ export component AppWindow inherits Window {
                         copy-terminal-text() => { root.copy-terminal-text(term.id); }
                         clear-terminal() => { root.clear-terminal(term.id); }
                         add-selection-to-quick() => { root.add-selection-to-quick(term.id); }
+                        send-selection-to-ai() => { root.send-selection-to-ai(term.id); }
                         find-query-changed(q) => { root.find-query-changed(term.id, q); }
                         terminal-scroll(d) => { root.terminal-scroll(term.id, d); }
                         terminal-wheel(d, c, r) => { root.terminal-wheel(term.id, d, c, r); }
@@ -2083,6 +2124,10 @@ export component AppWindow inherits Window {
                             root.welcome-collapsed = true;
                             root.set-welcome-collapsed(true);
                         }
+                        if (root.ai-panel-open && root.ai-panel-dock == root.dock-target) {
+                            root.ai-panel-open = false;
+                            root.set-ai-panel-open(false);
+                        }
                     }
                     root.panel-dragging = false;
                 }
@@ -2123,6 +2168,91 @@ export component AppWindow inherits Window {
                                         : (self.absolute-position.y + self.mouse-y)
                                             - quick-area.absolute-position.y,
                                     120px, max(140px, quick-area.height - 160px));
+                            }
+                        }
+                    }
+                }
+            }
+
+            if root.ai-panel-open && !root.zen-mode : AIPanel {
+                x: root.ai-panel-dock == "right" ? parent.width - parent.ai-w : 0px;
+                y: root.ai-panel-dock == "bottom" ? parent.height - parent.ai-h : 0px;
+                width: parent.ai-horizontal ? parent.ai-w : parent.width;
+                height: parent.ai-horizontal ? parent.height : parent.ai-h;
+                messages: root.ai-messages;
+                busy: root.ai-busy;
+                dock-edge: root.ai-panel-dock;
+                draft <=> root.ai-draft;
+                draft-revision: root.ai-draft-revision;
+                send => { root.send-ai-message(root.ai-draft); }
+                stop => { root.stop-ai-message(); }
+                clear => { root.clear-ai-messages(); }
+                close => {
+                    root.ai-panel-open = false;
+                    root.set-ai-panel-open(false);
+                }
+                dock-drag-move(ax, ay) => {
+                    root.panel-dragging = true;
+                    root.drag-nx = (ax - dock-area.absolute-position.x) / dock-area.width;
+                    root.drag-ny = (ay - dock-area.absolute-position.y) / dock-area.height;
+                }
+                dock-drag-end => {
+                    if (root.dock-target != "") {
+                        root.ai-panel-dock = root.dock-target;
+                        root.set-ai-panel-dock(root.dock-target);
+                        // Same-edge squeeze: only one docked panel per edge.
+                        if (root.sidebar-dock == root.dock-target) {
+                            root.sidebar-collapsed = true;
+                            root.set-sidebar-collapsed(true);
+                        }
+                        if (root.welcome-as-sidebar
+                                && root.welcome-sidebar-dock == root.dock-target) {
+                            root.welcome-collapsed = true;
+                            root.set-welcome-collapsed(true);
+                        }
+                        if (root.quick-panel-open && root.quick-panel-dock == root.dock-target) {
+                            root.quick-panel-collapsed = true;
+                        }
+                    }
+                    root.panel-dragging = false;
+                }
+            }
+
+            Rectangle {
+                visible: root.ai-panel-open && !root.zen-mode;
+                x: root.ai-panel-dock == "left" ? parent.ai-w
+                 : root.ai-panel-dock == "right" ? parent.width - parent.ai-w - 4px
+                 : 0px;
+                y: root.ai-panel-dock == "top" ? parent.ai-h
+                 : root.ai-panel-dock == "bottom" ? parent.height - parent.ai-h - 4px
+                 : 0px;
+                width: parent.ai-horizontal ? 4px : parent.width;
+                height: parent.ai-horizontal ? parent.height : 4px;
+                background: ai-split-ta.has-hover ? Theme.accent : Theme.border-subtle;
+                ai-split-ta := TouchArea {
+                    x: quick-area.ai-horizontal ? -4px : 0px;
+                    y: quick-area.ai-horizontal ? 0px : -4px;
+                    width: quick-area.ai-horizontal ? 12px : parent.width;
+                    height: quick-area.ai-horizontal ? parent.height : 12px;
+                    mouse-cursor: quick-area.ai-horizontal ? ew-resize : ns-resize;
+                    moved => {
+                        if (self.pressed) {
+                            if (quick-area.ai-horizontal) {
+                                root.ai-panel-width = clamp(
+                                    root.ai-panel-dock == "right"
+                                        ? quick-area.width - ((self.absolute-position.x + self.mouse-x)
+                                            - quick-area.absolute-position.x)
+                                        : (self.absolute-position.x + self.mouse-x)
+                                            - quick-area.absolute-position.x,
+                                    240px, max(260px, quick-area.width - 240px));
+                            } else {
+                                root.ai-panel-height = clamp(
+                                    root.ai-panel-dock == "bottom"
+                                        ? quick-area.height - ((self.absolute-position.y + self.mouse-y)
+                                            - quick-area.absolute-position.y)
+                                        : (self.absolute-position.y + self.mouse-y)
+                                            - quick-area.absolute-position.y,
+                                    160px, max(180px, quick-area.height - 160px));
                             }
                         }
                     }
@@ -4721,6 +4851,13 @@ export component AppWindow inherits Window {
                     webdav-remote-path <=> root.webdav-remote-path;
                     webdav-accept-invalid-certs <=> root.webdav-accept-invalid-certs;
                     webdav-status <=> root.webdav-status;
+                    ai-base-url <=> root.ai-base-url;
+                    ai-api-key <=> root.ai-api-key;
+                    ai-model <=> root.ai-model;
+                    ai-panel-enabled <=> root.ai-panel-enabled;
+                    ai-discovered-models: root.ai-discovered-models;
+                    ai-discover-state: root.ai-discover-state;
+                    ai-discover-error: root.ai-discover-error;
                     download-always-ask <=> root.download-always-ask;
                     paste-confirm-enabled <=> root.paste-confirm-enabled;
                     extra-paste-shortcuts-enabled <=> root.extra-paste-shortcuts-enabled;
@@ -4771,6 +4908,33 @@ export component AppWindow inherits Window {
                     }
                     webdav-upload => { root.webdav-upload(); }
                     webdav-download => { root.webdav-download(); }
+                    save-ai-settings(base-url, api-key, model) => {
+                        root.save-ai-settings(base-url, api-key, model);
+                    }
+                    discover-ai-models(base-url, api-key) => {
+                        root.discover-ai-models(base-url, api-key);
+                    }
+                    set-ai-panel-enabled(v) => {
+                        // The settings toggle doubles as the panel's open/close:
+                        // persist + apply the same-edge squeeze.
+                        root.ai-panel-open = v;
+                        root.set-ai-panel-open(v);
+                        if (v) {
+                            if (root.sidebar-dock == root.ai-panel-dock) {
+                                root.sidebar-collapsed = true;
+                                root.set-sidebar-collapsed(true);
+                            }
+                            if (root.welcome-as-sidebar
+                                    && root.welcome-sidebar-dock == root.ai-panel-dock) {
+                                root.welcome-collapsed = true;
+                                root.set-welcome-collapsed(true);
+                            }
+                            if (root.quick-panel-open
+                                    && root.quick-panel-dock == root.ai-panel-dock) {
+                                root.quick-panel-collapsed = true;
+                            }
+                        }
+                    }
                     set-download-always-ask(v) => { root.set-download-always-ask(v); }
                     set-paste-confirm-enabled(v) => { root.set-paste-confirm-enabled(v); }
                     set-extra-paste-shortcuts-enabled(v) => { root.set-extra-paste-shortcuts-enabled(v); }

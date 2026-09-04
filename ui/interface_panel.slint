@@ -387,6 +387,15 @@ export component InterfacePanel inherits Rectangle {
     in-out property <string> webdav-remote-path;
     in-out property <bool> webdav-accept-invalid-certs;
     in-out property <string> webdav-status;
+    // AI assistant chat (OpenAI-compatible). The key is stored encrypted at
+    // rest by Rust; the panel visibility toggle persists the panel itself.
+    in-out property <string> ai-base-url;
+    in-out property <string> ai-api-key;
+    in-out property <string> ai-model;
+    in-out property <bool> ai-panel-enabled: false;
+    in property <[string]> ai-discovered-models;
+    in property <string> ai-discover-state;   // "" | "busy" | "ok" | "error"
+    in property <string> ai-discover-error;
     in-out property <bool> download-always-ask;
     in-out property <bool> paste-confirm-enabled: true;
     in-out property <bool> extra-paste-shortcuts-enabled: true;
@@ -440,6 +449,9 @@ export component InterfacePanel inherits Rectangle {
     callback save-webdav-settings(bool, string, string, string, string, bool);
     callback webdav-upload();
     callback webdav-download();
+    callback save-ai-settings(string /* base-url */, string /* api-key */, string /* model */);
+    callback discover-ai-models(string /* base-url */, string /* api-key */);
+    callback set-ai-panel-enabled(bool);
     callback set-download-always-ask(bool);
     callback set-paste-confirm-enabled(bool);
     callback set-extra-paste-shortcuts-enabled(bool);
@@ -530,6 +542,11 @@ export component InterfacePanel inherits Rectangle {
                     icon: "\u{E2C2}"; label: "WebDAV";
                     active: root.ifd-page == "webdav";
                     clicked => { root.ifd-page = "webdav"; }
+                }
+                NavItem {
+                    icon: "\u{E8BD}"; label: "AI";
+                    active: root.ifd-page == "ai";
+                    clicked => { root.ifd-page = "ai"; }
                 }
                 NavItem {
                     icon: "\u{E2C4}"; label: root.lang-en ? "Download" : "下载";
@@ -1562,6 +1579,87 @@ export component InterfacePanel inherits Rectangle {
                 }
                 Text {
                     text: root.webdav-status;
+                    color: Theme.text-muted;
+                    font-size: 11px * Theme.panel-font;
+                    wrap: word-wrap;
+                }
+            }
+
+            // --- AI page -----------------------------------------------
+            if root.ifd-page == "ai" : VerticalLayout {
+                padding-left: 20px;
+                padding-right: 20px;
+                padding-top: 14px;
+                spacing: 10px;
+                alignment: start;
+                SectionHeader { text: "AI"; height: 24px; }
+                SettingRow {
+                    label: root.lang-en ? "Show AI panel" : "显示 AI 对话面板";
+                    desc: root.lang-en
+                        ? "A dockable chat panel (left by default); terminal right-click → Send to AI fills its input."
+                        : "可停靠的对话面板（默认停靠左侧）；终端右键「发送到 AI」会填入其输入框。";
+                    show-divider: false;
+                    Switch {
+                        on: root.ai-panel-enabled;
+                        toggled(v) => { root.set-ai-panel-enabled(v); }
+                    }
+                }
+                LabeledInput {
+                    label: root.lang-en ? "API base URL" : "API 地址";
+                    placeholder: "https://api.openai.com/v1";
+                    value <=> root.ai-base-url;
+                }
+                LabeledInput {
+                    label: root.lang-en ? "API key" : "API Key";
+                    placeholder: root.lang-en ? "Optional (e.g. local Ollama)" : "可选（如本地 Ollama）";
+                    password: true;
+                    value <=> root.ai-api-key;
+                }
+                SettingRow {
+                    label: root.lang-en ? "Model" : "模型";
+                    desc: root.lang-en
+                        ? "Type a model name, or discover one from the endpoint."
+                        : "可手动填写模型名，也可点击「发现模型」自动获取。";
+                    HorizontalLayout {
+                        spacing: 6px;
+                        alignment: end;
+                        GhostButton {
+                            text: root.ai-discover-state == "busy"
+                                ? (root.lang-en ? "Discovering…" : "发现中…")
+                                : (root.lang-en ? "Discover models" : "发现模型");
+                            clicked => { root.discover-ai-models(root.ai-base-url, root.ai-api-key); }
+                        }
+                    }
+                }
+                if root.ai-discover-state == "ok" && root.ai-discovered-models.length > 0 : SettingRow {
+                    label: root.lang-en ? "Discovered models" : "发现的模型";
+                    ComboBox {
+                        width: 260px;
+                        model: root.ai-discovered-models;
+                        current-value: root.ai-model;
+                        selected(v) => { root.ai-model = v; }
+                    }
+                }
+                if root.ai-discover-state == "error" : Text {
+                    text: root.ai-discover-error;
+                    color: Theme.danger;
+                    font-size: 11px * Theme.panel-font;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+                    GhostButton {
+                        text: root.lang-en ? "Save" : "保存";
+                        clicked => {
+                            root.save-ai-settings(root.ai-base-url, root.ai-api-key, root.ai-model);
+                        }
+                    }
+                }
+                Text {
+                    text: root.lang-en
+                        ? "Any OpenAI-compatible /chat/completions endpoint works (OpenAI, DeepSeek, Ollama, …). The key is stored encrypted; conversations are never written to disk."
+                        : "支持任意 OpenAI 兼容 /chat/completions 接口（OpenAI、DeepSeek、Ollama 等）。Key 加密存储，对话不会写入磁盘。";
                     color: Theme.text-muted;
                     font-size: 11px * Theme.panel-font;
                     wrap: word-wrap;

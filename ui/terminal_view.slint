@@ -52,6 +52,13 @@ export struct QuickCmd {
     send-enter: bool,
 }
 
+// One chat row in the AI panel. `role` is "user", "assistant", or "error"
+// (errors are surfaced inline and never sent back to the API).
+export struct AiMessage {
+    role: string,
+    content: string,
+}
+
 // --- MenuItem --------------------------------------------------------------
 // One row of the terminal right-click context menu (MDL2 icon + label).
 component MenuItem inherits Rectangle {
@@ -232,6 +239,229 @@ export component QuickDockPanel inherits Rectangle {
     }
 }
 
+// --- AIPanel ---------------------------------------------------------------
+// Dockable AI assistant chat (OpenAI-compatible). Left-docked by default; the
+// header drags to any edge exactly like QuickDockPanel. The conversation lives
+// only in the UI model — nothing is persisted. Streaming replies arrive as
+// deltas appended to the trailing assistant row; the send button doubles as a
+// stop button while `busy`.
+export component AIPanel inherits Rectangle {
+    in property <[AiMessage]> messages;
+    in property <bool> busy;
+    in property <string> dock-edge: "left";
+    in-out property <string> draft;
+    in property <int> draft-revision;   // bumped when terminal text lands in the draft
+    callback send();
+    callback stop();
+    callback clear();
+    callback close();
+    callback dock-drag-move(length, length);
+    callback dock-drag-end();
+
+    // Auto-follow: while streaming, jump to the bottom only if the view was
+    // still near the bottom at the previous tick — scrolling up pauses the
+    // follow until the next busy transition (send / reply finished).
+    property <length> prev-bottom: 0px;
+    // Defer ai-input.focus() to the next event-loop tick (same IME/recursion
+    // guard as LabeledInput — focusing during property dispatch can panic).
+    property <bool> focus-pending: false;
+
+    background: Theme.bg-panel;
+    border-width: 1px;
+    border-color: Theme.border-subtle;
+    clip: true;
+
+    VerticalLayout {
+        spacing: 0;
+        // Header: drag to dock + title + clear + close.
+        Rectangle {
+            height: 34px;
+            background: Theme.bg-panel-alt;
+            drag-area := TouchArea {
+                mouse-cursor: grab;
+                moved => {
+                    if (self.pressed) {
+                        root.dock-drag-move(self.absolute-position.x + self.mouse-x,
+                                            self.absolute-position.y + self.mouse-y);
+                    }
+                }
+                pointer-event(ev) => {
+                    if (ev.kind == PointerEventKind.up) { root.dock-drag-end(); }
+                }
+            }
+            HorizontalLayout {
+                padding-left: 8px; padding-right: 4px; spacing: 6px;
+                Text {
+                    text: "\u{E8BD}";
+                    font-family: "Material Icons";
+                    color: Theme.text-muted; font-size: Theme.fs-md;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: @tr("AI assistant");
+                    color: Theme.text-primary; font-size: Theme.fs-sm;
+                    font-weight: 700; vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                Rectangle {
+                    width: 28px;
+                    background: clear-ta.has-hover ? Theme.bg-hover : transparent;
+                    border-radius: Theme.radius-sm;
+                    clear-ta := TouchArea { mouse-cursor: pointer; clicked => { root.clear(); } }
+                    Text {
+                        text: "\u{E872}";
+                        font-family: "Material Icons";
+                        color: Theme.text-secondary; font-size: Theme.fs-md;
+                        horizontal-alignment: center; vertical-alignment: center;
+                    }
+                }
+                Rectangle {
+                    width: 28px;
+                    background: close-ta.has-hover ? Theme.bg-hover : transparent;
+                    border-radius: Theme.radius-sm;
+                    close-ta := TouchArea { mouse-cursor: pointer; clicked => { root.close(); } }
+                    Text {
+                        text: root.dock-edge == "right" ? "\u{E5CC}"
+                            : root.dock-edge == "top" ? "\u{E5CE}"
+                            : root.dock-edge == "bottom" ? "\u{E5CF}"
+                            : "\u{E5CB}";
+                        font-family: "Material Icons";
+                        color: Theme.text-secondary; font-size: Theme.fs-md;
+                        horizontal-alignment: center; vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        // Conversation (Flickable + layout, consistent with the other panels).
+        Rectangle {
+            vertical-stretch: 1;
+            background: Theme.bg-root;
+            clip: true;
+            ai-scroll := Flickable {
+                viewport-width: self.width;
+                viewport-height: max(self.height, ai-list.preferred-height);
+                ai-list := VerticalLayout {
+                    padding: 8px; spacing: 8px; alignment: start;
+                    if root.messages.length == 0 : Text {
+                        text: @tr("Ask about terminal output, errors, or commands");
+                        color: Theme.text-muted; font-size: Theme.fs-xs;
+                        wrap: word-wrap;
+                        horizontal-alignment: center;
+                    }
+                    for m in root.messages : Rectangle {
+                        height: max(28px, ai-msg-txt.preferred-height + 12px);
+                        border-radius: Theme.radius-sm;
+                        background: m.role == "user" ? Theme.accent.with-alpha(0.14)
+                            : m.role == "error" ? Theme.danger.with-alpha(0.14)
+                            : Theme.bg-panel;
+                        ai-msg-txt := Text {
+                            x: 8px; y: 6px;
+                            width: parent.width - 16px;
+                            // Empty trailing assistant row = reply still streaming.
+                            text: m.content == "" && m.role == "assistant" && root.busy ? "…" : m.content;
+                            color: m.role == "error" ? Theme.danger
+                                : m.role == "user" ? Theme.text-secondary
+                                : Theme.text-primary;
+                            font-family: Theme.ui-font-family;
+                            font-size: Theme.fs-sm;
+                            wrap: word-wrap;
+                            vertical-alignment: top;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Input row: multi-line draft + send / stop button.
+        Rectangle {
+            height: 84px;
+            background: Theme.bg-panel-alt;
+            HorizontalLayout {
+                padding: 8px; spacing: 6px;
+                Rectangle {
+                    horizontal-stretch: 1;
+                    border-radius: Theme.radius-sm;
+                    border-width: 1px;
+                    border-color: ai-input.has-focus ? Theme.accent : Theme.border-subtle;
+                    background: Theme.bg-root;
+                    clip: true;
+                    Flickable {
+                        viewport-width: self.width;
+                        viewport-height: max(self.height, ai-input.preferred-height + 10px);
+                        ai-input := TextInput {
+                            x: 8px; y: 5px;
+                            width: parent.width - 16px;
+                            text <=> root.draft;
+                            color: Theme.text-primary;
+                            font-family: Theme.ui-font-family;
+                            font-size: Theme.fs-md;
+                            single-line: false;
+                            wrap: word-wrap;
+                        }
+                    }
+                    if root.draft == "" : Text {
+                        x: 8px; y: 5px;
+                        text: @tr("Ask the AI… (terminal selections arrive here)");
+                        color: Theme.text-muted; font-size: Theme.fs-sm;
+                    }
+                }
+                Rectangle {
+                    width: 40px;
+                    border-radius: Theme.radius-sm;
+                    background: root.busy
+                        ? (send-ta.has-hover ? Theme.danger.with-alpha(0.30) : Theme.danger.with-alpha(0.18))
+                        : (send-ta.has-hover ? Theme.accent-hover : Theme.accent);
+                    send-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            if (root.busy) { root.stop(); }
+                            else { root.send(); ai-scroll.viewport-y = max(0px, ai-scroll.viewport-height - ai-scroll.height); root.prev-bottom = ai-scroll.viewport-height - ai-scroll.height; }
+                        }
+                    }
+                    Text {
+                        text: root.busy ? "\u{E047}" : "\u{E163}";
+                        font-family: "Material Icons";
+                        color: root.busy ? Theme.danger : white;
+                        font-size: Theme.fs-lg;
+                        horizontal-alignment: center; vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+
+    // Stream auto-follow: every 250ms while busy, jump to the bottom only when
+    // the view was still near the bottom at the previous tick.
+    Timer {
+        interval: 250ms;
+        running: root.busy;
+        triggered => {
+            if (ai-scroll.viewport-y >= root.prev-bottom - 8px) {
+                ai-scroll.viewport-y = ai-scroll.viewport-height - ai-scroll.height;
+            }
+            root.prev-bottom = ai-scroll.viewport-height - ai-scroll.height;
+        }
+    }
+    // busy true→(reply starting/ending) also re-anchors the view so freshly
+    // pushed rows (user message, error bubbles) stay visible.
+    changed busy => {
+        ai-scroll.viewport-y = max(0px, ai-scroll.viewport-height - ai-scroll.height);
+        root.prev-bottom = ai-scroll.viewport-height - ai-scroll.height;
+    }
+    changed draft-revision => {
+        root.focus-pending = true;
+    }
+    focus-timer := Timer {
+        interval: 0ms;
+        running: root.focus-pending;
+        triggered => {
+            root.focus-pending = false;
+            ai-input.focus();
+        }
+    }
+}
+
 // --- TerminalView ----------------------------------------------------------
 
 export component TerminalView inherits Rectangle {
@@ -385,6 +615,7 @@ export component TerminalView inherits Rectangle {
     callback copy-terminal-text();
     callback clear-terminal();              // wipe this session's screen buffer
     callback add-selection-to-quick();      // selection → prefill quick-command dialog
+    callback send-selection-to-ai();        // selection → AI panel draft box (no auto-send)
     callback find-query-changed(string);    // recompute search highlights
     callback terminal-scroll(float);         // scroll history by fractional lines (+ = up); Rust keeps the sub-line remainder so momentum decays smoothly
     // Wheel inside an alt-screen app (tmux/less/vim): forward to the program so it
@@ -978,7 +1209,7 @@ export component TerminalView inherits Rectangle {
                         ctx-menu := PopupWindow {
                             x: root.ctx-x;
                             y: root.ctx-y;
-                            // The 5th item only shows with a live selection; widen
+                            // The 6th item only shows with a live selection; widen
                             // for its longer label so nothing clips (no elide here).
                             // Height follows the layout so item count changes never
                             // overflow the card (#150-fix).
@@ -1013,6 +1244,10 @@ export component TerminalView inherits Rectangle {
                                     if root.has-selection : MenuItem {
                                         icon: "\u{E5CE}"; label: @tr("Add as quick command");
                                         clicked => { root.add-selection-to-quick(); ime-input.focus(); }
+                                    }
+                                    if root.has-selection : MenuItem {
+                                        icon: "\u{E8BD}"; label: @tr("Send to AI");
+                                        clicked => { root.send-selection-to-ai(); }
                                     }
                                 }
                             }

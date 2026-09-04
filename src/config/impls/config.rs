@@ -496,6 +496,9 @@ impl ConfigStore {
                     if let Some(plain) = Self::try_decrypt(&key, cfg.webdav_password.as_str()) {
                         cfg.webdav_password = Secret::new(plain);
                     }
+                    if let Some(plain) = Self::try_decrypt(&key, cfg.ai_api_key.as_str()) {
+                        cfg.ai_api_key = Secret::new(plain);
+                    }
                     // Clean up any duplicate history accumulated before #113,
                     // keeping the last (most recent) occurrence of each command.
                     dedup_keep_last(&mut cfg.command_history);
@@ -1410,6 +1413,71 @@ impl ConfigStore {
         self.cache.webdav_accept_invalid_certs = accept_invalid_certs;
     }
 
+    // ── AI assistant chat settings ────────────────────────────────────────
+
+    pub fn ai_base_url(&self) -> &str {
+        &self.cache.ai_base_url
+    }
+
+    pub fn ai_model(&self) -> &str {
+        &self.cache.ai_model
+    }
+
+    pub fn ai_api_key(&self) -> &str {
+        self.cache.ai_api_key.as_str()
+    }
+
+    pub fn set_ai_settings(&mut self, base_url: String, api_key: String, model: String) {
+        self.cache.ai_base_url = base_url.trim().trim_end_matches('/').to_string();
+        self.cache.ai_api_key = Secret::new(api_key);
+        self.cache.ai_model = model.trim().to_string();
+    }
+
+    pub fn ai_panel_open(&self) -> bool {
+        self.cache.ai_panel_open
+    }
+
+    pub fn set_ai_panel_open(&mut self, open: bool) {
+        self.cache.ai_panel_open = open;
+    }
+
+    pub fn ai_panel_width(&self) -> f32 {
+        let width = self.cache.ai_panel_width;
+        if width <= 0.0 {
+            default_ai_panel_width()
+        } else {
+            width
+        }
+    }
+
+    pub fn set_ai_panel_width(&mut self, width: f32) {
+        self.cache.ai_panel_width = width;
+    }
+
+    pub fn ai_panel_height(&self) -> f32 {
+        let height = self.cache.ai_panel_height;
+        if height <= 0.0 {
+            default_ai_panel_height()
+        } else {
+            height
+        }
+    }
+
+    pub fn set_ai_panel_height(&mut self, height: f32) {
+        self.cache.ai_panel_height = height;
+    }
+
+    pub fn ai_panel_dock(&self) -> String {
+        match self.cache.ai_panel_dock.trim() {
+            "left" | "right" | "top" | "bottom" => self.cache.ai_panel_dock.clone(),
+            _ => "left".into(),
+        }
+    }
+
+    pub fn set_ai_panel_dock(&mut self, dock: String) {
+        self.cache.ai_panel_dock = dock;
+    }
+
     /// Whether each download prompts for a save location (default false) (#87).
     pub fn download_always_ask(&self) -> bool {
         self.cache.download_always_ask
@@ -1581,6 +1649,10 @@ impl ConfigStore {
         {
             let enc = Self::encrypt(&self.key, disk.webdav_password.as_str())?;
             disk.webdav_password = Secret::new(enc);
+        }
+        if !disk.ai_api_key.is_empty() && !disk.ai_api_key.as_str().starts_with(Self::ENC_PREFIX) {
+            let enc = Self::encrypt(&self.key, disk.ai_api_key.as_str())?;
+            disk.ai_api_key = Secret::new(enc);
         }
         let raw = serde_json::to_string_pretty(&disk)?;
         // Write to a sibling temp file then rename — cheap atomicity.

@@ -71,6 +71,14 @@ pub(crate) fn default_quick_panel_height() -> f32 {
     220.0
 }
 
+pub(crate) fn default_ai_panel_width() -> f32 {
+    320.0
+}
+
+pub(crate) fn default_ai_panel_height() -> f32 {
+    420.0
+}
+
 /// On-disk layout. Keep additive to ease forward-compat.
 /// NOTE: `ConfigFile::default()` yields `update_check_disabled=false` (derive),
 /// but serde missing field and `fresh_config()` yield `true` (= disabled, no
@@ -291,6 +299,25 @@ pub struct ConfigFile {
     /// resource panel / wallpaper overlay) to users still sitting on old defaults.
     #[serde(default)]
     pub defaults_rev: u32,
+    /// AI assistant chat settings. `ai_api_key` is encrypted at rest like the
+    /// WebDAV password. `ai_base_url` is an OpenAI-compatible base URL without
+    /// a trailing slash (e.g. `https://api.openai.com/v1`).
+    #[serde(default)]
+    pub ai_base_url: String,
+    #[serde(default)]
+    pub ai_model: String,
+    #[serde(default)]
+    pub ai_api_key: Secret,
+    /// AI-panel docking: extents (px) and docked edge (left|right|top|bottom),
+    /// persisted so the layout sticks.
+    #[serde(default)]
+    pub ai_panel_open: bool,
+    #[serde(default = "default_ai_panel_width")]
+    pub ai_panel_width: f32,
+    #[serde(default = "default_ai_panel_height")]
+    pub ai_panel_height: f32,
+    #[serde(default)]
+    pub ai_panel_dock: String,
 }
 
 /// Portable export file (issue #46): sessions with everything in plaintext
