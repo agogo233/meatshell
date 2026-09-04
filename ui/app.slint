@@ -584,6 +584,9 @@ export component AppWindow inherits Window {
     in-out property <bool> action-links-host-port: true;
     in-out property <bool> action-links-url: true;
     callback set-action-links(bool, bool, bool, bool); // master, ipv4, host:port, url
+    in-out property <int> command-history-min-len: 0;
+    in-out property <int> command-history-max-len: 0;
+    callback set-command-history-length-filter(int, int); // min, max chars
     in-out property <float> ui-scale <=> Theme.ui-scale;   // global UI zoom (#100)
     in-out property <float> panel-font <=> Theme.panel-font;  // settings-panel font scale
     callback set-panel-font(int);                          // apply + persist (percent)
@@ -4867,6 +4870,8 @@ export component AppWindow inherits Window {
                     action-links-ipv4 <=> root.action-links-ipv4;
                     action-links-host-port <=> root.action-links-host-port;
                     action-links-url <=> root.action-links-url;
+                    command-history-min-len <=> root.command-history-min-len;
+                    command-history-max-len <=> root.command-history-max-len;
                     ui-scale: root.ui-scale;
                     sftp-follow-cd <=> root.sftp-follow-cd;
                     collapse-sidebar-default <=> root.collapse-sidebar-default;
@@ -4916,6 +4921,9 @@ export component AppWindow inherits Window {
                     set-json-format-output(enabled) => { root.set-json-format-output(enabled); }
                     set-action-links(enabled, ipv4, host-port, url) => {
                         root.set-action-links(enabled, ipv4, host-port, url);
+                    }
+                    set-command-history-length-filter(min, max) => {
+                        root.set-command-history-length-filter(min, max);
                     }
                     add-output-highlight-rule(pattern, regex, case-sensitive, whole-line, color) => {
                         root.add-output-highlight-rule(

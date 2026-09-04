@@ -73,16 +73,73 @@ pub(super) fn validate_output_highlight_rule(
     Ok(())
 }
 
-/// Build the filtered history-view rows for the dropdown, oldest first with the
-/// newest command at the bottom (#55, #101). The command-history model shares
-/// the same storage order so ↑/↓ recall keeps its shell-like semantics.
+/// Build the filtered history-view rows for the dropdown. Empty query returns
+/// every command oldest-first (newest last, #55/#101). A non-empty query ranks
+/// commands by a fuzzy score — substring matches beat subsequence matches, and
+/// start-of-word / consecutive-character runs score higher — sorted ascending so
+/// the best match lands at the bottom, where the dropdown highlights by default.
 pub(super) fn history_view_rows(history: &[String], query: &str) -> Vec<SharedString> {
     let q = query.trim().to_lowercase();
-    history
+    if q.is_empty() {
+        return history.iter().map(|command| command.clone().into()).collect();
+    }
+    let mut scored: Vec<(i64, usize, String)> = history
         .iter()
-        .filter(|command| q.is_empty() || command.to_lowercase().contains(&q))
-        .map(|command| command.clone().into())
-        .collect()
+        .enumerate()
+        .filter_map(|(index, command)| {
+            fuzzy_score(&command.to_lowercase(), &q).map(|score| (score, index, command.clone()))
+        })
+        .collect();
+    // Ascending score; ties keep the original (oldest→newest) order.
+    scored.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    scored.into_iter().map(|(_, _, command)| command.into()).collect()
+}
+
+/// Fuzzy score of `q` (lowercased) against `text` (lowercased). `None` when the
+/// query is neither a substring nor a subsequence. Higher is a better match.
+fn fuzzy_score(text: &str, q: &str) -> Option<i64> {
+    if q.is_empty() {
+        return Some(0);
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let qchars: Vec<char> = q.chars().collect();
+
+    // Substring match: strong signal, boosted by an early / word-start hit.
+    if let Some(pos) = text.find(q) {
+        let mut score = 1000i64;
+        if pos == 0 {
+            score += 400;
+        } else if chars.get(pos - 1).is_some_and(|c| *c == ' ' || *c == '\t') {
+            score += 200;
+        }
+        // Earlier occurrences rank slightly higher.
+        score -= pos.min(150) as i64;
+        return Some(score);
+    }
+
+    // Subsequence match: weaker, rewarded for consecutive runs and word starts.
+    let mut score = 100i64;
+    let mut qi = 0usize;
+    let mut prev_match: Option<usize> = None;
+    for (ti, &c) in chars.iter().enumerate() {
+        if qi < qchars.len() && c == qchars[qi] {
+            if let Some(p) = prev_match {
+                if ti == p + 1 {
+                    score += 15; // consecutive run
+                }
+            }
+            if ti == 0 || matches!(chars.get(ti - 1), Some(' ') | Some('\t') | Some('_') | Some('-') | Some('/')) {
+                score += 40; // word-start hit
+            }
+            prev_match = Some(ti);
+            qi += 1;
+        }
+    }
+    if qi == qchars.len() {
+        Some(score)
+    } else {
+        None
+    }
 }
 
 /// Build the filtered history-view model for the dropdown: case-insensitive

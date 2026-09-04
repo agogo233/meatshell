@@ -381,6 +381,8 @@ export component InterfacePanel inherits Rectangle {
     in-out property <bool> action-links-ipv4: true;
     in-out property <bool> action-links-host-port: true;
     in-out property <bool> action-links-url: true;
+    in-out property <int> command-history-min-len: 0;
+    in-out property <int> command-history-max-len: 0;
     in property <float> ui-scale;
     in-out property <bool> sftp-follow-cd;
     in-out property <bool> collapse-sidebar-default;
@@ -446,6 +448,7 @@ export component InterfacePanel inherits Rectangle {
     callback remove-output-highlight-rule(int);
     callback set-output-highlight-rule-enabled(int, bool);
     callback set-action-links(bool, bool, bool, bool); // master, ipv4, host:port, url
+    callback set-command-history-length-filter(int, int); // min, max chars
     callback export-output-highlight-rules();
     callback import-output-highlight-rules();
     callback set-ui-scale(int);
@@ -743,10 +746,34 @@ export component InterfacePanel inherits Rectangle {
                     label: root.lang-en ? "Additional paste shortcuts" : "额外粘贴快捷键";
                     desc: root.lang-en ? "Enable Ctrl+Alt+V, Shift+Insert, and middle-click paste."
                                        : "启用 Ctrl+Alt+V、Shift+Insert 和鼠标中键粘贴。";
-                    show-divider: false;
                     Switch {
                         on: root.extra-paste-shortcuts-enabled;
                         toggled(v) => { root.extra-paste-shortcuts-enabled = v; root.set-extra-paste-shortcuts-enabled(v); }
+                    }
+                }
+                SettingRow {
+                    label: root.lang-en ? "History min length" : "历史最短长度";
+                    desc: root.lang-en ? "Commands shorter than this are not recorded (0 = off)."
+                                       : "短于此长度的命令不记录（0 表示不限制）。";
+                    Stepper {
+                        value: root.command-history-min-len; minimum: 0; maximum: 50; step: 1;
+                        changed(v) => {
+                            root.command-history-min-len = v;
+                            root.set-command-history-length-filter(v, root.command-history-max-len);
+                        }
+                    }
+                }
+                SettingRow {
+                    label: root.lang-en ? "History max length" : "历史最长长度";
+                    desc: root.lang-en ? "Commands longer than this are not recorded (0 = off)."
+                                       : "长于此长度的命令不记录（0 表示不限制）。";
+                    show-divider: false;
+                    Stepper {
+                        value: root.command-history-max-len; minimum: 0; maximum: 2000; step: 10;
+                        changed(v) => {
+                            root.command-history-max-len = v;
+                            root.set-command-history-length-filter(root.command-history-min-len, v);
+                        }
                     }
                 }
             }

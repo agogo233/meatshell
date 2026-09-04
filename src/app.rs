@@ -866,6 +866,8 @@ fn open_window(
         window.set_action_links_host_port(s.action_links_host_port_pref());
         window.set_action_links_url(s.action_links_url_pref());
         window.set_search_history_mode(s.search_history_mode());
+        window.set_command_history_min_len(s.command_history_min_len() as i32);
+        window.set_command_history_max_len(s.command_history_max_len() as i32);
         window.set_ui_scale(s.ui_scale() as f32 / 100.0); // global UI zoom (#100)
         window.set_panel_font(s.panel_font() as f32 / 100.0); // settings-panel font scale
         window.set_renderer_mode(s.renderer_mode().into());
@@ -1519,6 +1521,16 @@ fn open_window(
             if let Some(w) = weak.upgrade() {
                 w.set_search_history_mode(history);
             }
+        });
+    }
+    // Command-history length filter (min/max chars, 0 = unlimited).
+    {
+        let store = store.clone();
+        window.on_set_command_history_length_filter(move |min, max| {
+            let mut s = store.borrow_mut();
+            s.set_command_history_min_len(min.max(0) as u32);
+            s.set_command_history_max_len(max.max(0) as u32);
+            let _ = s.save();
         });
     }
     {

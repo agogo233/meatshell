@@ -20,3 +20,46 @@ fn lists_and_filters_commands_newest_last() {
         .collect();
     assert_eq!(filtered, ["git status", "git log"]);
 }
+
+#[test]
+fn fuzzy_subsequence_matches_and_ranks_best_last() {
+    let history = vec![
+        "git commit -m".to_string(),
+        "kubectl get pods".to_string(),
+        "grep foo".to_string(),
+    ];
+    // "kbl" is a subsequence of "kubectl" but not of the others.
+    let rows: Vec<String> = history_view_rows(&history, "kbl")
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    assert_eq!(rows, ["kubectl get pods"]);
+}
+
+#[test]
+fn fuzzy_prefers_substring_over_subsequence() {
+    let history = vec![
+        "docker compose up".to_string(), // subsequence "co"
+        "git checkout".to_string(),      // substring "checkout" contains "co"
+    ];
+    let rows: Vec<String> = history_view_rows(&history, "co")
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    // Best match (substring) is last (dropdown default selection).
+    assert_eq!(rows.last().map(String::as_str), Some("git checkout"));
+}
+
+#[test]
+fn fuzzy_word_start_boosts_rank() {
+    let history = vec![
+        "echo log".to_string(), // "log" mid-word
+        "git log".to_string(),  // "log" at word start
+    ];
+    let rows: Vec<String> = history_view_rows(&history, "log")
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.last().map(String::as_str), Some("git log"));
+}
