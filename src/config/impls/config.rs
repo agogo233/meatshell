@@ -1164,6 +1164,37 @@ impl ConfigStore {
         self.cache.sftp_queue_preserve_mtime = preserve;
     }
 
+    // ── Grace auto-reconnect (#P3-H) ──────────────────────────────────────
+    pub fn auto_reconnect_enabled(&self) -> bool {
+        self.cache.auto_reconnect_enabled
+    }
+
+    pub fn set_auto_reconnect_enabled(&mut self, enabled: bool) {
+        self.cache.auto_reconnect_enabled = enabled;
+    }
+
+    pub fn auto_reconnect_max_attempts(&self) -> u32 {
+        match self.cache.auto_reconnect_max_attempts {
+            0 => 5,
+            n => n.clamp(1, 50),
+        }
+    }
+
+    pub fn set_auto_reconnect_max_attempts(&mut self, n: u32) {
+        self.cache.auto_reconnect_max_attempts = n;
+    }
+
+    pub fn auto_reconnect_interval_secs(&self) -> u64 {
+        match self.cache.auto_reconnect_interval_secs {
+            0 => 5,
+            n => n.clamp(2, 3600),
+        }
+    }
+
+    pub fn set_auto_reconnect_interval_secs(&mut self, n: u64) {
+        self.cache.auto_reconnect_interval_secs = n;
+    }
+
     pub fn sftp_bookmarks(&self) -> &[String] {
         &self.cache.sftp_bookmarks
     }

@@ -14,6 +14,7 @@ use crate::terminal::{RenderGates, TermBuffers};
 use crate::ui::AppWindow;
 
 /// Shared dependencies for starting or reconnecting a session tab.
+#[derive(Clone)]
 pub(crate) struct ConnectCtx {
     pub(crate) weak: slint::Weak<AppWindow>,
     /// Registry id of the window this session belongs to, so connect-time

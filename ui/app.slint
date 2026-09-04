@@ -678,6 +678,13 @@ export component AppWindow inherits Window {
     callback set-sftp-queue-dedup(string);
     in-out property <bool> sftp-preserve-mtime: false;
     callback set-sftp-preserve-mtime(bool);
+    // Grace auto-reconnect (#P3-H).
+    in-out property <bool> auto-reconnect-enabled: false;
+    callback set-auto-reconnect-enabled(bool);
+    in-out property <int> auto-reconnect-max-attempts: 5;
+    callback set-auto-reconnect-max-attempts(int);
+    in-out property <int> auto-reconnect-interval: 5;
+    callback set-auto-reconnect-interval(int);
     // Hide the quick-command bar under the terminal; toolbar toggle persists it.
     in-out property <bool> cmd-bar-hidden: false;
     callback set-cmd-bar-hidden(bool);             // apply + persist
@@ -4898,6 +4905,9 @@ export component AppWindow inherits Window {
                     sftp-queue-rate-limit <=> root.sftp-queue-rate-limit;
                     sftp-queue-dedup <=> root.sftp-queue-dedup;
                     sftp-preserve-mtime <=> root.sftp-preserve-mtime;
+                    auto-reconnect-enabled <=> root.auto-reconnect-enabled;
+                    auto-reconnect-max-attempts <=> root.auto-reconnect-max-attempts;
+                    auto-reconnect-interval <=> root.auto-reconnect-interval;
                     collapse-sidebar-default <=> root.collapse-sidebar-default;
                     collapse-sftp-default <=> root.collapse-sftp-default;
                     sync-upload-enabled <=> root.sync-upload-enabled;
@@ -4971,6 +4981,9 @@ export component AppWindow inherits Window {
                     set-sftp-queue-rate-limit(v) => { root.set-sftp-queue-rate-limit(v); }
                     set-sftp-queue-dedup(v) => { root.set-sftp-queue-dedup(v); }
                     set-sftp-preserve-mtime(v) => { root.set-sftp-preserve-mtime(v); }
+                    set-auto-reconnect-enabled(v) => { root.set-auto-reconnect-enabled(v); }
+                    set-auto-reconnect-max-attempts(v) => { root.set-auto-reconnect-max-attempts(v); }
+                    set-auto-reconnect-interval(v) => { root.set-auto-reconnect-interval(v); }
                     set-collapse-sidebar-default(v) => { root.set-collapse-sidebar-default(v); }
                     set-collapse-sftp-default(v) => { root.set-collapse-sftp-default(v); }
                     set-sync-upload-enabled(v) => { root.set-sync-upload-enabled(v); }

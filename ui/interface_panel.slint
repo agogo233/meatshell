@@ -389,6 +389,10 @@ export component InterfacePanel inherits Rectangle {
     in-out property <int> sftp-queue-rate-limit: 0;   // KiB/s, 0 = unlimited
     in-out property <string> sftp-queue-dedup: "ask"; // ask/overwrite/skip/rename
     in-out property <bool> sftp-preserve-mtime;
+    // Grace auto-reconnect (#P3-H).
+    in-out property <bool> auto-reconnect-enabled;
+    in-out property <int> auto-reconnect-max-attempts: 5;
+    in-out property <int> auto-reconnect-interval: 5;
     in-out property <bool> collapse-sidebar-default;
     in-out property <bool> collapse-sftp-default;
     in-out property <bool> sync-upload-enabled;
@@ -466,6 +470,9 @@ export component InterfacePanel inherits Rectangle {
     callback set-sftp-queue-rate-limit(int);
     callback set-sftp-queue-dedup(string);
     callback set-sftp-preserve-mtime(bool);
+    callback set-auto-reconnect-enabled(bool);
+    callback set-auto-reconnect-max-attempts(int);
+    callback set-auto-reconnect-interval(int);
     callback set-collapse-sidebar-default(bool);
     callback set-collapse-sftp-default(bool);
     callback set-sync-upload-enabled(bool);
@@ -1679,6 +1686,38 @@ export component InterfacePanel inherits Rectangle {
                         ? "Session sync itself is toggled from the sync icon in the top-right bar."
                         : "会话同步本身从右上角的同步图标开关。";
                     color: Theme.text-muted; font-size: 11px * Theme.panel-font; wrap: word-wrap;
+                }
+                SectionHeader { text: root.lang-en ? "GRACE RECONNECT" : "智能重连"; height: 24px; }
+                SettingRow {
+                    label: root.lang-en ? "Auto-reconnect dropped tabs" : "断线自动重连";
+                    desc: root.lang-en
+                        ? "Reconnect a dropped remote tab in place, up to the attempt limit."
+                        : "远程标签断开后自动原地重连，最多到尝试上限。";
+                    Switch {
+                        on: root.auto-reconnect-enabled;
+                        toggled(v) => { root.auto-reconnect-enabled = v; root.set-auto-reconnect-enabled(v); }
+                    }
+                }
+                SettingRow {
+                    label: root.lang-en ? "Max attempts" : "最大尝试次数";
+                    desc: root.lang-en
+                        ? "Give up after this many consecutive failed reconnects."
+                        : "连续重连失败达到此次数后放弃。";
+                    Stepper {
+                        value: root.auto-reconnect-max-attempts; minimum: 1; maximum: 50; step: 1;
+                        changed(v) => { root.auto-reconnect-max-attempts = v; root.set-auto-reconnect-max-attempts(v); }
+                    }
+                }
+                SettingRow {
+                    label: root.lang-en ? "Retry interval" : "重连间隔";
+                    desc: root.lang-en
+                        ? "Seconds between reconnect scans."
+                        : "两次重连扫描之间的秒数。";
+                    show-divider: false;
+                    Stepper {
+                        value: root.auto-reconnect-interval; minimum: 2; maximum: 3600; step: 1; unit: "s";
+                        changed(v) => { root.auto-reconnect-interval = v; root.set-auto-reconnect-interval(v); }
+                    }
                 }
             }
 

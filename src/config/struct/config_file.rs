@@ -191,6 +191,16 @@ pub struct ConfigFile {
     /// Maximum command length (chars) recorded in command history. 0 = no max.
     #[serde(default)]
     pub command_history_max_len: u32,
+    // ── Grace auto-reconnect (#P3-H) ──────────────────────────────────────
+    /// Automatically reconnect a dropped (non-local) tab in place. Opt-in.
+    #[serde(default)]
+    pub auto_reconnect_enabled: bool,
+    /// Max consecutive auto-reconnect attempts per tab before giving up. 0 = default (5).
+    #[serde(default)]
+    pub auto_reconnect_max_attempts: u32,
+    /// Seconds between auto-reconnect scans. 0 = default (5).
+    #[serde(default)]
+    pub auto_reconnect_interval_secs: u64,
     /// Global UI scale in percent (#100). 0 = default (100%).
     #[serde(default)]
     pub ui_scale: u32,

@@ -60,6 +60,9 @@ pub(crate) struct TabStatus {
     pub(crate) user: String,
     pub(crate) session_id: String,
     pub(crate) state: u8,
+    /// Consecutive auto-reconnect attempts for this tab (#P3-H). Reset to 0 on
+    /// a successful connect; capped by `auto_reconnect_max_attempts`.
+    pub(crate) reconnect_attempts: u32,
     /// True for built-in local shell tabs (system:*). Those should show the
     /// local machine's resource panel, not the (empty) remote stats fields.
     pub(crate) is_local: bool,

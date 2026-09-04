@@ -49,7 +49,7 @@ use self::window::*;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 /// Max bytes merged into one Output event before starting a fresh chunk (#209).
 /// Keeps a single UI callback from spending hundreds of ms in vt100 ingest.
@@ -975,6 +975,36 @@ fn open_window(
         window.on_set_sftp_preserve_mtime(move |preserve| {
             let mut s = store.borrow_mut();
             s.set_sftp_queue_preserve_mtime(preserve);
+            let _ = s.save();
+        });
+    }
+
+    // Grace auto-reconnect settings (#P3-H). The timer itself is created once
+    // the window's ConnectCtx exists (see below); here we only mirror + persist.
+    window.set_auto_reconnect_enabled(store.borrow().auto_reconnect_enabled());
+    window.set_auto_reconnect_max_attempts(store.borrow().auto_reconnect_max_attempts() as i32);
+    window.set_auto_reconnect_interval(store.borrow().auto_reconnect_interval_secs() as i32);
+    {
+        let store = store.clone();
+        window.on_set_auto_reconnect_enabled(move |enabled| {
+            let mut s = store.borrow_mut();
+            s.set_auto_reconnect_enabled(enabled);
+            let _ = s.save();
+        });
+    }
+    {
+        let store = store.clone();
+        window.on_set_auto_reconnect_max_attempts(move |n| {
+            let mut s = store.borrow_mut();
+            s.set_auto_reconnect_max_attempts(n.max(1) as u32);
+            let _ = s.save();
+        });
+    }
+    {
+        let store = store.clone();
+        window.on_set_auto_reconnect_interval(move |secs| {
+            let mut s = store.borrow_mut();
+            s.set_auto_reconnect_interval_secs(secs.max(2) as u64);
             let _ = s.save();
         });
     }
@@ -2635,30 +2665,67 @@ fn open_window(
     // send/stream callbacks, which push into it via downcast.
     window.set_ai_messages(ModelRc::from(Rc::new(VecModel::<AiMessage>::default())));
     wire_ai_callbacks(&window, &store, &bufs);
+    let connect_ctx = ConnectCtx {
+        weak: window.as_weak(),
+        window_id,
+        runtime: runtime.clone(),
+        handles: handles.clone(),
+        sftp_handles: sftp_handles.clone(),
+        sftp_last_cwd: sftp_last_cwd.clone(),
+        bufs: bufs.clone(),
+        render_gates: render_gates.clone(),
+        tab_statuses: tab_statuses.clone(),
+        local_snap: local_snap.clone(),
+        local_net_hist: local_net_hist.clone(),
+        last_term_size: last_term_size.clone(),
+        sftp_follow_cd: sftp_follow_cd.clone(),
+        store: store.clone(),
+        tab_routes: core.tab_routes.clone(),
+    };
     wire_key_input(
         &window,
         handles.clone(),
         bufs.clone(),
         last_term_size.clone(),
         store.clone(),
-        ConnectCtx {
-            weak: window.as_weak(),
-            window_id,
-            runtime: runtime.clone(),
-            handles: handles.clone(),
-            sftp_handles: sftp_handles.clone(),
-            sftp_last_cwd: sftp_last_cwd.clone(),
-            bufs: bufs.clone(),
-            render_gates: render_gates.clone(),
-            tab_statuses: tab_statuses.clone(),
-            local_snap: local_snap.clone(),
-            local_net_hist: local_net_hist.clone(),
-            last_term_size: last_term_size.clone(),
-            sftp_follow_cd: sftp_follow_cd.clone(),
-            store: store.clone(),
-            tab_routes: core.tab_routes.clone(),
-        },
+        connect_ctx.clone(),
     );
+
+    // ── Grace auto-reconnect (#P3-H) ──────────────────────────────────────
+    // Opt-in periodic scan: reconnect dropped (non-local) tabs in place, up to
+    // `max_attempts` consecutive tries each (reset on a successful connect).
+    if store.borrow().auto_reconnect_enabled() {
+        let interval = store.borrow().auto_reconnect_interval_secs();
+        let max_attempts = store.borrow().auto_reconnect_max_attempts();
+        let ctx = connect_ctx.clone();
+        let timer = slint::Timer::default();
+        timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_secs(interval),
+            move || {
+                let dead: Vec<String> = {
+                    let statuses = ctx.tab_statuses.lock().unwrap();
+                    statuses
+                        .iter()
+                        .filter(|(_, st)| {
+                            st.state == 2 && !st.is_local && st.reconnect_attempts < max_attempts
+                        })
+                        .map(|(id, _)| id.clone())
+                        .collect()
+                };
+                for tab_id in dead {
+                    // Count the attempt up-front so a failing reconnect still
+                    // advances toward the cap (no hot loop); reset on connect.
+                    if let Some(st) = ctx.tab_statuses.lock().unwrap().get_mut(&tab_id) {
+                        st.reconnect_attempts += 1;
+                    }
+                    reconnect_tab_in_place(&tab_id, &ctx);
+                }
+            },
+        );
+        // Park the timer in the window's timer vec so it stops on close.
+        window_timers.borrow_mut().push(timer);
+    }
 
     // --- Window activity, for idle-CPU throttling (#127) ----------------
     // Idle terminals shouldn't burn CPU: pause the sampler when the window is
@@ -6031,45 +6098,7 @@ fn wire_key_input(
             // pressing Enter re-spawns the shell + SFTP workers in the SAME tab
             // with a fresh screen instead of forcing the user to open a new one.
             if key.as_str() == "\n" && !ctrl && !alt {
-                let dead_session = {
-                    let statuses = ctx.tab_statuses.lock().unwrap();
-                    statuses
-                        .get(tab_id.as_str())
-                        .filter(|st| st.state == 2)
-                        .map(|st| st.session_id.clone())
-                };
-                if let Some(session_id) = dead_session {
-                    let Some(session) = store.borrow().get(&session_id).cloned() else {
-                        return;
-                    };
-                    // Drop the dead shell/SFTP handles for this tab.
-                    ctx.handles.borrow_mut().remove(tab_id.as_str());
-                    if let Some(h) =
-                        ctx.sftp_handles.lock().unwrap().remove(tab_id.as_str())
-                    {
-                        h.close();
-                    }
-                    // Fresh screen: new parser, cleared history/selection.
-                    {
-                        if let Some(h) = term_buf(&ctx.bufs, tab_id.as_str()) {
-                            let mut b = h.lock().unwrap();
-                            b.release_scrollback();
-                        }
-                    }
-                    if let Some(st) =
-                        ctx.tab_statuses.lock().unwrap().get_mut(tab_id.as_str())
-                    {
-                        st.state = 0;
-                    }
-                    // Fresh session: the first OSC 7 after reconnect follows.
-                    ctx.sftp_last_cwd.lock().unwrap().remove(tab_id.as_str());
-                    if let Some(w) = ctx.weak.upgrade() {
-                        set_terminal_row(&w, tab_id.as_str(), |t| {
-                            t.status =
-                                crate::i18n::t("重连中...", "Reconnecting...").into();
-                        });
-                    }
-                    start_session_in_tab(tab_id.as_str(), session, &ctx);
+                if reconnect_tab_in_place(tab_id.as_str(), &ctx) {
                     return;
                 }
             }
@@ -7040,6 +7069,47 @@ fn wire_key_input(
             },
         );
     }
+}
+
+/// Reconnect a disconnected tab in place (#79): drop the dead shell/SFTP
+/// handles, clear the screen, and respawn the session in the SAME tab. Returns
+/// true when a reconnect was started (the tab was in the disconnected state).
+/// Shared by the Enter-to-reconnect key handler and the auto-reconnect timer.
+fn reconnect_tab_in_place(tab_id: &str, ctx: &ConnectCtx) -> bool {
+    let session_id = {
+        let statuses = ctx.tab_statuses.lock().unwrap();
+        statuses
+            .get(tab_id)
+            .filter(|st| st.state == 2)
+            .map(|st| st.session_id.clone())
+    };
+    let Some(session_id) = session_id else {
+        return false;
+    };
+    let Some(session) = ctx.store.borrow().get(&session_id).cloned() else {
+        return false;
+    };
+    // Drop the dead shell/SFTP handles for this tab.
+    ctx.handles.borrow_mut().remove(tab_id);
+    if let Some(h) = ctx.sftp_handles.lock().unwrap().remove(tab_id) {
+        h.close();
+    }
+    // Fresh screen: new parser, cleared history/selection.
+    if let Some(h) = term_buf(&ctx.bufs, tab_id) {
+        h.lock().unwrap().release_scrollback();
+    }
+    if let Some(st) = ctx.tab_statuses.lock().unwrap().get_mut(tab_id) {
+        st.state = 0;
+    }
+    // Fresh session: the first OSC 7 after reconnect follows.
+    ctx.sftp_last_cwd.lock().unwrap().remove(tab_id);
+    if let Some(w) = ctx.weak.upgrade() {
+        set_terminal_row(&w, tab_id, |t| {
+            t.status = crate::i18n::t("重连中...", "Reconnecting...").into();
+        });
+    }
+    start_session_in_tab(tab_id, session, ctx);
+    true
 }
 
 /// Build the per-kind action-link enable flags from config. The master switch
