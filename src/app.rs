@@ -168,7 +168,7 @@ use crate::resource::{
 use crate::resource::{SystemSampler, SystemSnapshot};
 use crate::session::{ConnectCtx, PendingCred, PendingHostKey, PendingMfa};
 use crate::sftp::{
-    download_target_path, spawn_sftp, DownloadConflict, SftpHandles, SftpLastCwd,
+    download_target_path, spawn_sftp, DedupPolicy, DownloadConflict, SftpHandles, SftpLastCwd,
 };
 use crate::ssh::{
     format_mtime, format_size, spawn_session, test_session_auth, ProcInfo, SessionCommand,
@@ -937,6 +937,44 @@ fn open_window(
             flag.store(follow, std::sync::atomic::Ordering::Relaxed);
             let mut s = store.borrow_mut();
             s.set_sftp_follow_cd(follow);
+            let _ = s.save();
+        });
+    }
+
+    // SFTP transfer-queue tuning (concurrency / rate limit / dedup / mtime).
+    window.set_sftp_queue_concurrency(store.borrow().sftp_queue_concurrency() as i32);
+    window.set_sftp_queue_rate_limit(store.borrow().sftp_queue_rate_limit_kbps() as i32);
+    window.set_sftp_queue_dedup(store.borrow().sftp_queue_dedup().to_string().into());
+    window.set_sftp_preserve_mtime(store.borrow().sftp_queue_preserve_mtime());
+    {
+        let store = store.clone();
+        window.on_set_sftp_queue_concurrency(move |n| {
+            let mut s = store.borrow_mut();
+            s.set_sftp_queue_concurrency(n.max(1) as u32);
+            let _ = s.save();
+        });
+    }
+    {
+        let store = store.clone();
+        window.on_set_sftp_queue_rate_limit(move |kbps| {
+            let mut s = store.borrow_mut();
+            s.set_sftp_queue_rate_limit_kbps(kbps.max(0) as u32);
+            let _ = s.save();
+        });
+    }
+    {
+        let store = store.clone();
+        window.on_set_sftp_queue_dedup(move |policy| {
+            let mut s = store.borrow_mut();
+            s.set_sftp_queue_dedup(policy.to_string());
+            let _ = s.save();
+        });
+    }
+    {
+        let store = store.clone();
+        window.on_set_sftp_preserve_mtime(move |preserve| {
+            let mut s = store.borrow_mut();
+            s.set_sftp_queue_preserve_mtime(preserve);
             let _ = s.save();
         });
     }

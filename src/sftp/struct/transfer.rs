@@ -81,6 +81,42 @@ pub enum DownloadConflict {
     KeepBoth,
 }
 
+/// Duplicate-target policy for transfers, chosen from settings. `Ask` keeps the
+/// interactive prompt; the others resolve automatically.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DedupPolicy {
+    Ask,
+    Overwrite,
+    Skip,
+    Rename,
+}
+
+/// Per-session SFTP transfer-queue tuning, snapshotted from the global config
+/// when the worker spawns. Automation callers use [`SftpQueueConfig::default`]
+/// (unlimited, sequential-ish).
+#[derive(Clone, Debug)]
+pub struct SftpQueueConfig {
+    /// Max concurrent transfer tasks (1..=4).
+    pub concurrency: u32,
+    /// Per-transfer rate limit in KiB/s (0 = unlimited).
+    pub rate_limit_kbps: u32,
+    /// Duplicate-target policy.
+    pub dedup: DedupPolicy,
+    /// Preserve file mtimes across transfer.
+    pub preserve_mtime: bool,
+}
+
+impl Default for SftpQueueConfig {
+    fn default() -> Self {
+        Self {
+            concurrency: 2,
+            rate_limit_kbps: 0,
+            dedup: DedupPolicy::Ask,
+            preserve_mtime: false,
+        }
+    }
+}
+
 /// Handle retained by the UI to drive a running SFTP worker.
 pub struct SftpHandle {
     pub commands: UnboundedSender<SftpCommand>,

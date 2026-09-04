@@ -1,9 +1,20 @@
 use super::*;
 
-fn choose_download_conflict(remote: &str, local_dir: &str) -> Option<DownloadConflict> {
+fn choose_download_conflict(
+    remote: &str,
+    local_dir: &str,
+    policy: DedupPolicy,
+) -> Option<DownloadConflict> {
     let target = download_target_path(remote, local_dir);
     if !target.is_file() {
         return Some(DownloadConflict::Replace);
+    }
+    // A configured policy resolves the conflict without prompting.
+    match policy {
+        DedupPolicy::Overwrite => return Some(DownloadConflict::Replace),
+        DedupPolicy::Rename => return Some(DownloadConflict::KeepBoth),
+        DedupPolicy::Skip => return None,
+        DedupPolicy::Ask => {}
     }
     let replace = t("替换", "Replace");
     let keep_both = t("共存", "Keep both");
@@ -35,6 +46,21 @@ fn choose_download_conflict(remote: &str, local_dir: &str) -> Option<DownloadCon
             Some(DownloadConflict::KeepBoth)
         }
         _ => None,
+    }
+}
+
+/// Read the configured duplicate-target policy from the window mirror of the
+/// global setting (defaults to `Ask` when the window is gone).
+fn configured_dedup_policy(weak: &slint::Weak<AppWindow>) -> DedupPolicy {
+    match weak
+        .upgrade()
+        .map(|w| w.get_sftp_queue_dedup().to_string())
+        .as_deref()
+    {
+        Some("overwrite") => DedupPolicy::Overwrite,
+        Some("skip") => DedupPolicy::Skip,
+        Some("rename") => DedupPolicy::Rename,
+        _ => DedupPolicy::Ask,
     }
 }
 
@@ -138,9 +164,11 @@ pub(super) fn wire_sftp_callbacks(
                     if let Some(h) = handles.get(&tab_id) {
                         if let Some(ref dir) = arc_dir {
                             h.download_archive(dir.clone(), arc_names.clone(), preset);
-                        } else if let Some(conflict) =
-                            choose_download_conflict(&remote_path, &preset)
-                        {
+                        } else if let Some(conflict) = choose_download_conflict(
+                            &remote_path,
+                            &preset,
+                            configured_dedup_policy(&weak),
+                        ) {
                             h.download(remote_path, preset, conflict);
                         }
                         // Pop the transfers panel so progress is visible (user
@@ -161,9 +189,11 @@ pub(super) fn wire_sftp_callbacks(
                         if let Some(h) = handles.get(&tab_id) {
                             if let Some(ref rdir) = arc_dir {
                                 h.download_archive(rdir.clone(), arc_names.clone(), local_dir);
-                            } else if let Some(conflict) =
-                                choose_download_conflict(&remote_path, &local_dir)
-                            {
+                            } else if let Some(conflict) = choose_download_conflict(
+                                &remote_path,
+                                &local_dir,
+                                configured_dedup_policy(&weak),
+                            ) {
                                 h.download(remote_path, local_dir, conflict);
                             }
                         }
@@ -428,9 +458,11 @@ pub(super) fn wire_sftp_callbacks(
                 if let Ok(handles) = sftp_handles.lock() {
                     if let Some(h) = handles.get(tab_id.as_str()) {
                         if single {
-                            if let Some(conflict) =
-                                choose_download_conflict(&paths[0], &preset)
-                            {
+                            if let Some(conflict) = choose_download_conflict(
+                                &paths[0],
+                                &preset,
+                                configured_dedup_policy(&weak),
+                            ) {
                                 h.download(paths[0].clone(), preset.clone(), conflict);
                             }
                         } else {
@@ -449,9 +481,11 @@ pub(super) fn wire_sftp_callbacks(
                         if let Ok(handles) = sftp_handles.lock() {
                             if let Some(h) = handles.get(&tab) {
                                 if single {
-                                    if let Some(conflict) =
-                                        choose_download_conflict(&paths[0], &dir)
-                                    {
+                                    if let Some(conflict) = choose_download_conflict(
+                                        &paths[0],
+                                        &dir,
+                                        configured_dedup_policy(&weak2),
+                                    ) {
                                         h.download(paths[0].clone(), dir.clone(), conflict);
                                     }
                                 } else {

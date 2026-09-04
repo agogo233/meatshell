@@ -33,7 +33,7 @@ use crate::config::{AuthMethod, Session};
 use crate::i18n::t;
 use crate::ssh::{format_mtime, format_size, RemoteEntry, RemoteTreeNode, SessionEvent};
 
-use super::transfer::{DownloadConflict, SftpCommand, SftpHandle};
+use super::transfer::{DownloadConflict, SftpCommand, SftpHandle, SftpQueueConfig};
 
 impl SftpHandle {
     pub fn list_dir(&self, path: String) {
@@ -163,12 +163,13 @@ pub fn spawn_sftp(
     session: Session,
     jump: Option<Session>,
     events: UnboundedSender<SessionEvent>,
+    queue: SftpQueueConfig,
 ) -> SftpHandle {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let self_tx = cmd_tx.clone();
     let events_err = events.clone();
     let join = runtime.spawn(async move {
-        if let Err(err) = run_sftp(session, jump, cmd_rx, self_tx, events).await {
+        if let Err(err) = run_sftp(session, jump, cmd_rx, self_tx, events, queue).await {
             let _ = events_err.send(SessionEvent::SftpStatus(friendly_sftp_error(&err)));
         }
     });
@@ -255,7 +256,12 @@ async fn run_sftp(
     mut commands: UnboundedReceiver<SftpCommand>,
     self_tx: UnboundedSender<SftpCommand>,
     events: UnboundedSender<SessionEvent>,
+    queue: SftpQueueConfig,
 ) -> Result<()> {
+    // Bound concurrent transfer tasks (each Download/Upload spawns its own
+    // task; this semaphore caps how many run at once per the setting).
+    let permits = queue.concurrency.clamp(1, 4) as usize;
+    let transfer_slots = Arc::new(tokio::sync::Semaphore::new(permits));
     let _ = events.send(SessionEvent::SftpStatus(
         t("SFTP 连接中...", "SFTP connecting...").into(),
     ));
@@ -611,6 +617,9 @@ async fn run_sftp(
                 let sftp = sftp.clone();
                 let handle = handle.clone();
                 let events = events.clone();
+                let slots = transfer_slots.clone();
+                let rate_kbps = queue.rate_limit_kbps;
+                let preserve_mtime = queue.preserve_mtime;
                 // Register a cancel flag up-front under the file id, so a
                 // CancelTransfer arriving mid-download can flip it (#100).
                 let file_id = Uuid::new_v4().to_string();
@@ -621,6 +630,16 @@ async fn run_sftp(
                     .insert(file_id.clone(), cancel.clone());
                 let cancels_done = cancels.clone();
                 tokio::spawn(async move {
+                    // Wait for a free transfer slot so at most `concurrency`
+                    // transfers run at once; the permit is held for the whole
+                    // transfer and released when the task ends.
+                    let _permit = match slots.acquire().await {
+                        Ok(p) => p,
+                        Err(_) => {
+                            cancels_done.lock().unwrap().remove(&file_id);
+                            return;
+                        }
+                    };
                     // A directory target → recursively mirror the whole tree (#50).
                     let is_dir = sftp
                         .metadata(&remote)
@@ -649,7 +668,17 @@ async fn run_sftp(
                             t("下载文件夹", "Downloading folder"),
                             dirname
                         )));
-                        match download_dir(&sftp, &handle, &remote, &local_dir, &events).await {
+                        match download_dir(
+                            &sftp,
+                            &handle,
+                            &remote,
+                            &local_dir,
+                            &events,
+                            rate_kbps,
+                            preserve_mtime,
+                        )
+                        .await
+                        {
                             Ok(_) => {
                                 let _ = events.send(SessionEvent::SftpStatus(format!(
                                     "{}: {}",
@@ -690,6 +719,8 @@ async fn run_sftp(
                             &id,
                             &events,
                             &cancel,
+                            rate_kbps,
+                            preserve_mtime,
                         )
                         .await
                         {
@@ -787,8 +818,18 @@ async fn run_sftp(
                         if st != 0 {
                             return Err(anyhow!(t("远端 tar 打包失败", "remote tar failed")));
                         }
-                        download_impl(&handle, &tmp, &local_path, &arc_name, &id, &events, &cancel)
-                            .await
+                        download_impl(
+                            &handle,
+                            &tmp,
+                            &local_path,
+                            &arc_name,
+                            &id,
+                            &events,
+                            &cancel,
+                            rate_kbps,
+                            preserve_mtime,
+                        )
+                        .await
                     }
                     .await;
                     // Best-effort cleanup of the remote temp tar — success, failure
@@ -837,6 +878,9 @@ async fn run_sftp(
                 let sftp = sftp.clone();
                 let handle = handle.clone();
                 let events = events.clone();
+                let slots = transfer_slots.clone();
+                let rate_kbps = queue.rate_limit_kbps;
+                let preserve_mtime = queue.preserve_mtime;
                 // Register a cancel flag up-front under the file id so a
                 // CancelTransfer arriving mid-upload can flip it (#100).
                 let up_id = Uuid::new_v4().to_string();
@@ -847,6 +891,14 @@ async fn run_sftp(
                     .insert(up_id.clone(), cancel.clone());
                 let cancels_done = cancels.clone();
                 tokio::spawn(async move {
+                    // Cap concurrent transfers via the shared semaphore.
+                    let _permit = match slots.acquire().await {
+                        Ok(p) => p,
+                        Err(_) => {
+                            cancels_done.lock().unwrap().remove(&up_id);
+                            return;
+                        }
+                    };
                     // A directory source → recursively upload the whole tree (#50).
                     let is_dir = tokio::fs::metadata(&local)
                         .await
@@ -872,7 +924,16 @@ async fn run_sftp(
                             t("上传文件夹", "Uploading folder"),
                             dirname
                         )));
-                        let res = upload_dir(&handle, &sftp, &local, &remote_dir, &events).await;
+                        let res = upload_dir(
+                            &handle,
+                            &sftp,
+                            &local,
+                            &remote_dir,
+                            &events,
+                            rate_kbps,
+                            preserve_mtime,
+                        )
+                        .await;
                         if let Ok(entries) = list_dir_impl(&sftp, &remote_dir).await {
                             let _ = events.send(SessionEvent::SftpEntries {
                                 path: remote_dir.clone(),
@@ -925,6 +986,8 @@ async fn run_sftp(
                             &id,
                             &events,
                             &cancel,
+                            rate_kbps,
+                            preserve_mtime,
                         )
                         .await
                         {
@@ -984,13 +1047,23 @@ async fn run_sftp(
                 let sftp = sftp.clone();
                 let handle = handle.clone();
                 let events = events.clone();
+                let rate_kbps = queue.rate_limit_kbps;
+                let preserve_mtime = queue.preserve_mtime;
                 tokio::spawn(async move {
                     let filename = base_name(&remote);
                     let remote_dir = parent_dir(&remote);
                     let id = Uuid::new_v4().to_string();
                     let no_cancel = Arc::new(AtomicBool::new(false));
                     let result = upload_pipelined(
-                        &handle, &local, &remote, &filename, &id, &events, &no_cancel,
+                        &handle,
+                        &local,
+                        &remote,
+                        &filename,
+                        &id,
+                        &events,
+                        &no_cancel,
+                        rate_kbps,
+                        preserve_mtime,
                     )
                     .await;
                     match result {
@@ -1260,7 +1333,15 @@ async fn run_sftp(
                 let xid = Uuid::new_v4().to_string();
                 let no_cancel = Arc::new(AtomicBool::new(false));
                 match download_impl(
-                    &handle, &remote, &local_str, &filename, &xid, &events, &no_cancel,
+                    &handle,
+                    &remote,
+                    &local_str,
+                    &filename,
+                    &xid,
+                    &events,
+                    &no_cancel,
+                    queue.rate_limit_kbps,
+                    queue.preserve_mtime,
                 )
                 .await
                 {
@@ -1724,11 +1805,14 @@ async fn stage_remote_for_copy(
             .map(|entries| entries.is_empty())
             .unwrap_or(false);
         if !empty {
-            download_dir(sftp, handle, remote, &local_parent, events).await?;
+            download_dir(sftp, handle, remote, &local_parent, events, 0, false).await?;
         }
     } else {
         let local = local_path.to_string_lossy().to_string();
-        download_impl(handle, remote, &local, &name, &id, events, &no_cancel).await?;
+        download_impl(
+            handle, remote, &local, &name, &id, events, &no_cancel, 0, false,
+        )
+        .await?;
     }
 
     Ok((local_path, cleanup_root))
@@ -1839,6 +1923,8 @@ async fn download_impl(
     id: &str,
     events: &UnboundedSender<SessionEvent>,
     cancel: &Arc<AtomicBool>,
+    rate_kbps: u32,
+    preserve_mtime: bool,
 ) -> Result<bool> {
     use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
@@ -1856,12 +1942,12 @@ async fn download_impl(
     let raw = Arc::new(RawSftpSession::new(channel.into_stream()));
     raw.init().await.context("sftp download handshake")?;
 
-    let total = raw
-        .stat(remote)
-        .await
-        .ok()
+    let remote_attrs = raw.stat(remote).await.ok();
+    let total = remote_attrs
+        .as_ref()
         .and_then(|a| a.attrs.size)
         .unwrap_or(0);
+    let remote_mtime = remote_attrs.as_ref().and_then(|a| a.attrs.mtime);
     let fhandle = raw
         .open(remote, OpenFlags::READ, FileAttributes::default())
         .await
@@ -1872,6 +1958,11 @@ async fn download_impl(
         .with_context(|| format!("create local {local}"))?;
 
     emit_transfer(events, id, name, false, 0, total, 0, "");
+
+    // Token-bucket pacer: `rate_kbps` KiB/s, refilled per 100 ms window.
+    let rate_bytes_per_sec = (rate_kbps as u64).saturating_mul(1024);
+    let mut pace_window = Instant::now();
+    let mut pace_bytes: u64 = 0;
 
     let mut done: u64 = 0;
     let mut last = Instant::now();
@@ -1925,6 +2016,21 @@ async fn download_impl(
                             err = Some(anyhow!("write local: {e}"));
                         } else {
                             done += data.len() as u64;
+                        }
+                    }
+                    if rate_bytes_per_sec > 0 {
+                        pace_bytes += data.len() as u64;
+                        if pace_window.elapsed() >= Duration::from_millis(100) {
+                            let allowed =
+                                rate_bytes_per_sec / 10; // per 100 ms
+                            if pace_bytes > allowed {
+                                let over = pace_bytes - allowed;
+                                let ms =
+                                    (over as f64 / rate_bytes_per_sec as f64 * 1000.0) as u64;
+                                tokio::time::sleep(Duration::from_millis(ms.min(1000))).await;
+                            }
+                            pace_window = Instant::now();
+                            pace_bytes = 0;
                         }
                     }
                     if last.elapsed() >= Duration::from_millis(150) {
@@ -1995,6 +2101,16 @@ async fn download_impl(
         return Ok(false);
     }
     local_file.flush().await.context("flush local file")?;
+    if preserve_mtime {
+        if let Some(secs) = remote_mtime {
+            drop(local_file);
+            let when =
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs as u64);
+            if let Ok(f) = std::fs::OpenOptions::new().write(true).open(local) {
+                let _ = f.set_modified(when);
+            }
+        }
+    }
     emit_transfer(events, id, name, false, done, total.max(done), 1, "");
     Ok(true)
 }
@@ -2011,6 +2127,8 @@ async fn download_dir(
     remote_root: &str,
     local_parent: &str,
     events: &UnboundedSender<SessionEvent>,
+    rate_kbps: u32,
+    preserve_mtime: bool,
 ) -> Result<()> {
     // Folder transfers aren't individually cancellable from the UI; a throwaway
     // never-set flag satisfies download_impl's signature.
@@ -2039,6 +2157,8 @@ async fn download_dir(
                     &id,
                     events,
                     &no_cancel,
+                    rate_kbps,
+                    preserve_mtime,
                 )
                 .await?;
             }
@@ -2088,6 +2208,8 @@ async fn upload_dir(
     local_root: &Path,
     remote_parent: &str,
     events: &UnboundedSender<SessionEvent>,
+    rate_kbps: u32,
+    preserve_mtime: bool,
 ) -> Result<()> {
     // Folder uploads aren't individually cancellable from the UI; a throwaway
     // never-set flag satisfies upload_pipelined's signature.
@@ -2110,7 +2232,18 @@ async fn upload_dir(
                 stack.push((lpath, rchild));
             } else if ft.is_file() {
                 let id = Uuid::new_v4().to_string();
-                upload_pipelined(handle, &lpath, &rchild, &name, &id, events, &no_cancel).await?;
+                upload_pipelined(
+                    handle,
+                    &lpath,
+                    &rchild,
+                    &name,
+                    &id,
+                    events,
+                    &no_cancel,
+                    rate_kbps,
+                    preserve_mtime,
+                )
+                .await?;
             }
         }
     }
@@ -2134,11 +2267,18 @@ async fn upload_pipelined(
     id: &str,
     events: &UnboundedSender<SessionEvent>,
     cancel: &Arc<AtomicBool>,
+    rate_kbps: u32,
+    preserve_mtime: bool,
 ) -> Result<bool> {
     use tokio::io::AsyncReadExt;
 
     const CHUNK: usize = 32 * 1024; // safe SFTP write size
     const MAX_INFLIGHT: usize = 32; // ~1 MB of outstanding writes hides the RTT
+
+    // Upload-side mtime would need a remote SETSTAT; the raw SFTP API for it is
+    // not exercised elsewhere in this crate, so we keep the flag for symmetry but
+    // only honour download-side mtime for now.
+    let _ = preserve_mtime;
 
     let total = tokio::fs::metadata(local)
         .await
@@ -2172,6 +2312,11 @@ async fn upload_pipelined(
         .handle;
 
     emit_transfer(events, id, name, true, 0, total, 0, "");
+
+    // Token-bucket pacer (see download_impl): rate_kbps KiB/s per 100 ms window.
+    let rate_bytes_per_sec = (rate_kbps as u64).saturating_mul(1024);
+    let mut pace_window = Instant::now();
+    let mut pace_bytes: u64 = 0;
 
     let mut offset: u64 = 0;
     let mut done: u64 = 0;
@@ -2208,6 +2353,19 @@ async fn upload_pipelined(
         match inflight.next().await {
             Some(Ok(n)) => {
                 done += n;
+                if rate_bytes_per_sec > 0 {
+                    pace_bytes += n;
+                    if pace_window.elapsed() >= Duration::from_millis(100) {
+                        let allowed = rate_bytes_per_sec / 10;
+                        if pace_bytes > allowed {
+                            let over = pace_bytes - allowed;
+                            let ms = (over as f64 / rate_bytes_per_sec as f64 * 1000.0) as u64;
+                            tokio::time::sleep(Duration::from_millis(ms.min(1000))).await;
+                        }
+                        pace_window = Instant::now();
+                        pace_bytes = 0;
+                    }
+                }
                 if last.elapsed() >= Duration::from_millis(150) {
                     last = Instant::now();
                     emit_transfer(events, id, name, true, done, total, 0, "");

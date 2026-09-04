@@ -669,6 +669,15 @@ export component AppWindow inherits Window {
     // SFTP follows the terminal's cd; opt out in Interface settings.
     in-out property <bool> sftp-follow-cd: true;
     callback set-sftp-follow-cd(bool);             // apply + persist
+    // SFTP transfer-queue tuning (concurrency / rate limit / dedup / mtime).
+    in-out property <int> sftp-queue-concurrency: 2;
+    callback set-sftp-queue-concurrency(int);
+    in-out property <int> sftp-queue-rate-limit: 0;
+    callback set-sftp-queue-rate-limit(int);
+    in-out property <string> sftp-queue-dedup: "ask";
+    callback set-sftp-queue-dedup(string);
+    in-out property <bool> sftp-preserve-mtime: false;
+    callback set-sftp-preserve-mtime(bool);
     // Hide the quick-command bar under the terminal; toolbar toggle persists it.
     in-out property <bool> cmd-bar-hidden: false;
     callback set-cmd-bar-hidden(bool);             // apply + persist
@@ -4878,6 +4887,10 @@ export component AppWindow inherits Window {
                     command-history-max-len <=> root.command-history-max-len;
                     ui-scale: root.ui-scale;
                     sftp-follow-cd <=> root.sftp-follow-cd;
+                    sftp-queue-concurrency <=> root.sftp-queue-concurrency;
+                    sftp-queue-rate-limit <=> root.sftp-queue-rate-limit;
+                    sftp-queue-dedup <=> root.sftp-queue-dedup;
+                    sftp-preserve-mtime <=> root.sftp-preserve-mtime;
                     collapse-sidebar-default <=> root.collapse-sidebar-default;
                     collapse-sftp-default <=> root.collapse-sftp-default;
                     sync-upload-enabled <=> root.sync-upload-enabled;
@@ -4945,6 +4958,10 @@ export component AppWindow inherits Window {
                     set-panel-font(v) => { root.set-panel-font(v); }
                     set-renderer-mode(v) => { root.set-renderer-mode(v); }
                     set-sftp-follow-cd(v) => { root.set-sftp-follow-cd(v); }
+                    set-sftp-queue-concurrency(v) => { root.set-sftp-queue-concurrency(v); }
+                    set-sftp-queue-rate-limit(v) => { root.set-sftp-queue-rate-limit(v); }
+                    set-sftp-queue-dedup(v) => { root.set-sftp-queue-dedup(v); }
+                    set-sftp-preserve-mtime(v) => { root.set-sftp-preserve-mtime(v); }
                     set-collapse-sidebar-default(v) => { root.set-collapse-sidebar-default(v); }
                     set-collapse-sftp-default(v) => { root.set-collapse-sftp-default(v); }
                     set-sync-upload-enabled(v) => { root.set-sync-upload-enabled(v); }

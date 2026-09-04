@@ -102,6 +102,23 @@ pub(super) fn start_session_in_tab(tab_id: &str, session: Session, ctx: &Connect
         // points at the destination and the handle must land there.
         let sftp_route = route.clone();
         let sftp_tab_id = tab_id.to_string();
+        // Snapshot the transfer-queue settings now (UI thread) so the worker
+        // task doesn't need to reach back into the config store.
+        let queue_cfg = {
+            let cfg = ctx.store.borrow();
+            let dedup = match cfg.sftp_queue_dedup() {
+                "overwrite" => crate::sftp::DedupPolicy::Overwrite,
+                "skip" => crate::sftp::DedupPolicy::Skip,
+                "rename" => crate::sftp::DedupPolicy::Rename,
+                _ => crate::sftp::DedupPolicy::Ask,
+            };
+            crate::sftp::SftpQueueConfig {
+                concurrency: cfg.sftp_queue_concurrency(),
+                rate_limit_kbps: cfg.sftp_queue_rate_limit_kbps(),
+                dedup,
+                preserve_mtime: cfg.sftp_queue_preserve_mtime(),
+            }
+        };
         sftp_runtime.spawn(async move {
             // The interactive PTY may never report Connected (stalled
             // handshake); bound the wait so this bootstrap task cannot
@@ -113,7 +130,8 @@ pub(super) fn start_session_in_tab(tab_id: &str, session: Session, ctx: &Connect
                 return;
             }
             tokio::task::yield_now().await;
-            let sftp_handle = spawn_sftp(sftp_task_runtime.handle(), session, jump, sftp_tx);
+            let sftp_handle =
+                spawn_sftp(sftp_task_runtime.handle(), session, jump, sftp_tx, queue_cfg);
             let handles = sftp_route
                 .lock()
                 .ok()

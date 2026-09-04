@@ -385,6 +385,10 @@ export component InterfacePanel inherits Rectangle {
     in-out property <int> command-history-max-len: 0;
     in property <float> ui-scale;
     in-out property <bool> sftp-follow-cd;
+    in-out property <int> sftp-queue-concurrency: 2;
+    in-out property <int> sftp-queue-rate-limit: 0;   // KiB/s, 0 = unlimited
+    in-out property <string> sftp-queue-dedup: "ask"; // ask/overwrite/skip/rename
+    in-out property <bool> sftp-preserve-mtime;
     in-out property <bool> collapse-sidebar-default;
     in-out property <bool> collapse-sftp-default;
     in-out property <bool> sync-upload-enabled;
@@ -455,6 +459,10 @@ export component InterfacePanel inherits Rectangle {
     callback set-panel-font(int);   // settings-panel font scale, percent
     callback set-renderer-mode(string);
     callback set-sftp-follow-cd(bool);
+    callback set-sftp-queue-concurrency(int);
+    callback set-sftp-queue-rate-limit(int);
+    callback set-sftp-queue-dedup(string);
+    callback set-sftp-preserve-mtime(bool);
     callback set-collapse-sidebar-default(bool);
     callback set-collapse-sftp-default(bool);
     callback set-sync-upload-enabled(bool);
@@ -1422,10 +1430,66 @@ export component InterfacePanel inherits Rectangle {
                     desc: root.lang-en
                         ? "A cd in the terminal switches the SFTP panel to the same directory."
                         : "终端里执行 cd 时,SFTP 面板自动切到相同目录。";
-                    show-divider: false;
                     Switch {
                         on: root.sftp-follow-cd;
                         toggled(v) => { root.sftp-follow-cd = v; root.set-sftp-follow-cd(v); }
+                    }
+                }
+                SectionHeader { text: root.lang-en ? "TRANSFER QUEUE" : "传输队列"; height: 24px; }
+                SettingRow {
+                    label: root.lang-en ? "Concurrent transfers" : "并发传输数";
+                    desc: root.lang-en
+                        ? "How many files upload/download at the same time (1-4)."
+                        : "同时上传/下载的文件数量（1-4）。";
+                    Stepper {
+                        value: root.sftp-queue-concurrency; minimum: 1; maximum: 4; step: 1;
+                        changed(v) => { root.sftp-queue-concurrency = v; root.set-sftp-queue-concurrency(v); }
+                    }
+                }
+                SettingRow {
+                    label: root.lang-en ? "Rate limit" : "限速";
+                    desc: root.lang-en
+                        ? "Per-transfer cap in KiB/s. 0 means unlimited."
+                        : "单个传输上限（KiB/s）。0 表示不限速。";
+                    Stepper {
+                        value: root.sftp-queue-rate-limit; minimum: 0; maximum: 100000; step: 100; unit: "KiB/s";
+                        changed(v) => { root.sftp-queue-rate-limit = v; root.set-sftp-queue-rate-limit(v); }
+                    }
+                }
+                SettingRow {
+                    label: root.lang-en ? "Duplicate files" : "重名文件";
+                    desc: root.lang-en
+                        ? "What to do when the target file already exists."
+                        : "目标文件已存在时的处理方式。";
+                    ComboBox {
+                        width: 180px;
+                        model: [
+                            root.lang-en ? "Ask" : "每次询问",
+                            root.lang-en ? "Overwrite" : "直接覆盖",
+                            root.lang-en ? "Skip" : "跳过",
+                            root.lang-en ? "Keep both" : "自动改名",
+                        ];
+                        current-value: root.sftp-queue-dedup == "overwrite" ? (root.lang-en ? "Overwrite" : "直接覆盖")
+                            : root.sftp-queue-dedup == "skip" ? (root.lang-en ? "Skip" : "跳过")
+                            : root.sftp-queue-dedup == "rename" ? (root.lang-en ? "Keep both" : "自动改名")
+                            : (root.lang-en ? "Ask" : "每次询问");
+                        selected(v) => {
+                            root.sftp-queue-dedup = (v == "Overwrite" || v == "直接覆盖") ? "overwrite"
+                                : (v == "Skip" || v == "跳过") ? "skip"
+                                : (v == "Keep both" || v == "自动改名") ? "rename" : "ask";
+                            root.set-sftp-queue-dedup(root.sftp-queue-dedup);
+                        }
+                    }
+                }
+                SettingRow {
+                    label: root.lang-en ? "Preserve modification time" : "保留修改时间";
+                    desc: root.lang-en
+                        ? "Set the downloaded file's mtime to match the remote file."
+                        : "下载后把本地文件的修改时间设为与远端一致。";
+                    show-divider: false;
+                    Switch {
+                        on: root.sftp-preserve-mtime;
+                        toggled(v) => { root.sftp-preserve-mtime = v; root.set-sftp-preserve-mtime(v); }
                     }
                 }
             }
