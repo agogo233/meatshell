@@ -306,6 +306,9 @@ msgstr "Clear buffer"
 msgid "Find"
 msgstr "Find"
 
+msgid "Add as quick command"
+msgstr "Add as quick command"
+
 msgid "Processes"
 msgstr "Processes"
 

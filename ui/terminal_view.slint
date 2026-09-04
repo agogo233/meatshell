@@ -258,6 +258,7 @@ export component TerminalView inherits Rectangle {
     in property <bool>   mouse-tracked;   // remote app wants mouse events (btop/htop/mc)
     in property <[TermMatch]> find-matches; // search-highlight rectangles
     in property <[TermMatch]> selection;    // drag-selection highlight rectangles
+    in property <bool> has-selection: false; // live selection with extent (menu item visibility)
 
     in property <string>  sftp-path: "/";
     in property <[SftpEntry]> sftp-entries;
@@ -383,6 +384,7 @@ export component TerminalView inherits Rectangle {
     callback paste-from-clipboard();
     callback copy-terminal-text();
     callback clear-terminal();              // wipe this session's screen buffer
+    callback add-selection-to-quick();      // selection → prefill quick-command dialog
     callback find-query-changed(string);    // recompute search highlights
     callback terminal-scroll(float);         // scroll history by fractional lines (+ = up); Rust keeps the sub-line remainder so momentum decays smoothly
     // Wheel inside an alt-screen app (tmux/less/vim): forward to the program so it
@@ -976,8 +978,12 @@ export component TerminalView inherits Rectangle {
                         ctx-menu := PopupWindow {
                             x: root.ctx-x;
                             y: root.ctx-y;
-                            width: 132px;
-                            height: 132px;
+                            // The 5th item only shows with a live selection; widen
+                            // for its longer label so nothing clips (no elide here).
+                            // Height follows the layout so item count changes never
+                            // overflow the card (#150-fix).
+                            width: root.has-selection ? 168px : 132px;
+                            height: ctx-vl.preferred-height;
                             Rectangle {
                                 background: Theme.popup-bg;
                                 border-radius: Theme.radius-sm;
@@ -985,7 +991,7 @@ export component TerminalView inherits Rectangle {
                                 border-color: Theme.border-strong;
                                 drop-shadow-blur: 12px;
                                 drop-shadow-color: #00000060;
-                                VerticalLayout {
+                                ctx-vl := VerticalLayout {
                                     padding: 4px;
                                     spacing: 1px;
                                     MenuItem {
@@ -1003,6 +1009,10 @@ export component TerminalView inherits Rectangle {
                                     MenuItem {
                                         icon: "\u{E8B6}"; label: @tr("Find");
                                         clicked => { root.find-active = true; }
+                                    }
+                                    if root.has-selection : MenuItem {
+                                        icon: "\u{E5CE}"; label: @tr("Add as quick command");
+                                        clicked => { root.add-selection-to-quick(); ime-input.focus(); }
                                     }
                                 }
                             }

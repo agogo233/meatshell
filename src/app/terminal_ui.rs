@@ -179,9 +179,12 @@ pub(super) fn rebuild_tab_display(win: &AppWindow, bufs: &TermBuffers, tab_id: &
         let b = buf.render(); // also refreshes buf.displayed_text
         let matches = compute_find_matches(&buf.displayed_text, &buf.find_query);
         let sel = buf.selection_rects_visible(cols);
-        (b, matches, sel)
+        // Extent-based (not visible-rect-based): a selection scrolled out of
+        // view still extracts text, so the ctx-menu item must stay available.
+        let has_sel = buf.selection_has_extent();
+        (b, matches, sel, has_sel)
     });
-    let Some((b, matches, sel)) = data else {
+    let Some((b, matches, sel, has_sel)) = data else {
         return;
     };
     let spans = ModelRc::from(Rc::new(VecModel::from(b.spans)));
@@ -198,6 +201,7 @@ pub(super) fn rebuild_tab_display(win: &AppWindow, bufs: &TermBuffers, tab_id: &
         row.mouse_tracked = b.mouse_tracked;
         row.find_matches = fm.clone();
         row.selection = sm.clone();
+        row.has_selection = has_sel;
         row.scroll_max = smax;
         row.scroll_offset = soff;
     });
@@ -210,14 +214,15 @@ pub(super) fn rebuild_tab_display(win: &AppWindow, bufs: &TermBuffers, tab_id: &
 pub(super) fn refresh_terminal_selection(win: &AppWindow, bufs: &TermBuffers, tab_id: &str) {
     let selection = with_term_buf(bufs, tab_id, |buf| {
         let cols = buf.parser.screen().size().1;
-        buf.selection_rects_visible(cols)
+        (buf.selection_rects_visible(cols), buf.selection_has_extent())
     });
-    let Some(selection) = selection else {
+    let Some((selection, has_sel)) = selection else {
         return;
     };
     let model = ModelRc::from(Rc::new(VecModel::from(selection)));
     set_terminal_row(win, tab_id, move |row| {
         row.selection = model.clone();
+        row.has_selection = has_sel;
     });
     win.window().request_redraw();
 }

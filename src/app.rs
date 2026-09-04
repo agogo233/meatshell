@@ -4682,6 +4682,7 @@ fn wire_session_callbacks(
                 mouse_tracked: false,
                 find_matches: ModelRc::from(std::rc::Rc::new(VecModel::<TermMatch>::default())),
                 selection: ModelRc::from(std::rc::Rc::new(VecModel::<TermMatch>::default())),
+                has_selection: false,
                 sftp_path: "/".into(),
                 sftp_entries: ModelRc::from(std::rc::Rc::new(VecModel::<SftpEntry>::default())),
                 sftp_status: if has_sftp {
@@ -6010,6 +6011,46 @@ fn wire_key_input(
         });
     }
 
+    // Context menu → 添加为快捷命令: open the manage dialog (#55) with the live
+    // selection pre-filled as the command; the user names/groups it and hits Add.
+    {
+        let bufs_add = bufs.clone();
+        let weak = window.as_weak();
+        window.on_add_selection_to_quick(move |tab_id: SharedString| {
+            let text = term_buf(&bufs_add, tab_id.as_str())
+                .map(|h| {
+                    let buf = h.lock().unwrap();
+                    buf.extract_selection_text()
+                })
+                .unwrap_or_default();
+            let command = text.trim().to_string();
+            if command.is_empty() {
+                // Whitespace-only selection: extent exists but nothing to save.
+                tracing::debug!("add-selection-to-quick: empty selection text, ignored");
+                return;
+            }
+            // Suggest a name from the first non-blank line, char-truncated so
+            // CJK never splits mid-glyph; Add starts enabled either way.
+            let first = command
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .unwrap_or("quick command");
+            let mut name: String = first.chars().take(40).collect();
+            if first.chars().count() > 40 {
+                name.push('…');
+            }
+            if let Some(w) = weak.upgrade() {
+                w.set_qcm_name(name.into());
+                w.set_qcm_command(command.into());
+                w.set_qcm_group("".into());
+                w.set_qcm_send_enter(true);
+                w.set_qcm_edit_index(-1);
+                w.set_quick_cmd_manage_open(true);
+            }
+        });
+    }
+
     // Middle-click / Ctrl+Shift+V: paste clipboard text into PTY.
     {
         let handles = handles.clone();
@@ -6101,6 +6142,7 @@ fn wire_key_input(
                     row.spans = ModelRc::from(Rc::new(VecModel::<TermSpan>::default()));
                     row.find_matches = ModelRc::from(Rc::new(VecModel::<TermMatch>::default()));
                     row.selection = ModelRc::from(Rc::new(VecModel::<TermMatch>::default()));
+                    row.has_selection = false;
                     row.cursor_row = 0;
                     row.cursor_col = 0;
                     row.rows_used = 0;

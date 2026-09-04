@@ -61,6 +61,7 @@ export struct TerminalState {
     mouse-tracked: bool,     // remote app wants mouse events (btop/htop/mc)
     find-matches: [TermMatch], // search-highlight rectangles
     selection: [TermMatch],    // drag-selection highlight rectangles
+    has-selection: bool,       // live selection with extent → ctx-menu "Add as quick command"
 
     // SFTP panel state
     sftp-path: string,
@@ -1027,6 +1028,9 @@ export component AppWindow inherits Window {
     callback copy-terminal-text(string /* tab-id */);
     // Clear a session's terminal buffer (its visible screen + scrollback).
     callback clear-terminal(string /* tab-id */);
+    // Context menu on a live selection: open the quick-command dialog with the
+    // selected text pre-filled as the command.
+    callback add-selection-to-quick(string /* tab-id */);
     // Recompute search highlights for a session's visible screen.
     callback find-query-changed(string /* tab-id */, string /* query */);
     // Scroll a session's scrollback history by N lines (+ = up/older).
@@ -1819,6 +1823,7 @@ export component AppWindow inherits Window {
                         mouse-tracked: term.mouse-tracked;
                         find-matches: term.find-matches;
                         selection: term.selection;
+                        has-selection: term.has-selection;
                         sftp-panel-height: term.sftp-panel-height;
                         set-sftp-panel-height(v) => { root.set-pane-sftp-height(term.id, v); }
                         sftp-panel-width: term.sftp-panel-width;
@@ -1965,6 +1970,7 @@ export component AppWindow inherits Window {
                         paste-from-clipboard() => { root.paste-from-clipboard(term.id); }
                         copy-terminal-text() => { root.copy-terminal-text(term.id); }
                         clear-terminal() => { root.clear-terminal(term.id); }
+                        add-selection-to-quick() => { root.add-selection-to-quick(term.id); }
                         find-query-changed(q) => { root.find-query-changed(term.id, q); }
                         terminal-scroll(d) => { root.terminal-scroll(term.id, d); }
                         terminal-wheel(d, c, r) => { root.terminal-wheel(term.id, d, c, r); }
