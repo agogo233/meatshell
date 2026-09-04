@@ -449,7 +449,7 @@ pub(super) fn session_from_draft(
         password,
         private_key_path,
         private_key_inline,
-        proxy: draft.proxy.to_string(),
+        proxy: Secret::new(draft.proxy.to_string()),
         last_used: None,
         group: draft.group.to_string(),
         kind,

@@ -108,8 +108,10 @@ pub struct Session {
     pub private_key_inline: Secret,
     /// Optional outbound proxy, e.g. "socks5://127.0.0.1:1080" or
     /// "http://user:pass@host:8080". Empty = use $ALL_PROXY, else direct.
+    /// `Secret` so a proxy password is encrypted on disk and redacted from
+    /// debug output like every other credential.
     #[serde(default)]
-    pub proxy: String,
+    pub proxy: Secret,
     /// Optional SSH jump host (bastion): the id of another saved SSH session to
     /// tunnel this connection through, like OpenSSH's ProxyJump. Empty = direct.
     /// Single hop only; the jump session supplies its own host/user/auth (#211).
@@ -233,7 +235,7 @@ impl Session {
             password: Secret::default(),
             private_key_path: String::new(),
             private_key_inline: Secret::default(),
-            proxy: String::new(),
+            proxy: Secret::default(),
             jump_session_id: String::new(),
             last_used: None,
             group: String::new(),

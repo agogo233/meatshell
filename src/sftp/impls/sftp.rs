@@ -320,7 +320,7 @@ async fn run_sftp(
         }
         None => {
             _jump_keepalive = None;
-            match crate::ssh::proxy::resolve(&session.proxy) {
+            match crate::ssh::proxy::resolve(session.proxy.as_str()) {
                 Some(p) => {
                     let stream = crate::ssh::proxy::connect(&p, &session.host, session.port)
                         .await
@@ -376,7 +376,7 @@ async fn run_sftp(
                     }
                     None => {
                         _jump_keepalive = None;
-                        match crate::ssh::proxy::resolve(&session.proxy) {
+                        match crate::ssh::proxy::resolve(session.proxy.as_str()) {
                             Some(p) => {
                                 let stream =
                                     crate::ssh::proxy::connect(&p, &session.host, session.port)
@@ -703,6 +703,7 @@ async fn run_sftp(
                         let local_path = match conflict {
                             DownloadConflict::Replace => requested,
                             DownloadConflict::KeepBoth => available_download_path(&requested),
+                            DownloadConflict::Fail => requested,
                         };
                         let local_path_text = local_path.to_string_lossy().to_string();
                         let id = file_id.clone();
@@ -721,6 +722,7 @@ async fn run_sftp(
                             &cancel,
                             rate_kbps,
                             preserve_mtime,
+                            conflict == DownloadConflict::Fail,
                         )
                         .await
                         {
@@ -830,6 +832,7 @@ async fn run_sftp(
                             &cancel,
                             rate_kbps,
                             preserve_mtime,
+                            false,
                         )
                         .await
                     }
@@ -1344,6 +1347,7 @@ async fn run_sftp(
                     &no_cancel,
                     queue.rate_limit_kbps,
                     queue.preserve_mtime,
+                    false,
                 )
                 .await
                 {
@@ -1812,7 +1816,7 @@ async fn stage_remote_for_copy(
     } else {
         let local = local_path.to_string_lossy().to_string();
         download_impl(
-            handle, remote, &local, &name, &id, events, &no_cancel, 0, false,
+            handle, remote, &local, &name, &id, events, &no_cancel, 0, false, false,
         )
         .await?;
     }
@@ -1927,6 +1931,7 @@ async fn download_impl(
     cancel: &Arc<AtomicBool>,
     rate_kbps: u32,
     preserve_mtime: bool,
+    fail_if_exists: bool,
 ) -> Result<bool> {
     use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
@@ -1955,9 +1960,26 @@ async fn download_impl(
         .await
         .with_context(|| format!("open remote {remote}"))?
         .handle;
-    let mut local_file = tokio::fs::File::create(local)
-        .await
-        .with_context(|| format!("create local {local}"))?;
+    let mut local_file = if fail_if_exists {
+        // Atomic create-if-absent: no exists()-then-write race window, and no
+        // file is left behind when the target already exists.
+        tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(local)
+            .await
+            .with_context(|| {
+                format!(
+                    "{}: {}",
+                    t("下载目标文件已存在", "download target already exists"),
+                    local
+                )
+            })?
+    } else {
+        tokio::fs::File::create(local)
+            .await
+            .with_context(|| format!("create local {local}"))?
+    };
 
     emit_transfer(events, id, name, false, 0, total, 0, "");
 
@@ -2161,6 +2183,7 @@ async fn download_dir(
                     &no_cancel,
                     rate_kbps,
                     preserve_mtime,
+                    false,
                 )
                 .await?;
             }

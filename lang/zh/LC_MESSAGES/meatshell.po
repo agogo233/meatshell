@@ -593,3 +593,6 @@ msgstr "问问 AI…（终端选中文本会填到这里）"
 
 msgid "Large-output protection active"
 msgstr "大输出保护已启用"
+
+msgid "Only 127.0.0.1 / localhost / ::1 is allowed — other addresses would expose the tunnel to your whole network"
+msgstr "仅允许 127.0.0.1 / localhost / ::1，其他地址会把隧道暴露到整个局域网"

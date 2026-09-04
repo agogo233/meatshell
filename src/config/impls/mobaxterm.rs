@@ -26,7 +26,7 @@
 
 use anyhow::{bail, Result};
 
-use super::structs::{AuthMethod, Session, SessionKind};
+use super::structs::{AuthMethod, Secret, Session, SessionKind};
 
 /// Parse a MobaXterm `.mxtsessions` (or single-session `.moba`) file into
 /// meatshell sessions. Unsupported session types (RDP/VNC/SFTP/…) and entries
@@ -115,7 +115,7 @@ pub(super) fn parse_export(raw: &str) -> Result<Vec<Session>> {
                 AuthMethod::Key
             },
             private_key_path,
-            proxy,
+            proxy: Secret::new(proxy),
             kind,
             group: group.clone(),
             encoding,
@@ -235,7 +235,7 @@ keyhost=#109#0%192.0.2.30%22%admin__PERCENT__x%0%0%0%0%0%0%0%0%0%0%0%_CurrentDri
         assert_eq!(session.auth, AuthMethod::Key);
         assert_eq!(session.private_key_path, "C:\\Users\\me\\.ssh\\id.ppk");
         assert_eq!(session.user, "admin%x");
-        assert_eq!(session.proxy, "socks5://me@proxy.example.com:8080");
+        assert_eq!(session.proxy.as_str(), "socks5://me@proxy.example.com:8080");
         assert_eq!(session.note, "note with # and |");
         assert_eq!(session.group, "My Folder");
     }

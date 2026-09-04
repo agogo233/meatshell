@@ -1772,6 +1772,14 @@ export component InterfacePanel inherits Rectangle {
                         toggled(v) => { root.webdav-accept-invalid-certs = v; }
                     }
                 }
+                if root.webdav-accept-invalid-certs : Text {
+                    text: root.lang-en
+                        ? "Certificate verification is off: saved session passwords can be read by a man in the middle. Only trusted self-signed servers, HTTPS only."
+                        : "证书校验已关闭：已保存的会话密码可能被中间人读取，仅限可信自签服务器，且仅支持 HTTPS。";
+                    color: Theme.danger;
+                    font-size: 11px * Theme.panel-font;
+                    wrap: word-wrap;
+                }
                 HorizontalLayout {
                     spacing: 8px;
                     alignment: end;

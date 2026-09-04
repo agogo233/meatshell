@@ -217,6 +217,51 @@ fn webdav_ensure_parent_dirs(agent: &ureq::Agent, url: &str, auth: Option<&str>)
     Ok(())
 }
 
+/// Certificate verification is only meaningful for TLS, so skipping it over
+/// plain HTTP would ship every saved credential in cleartext. Enforced in the
+/// two transport chokepoints below, which every WebDAV path goes through.
+pub(super) fn require_tls_for_skipped_verification(
+    accept_invalid_certs: bool,
+    base_url: &str,
+) -> Result<()> {
+    if !accept_invalid_certs || base_url.trim().to_ascii_lowercase().starts_with("https://") {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{}",
+        t(
+            "关闭证书校验时仅支持 https:// 地址，否则密码会明文传输",
+            "with certificate verification disabled only https:// is allowed; plain HTTP would send passwords in cleartext"
+        )
+    )
+}
+
+/// One explicit confirmation before certificate verification is switched off:
+/// once it is off, a man in the middle can read the credentials of every saved
+/// session. Persisted settings keep whatever the user answered here.
+pub(super) fn confirm_skip_cert_verification() -> bool {
+    rfd::MessageDialog::new()
+        .set_title(t("关闭证书校验？", "Disable certificate verification?"))
+        .set_description(t(
+            "关闭后本机无法确认 WebDAV 服务器身份，已保存的所有会话密码都可能被中间人读取。建议仅用于自签证书的可信局域网。",
+            "After this the app cannot verify the WebDAV server's identity, and the passwords of every saved session can be read by a man in the middle. Use it only for trusted self-signed servers.",
+        ))
+        .set_level(rfd::MessageLevel::Warning)
+        .set_buttons(rfd::MessageButtons::YesNo)
+        .show()
+        == rfd::MessageDialogResult::Yes
+}
+
+/// Suffix for WebDAV status lines while verification is off, so the risk stays
+/// visible at the point of use and not only in the settings page.
+pub(super) fn webdav_status_suffix(accept_invalid_certs: bool) -> String {
+    if accept_invalid_certs {
+        t("（证书校验已关闭）", "(certificate verification disabled)").to_string()
+    } else {
+        String::new()
+    }
+}
+
 pub(super) fn webdav_put_json(
     base_url: &str,
     remote_path: &str,
@@ -225,6 +270,7 @@ pub(super) fn webdav_put_json(
     accept_invalid_certs: bool,
     json: String,
 ) -> Result<()> {
+    require_tls_for_skipped_verification(accept_invalid_certs, base_url)?;
     let url = webdav_url(base_url, remote_path)?;
     let agent = webdav_agent(accept_invalid_certs);
     let auth = webdav_auth_header(username, password);
@@ -243,6 +289,7 @@ pub(super) fn webdav_get_json(
     password: &str,
     accept_invalid_certs: bool,
 ) -> Result<String> {
+    require_tls_for_skipped_verification(accept_invalid_certs, base_url)?;
     let url = webdav_url(base_url, remote_path)?;
     let agent = webdav_agent(accept_invalid_certs);
     let auth = webdav_auth_header(username, password);
@@ -251,4 +298,18 @@ pub(super) fn webdav_get_json(
         .map_err(webdav_error)?
         .into_string()
         .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skipped_cert_verification_requires_https() {
+        // Verification on: plain HTTP is an ordinary (unencrypted) choice.
+        assert!(require_tls_for_skipped_verification(false, "http://nas:5005/all/").is_ok());
+        // Verification off: HTTP must be refused, HTTPS stays allowed.
+        assert!(require_tls_for_skipped_verification(true, "http://nas:5005/all/").is_err());
+        assert!(require_tls_for_skipped_verification(true, "https://nas:5006/all/").is_ok());
+    }
 }

@@ -427,6 +427,13 @@ impl ConfigStore {
 
     // ── Key file management ───────────────────────────────────────────────
 
+    fn unix_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
     /// Load the 32-byte key from `<config_dir>/secret.key`, or generate and
     /// persist a fresh one.  On Unix the key file is created with mode `0600`
     /// so other local accounts cannot read it.  On Windows files in `%APPDATA%`
@@ -443,7 +450,30 @@ impl ConfigStore {
                 key.copy_from_slice(&bytes);
                 return Ok(key);
             }
-            tracing::warn!("secret.key has wrong length — regenerating");
+            // A truncated or foreign key can no longer decrypt anything it once
+            // encrypted, so overwriting it would silently blank every saved
+            // password.  Keep a copy first so a restore is still possible; if the
+            // backup itself fails we still proceed rather than blocking startup.
+            // The random suffix keeps two corrupt keys from the same second from
+            // overwriting each other.
+            let mut suffix = [0u8; 4];
+            OsRng.fill_bytes(&mut suffix);
+            let backup = key_path.with_file_name(format!(
+                "secret.key.bak-{}-{}",
+                Self::unix_secs(),
+                URL_SAFE_NO_PAD.encode(suffix)
+            ));
+            match fs::copy(&key_path, &backup) {
+                Ok(_) => tracing::warn!(
+                    "secret.key has wrong length — backed up to {} before regenerating",
+                    backup.display()
+                ),
+                Err(e) => tracing::warn!(
+                    "secret.key has wrong length and backing it up to {} failed ({e}) — \
+                     regenerating without a backup",
+                    backup.display()
+                ),
+            }
         }
 
         let mut key = [0u8; 32];
@@ -498,6 +528,9 @@ impl ConfigStore {
                             Self::try_decrypt(&key, session.private_key_inline.as_str())
                         {
                             session.private_key_inline = Secret::new(plain);
+                        }
+                        if let Some(plain) = Self::try_decrypt(&key, session.proxy.as_str()) {
+                            session.proxy = Secret::new(plain);
                         }
                         for trigger in &mut session.triggers {
                             if let Some(plain) = Self::try_decrypt(&key, trigger.response.as_str())
@@ -1953,7 +1986,7 @@ impl ConfigStore {
     }
 
     pub fn save(&self) -> Result<()> {
-        // Build a disk copy where every non-empty password is encrypted.
+        // Build a disk copy where every non-empty credential is encrypted.
         let mut disk = self.cache.clone();
         for session in &mut disk.sessions {
             if !session.password.is_empty()
@@ -1970,6 +2003,12 @@ impl ConfigStore {
             {
                 let enc = Self::encrypt(&self.key, session.private_key_inline.as_str())?;
                 session.private_key_inline = Secret::new(enc);
+            }
+            if !session.proxy.is_empty()
+                && !session.proxy.as_str().starts_with(Self::ENC_PREFIX)
+            {
+                let enc = Self::encrypt(&self.key, session.proxy.as_str())?;
+                session.proxy = Secret::new(enc);
             }
             for trigger in &mut session.triggers {
                 if !trigger.response.is_empty()
@@ -2091,16 +2130,18 @@ impl ConfigStore {
         String::from_utf8(plain).ok()
     }
 
-    /// Export all sessions to a portable JSON file. Passwords are re-encrypted
-    /// with the built-in export key; everything else stays plaintext so the
-    /// file is human-readable and editable. Returns the number of sessions.
+    /// Export all sessions to a portable JSON file. Passwords, inline keys and
+    /// proxy credentials are re-encrypted with the built-in export key;
+    /// everything else stays plaintext so the file is human-readable and
+    /// editable. Returns the number of sessions.
     pub fn export_json(&self) -> Result<(String, usize)> {
         let mut out = ExportFile {
             meatshell_export: 1,
             sessions: self.cache.sessions.clone(),
         };
         for s in &mut out.sessions {
-            // `cache` holds plaintext passwords; obfuscate with the export key.
+            // `cache` holds plaintext credentials; obfuscate them with the
+            // export key so a proxy password isn't naked in the file either.
             if !s.password.is_empty() {
                 let enc = Self::encrypt_export(s.password.as_str())?;
                 s.password = Secret::new(enc);
@@ -2108,6 +2149,10 @@ impl ConfigStore {
             if !s.private_key_inline.is_empty() {
                 let enc = Self::encrypt_export(s.private_key_inline.as_str())?;
                 s.private_key_inline = Secret::new(enc);
+            }
+            if !s.proxy.is_empty() {
+                let enc = Self::encrypt_export(s.proxy.as_str())?;
+                s.proxy = Secret::new(enc);
             }
             for trigger in &mut s.triggers {
                 if !trigger.response.is_empty() {
@@ -2119,15 +2164,6 @@ impl ConfigStore {
             s.last_used = None;
         }
         Ok((serde_json::to_string_pretty(&out)?, out.sessions.len()))
-    }
-
-    /// Export all sessions to a portable JSON file. Passwords are re-encrypted
-    /// with the built-in export key; everything else stays plaintext so the
-    /// file is human-readable and editable. Returns the number of sessions.
-    pub fn export_to(&self, path: &Path) -> Result<usize> {
-        let (raw, count) = self.export_json()?;
-        fs::write(path, raw).with_context(|| format!("failed to write {}", path.display()))?;
-        Ok(count)
     }
 
     /// Import sessions from a MeatShell portable export, a FinalShell connection
@@ -2170,6 +2206,11 @@ impl ConfigStore {
                     Self::try_decrypt(&self.key, s.private_key_inline.as_str())
                 {
                     s.private_key_inline = Secret::new(plain);
+                }
+                if let Some(plain) = Self::decrypt_export(s.proxy.as_str()) {
+                    s.proxy = Secret::new(plain);
+                } else if let Some(plain) = Self::try_decrypt(&self.key, s.proxy.as_str()) {
+                    s.proxy = Secret::new(plain);
                 }
                 for trigger in &mut s.triggers {
                     if let Some(plain) = Self::decrypt_export(trigger.response.as_str()) {
@@ -2904,6 +2945,85 @@ mod tests {
     }
 
     #[test]
+    fn corrupt_key_is_backed_up_before_regeneration() {
+        let dir = std::env::temp_dir().join(format!("ms-key-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key_path = dir.join("secret.key");
+        let corrupt = [0u8; 31];
+        std::fs::write(&key_path, corrupt).unwrap();
+
+        let fresh = ConfigStore::load_or_create_key(&dir).unwrap();
+        assert_eq!(fresh.len(), 32);
+        assert_ne!(fresh, corrupt);
+
+        let backups: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().starts_with("secret.key.bak-"))
+            .collect();
+        assert_eq!(backups.len(), 1, "exactly one backup of the corrupt key");
+        assert_eq!(std::fs::read(backups[0].path()).unwrap(), corrupt);
+        assert_eq!(std::fs::read(&key_path).unwrap().len(), 32);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn intact_key_is_kept_without_a_backup() {
+        let dir = std::env::temp_dir().join(format!("ms-key-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key_path = dir.join("secret.key");
+        let intact = [9u8; 32];
+        std::fs::write(&key_path, intact).unwrap();
+
+        assert_eq!(ConfigStore::load_or_create_key(&dir).unwrap(), intact);
+        let backups = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().starts_with("secret.key.bak-"))
+            .count();
+        assert_eq!(backups, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_key_is_generated_without_a_backup() {
+        let dir = std::env::temp_dir().join(format!("ms-key-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let key = ConfigStore::load_or_create_key(&dir).unwrap();
+        assert_eq!(std::fs::read(dir.join("secret.key")).unwrap(), key.to_vec());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn proxy_credentials_are_encrypted_on_disk() {
+        let mut store = temp_store();
+        store.cache.sessions.push(Session {
+            name: "via-proxy".into(),
+            host: "gateway.internal".into(),
+            user: "ops".into(),
+            proxy: Secret::new("socks5://me:p4ss@proxy.corp:1080"),
+            ..Session::new_empty()
+        });
+        store.save().unwrap();
+
+        let raw = std::fs::read_to_string(&store.path).unwrap();
+        assert!(!raw.contains("p4ss"));
+        let disk: ConfigFile = serde_json::from_str(&raw).unwrap();
+        let encrypted = disk.sessions[0].proxy.as_str();
+        assert!(encrypted.starts_with(ConfigStore::ENC_PREFIX));
+        assert_eq!(
+            ConfigStore::try_decrypt(&store.key, encrypted).as_deref(),
+            Some("socks5://me:p4ss@proxy.corp:1080")
+        );
+
+        let _ = std::fs::remove_file(&store.path);
+    }
+
+    #[test]
     fn export_import_roundtrip_preserves_password() {
         let mut a = temp_store();
         a.cache.sessions.push(Session {
@@ -2912,23 +3032,27 @@ mod tests {
             port: 22,
             user: "root".into(),
             password: Secret::new("s3cr3t"),
+            proxy: Secret::new("socks5://me:p4ss@proxy.corp:1080"),
             ..Session::new_empty()
         });
 
         let export_path = std::env::temp_dir().join(format!("ms-exp-{}.json", Uuid::new_v4()));
-        assert_eq!(a.export_to(&export_path).unwrap(), 1);
+        let (raw, count) = a.export_json().unwrap();
+        assert_eq!(count, 1);
+        std::fs::write(&export_path, &raw).unwrap();
 
-        // The file keeps host/user plaintext but the password is obfuscated.
-        let raw = std::fs::read_to_string(&export_path).unwrap();
+        // The file keeps host/user plaintext but the credentials are obfuscated.
         assert!(raw.contains("192.168.100.2"));
         assert!(raw.contains(ConfigStore::EXPORT_PREFIX));
         assert!(!raw.contains("s3cr3t"));
+        assert!(!raw.contains("p4ss"));
 
-        // Importing into a fresh store recovers the plaintext password.
+        // Importing into a fresh store recovers the plaintext password and proxy.
         let mut b = temp_store();
         assert_eq!(b.import_from(&export_path).unwrap(), (1, 0));
         assert_eq!(b.cache.sessions.len(), 1);
         assert_eq!(b.cache.sessions[0].password.as_str(), "s3cr3t");
+        assert_eq!(b.cache.sessions[0].proxy.as_str(), "socks5://me:p4ss@proxy.corp:1080");
         assert_eq!(b.cache.sessions[0].host, "192.168.100.2");
 
         // Re-importing the same file skips the duplicate.

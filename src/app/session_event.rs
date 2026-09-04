@@ -83,7 +83,7 @@ pub(super) fn apply_session_event_to_window(
         SessionEvent::Connected => {
             update_tab(&|t| t.connected = true);
             update_terminal(&|t| t.status = crate::i18n::t("已连接", "Connected").into());
-            if let Some(st) = statuses.lock().unwrap().get_mut(tab_id) {
+            if let Some(st) = lock_or_recover(&statuses).get_mut(tab_id) {
                 st.state = 1;
                 st.reconnect_attempts = 0;
             }
@@ -99,7 +99,7 @@ pub(super) fn apply_session_event_to_window(
             // tab and its status, release the heavy terminal state, then paint
             // only the reconnect hint below.
             if let Some(h) = crate::app::term_buf(bufs, tab_id) {
-                h.lock().unwrap().release_scrollback();
+                lock_or_recover(&h).release_scrollback();
             }
             // Print the hint into the terminal itself (FinalShell-style), via a
             // synthetic Output event so it reuses the normal render path (#79).
@@ -124,7 +124,7 @@ pub(super) fn apply_session_event_to_window(
             update_terminal(&|t| {
                 t.status = format!("{} — {reason}", crate::i18n::t("已断开", "Disconnected")).into()
             });
-            if let Some(st) = statuses.lock().unwrap().get_mut(tab_id) {
+            if let Some(st) = lock_or_recover(&statuses).get_mut(tab_id) {
                 st.state = 2;
             }
             if win.get_active_tab_id().as_str() == tab_id
@@ -145,7 +145,7 @@ pub(super) fn apply_session_event_to_window(
             procs: _,
             sys,
         } => {
-            if let Some(st) = statuses.lock().unwrap().get_mut(tab_id) {
+            if let Some(st) = lock_or_recover(&statuses).get_mut(tab_id) {
                 st.cpu = cpu_percent;
                 st.mem_used_kib = mem_used_kib;
                 st.mem_total_kib = mem_total_kib;
@@ -174,7 +174,7 @@ pub(super) fn apply_session_event_to_window(
             current_user,
             procs,
         } => {
-            if let Some(st) = statuses.lock().unwrap().get_mut(tab_id) {
+            if let Some(st) = lock_or_recover(&statuses).get_mut(tab_id) {
                 if !current_user.is_empty() {
                     st.user = current_user;
                 }

@@ -84,6 +84,11 @@ fn redaction_patterns() -> &'static [(Regex, &'static str)] {
                 Regex::new(r"(?i)(postgres|mysql|mongodb)://[^@\s]+@").unwrap(),
                 "$1://[REDACTED]@",
             ),
+            // Proxy URLs with embedded credentials (socks5://user:pass@host:port).
+            (
+                Regex::new(r"(?i)(socks5h|socks5|socks|https?)://[^@\s]+@").unwrap(),
+                "$1://[REDACTED]@",
+            ),
         ]
     })
 }
@@ -629,7 +634,7 @@ pub(super) fn wire_ai_callbacks(
         window.on_send_selection_to_ai(move |tab_id: SharedString| {
             let text = term_buf(&bufs_sel, tab_id.as_str())
                 .map(|h| {
-                    let buf = h.lock().unwrap();
+                    let buf = lock_or_recover(&h);
                     buf.extract_selection_text()
                 })
                 .unwrap_or_default();
@@ -688,6 +693,23 @@ mod tests {
         let redacted = redact_sensitive_text("mysql://root:s3cret@db.internal:3306/app");
         assert!(!redacted.contains("s3cret"));
         assert!(redacted.contains("mysql://[REDACTED]@db.internal:3306/app"));
+    }
+
+    #[test]
+    fn redacts_proxy_urls_with_userinfo() {
+        let redacted = redact_sensitive_text(
+            "connecting via socks5://me:p4ss@proxy.corp:1080 and http://svc@relay:8080",
+        );
+        assert!(!redacted.contains("me:p4ss"));
+        assert!(!redacted.contains("svc@"));
+        assert!(redacted.contains("socks5://[REDACTED]@proxy.corp:1080"));
+        assert!(redacted.contains("http://[REDACTED]@relay:8080"));
+    }
+
+    #[test]
+    fn leaves_userinfo_free_proxy_urls_alone() {
+        let raw = "socks5://proxy.corp:1080";
+        assert_eq!(redact_sensitive_text(raw), raw);
     }
 
     #[test]

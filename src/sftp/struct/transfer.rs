@@ -79,6 +79,9 @@ pub enum SftpCommand {
 pub enum DownloadConflict {
     Replace,
     KeepBoth,
+    /// Refuse instead of overwriting: the download fails if the target exists.
+    /// Kept out of the UI path, which always asks; automation tools use it.
+    Fail,
 }
 
 /// Duplicate-target policy for transfers, chosen from settings. `Ask` keeps the

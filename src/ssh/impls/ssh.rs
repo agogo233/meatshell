@@ -1105,7 +1105,7 @@ async fn connect_ssh(
     }
 
     // Connect directly, or tunnel through a SOCKS5 / HTTP proxy (issue #7).
-    let handle = match crate::ssh::proxy::resolve(&session.proxy) {
+    let handle = match crate::ssh::proxy::resolve(session.proxy.as_str()) {
         Some(p) => {
             let _ = events.send(SessionEvent::Status(format!(
                 "{} {} → {}",

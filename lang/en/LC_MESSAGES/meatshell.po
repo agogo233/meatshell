@@ -584,3 +584,6 @@ msgstr "When expected text appears, send the response automatically. Responses a
 
 msgid "Large-output protection active"
 msgstr "Large-output protection active"
+
+msgid "Only 127.0.0.1 / localhost / ::1 is allowed — other addresses would expose the tunnel to your whole network"
+msgstr "Only 127.0.0.1 / localhost / ::1 is allowed — other addresses would expose the tunnel to your whole network"

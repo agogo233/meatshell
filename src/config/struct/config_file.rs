@@ -387,8 +387,9 @@ pub struct ConfigFile {
 }
 
 /// Portable export file (issue #46): sessions with everything in plaintext
-/// **except** the password, which is encrypted with a fixed key baked into the
-/// binary so the file opens on *any* machine running meatshell.
+/// **except** passwords, inline private keys and proxy credentials, which are
+/// encrypted with a fixed key baked into the binary so the file opens on *any*
+/// machine running meatshell.
 ///
 /// Security note: a built-in key in open-source code is **obfuscation, not real
 /// security** — anyone with the source can derive it. It only stops a casual

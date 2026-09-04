@@ -71,19 +71,15 @@ async fn download_file(arguments: &Value, frontend: Frontend) -> Result<Value> {
         .next()
         .filter(|name| !name.is_empty())
         .ok_or_else(|| anyhow!("remote_path must identify a file"))?;
-    if local_directory.join(file_name).exists() {
-        return Err(anyhow!(
-            "download destination already exists: {}",
-            local_directory.join(file_name).display()
-        ));
-    }
     let mut result = super::sftp::transfer(
         session,
         jump,
         crate::sftp::SftpCommand::Download {
             remote: remote_path.to_string(),
             local_dir: local_directory.to_string_lossy().into_owned(),
-            conflict: crate::sftp::DownloadConflict::Replace,
+            // Never overwrite: the download fails if the target exists, with no
+            // check-then-write race window in between.
+            conflict: crate::sftp::DownloadConflict::Fail,
         },
         false,
         timeout,
@@ -255,7 +251,7 @@ fn safe_session(session: &Session) -> Value {
         "has_private_key": !session.private_key_path.trim().is_empty()
             || !session.private_key_inline.is_empty(),
         "jump_session_id": session.jump_session_id,
-        "has_proxy": !session.proxy.trim().is_empty(),
+        "has_proxy": !session.proxy.as_str().trim().is_empty(),
     })
 }
 

@@ -152,14 +152,14 @@ pub(super) fn wire_tab_callbacks(
             if let Some(handle) = handles.borrow_mut().remove(&id) {
                 handle.close();
             }
-            if let Some(sftp) = sftp_handles.lock().unwrap().remove(&id) {
+            if let Some(sftp) = lock_or_recover(&sftp_handles).remove(&id) {
                 sftp.close();
             }
-            sftp_last_cwd.lock().unwrap().remove(&id);
-            if let Some(gate) = render_gates.lock().unwrap().remove(&id) {
+            lock_or_recover(&sftp_last_cwd).remove(&id);
+            if let Some(gate) = lock_or_recover(&render_gates).remove(&id) {
                 gate.close();
             }
-            bufs.lock().unwrap().remove(&id);
+            lock_or_recover(&bufs).remove(&id);
             if let Ok(mut routes) = tab_routes.lock() {
                 routes.remove(&id);
             }

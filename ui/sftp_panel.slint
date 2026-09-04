@@ -1064,6 +1064,13 @@ export component SftpPanel inherits Rectangle {
                         }
                     }
 
+                    if (root.tunnel-bind != "" && root.tunnel-bind != "127.0.0.1" && root.tunnel-bind != "localhost" && root.tunnel-bind != "::1") : Text {
+                        text: @tr("Only 127.0.0.1 / localhost / ::1 is allowed — other addresses would expose the tunnel to your whole network");
+                        color: Theme.danger;
+                        font-size: Theme.fs-sm;
+                        wrap: word-wrap;
+                    }
+
                     if root.tunnel-kind == "local" : HorizontalLayout {
                         spacing: 8px;
                         Rectangle {

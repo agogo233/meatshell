@@ -37,6 +37,16 @@ pub(super) fn forward_model(forwards: &[PortFwd]) -> ModelRc<PortFwd> {
     ModelRc::from(Rc::new(VecModel::from(forwards.to_vec())))
 }
 
+/// Client-side listeners (local `-L`, dynamic `-D`) may only bind loopback:
+/// any other address would expose the tunnel to the whole LAN. `remote`
+/// forwards bind on the server instead, so this check does not apply to them.
+pub(super) fn is_loopback_bind(addr: &str) -> bool {
+    match addr.trim() {
+        "" | "127.0.0.1" | "localhost" | "::1" => true,
+        _ => false,
+    }
+}
+
 pub(super) fn validated_port_forwards(
     drafts: &[PortFwd],
 ) -> std::result::Result<Vec<crate::config::PortForward>, String> {
@@ -64,6 +74,18 @@ pub(super) fn validated_port_forwards(
                 .to_string()
             })?;
         let kind = draft.kind.as_str();
+        let bind_addr = if draft.bind_addr.trim().is_empty() {
+            "127.0.0.1".to_string()
+        } else {
+            draft.bind_addr.trim().to_string()
+        };
+        if kind != "remote" && !is_loopback_bind(&bind_addr) {
+            return Err(t(
+                "本地/动态转发的监听地址仅允许回环地址（127.0.0.1 / localhost / ::1）",
+                "A local or dynamic forward may only bind a loopback address (127.0.0.1 / localhost / ::1).",
+            )
+            .to_string());
+        }
         let (host, host_port) = if kind == "dynamic" {
             (String::new(), 0)
         } else {
@@ -87,11 +109,7 @@ pub(super) fn validated_port_forwards(
         forwards.push(crate::config::PortForward {
             kind: kind.to_string(),
             name: draft.name.trim().to_string(),
-            bind_addr: if draft.bind_addr.trim().is_empty() {
-                "127.0.0.1".to_string()
-            } else {
-                draft.bind_addr.trim().to_string()
-            },
+            bind_addr,
             bind_port,
             host,
             host_port,

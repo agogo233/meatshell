@@ -49,11 +49,18 @@ use self::window::*;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 /// Max bytes merged into one Output event before starting a fresh chunk (#209).
 /// Keeps a single UI callback from spending hundreds of ms in vt100 ingest.
 const OUTPUT_MERGE_BYTE_CAP: usize = 64 * 1024;
+
+/// Lock a mutex, recovering the guard from a poisoned lock instead of panicking.
+/// A panic on any background thread must not take the whole UI down with it: the
+/// data behind a poisoned mutex is as good as it was, so reuse it.
+fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|p| p.into_inner())
+}
 
 /// Output parsed between UI-flush checkpoints during sustained traffic.
 const INGEST_FRAME_BUDGET: usize = 64 * 1024;
@@ -80,7 +87,7 @@ const SCROLLED_RENDER_MIN_INTERVAL: std::time::Duration =
     std::time::Duration::from_millis(100);
 
 fn term_buf(bufs: &TermBuffers, tab_id: &str) -> Option<TermBufferHandle> {
-    bufs.lock().unwrap().get(tab_id).cloned()
+    lock_or_recover(&bufs).get(tab_id).cloned()
 }
 
 fn tab_render_interval(bufs: &TermBuffers, tab_id: &str) -> std::time::Duration {
@@ -106,13 +113,13 @@ fn with_term_buf<R>(
     f: impl FnOnce(&mut TermBuffer) -> R,
 ) -> Option<R> {
     let h = term_buf(bufs, tab_id)?;
-    let mut guard = h.lock().unwrap();
+    let mut guard = lock_or_recover(&h);
     Some(f(&mut guard))
 }
 
 fn ingest_terminal_output(bufs: &TermBuffers, tab_id: &str, chunk: &[u8]) -> Vec<u8> {
     if let Some(h) = term_buf(bufs, tab_id) {
-        h.lock().unwrap().ingest(chunk)
+        lock_or_recover(&h).ingest(chunk)
     } else {
         Vec::new()
     }
@@ -264,7 +271,7 @@ fn register_tab_render_request(
     gates: &RenderGates,
 ) -> Option<(Arc<TabRenderGate>, TabRenderTicket, bool)> {
     let gate = {
-        let map = gates.lock().unwrap();
+        let map = lock_or_recover(&gates);
         map.get(tab_id).cloned()
     }?;
     let (generation, should_schedule) = gate.request()?;
@@ -1286,6 +1293,7 @@ fn open_window(
         window.set_webdav_status(String::new().into());
     }
     {
+        let weak = window.as_weak();
         let store = store.clone();
         window.on_save_webdav_settings(
             move |enabled: bool,
@@ -1293,7 +1301,28 @@ fn open_window(
                   username: SharedString,
                   password: SharedString,
                   remote_path: SharedString,
-                  accept_invalid_certs: bool| {
+                  mut accept_invalid_certs: bool| {
+                // Turning verification off exposes every saved credential, so ask
+                // once; a decline keeps the previous (verified) value.
+                if accept_invalid_certs
+                    && !store.borrow().webdav_accept_invalid_certs()
+                    && !confirm_skip_cert_verification()
+                {
+                    accept_invalid_certs = false;
+                    if let Some(w) = weak.upgrade() {
+                        w.set_webdav_accept_invalid_certs(false);
+                    }
+                }
+                // Also catch an https → http switch while verification is already off.
+                if let Err(e) = require_tls_for_skipped_verification(
+                    accept_invalid_certs,
+                    url.as_str(),
+                ) {
+                    if let Some(w) = weak.upgrade() {
+                        w.set_webdav_status(e.to_string().into());
+                    }
+                    return;
+                }
                 let mut s = store.borrow_mut();
                 s.set_webdav_settings(
                     enabled,
@@ -1346,7 +1375,12 @@ fn open_window(
                 .map(|_| count)
             });
             let msg = match res {
-                Ok(n) => format!("{} {}", t("已上传连接", "uploaded connections"), n),
+                Ok(n) => format!(
+                    "{} {}{}",
+                    t("已上传连接", "uploaded connections"),
+                    n,
+                    webdav_status_suffix(accept_invalid_certs)
+                ),
                 Err(e) => format!("{}: {}", t("上传失败", "upload failed"), e),
             };
             w.set_webdav_status(msg.into());
@@ -1586,8 +1620,8 @@ fn open_window(
                 s.set_search_history_mode(history);
                 let _ = s.save();
             }
-            for buffer in bufs.lock().unwrap().values() {
-                buffer.lock().unwrap().search_history_mode = history;
+            for buffer in lock_or_recover(&bufs).values() {
+                lock_or_recover(&buffer).search_history_mode = history;
             }
             if let Some(w) = weak.upgrade() {
                 w.set_search_history_mode(history);
@@ -1613,8 +1647,8 @@ fn open_window(
                 settings.set_json_format_output(enabled);
                 let _ = settings.save();
             }
-            for buffer in bufs.lock().unwrap().values() {
-                buffer.lock().unwrap().json_format_output = enabled;
+            for buffer in lock_or_recover(&bufs).values() {
+                lock_or_recover(&buffer).json_format_output = enabled;
             }
         });
     }
@@ -1902,11 +1936,12 @@ fn open_window(
                     sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
                     registry.broadcast_config_changed();
                     format!(
-                        "{} {}, {} {}",
+                        "{} {}, {} {}{}",
                         t("已导入", "imported"),
                         added,
                         t("跳过", "skipped"),
-                        skipped
+                        skipped,
+                        webdav_status_suffix(accept_invalid_certs)
                     )
                 }
                 Err(e) => format!("{}: {}", t("下载失败", "download failed"), e),
@@ -2190,7 +2225,7 @@ fn open_window(
                 // Re-check the source tab, PID, and owner against the latest sample;
                 // the main window may have switched tabs since the menu was opened.
                 let ownership = {
-                    let states = statuses.lock().unwrap();
+                    let states = lock_or_recover(&statuses);
                     states.get(&tab_id).map_or_else(
                         || Err(t("当前会话不可用", "The current session is unavailable")),
                         |status| {
@@ -2434,7 +2469,7 @@ fn open_window(
         window.on_select_net_iface(move |iface: SharedString| {
             let Some(w) = weak.upgrade() else { return };
             let active = w.get_active_tab_id().to_string();
-            if let Some(st) = statuses.lock().unwrap().get_mut(&active) {
+            if let Some(st) = lock_or_recover(&statuses).get_mut(&active) {
                 st.selected_iface = iface.to_string();
                 st.net_hist = vec![0.0; NET_HISTORY_LEN]; // reset graph for new NIC
             }
@@ -2717,7 +2752,7 @@ fn open_window(
                     return;
                 }
                 let dead: Vec<String> = {
-                    let statuses = ctx.tab_statuses.lock().unwrap();
+                    let statuses = lock_or_recover(&ctx.tab_statuses);
                     statuses
                         .iter()
                         .filter(|(_, st)| {
@@ -2729,7 +2764,7 @@ fn open_window(
                 for tab_id in dead {
                     // Count the attempt up-front so a failing reconnect still
                     // advances toward the cap (no hot loop); reset on connect.
-                    if let Some(st) = ctx.tab_statuses.lock().unwrap().get_mut(&tab_id) {
+                    if let Some(st) = lock_or_recover(&ctx.tab_statuses).get_mut(&tab_id) {
                         st.reconnect_attempts += 1;
                     }
                     reconnect_tab_in_place(&tab_id, &ctx);
@@ -2790,15 +2825,15 @@ fn open_window(
                 WinActivity::Active => {}
             }
             let snap = {
-                let mut s = tick_sampler.lock().expect("sampler poisoned");
+                let mut s = lock_or_recover(&tick_sampler);
                 s.sample()
             };
             // Append the raw local throughput to the bottom-graph ring buffer
             // (normalisation happens at display time so the graph auto-scales).
-            push_ring(&mut tick_net.lock().unwrap(), snap.net_bytes_per_sec as f32);
+            push_ring(&mut lock_or_recover(&tick_net), snap.net_bytes_per_sec as f32);
             // Stash the local sample; the sidebar shows it on the welcome tab
             // and in the bottom network graph.
-            *tick_local.lock().unwrap() = snap.clone();
+            *lock_or_recover(&tick_local) = snap.clone();
 
             // Everything (status, CPU/mem/swap, both graphs) follows the
             // active tab; refresh_sidebar reads the stores we just updated.
@@ -4017,21 +4052,37 @@ fn wire_session_callbacks(
         });
     }
 
-    // Export all sessions to a portable JSON file (issue #46). Passwords are
-    // obfuscated with the built-in export key; host/user/port stay plaintext.
+    // Export the whole config as a passphrase-encrypted bundle (#P3-I). The old
+    // built-in-key JSON export let anyone derive the key from the source code.
     {
         let weak = window.as_weak();
         let store = store.clone();
         window.on_export_sessions(move || {
+            let Some(w) = weak.upgrade() else { return };
+            let pass = w.get_portable_passphrase().to_string();
+            if pass.is_empty() {
+                w.set_ssh_import_hint(
+                    t(
+                        "请先在 设置 → 界面 填写便携包口令",
+                        "enter a bundle passphrase in Settings → Interface first",
+                    )
+                    .into(),
+                );
+                return;
+            }
             if let Some(path) = rfd::FileDialog::new()
-                .set_file_name("meatshell-connections.json")
-                .add_filter("JSON", &["json"])
+                .set_file_name("meatshell-connections.mpack")
+                .add_filter("MeatShell bundle", &["mpack"])
                 .save_file()
             {
-                let res = store.borrow().export_to(&path);
+                let res = store.borrow().export_bundle_to(&path, &pass);
                 if let Some(w) = weak.upgrade() {
                     let hint = match res {
-                        Ok(n) => format!("{} {}", t("已导出连接", "exported"), n),
+                        Ok(n) => format!(
+                            "{} {}",
+                            t("已导出连接（口令加密）", "exported (encrypted)"),
+                            n
+                        ),
                         Err(e) => format!("{}: {}", t("导出失败", "export failed"), e),
                     };
                     w.set_ssh_import_hint(hint.into());
@@ -4301,7 +4352,7 @@ fn wire_session_callbacks(
                 w.set_dialog_key_inline("".into());
                 w.set_dialog_key_inline_mode(!session.private_key_inline.is_empty());
                 w.set_dialog_test_status("".into());
-                let (proxy_type, proxy_hostport) = split_proxy(&session.proxy);
+                let (proxy_type, proxy_hostport) = split_proxy(session.proxy.as_str());
                 w.set_dialog_proxy_type(proxy_type.into());
                 w.set_dialog_proxy_hostport(proxy_hostport.into());
                 let (jump_labels, jump_ids, jump_idx) =
@@ -4703,7 +4754,7 @@ fn wire_session_callbacks(
                 // Store the key path with forward slashes uniformly.
                 private_key_path,
                 private_key_inline,
-                proxy: draft.proxy.to_string(),
+                proxy: Secret::new(draft.proxy.to_string()),
                 last_used: None,
                 group: draft.group.to_string(),
                 kind,
@@ -5089,7 +5140,7 @@ fn wire_session_callbacks(
             // Seed the per-tab status so the sidebar shows "连接中 host" the
             // moment this tab becomes active (the `changed active-tab-id`
             // handler fires refresh-sidebar right after set_active_tab_id below).
-            tab_statuses.lock().unwrap().insert(
+            lock_or_recover(&tab_statuses).insert(
                 tab_id.clone(),
                 TabStatus {
                     host: conn_label.clone(),
@@ -5181,7 +5232,7 @@ fn wire_session_callbacks(
                     compile_output_rules(settings.output_highlight_rules()),
                 )
             };
-            bufs.lock().unwrap().insert(
+            lock_or_recover(&bufs).insert(
                 tab_id.clone(),
                 Arc::new(Mutex::new(TermBuffer {
                     parser: vt100::Parser::new(24, 80, 5000),
@@ -5214,12 +5265,12 @@ fn wire_session_callbacks(
                     raw: std::collections::VecDeque::new(),
                 })),
             );
-            render_gates.lock().unwrap().insert(
+            lock_or_recover(&render_gates).insert(
                 tab_id.clone(),
                 Arc::new(TabRenderGate::new(RENDER_MIN_INTERVAL)),
             );
             // No followed-cwd yet: the first OSC 7 always triggers a follow.
-            sftp_last_cwd.lock().unwrap().remove(&tab_id);
+            lock_or_recover(&sftp_last_cwd).remove(&tab_id);
             // Add the new tab to the focused pane and re-flatten (this also sets
             // active-tab-id to the new tab via refresh_panes).
             layout.borrow_mut().add_tab(tab_id.clone());
@@ -5663,6 +5714,11 @@ fn wire_key_input(
                   host_port: SharedString| {
                 let kind = kind.to_string();
                 if kind != "local" && kind != "dynamic" {
+                    return;
+                }
+                // Client-side listeners stay loopback-only; a wider bind would
+                // expose the tunnel to the whole LAN (#port-forward-bind).
+                if !is_loopback_bind(&bind) {
                     return;
                 }
                 let Ok(bind_port) = bind_port.trim().parse::<u16>() else {
@@ -6154,7 +6210,7 @@ fn wire_key_input(
             // (DECCKM, set by nano/vim via \x1b[?1h). In that mode the terminal
             // must send \x1bOA/B/C/D instead of \x1b[A/B/C/D.
             let app_cursor = if let Some(h) = term_buf(&bufs, tab_id.as_str()) {
-                let mut b = h.lock().unwrap();
+                let mut b = lock_or_recover(&h);
                 // Typing snaps the view back to the live bottom so the
                 // user always sees what they're entering.
                 b.view_offset = 0;
@@ -6195,7 +6251,7 @@ fn wire_key_input(
             // alone fires so the filter below can catch IME-injected Backspace
             // events even if they arrive with shift=false.
             if key.as_str().is_empty() && shift && !ctrl && !alt {
-                *last_shift_time.lock().unwrap() = Some(std::time::Instant::now());
+                *lock_or_recover(&last_shift_time) = Some(std::time::Instant::now());
                 tracing::info!("[KEY_DIAG] lone-Shift recorded → timestamp saved");
             }
 
@@ -6226,7 +6282,7 @@ fn wire_key_input(
                         && (0x01..=0x1f).contains(&cp)
                         && !is_standalone
                     {
-                        *last_shift_time.lock().unwrap() = Some(std::time::Instant::now());
+                        *lock_or_recover(&last_shift_time) = Some(std::time::Instant::now());
                         tracing::info!(
                             "[KEY_DIAG] DROPPED IME C0 marker U+{:04X} (shift={}) → timestamp saved",
                             cp, shift
@@ -6309,7 +6365,7 @@ fn wire_key_input(
             // longer paired with this Backspace. Without clearing it, the broad
             // safety window drops legitimate Vim insert-mode Backspace (#319).
             if key.as_str() != "\u{0008}" && !key.as_str().is_empty() {
-                *last_shift_time.lock().unwrap() = None;
+                *lock_or_recover(&last_shift_time) = None;
             }
 
             if key.as_str() == "\u{0008}" && !ctrl && !alt {
@@ -6322,7 +6378,7 @@ fn wire_key_input(
                 // 日志显示百度拼音注入 U+0010(右Shift标记) 到 Backspace 之间
                 // 间隔约 914ms，因此窗口设为 1500ms 以覆盖该场景。
                 let (shift_just_pressed, elapsed_ms) = {
-                    let guard = last_shift_time.lock().unwrap();
+                    let guard = lock_or_recover(&last_shift_time);
                     match *guard {
                         Some(t) => {
                             let ms = t.elapsed().as_millis();
@@ -6393,14 +6449,14 @@ fn wire_key_input(
                     // Broadcast the same bytes to every online session (#78 pt.4).
                     for (target_id, handle) in h.iter() {
                         if let Some(buffer) = term_buf(&bufs, target_id) {
-                            buffer.lock().unwrap().interactive_echo_until =
+                            lock_or_recover(&buffer).interactive_echo_until =
                                 std::time::Instant::now() + INTERACTIVE_ECHO_WINDOW;
                         }
                         handle.send_raw(bytes.clone());
                     }
                 } else if let Some(handle) = h.get(tab_id.as_str()) {
                     if let Some(buffer) = term_buf(&bufs, tab_id.as_str()) {
-                        buffer.lock().unwrap().interactive_echo_until =
+                        lock_or_recover(&buffer).interactive_echo_until =
                             std::time::Instant::now() + INTERACTIVE_ECHO_WINDOW;
                     }
                     handle.send_raw(bytes);
@@ -6487,7 +6543,7 @@ fn wire_key_input(
         window.on_copy_terminal_text(move |tab_id: SharedString| {
             let text = term_buf(&bufs, tab_id.as_str())
                 .map(|h| {
-                    let buf = h.lock().unwrap();
+                    let buf = lock_or_recover(&h);
                     // Copy the drag-selection when there is one, else the
                     // whole displayed screen.
                     let sel = buf.extract_selection_text();
@@ -6514,7 +6570,7 @@ fn wire_key_input(
         window.on_add_selection_to_quick(move |tab_id: SharedString| {
             let text = term_buf(&bufs_add, tab_id.as_str())
                 .map(|h| {
-                    let buf = h.lock().unwrap();
+                    let buf = lock_or_recover(&h);
                     buf.extract_selection_text()
                 })
                 .unwrap_or_default();
@@ -6630,7 +6686,7 @@ fn wire_key_input(
         window.on_clear_terminal(move |tab_id: SharedString| {
             let tid = tab_id.to_string();
             if let Some(h) = term_buf(&bufs_clear, &tid) {
-                let mut buf = h.lock().unwrap();
+                let mut buf = lock_or_recover(&h);
                 buf.release_scrollback();
             }
             if let Some(win) = weak.upgrade() {
@@ -6828,7 +6884,7 @@ fn wire_key_input(
         window.on_terminal_wheel(move |tab_id: SharedString, dir: i32, col: i32, row: i32| {
             let tid = tab_id.to_string();
             let bytes = term_buf(&bufs_wheel, &tid).map(|h| {
-                let buf = h.lock().unwrap();
+                let buf = lock_or_recover(&h);
                 let screen = buf.parser.screen();
                 if screen.mouse_protocol_mode() != vt100::MouseProtocolMode::None {
                     // 1-based cell under the cursor, clamped to the screen.
@@ -7022,7 +7078,7 @@ fn wire_key_input(
                 return;
             };
             {
-                let mut buf = h.lock().unwrap();
+                let mut buf = lock_or_recover(&h);
                 // No scrollback on the alternate screen (vim/btop own the view).
                 if buf.parser.screen().alternate_screen() {
                     return;
@@ -7080,7 +7136,7 @@ fn wire_key_input(
             move |tab_id: SharedString, kind: i32, button: i32, row: i32, col: i32| -> bool {
                 let tid = tab_id.to_string();
                 let Some(bytes) = term_buf(&bufs_mouse, &tid).map(|h| {
-                    let buf = h.lock().unwrap();
+                    let buf = lock_or_recover(&h);
                     let screen = buf.parser.screen();
                     let (rows, cols) = screen.size();
                     if buf.mouse_tracked {
@@ -7125,7 +7181,7 @@ fn wire_key_input(
 /// Shared by the Enter-to-reconnect key handler and the auto-reconnect timer.
 fn reconnect_tab_in_place(tab_id: &str, ctx: &ConnectCtx) -> bool {
     let session_id = {
-        let statuses = ctx.tab_statuses.lock().unwrap();
+        let statuses = lock_or_recover(&ctx.tab_statuses);
         statuses
             .get(tab_id)
             .filter(|st| st.state == 2)
@@ -7139,18 +7195,18 @@ fn reconnect_tab_in_place(tab_id: &str, ctx: &ConnectCtx) -> bool {
     };
     // Drop the dead shell/SFTP handles for this tab.
     ctx.handles.borrow_mut().remove(tab_id);
-    if let Some(h) = ctx.sftp_handles.lock().unwrap().remove(tab_id) {
+    if let Some(h) = lock_or_recover(&ctx.sftp_handles).remove(tab_id) {
         h.close();
     }
     // Fresh screen: new parser, cleared history/selection.
     if let Some(h) = term_buf(&ctx.bufs, tab_id) {
-        h.lock().unwrap().release_scrollback();
+        lock_or_recover(&h).release_scrollback();
     }
-    if let Some(st) = ctx.tab_statuses.lock().unwrap().get_mut(tab_id) {
+    if let Some(st) = lock_or_recover(&ctx.tab_statuses).get_mut(tab_id) {
         st.state = 0;
     }
     // Fresh session: the first OSC 7 after reconnect follows.
-    ctx.sftp_last_cwd.lock().unwrap().remove(tab_id);
+    lock_or_recover(&ctx.sftp_last_cwd).remove(tab_id);
     if let Some(w) = ctx.weak.upgrade() {
         set_terminal_row(&w, tab_id, |t| {
             t.status = crate::i18n::t("重连中...", "Reconnecting...").into();

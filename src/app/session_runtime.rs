@@ -28,7 +28,7 @@ pub(super) fn resolve_jump(store: &Rc<RefCell<ConfigStore>>, session: &Session) 
 /// reconnect (#79); the tab/terminal/parser must already exist.
 pub(super) fn start_session_in_tab(tab_id: &str, session: Session, ctx: &ConnectCtx) {
     let has_sftp = session.kind == SessionKind::Ssh;
-    let (initial_cols, initial_rows) = *ctx.last_term_size.lock().unwrap();
+    let (initial_cols, initial_rows) = *lock_or_recover(&ctx.last_term_size);
     // Resolve the optional SSH jump host now (on the UI thread, where the store
     // lives) so the owned Session can be handed to the worker threads (#211).
     let jump = resolve_jump(&ctx.store, &session);
@@ -196,7 +196,7 @@ pub(super) fn start_session_in_tab(tab_id: &str, session: Session, ctx: &Connect
                 // from this batch so stale scrollback is released immediately.
                 if let Some(closed) = take_closed_event(&mut drained) {
                     if let Some(h) = crate::app::term_buf(&rt.bufs, &tab_id_pump) {
-                        h.lock().unwrap().release_scrollback();
+                        lock_or_recover(&h).release_scrollback();
                     }
                     let rt_evt = rt.clone();
                     let tid = tab_id_pump.clone();

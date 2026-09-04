@@ -202,12 +202,12 @@ pub(super) fn apply_terminal_resize(
     cols: u32,
     rows: u32,
 ) {
-    *last_term_size.lock().unwrap() = (cols, rows);
+    *lock_or_recover(&last_term_size) = (cols, rows);
     if let Some(handle) = handles.borrow().get(tab_id) {
         handle.resize(cols, rows);
     }
     if let Some(h) = term_buf(bufs, tab_id) {
-        let mut buf = h.lock().unwrap();
+        let mut buf = lock_or_recover(&h);
         let (old_rows, old_cols) = buf.parser.screen().size();
         let (new_rows, new_cols) = (rows as u16, cols as u16);
         if (new_rows, new_cols) != (old_rows, old_cols) {
@@ -322,12 +322,12 @@ pub(super) fn theme_pref_is_dark(store: &ConfigStore) -> bool {
 pub(super) fn apply_dark_mode(window: &AppWindow, bufs: &TermBuffers, dark: bool) {
     window.set_dark_mode(dark);
     {
-        let handles: Vec<_> = bufs.lock().unwrap().values().cloned().collect();
+        let handles: Vec<_> = lock_or_recover(&bufs).values().cloned().collect();
         for h in handles {
-            h.lock().unwrap().is_dark = dark;
+            lock_or_recover(&h).is_dark = dark;
         }
     }
-    let tab_ids: Vec<String> = bufs.lock().unwrap().keys().cloned().collect();
+    let tab_ids: Vec<String> = lock_or_recover(&bufs).keys().cloned().collect();
     for tid in tab_ids {
         rebuild_tab_display(window, bufs, &tid);
     }
@@ -341,12 +341,12 @@ pub(super) fn apply_output_highlight(
 ) {
     let mode = OutputHighlightPreset::from_settings(enabled, preset);
     {
-        let handles: Vec<_> = bufs.lock().unwrap().values().cloned().collect();
+        let handles: Vec<_> = lock_or_recover(&bufs).values().cloned().collect();
         for handle in handles {
-            handle.lock().unwrap().output_highlight = mode;
+            lock_or_recover(&handle).output_highlight = mode;
         }
     }
-    let tab_ids: Vec<String> = bufs.lock().unwrap().keys().cloned().collect();
+    let tab_ids: Vec<String> = lock_or_recover(&bufs).keys().cloned().collect();
     for tab_id in tab_ids {
         rebuild_tab_display(window, bufs, &tab_id);
     }
@@ -359,12 +359,12 @@ pub(super) fn apply_custom_output_rules(
 ) {
     let compiled = compile_output_rules(rules);
     {
-        let handles: Vec<_> = bufs.lock().unwrap().values().cloned().collect();
+        let handles: Vec<_> = lock_or_recover(&bufs).values().cloned().collect();
         for handle in handles {
-            handle.lock().unwrap().custom_highlight_rules = compiled.clone();
+            lock_or_recover(&handle).custom_highlight_rules = compiled.clone();
         }
     }
-    let tab_ids: Vec<String> = bufs.lock().unwrap().keys().cloned().collect();
+    let tab_ids: Vec<String> = lock_or_recover(&bufs).keys().cloned().collect();
     for tab_id in tab_ids {
         rebuild_tab_display(window, bufs, &tab_id);
     }
@@ -381,13 +381,13 @@ pub(super) fn apply_action_links(
     enabled: bool,
 ) {
     {
-        let handles: Vec<_> = bufs.lock().unwrap().values().cloned().collect();
+        let handles: Vec<_> = lock_or_recover(&bufs).values().cloned().collect();
         for handle in handles {
-            handle.lock().unwrap().action_link_flags = flags;
+            lock_or_recover(&handle).action_link_flags = flags;
         }
     }
     window.set_action_links_enabled(enabled);
-    let tab_ids: Vec<String> = bufs.lock().unwrap().keys().cloned().collect();
+    let tab_ids: Vec<String> = lock_or_recover(&bufs).keys().cloned().collect();
     for tab_id in tab_ids {
         rebuild_tab_display(window, bufs, &tab_id);
     }
