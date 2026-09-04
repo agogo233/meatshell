@@ -249,9 +249,10 @@ pub(super) fn rebuild_tab_display(win: &AppWindow, bufs: &TermBuffers, tab_id: &
         // view still extracts text, so the ctx-menu item must stay available.
         let has_sel = buf.selection_has_extent();
         let (fa, ft) = (buf.find_active, buf.find_positions.len() as i32);
-        (b, matches, links, sel, has_sel, fa, ft)
+        let bp = buf.backpressure;
+        (b, matches, links, sel, has_sel, fa, ft, bp)
     });
-    let Some((b, matches, links, sel, has_sel, fa, ft)) = data else {
+    let Some((b, matches, links, sel, has_sel, fa, ft, bp)) = data else {
         return;
     };
     let spans = ModelRc::from(Rc::new(VecModel::from(b.spans)));
@@ -275,6 +276,7 @@ pub(super) fn rebuild_tab_display(win: &AppWindow, bufs: &TermBuffers, tab_id: &
         row.scroll_offset = soff;
         row.find_active = fa;
         row.find_total = ft;
+        row.backpressure = bp;
     });
     win.window().request_redraw();
 }

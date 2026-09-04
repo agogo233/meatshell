@@ -27,6 +27,9 @@ pub(crate) struct TermBuffer {
     /// True between OSC 133 `C` (command start) and `D`/`A` (end / next prompt).
     /// Used to suppress command-history suggestions while a program is running.
     pub(crate) command_running: bool,
+    /// True while the output pump is actively pacing on UI flushes (a large
+    /// backlog has built up). Drives the "large-output protection" banner.
+    pub(crate) backpressure: bool,
     pub(crate) is_dark: bool,
     pub(crate) output_highlight: OutputHighlightPreset,
     pub(crate) custom_highlight_rules: Vec<CompiledOutputRule>,

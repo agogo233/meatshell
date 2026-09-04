@@ -349,6 +349,42 @@ pub(super) fn start_session_in_tab(tab_id: &str, session: Session, ctx: &Connect
                     );
                 }
 
+                // Large-output protection: when the producer has outrun the
+                // renderer, the unbounded channel grows. Surface that as a banner
+                // (with hysteresis so it doesn't flicker at the threshold). The
+                // pump's own `wait_for_ui_flush` pacing already applies the
+                // backpressure; this only informs the user.
+                {
+                    const BP_HIGH: usize = 24;
+                    const BP_LOW: usize = 4;
+                    let pending = shell_rx.len();
+                    if let Some(h) = crate::app::term_buf(&rt.bufs, &tab_id_pump) {
+                        let changed = if let Ok(mut buf) = h.lock() {
+                            let next = if buf.backpressure {
+                                pending > BP_LOW
+                            } else {
+                                pending >= BP_HIGH
+                            };
+                            if buf.backpressure != next {
+                                buf.backpressure = next;
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
+                        if changed {
+                            let _ = request_tab_render(
+                                rt.window.clone(),
+                                &tab_id_pump,
+                                &rt.bufs,
+                                &rt.gates,
+                            );
+                        }
+                    }
+                }
+
                 if ui_only.is_empty() {
                     continue;
                 }

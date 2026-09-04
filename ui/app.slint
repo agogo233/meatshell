@@ -64,6 +64,7 @@ export struct TerminalState {
     find-active: int,          // history-mode: current match index (-1 = none)
     find-total: int,           // history-mode: total match count
     command-running: bool,     // OSC 133: a command is executing (suppress suggestions)
+    backpressure: bool,        // large-output protection active (pump pacing on UI)
     selection: [TermMatch],    // drag-selection highlight rectangles
     has-selection: bool,       // live selection with extent → ctx-menu "Add as quick command"
 
@@ -1890,6 +1891,7 @@ export component AppWindow inherits Window {
                         find-active: term.find-active;
                         find-total: term.find-total;
                         command-running: term.command-running;
+                        backpressure: term.backpressure;
                         search-history-mode: root.search-history-mode;
                         action-links-enabled: root.action-links-enabled;
                         link-clicked(row, col) => { return root.action-link-click(term.id, row, col); }
