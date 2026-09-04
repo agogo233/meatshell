@@ -590,3 +590,6 @@ msgstr "询问终端输出、报错或命令相关问题"
 
 msgid "Ask the AI… (terminal selections arrive here)"
 msgstr "问问 AI…（终端选中文本会填到这里）"
+
+msgid "Large-output protection active"
+msgstr "大输出保护已启用"

@@ -581,3 +581,6 @@ msgstr "Add trigger"
 
 msgid "When expected text appears, send the response automatically. Responses are stored encrypted."
 msgstr "When expected text appears, send the response automatically. Responses are stored encrypted."
+
+msgid "Large-output protection active"
+msgstr "Large-output protection active"

@@ -5,6 +5,33 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ## [Unreleased]
 
+- **终端动作链接。** 识别输出中的 IPv4、`host:port` 与 http(s) URL：URL 支持 Ctrl+单击用系统浏览器打开，IPv4/`host:port` 一键填入命令栏；可在设置中按类型开关（macOS 暂不支持）。
+- **Terminal action links.** Recognize IPv4, `host:port` and http(s) URLs in output: Ctrl+click opens URLs in the system browser, while IPv4/`host:port` fill the command bar with one click; each type is toggleable in settings (not yet on macOS).
+
+- **自定义高亮规则支持 JSON 导入/导出。** 输出高亮规则可整体导出为 JSON 文件并在另一台机器导入，规则带稳定 id 便于合并。
+- **Import/export custom highlight rules as JSON.** Output-highlight rules can be exported to a JSON file and imported on another machine; each rule carries a stable id for clean merging.
+
+- **搜索增强：全历史双模式导航。** 查找可在「当前缓冲」与「完整回滚历史」间切换，支持上/下条跳转与命中计数，Enter / Shift+Enter 导航。
+- **Search upgrade: full-history dual-mode navigation.** Find can now toggle between the visible buffer and the whole scrollback, with next/previous jumps, a match counter, and Enter / Shift+Enter navigation.
+
+- **命令历史模糊建议与长度过滤。** 历史下拉改为模糊评分排序，并可按最短/最长长度过滤记录。
+- **Fuzzy command-history suggestions with length filters.** The history dropdown now ranks entries by a fuzzy score, and entries can be filtered by minimum/maximum length.
+
+- **被动解析 OSC 133 shell 集成命令边界。** 识别提示符/命令起止标记，命令运行期间抑制历史下拉，避免打断输入。
+- **Passive OSC 133 shell-integration parsing.** Prompt/command boundaries are recognized so the history dropdown is suppressed while a command is running.
+
+- **大输出保护横幅。** 当渲染队列积压时显示软背压横幅提示，避免误以为界面卡死。
+- **Large-output protection banner.** A soft-backpressure banner appears when the render queue backs up, so a busy terminal doesn't look frozen.
+
+- **SFTP 传输队列工程化。** 新增并发上限、限速（KiB/s）、下载 mtime 保留与重名处理策略（询问/覆盖/跳过/改名），并在设置中提供对应控件。
+- **SFTP transfer-queue engineering.** Adds a concurrency cap, per-transfer rate limiting (KiB/s), download mtime preservation, and a duplicate-file policy (ask/overwrite/skip/rename), all exposed in settings.
+
+- **断线自动重连（默认关闭）。** 可选的周期性扫描会在远程标签断开后原地重连，带最大尝试次数与重连间隔，成功连接后计数归零。
+- **Grace auto-reconnect (opt-in).** An optional periodic scan reconnects dropped remote tabs in place, with a max-attempt cap and retry interval; the counter resets on a successful connect.
+
+- **口令加密便携包与 WebDAV 同步。** 用口令（Argon2id + ChaCha20-Poly1305）把全部连接与设置封装为单个便携文件，支持文件导入/导出及经 WebDAV 上传/下载。
+- **Passphrase-encrypted portable bundle with WebDAV sync.** Seal all sessions and settings into one file encrypted with a passphrase (Argon2id + ChaCha20-Poly1305), with file export/import plus WebDAV upload/download.
+
 - **支持导入 MobaXterm 会话（`.mxtsessions` / `.moba`）。** 并入「导入连接」，自动识别 MobaXterm 导出的会话文件，支持文件夹分组、SSH 与 Telnet 会话、私钥路径与代理映射；会话密码由 MobaXterm 加密，无法还原，连接时按现有流程提示输入。
 - **Support importing MobaXterm sessions (`.mxtsessions` / `.moba`).** Folded into "Import connections", the format is auto-detected: folder groups, SSH and Telnet sessions, private-key path and proxy mapping are carried over; passwords are encrypted by MobaXterm and cannot be recovered, so the connect-time prompt asks for them.
 

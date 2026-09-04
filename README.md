@@ -104,6 +104,13 @@ open /Applications/meatshell.app
 - [x] 已知主机（`known_hosts`）校验 + 首次连接确认
 - [x] 多标签页终端分屏
 - [x] 多窗口：Ctrl+Shift+N（macOS ⌘⇧N）或系统入口“新建窗口”（Windows 任务栏 / Linux 桌面右键），Chrome 式单进程管理
+- [x] 终端动作链接：识别 IPv4 / `host:port` / http(s) URL，URL 可 Ctrl+单击打开浏览器，地址一键填入命令栏
+- [x] 终端搜索增强：当前缓冲 / 完整回滚历史双模式，上下一条跳转与命中计数
+- [x] 命令历史模糊建议 + 长度过滤；自定义输出高亮规则支持 JSON 导入 / 导出
+- [x] 被动解析 OSC 133 shell 集成命令边界；大输出软背压保护横幅
+- [x] SFTP 传输队列：并发上限 / 限速 / 下载 mtime 保留 / 重名处理策略
+- [x] 断线自动重连（可选，带最大尝试次数与重连间隔）
+- [x] 口令加密便携包（Argon2id + ChaCha20-Poly1305）：连接与设置整体导出 / 导入，并可经 WebDAV 同步
 
 彩色 emoji 图形来自 [Twemoji](https://github.com/jdecked/twemoji)，按
 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) 使用；完整署名见
