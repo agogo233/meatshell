@@ -446,6 +446,8 @@ export component InterfacePanel inherits Rectangle {
     callback remove-output-highlight-rule(int);
     callback set-output-highlight-rule-enabled(int, bool);
     callback set-action-links(bool, bool, bool, bool); // master, ipv4, host:port, url
+    callback export-output-highlight-rules();
+    callback import-output-highlight-rules();
     callback set-ui-scale(int);
     callback set-panel-font(int);   // settings-panel font scale, percent
     callback set-renderer-mode(string);
@@ -986,6 +988,20 @@ export component InterfacePanel inherits Rectangle {
                             }
                         }
                     }
+                }
+
+                Rectangle { height: 8px; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    GhostButton {
+                        text: root.lang-en ? "Export rules" : "导出规则";
+                        clicked => { root.export-output-highlight-rules(); }
+                    }
+                    GhostButton {
+                        text: root.lang-en ? "Import rules" : "导入规则";
+                        clicked => { root.import-output-highlight-rules(); }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
                 }
 
                 SectionHeader { text: root.lang-en ? "ACTION LINKS" : "动作链接"; height: 24px; }

@@ -644,6 +644,8 @@ export component AppWindow inherits Window {
     callback add-output-highlight-rule(string, bool, bool, bool, string) -> bool;
     callback remove-output-highlight-rule(int);
     callback set-output-highlight-rule-enabled(int, bool);
+    callback export-output-highlight-rules();      // save custom rules to JSON
+    callback import-output-highlight-rules();      // merge custom rules from JSON
     callback set-ui-scale(int);                    // apply + persist UI scale (percent) (#100)
     // Immersive wallpaper (set by Rust). The active id + custom file basename
     // feed the Interface → Wallpaper picker.
@@ -4914,6 +4916,8 @@ export component AppWindow inherits Window {
                     set-output-highlight-rule-enabled(index, enabled) => {
                         root.set-output-highlight-rule-enabled(index, enabled);
                     }
+                    export-output-highlight-rules() => { root.export-output-highlight-rules(); }
+                    import-output-highlight-rules() => { root.import-output-highlight-rules(); }
                     set-ui-scale(v) => { root.set-ui-scale(v); }
                     set-panel-font(v) => { root.set-panel-font(v); }
                     set-renderer-mode(v) => { root.set-renderer-mode(v); }

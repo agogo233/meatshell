@@ -1370,6 +1370,81 @@ fn open_window(
             apply_custom_output_rules(&w, &bufs, s.output_highlight_rules());
         });
     }
+    // Export the custom highlight rules to a portable JSON file.
+    {
+        let weak = window.as_weak();
+        let store = store.clone();
+        window.on_export_output_highlight_rules(move || {
+            let Some(path) = rfd::FileDialog::new()
+                .set_file_name("meatshell-highlights.json")
+                .add_filter("JSON", &["json"])
+                .save_file()
+            else {
+                return;
+            };
+            let res = (|| -> anyhow::Result<usize> {
+                let s = store.borrow();
+                let json = s.export_output_highlight_rules()?;
+                std::fs::write(&path, json)?;
+                Ok(s.output_highlight_rules().len())
+            })();
+            if let Some(w) = weak.upgrade() {
+                let hint = match res {
+                    Ok(n) => format!("{} {}", t("已导出高亮规则", "exported"), n),
+                    Err(e) => format!("{}: {}", t("导出失败", "export failed"), e),
+                };
+                w.set_output_highlight_rule_status(hint.into());
+            }
+        });
+    }
+    // Import highlight rules from a JSON file (merge by id / content, skip
+    // invalid, respect the 128 cap), then rebuild every terminal immediately.
+    {
+        let weak = window.as_weak();
+        let store = store.clone();
+        let bufs = bufs.clone();
+        window.on_import_output_highlight_rules(move || {
+            let Some(path) = rfd::FileDialog::new()
+                .add_filter("JSON", &["json"])
+                .pick_file()
+            else {
+                return;
+            };
+            let res = (|| -> anyhow::Result<(usize, usize, usize)> {
+                let raw = std::fs::read_to_string(&path)?;
+                let mut s = store.borrow_mut();
+                let out = s.import_output_highlight_rules(&raw)?;
+                let _ = s.save();
+                Ok(out)
+            })();
+            if let Some(w) = weak.upgrade() {
+                match res {
+                    Ok((imported, updated, skipped)) => {
+                        w.set_output_highlight_rule_status(
+                            format!(
+                                "{} {} / {} {} / {} {}",
+                                t("已导入", "imported"),
+                                imported,
+                                t("已更新", "updated"),
+                                updated,
+                                t("跳过", "skipped"),
+                                skipped
+                            )
+                            .into(),
+                        );
+                        let s = store.borrow();
+                        w.set_output_highlight_rules(output_highlight_rule_model(&s));
+                        apply_custom_output_rules(&w, &bufs, s.output_highlight_rules());
+                    }
+                    Err(e) => {
+                        w.set_output_highlight_rule_status(
+                            format!("{}: {}", t("导入失败", "import failed"), e).into(),
+                        );
+                    }
+                }
+            }
+        });
+    }
     // Interface settings: apply + persist the terminal font family / size.
     {
         let weak = window.as_weak();
