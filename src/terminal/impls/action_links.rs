@@ -61,7 +61,7 @@ fn ipv4_re() -> &'static Regex {
 fn host_port_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"\b((?:localhost|(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9]\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])|(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63})):(\d{1,5})\b")
+        Regex::new(r"\b(localhost|(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])|(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}):(\d{1,5})\b")
             .expect("valid host:port regex")
     })
 }
@@ -318,6 +318,17 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].kind, ActionLinkKind::HostPort);
         assert_eq!(hits[0].value, "db.internal.test:5432");
+    }
+
+    #[test]
+    fn matches_ip_with_port_as_host_port() {
+        // Regression: the octet `\.` must sit outside the alternation so a
+        // 3-digit octet (192) still matches; the whole host:port wins over the
+        // bare IPv4 by priority.
+        let hits = scan("ssh to 192.168.1.10:2222 now");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].kind, ActionLinkKind::HostPort);
+        assert_eq!(hits[0].value, "192.168.1.10:2222");
     }
 
     #[test]

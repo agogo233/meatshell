@@ -182,6 +182,9 @@ pub(super) fn wire_sftp_callbacks(
             }
             let sftp_handles = sftp_handles.clone();
             let weak = weak.clone();
+            // Read the policy on the UI thread; `Weak::upgrade` is not
+            // thread-safe, so the spawned thread must not call it.
+            let dedup = configured_dedup_policy(&weak);
             std::thread::spawn(move || {
                 if let Some(dir) = rfd::FileDialog::new().pick_folder() {
                     let local_dir = dir.to_string_lossy().to_string();
@@ -189,11 +192,9 @@ pub(super) fn wire_sftp_callbacks(
                         if let Some(h) = handles.get(&tab_id) {
                             if let Some(ref rdir) = arc_dir {
                                 h.download_archive(rdir.clone(), arc_names.clone(), local_dir);
-                            } else if let Some(conflict) = choose_download_conflict(
-                                &remote_path,
-                                &local_dir,
-                                configured_dedup_policy(&weak),
-                            ) {
+                            } else if let Some(conflict) =
+                                choose_download_conflict(&remote_path, &local_dir, dedup)
+                            {
                                 h.download(remote_path, local_dir, conflict);
                             }
                         }
@@ -475,17 +476,18 @@ pub(super) fn wire_sftp_callbacks(
                 let sftp_handles = sftp_handles.clone();
                 let weak2 = weak.clone();
                 let tab = tab_id.to_string();
+                // Read the policy on the UI thread before spawning (Weak::upgrade
+                // is not thread-safe).
+                let dedup = configured_dedup_policy(&weak2);
                 std::thread::spawn(move || {
                     if let Some(dir) = rfd::FileDialog::new().pick_folder() {
                         let dir = dir.to_string_lossy().to_string();
                         if let Ok(handles) = sftp_handles.lock() {
                             if let Some(h) = handles.get(&tab) {
                                 if single {
-                                    if let Some(conflict) = choose_download_conflict(
-                                        &paths[0],
-                                        &dir,
-                                        configured_dedup_policy(&weak2),
-                                    ) {
+                                    if let Some(conflict) =
+                                        choose_download_conflict(&paths[0], &dir, dedup)
+                                    {
                                         h.download(paths[0].clone(), dir.clone(), conflict);
                                     }
                                 } else {

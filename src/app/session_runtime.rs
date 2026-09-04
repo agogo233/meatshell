@@ -152,6 +152,9 @@ pub(super) fn start_session_in_tab(tab_id: &str, session: Session, ctx: &Connect
         let route_pump = route.clone();
         let rt_pump = ctx.runtime.clone();
         let tab_id_pump = tab_id.to_string();
+        // Snapshot the large-output-protection toggle on the UI thread; the pump
+        // thread has no store access.
+        let bp_enabled = ctx.store.borrow().output_backpressure_enabled();
         std::thread::spawn(move || {
             let mut shell_rx = rx;
             let mut sftp_ready_tx = sftp_ready_tx;
@@ -372,7 +375,7 @@ pub(super) fn start_session_in_tab(tab_id: &str, session: Session, ctx: &Connect
                 // (with hysteresis so it doesn't flicker at the threshold). The
                 // pump's own `wait_for_ui_flush` pacing already applies the
                 // backpressure; this only informs the user.
-                {
+                if bp_enabled {
                     const BP_HIGH: usize = 24;
                     const BP_LOW: usize = 4;
                     let pending = shell_rx.len();

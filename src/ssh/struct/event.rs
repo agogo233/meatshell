@@ -97,14 +97,14 @@ pub enum SessionEvent {
         procs: Vec<ProcInfo>,
     },
 
-/// A command the user ran in the terminal, captured via the shell hook
-/// (OSC 697) so it can join the command-box history (#113).
-CommandRan(String),
+    /// A command the user ran in the terminal, captured via the shell hook
+    /// (OSC 697) so it can join the command-box history (#113).
+    CommandRan(String),
 
-/// A shell-integration command boundary reported via OSC 133 (passively parsed
-/// when the remote shell emits it; we never inject it by default). Drives the
-/// "is a command running" flag used to suppress history suggestions.
-CommandMark(CommandMark),
+    /// A shell-integration command boundary reported via OSC 133 (passively parsed
+    /// when the remote shell emits it; we never inject it by default). Drives the
+    /// "is a command running" flag used to suppress history suggestions.
+    CommandMark(CommandMark),
 
     /// Runtime tunnel state changed (#206).
     TunnelUpdate(Vec<RuntimeTunnelInfo>),

@@ -621,7 +621,7 @@ export component TerminalView inherits Rectangle {
     callback find-query-changed(string);    // recompute search highlights
     callback find-navigate(bool /* reverse */); // history-mode next/prev
     callback set-search-history-mode(bool);     // toggle buffer/history search
-    in property <int> find-active: -1;      // current match index (-1 = none)
+    in property <int> find-match-index: -1;  // history-mode current match index (-1 = none)
     in property <int> find-total: 0;        // total match count (history mode)
     in property <bool> search-history-mode: false;
     in property <bool> command-running: false; // OSC 133: program executing
@@ -1571,7 +1571,7 @@ export component TerminalView inherits Rectangle {
                     // History-mode: match counter + prev/next navigation.
                     if root.search-history-mode : Text {
                         text: root.find-total > 0
-                            ? (root.find-active + 1) + "/" + root.find-total
+                            ? (root.find-match-index + 1) + "/" + root.find-total
                             : "0/0";
                         color: Theme.text-secondary;
                         font-size: Theme.fs-sm;

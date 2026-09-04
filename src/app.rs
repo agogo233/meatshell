@@ -2692,17 +2692,27 @@ fn open_window(
     );
 
     // ── Grace auto-reconnect (#P3-H) ──────────────────────────────────────
-    // Opt-in periodic scan: reconnect dropped (non-local) tabs in place, up to
+    // Periodic scan: reconnect dropped (non-local) tabs in place, up to
     // `max_attempts` consecutive tries each (reset on a successful connect).
-    if store.borrow().auto_reconnect_enabled() {
+    // The timer always runs (cheap: it scans a mostly-empty map); the enabled
+    // flag and attempt cap are read live from the store on the UI thread, so
+    // toggling them takes effect without reopening the window. Only the scan
+    // interval is fixed at startup.
+    {
         let interval = store.borrow().auto_reconnect_interval_secs();
-        let max_attempts = store.borrow().auto_reconnect_max_attempts();
         let ctx = connect_ctx.clone();
         let timer = slint::Timer::default();
         timer.start(
             slint::TimerMode::Repeated,
             std::time::Duration::from_secs(interval),
             move || {
+                let (enabled, max_attempts) = {
+                    let cfg = ctx.store.borrow();
+                    (cfg.auto_reconnect_enabled(), cfg.auto_reconnect_max_attempts())
+                };
+                if !enabled {
+                    return;
+                }
                 let dead: Vec<String> = {
                     let statuses = ctx.tab_statuses.lock().unwrap();
                     statuses
@@ -5119,6 +5129,11 @@ fn wire_session_callbacks(
                 sftp_panel_height: sftp_h_default,
                 sftp_panel_width: sftp_w_default,
                 sftp_saved_height: sftp_h_default,
+                link_matches: ModelRc::from(std::rc::Rc::new(VecModel::<TermMatch>::default())),
+                find_active: -1,
+                find_total: 0,
+                command_running: false,
+                backpressure: false,
             });
             // Create vt100 parser for this tab (default 24×80; resized on first
             // terminal-resize callback). 5000-line scrollback is stored for

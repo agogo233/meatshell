@@ -1010,16 +1010,20 @@ impl ConfigStore {
             }
             rule.pattern = rule.pattern.trim().to_string();
             rule.color = normalize_highlight_color(&rule.color).to_string();
+            // Remember whether the incoming rule carried an id BEFORE we mint
+            // one, so a legacy (id-less) export stays idempotent across repeat
+            // imports even after the stored copy gains an id on first import.
+            let incoming_had_id = !rule.id.trim().is_empty();
             if rule.id.trim().is_empty() {
                 rule.id = Uuid::new_v4().to_string();
             }
 
-            // Merge into an existing rule when the id matches; legacy rules
-            // without an id fall back to a content-signature match so re-import
+            // Merge into an existing rule when the id matches; a legacy rule
+            // without an id falls back to a content-signature match so re-import
             // of an old export stays idempotent.
             let existing = self.cache.output_highlight_rules.iter_mut().find(|r| {
                 r.id == rule.id
-                    || (r.id.is_empty()
+                    || (!incoming_had_id
                         && r.pattern == rule.pattern
                         && r.regex == rule.regex
                         && r.case_sensitive == rule.case_sensitive
@@ -2252,7 +2256,7 @@ impl ConfigStore {
         let blob = URL_SAFE_NO_PAD
             .decode(pack.trim())
             .map_err(|_| anyhow::anyhow!("not a valid bundle"))?;
-        if blob.len() < 4 + 16 + 12 || &blob[..4] != b"MPB1" {
+        if blob.len() < 4 + 16 + 12 || !blob.starts_with(b"MPB1") {
             return Err(anyhow::anyhow!("not a meatshell bundle"));
         }
         let salt = &blob[4..20];
