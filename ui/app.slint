@@ -438,6 +438,16 @@ export component AppWindow inherits Window {
                     || (root.sidebar-collapsed && root.sidebar-dock == "right")
                     ? 0px : 36px)
                 : root.quick-panel-width + 4px)
+            : 0px)
+        + ((root.ai-panel-open && root.ai-panel-dock == "right")
+            ? (root.ai-panel-collapsed
+                ? ((root.welcome-as-sidebar && root.welcome-collapsed
+                        && root.welcome-sidebar-dock == "right")
+                    || (root.sidebar-collapsed && root.sidebar-dock == "right")
+                    || (root.quick-panel-open && root.quick-panel-collapsed
+                        && root.quick-panel-dock == "right")
+                    ? 0px : 36px)
+                : root.ai-panel-width + 4px)
             : 0px);
     property <length> toolbar-y-off:
         (root.sidebar-dock == "top"
@@ -453,6 +463,16 @@ export component AppWindow inherits Window {
                     || (root.sidebar-collapsed && root.sidebar-dock == "top")
                     ? 0px : 36px)
                 : root.quick-panel-height + 4px)
+            : 0px)
+        + ((root.ai-panel-open && root.ai-panel-dock == "top")
+            ? (root.ai-panel-collapsed
+                ? ((root.welcome-as-sidebar && root.welcome-collapsed
+                        && root.welcome-sidebar-dock == "top")
+                    || (root.sidebar-collapsed && root.sidebar-dock == "top")
+                    || (root.quick-panel-open && root.quick-panel-collapsed
+                        && root.quick-panel-dock == "top")
+                    ? 0px : 36px)
+                : root.ai-panel-height + 4px)
             : 0px);
     property <length> toolbar-y:
         (root.custom-titlebar ? 43px : 5px + root.titlebar-inset) + root.toolbar-y-off;
@@ -813,6 +833,7 @@ export component AppWindow inherits Window {
     in-out property <length> ai-panel-width: 320px;
     in-out property <length> ai-panel-height: 420px;
     in-out property <string> ai-panel-dock: "left";
+    in-out property <bool> ai-panel-collapsed: false;
     in property <[AiMessage]> ai-messages;
     in-out property <bool> ai-busy: false;
     in-out property <string> ai-draft;
@@ -1330,6 +1351,38 @@ export component AppWindow inherits Window {
                 root.quick-panel-dock == "top" ? dock-area.quick-outer-strip : 0px;
             property <length> quick-bottom:
                 root.quick-panel-dock == "bottom" ? dock-area.quick-outer-strip : 0px;
+            // A collapsed AI panel joins the collapsed strip on its edge, highest
+            // priority to the one that wins the outermost slot (welcome > sidebar
+            // > quick). Only when nothing on that edge is collapsed does it reserve
+            // its own outermost 36px slot.
+            property <bool> ai-merge-welcome:
+                root.ai-panel-open && root.ai-panel-collapsed
+                && root.welcome-as-sidebar && root.welcome-collapsed
+                && root.ai-panel-dock == root.welcome-sidebar-dock;
+            property <bool> ai-merge-sidebar:
+                root.ai-panel-open && root.ai-panel-collapsed
+                && !dock-area.ai-merge-welcome && root.sidebar-collapsed
+                && root.ai-panel-dock == root.sidebar-dock;
+            property <bool> ai-merge-quick:
+                root.ai-panel-open && root.ai-panel-collapsed
+                && !dock-area.ai-merge-welcome && !dock-area.ai-merge-sidebar
+                && root.quick-panel-open && root.quick-panel-collapsed
+                && root.ai-panel-dock == root.quick-panel-dock;
+            property <length> ai-outer-strip:
+                !root.zen-mode && root.ai-panel-open && root.ai-panel-collapsed
+                    && !dock-area.ai-merge-welcome && !dock-area.ai-merge-sidebar
+                    && !dock-area.ai-merge-quick
+                    ? 36px : 0px;
+            property <bool> ai-outer-horizontal:
+                root.ai-panel-dock == "left" || root.ai-panel-dock == "right";
+            property <length> ai-left:
+                root.ai-panel-dock == "left" ? dock-area.ai-outer-strip : 0px;
+            property <length> ai-right:
+                root.ai-panel-dock == "right" ? dock-area.ai-outer-strip : 0px;
+            property <length> ai-top:
+                root.ai-panel-dock == "top" ? dock-area.ai-outer-strip : 0px;
+            property <length> ai-bottom:
+                root.ai-panel-dock == "bottom" ? dock-area.ai-outer-strip : 0px;
 
             if dock-area.quick-outer-strip > 0px : ToolStrip {
                 x: root.quick-panel-dock == "right" ? parent.width - parent.quick-outer-strip : 0px;
@@ -1339,6 +1392,8 @@ export component AppWindow inherits Window {
                 dock-edge: root.quick-panel-dock;
                 glyph: "\u{E3E7}";
                 tooltip: @tr("Quick commands");
+                show-second: parent.ai-merge-quick;
+                second-glyph: "\u{E8BD}";
                 expand => {
                     root.quick-panel-collapsed = false;
                     if (root.sidebar-dock == root.quick-panel-dock) {
@@ -1349,6 +1404,49 @@ export component AppWindow inherits Window {
                             && root.welcome-sidebar-dock == root.quick-panel-dock) {
                         root.welcome-collapsed = true;
                         root.set-welcome-collapsed(true);
+                    }
+                    if (root.ai-panel-open && root.ai-panel-dock == root.quick-panel-dock) {
+                        root.ai-panel-collapsed = true;
+                    }
+                }
+                expand-second => {
+                    root.ai-panel-collapsed = false;
+                    if (root.sidebar-dock == root.quick-panel-dock) {
+                        root.sidebar-collapsed = true;
+                        root.set-sidebar-collapsed(true);
+                    }
+                    if (root.welcome-as-sidebar
+                            && root.welcome-sidebar-dock == root.quick-panel-dock) {
+                        root.welcome-collapsed = true;
+                        root.set-welcome-collapsed(true);
+                    }
+                }
+            }
+
+            // Standalone collapsed AI panel — nothing else is collapsed on its
+            // edge, so it takes the outermost 36px slot.
+            if dock-area.ai-outer-strip > 0px : ToolStrip {
+                x: root.ai-panel-dock == "right" ? parent.width - parent.ai-outer-strip : 0px;
+                y: root.ai-panel-dock == "bottom" ? parent.height - parent.ai-outer-strip : 0px;
+                width: parent.ai-outer-horizontal ? parent.ai-outer-strip : parent.width;
+                height: parent.ai-outer-horizontal ? parent.height : parent.ai-outer-strip;
+                dock-edge: root.ai-panel-dock;
+                glyph: "\u{E8BD}";
+                tooltip: @tr("AI assistant");
+                expand => {
+                    root.ai-panel-collapsed = false;
+                    // Same-edge squeeze: at most one expanded panel per edge.
+                    if (root.sidebar-dock == root.ai-panel-dock) {
+                        root.sidebar-collapsed = true;
+                        root.set-sidebar-collapsed(true);
+                    }
+                    if (root.welcome-as-sidebar
+                            && root.welcome-sidebar-dock == root.ai-panel-dock) {
+                        root.welcome-collapsed = true;
+                        root.set-welcome-collapsed(true);
+                    }
+                    if (root.quick-panel-open && root.quick-panel-dock == root.ai-panel-dock) {
+                        root.quick-panel-collapsed = true;
                     }
                 }
             }
@@ -1367,10 +1465,21 @@ export component AppWindow inherits Window {
                     ? parent.height - parent.quick-top - parent.quick-bottom : parent.welcome-strip;
                 dock-edge: root.welcome-sidebar-dock;
                 glyph: "\u{E88A}";   // session list / welcome
-                show-second: parent.combine-collapsed-tools || parent.quick-merge-welcome;
-                second-glyph: parent.combine-collapsed-tools ? "\u{E871}" : "\u{E3E7}";
-                show-third: parent.combine-collapsed-tools && parent.quick-merge-welcome;
-                third-glyph: "\u{E3E7}";
+                // Icon priority fills slots left-to-right: welcome, then the
+                // resource panel (when both collapsed into one strip), then
+                // quick commands, then the AI panel.
+                show-second: parent.combine-collapsed-tools || parent.quick-merge-welcome
+                    || parent.ai-merge-welcome;
+                second-glyph: parent.combine-collapsed-tools ? "\u{E871}"
+                    : parent.quick-merge-welcome ? "\u{E3E7}" : "\u{E8BD}";
+                show-third: (parent.combine-collapsed-tools
+                            && (parent.quick-merge-welcome || parent.ai-merge-welcome))
+                    || (parent.quick-merge-welcome && parent.ai-merge-welcome);
+                third-glyph: (parent.combine-collapsed-tools && parent.quick-merge-welcome)
+                    ? "\u{E3E7}" : "\u{E8BD}";
+                show-fourth: parent.combine-collapsed-tools
+                    && parent.quick-merge-welcome && parent.ai-merge-welcome;
+                fourth-glyph: "\u{E8BD}";
                 expand => {
                     root.welcome-collapsed = false;
                     root.set-welcome-collapsed(false);
@@ -1382,6 +1491,10 @@ export component AppWindow inherits Window {
                             && root.quick-panel-dock == root.welcome-sidebar-dock) {
                         root.quick-panel-collapsed = true;
                     }
+                    if (root.ai-panel-open
+                            && root.ai-panel-dock == root.welcome-sidebar-dock) {
+                        root.ai-panel-collapsed = true;
+                    }
                 }
                 expand-second => {
                     if (parent.combine-collapsed-tools) {
@@ -1390,11 +1503,55 @@ export component AppWindow inherits Window {
                         if (root.quick-panel-open && root.quick-panel-dock == root.sidebar-dock) {
                             root.quick-panel-collapsed = true;
                         }
-                    } else {
+                        if (root.ai-panel-open && root.ai-panel-dock == root.sidebar-dock) {
+                            root.ai-panel-collapsed = true;
+                        }
+                    } else if (parent.quick-merge-welcome) {
                         root.quick-panel-collapsed = false;
+                        if (root.ai-panel-open && root.ai-panel-dock == root.quick-panel-dock) {
+                            root.ai-panel-collapsed = true;
+                        }
+                    } else {
+                        root.ai-panel-collapsed = false;
+                        if (root.sidebar-dock == root.welcome-sidebar-dock) {
+                            root.sidebar-collapsed = true;
+                            root.set-sidebar-collapsed(true);
+                        }
+                        if (root.quick-panel-open
+                                && root.quick-panel-dock == root.welcome-sidebar-dock) {
+                            root.quick-panel-collapsed = true;
+                        }
                     }
                 }
-                expand-third => { root.quick-panel-collapsed = false; }
+                expand-third => {
+                    if (parent.combine-collapsed-tools && parent.quick-merge-welcome) {
+                        root.quick-panel-collapsed = false;
+                        if (root.ai-panel-open && root.ai-panel-dock == root.quick-panel-dock) {
+                            root.ai-panel-collapsed = true;
+                        }
+                    } else {
+                        root.ai-panel-collapsed = false;
+                        if (root.sidebar-dock == root.welcome-sidebar-dock) {
+                            root.sidebar-collapsed = true;
+                            root.set-sidebar-collapsed(true);
+                        }
+                        if (root.quick-panel-open
+                                && root.quick-panel-dock == root.welcome-sidebar-dock) {
+                            root.quick-panel-collapsed = true;
+                        }
+                    }
+                }
+                expand-fourth => {
+                    root.ai-panel-collapsed = false;
+                    if (root.sidebar-dock == root.welcome-sidebar-dock) {
+                        root.sidebar-collapsed = true;
+                        root.set-sidebar-collapsed(true);
+                    }
+                    if (root.quick-panel-open
+                            && root.quick-panel-dock == root.welcome-sidebar-dock) {
+                        root.quick-panel-collapsed = true;
+                    }
+                }
             }
 
             if dock-area.sidebar-strip-outside : ToolStrip {
@@ -1410,8 +1567,10 @@ export component AppWindow inherits Window {
                     ? parent.height - parent.quick-top - parent.quick-bottom : parent.sidebar-outside-strip;
                 dock-edge: root.welcome-sidebar-dock;
                 glyph: "\u{E871}";
-                show-second: parent.quick-merge-sidebar;
-                second-glyph: "\u{E3E7}";
+                show-second: parent.quick-merge-sidebar || parent.ai-merge-sidebar;
+                second-glyph: parent.quick-merge-sidebar ? "\u{E3E7}" : "\u{E8BD}";
+                show-third: parent.quick-merge-sidebar && parent.ai-merge-sidebar;
+                third-glyph: "\u{E8BD}";
                 expand => {
                     root.sidebar-collapsed = false;
                     root.set-sidebar-collapsed(false);
@@ -1420,23 +1579,49 @@ export component AppWindow inherits Window {
                     if (root.quick-panel-open && root.quick-panel-dock == root.sidebar-dock) {
                         root.quick-panel-collapsed = true;
                     }
+                    if (root.ai-panel-open && root.ai-panel-dock == root.sidebar-dock) {
+                        root.ai-panel-collapsed = true;
+                    }
                 }
-                expand-second => { root.quick-panel-collapsed = false; }
+                expand-second => {
+                    if (parent.quick-merge-sidebar) {
+                        root.quick-panel-collapsed = false;
+                        if (root.ai-panel-open && root.ai-panel-dock == root.quick-panel-dock) {
+                            root.ai-panel-collapsed = true;
+                        }
+                    } else {
+                        root.ai-panel-collapsed = false;
+                        if (root.quick-panel-open && root.quick-panel-dock == root.sidebar-dock) {
+                            root.quick-panel-collapsed = true;
+                        }
+                    }
+                }
+                expand-third => {
+                    root.ai-panel-collapsed = false;
+                    if (root.quick-panel-open && root.quick-panel-dock == root.sidebar-dock) {
+                        root.quick-panel-collapsed = true;
+                    }
+                }
             }
 
             // Welcome / session list, to the right of the icon strip. Hidden when
             // collapsed — its icon stays in the strip; clicking it re-opens.
             if root.welcome-as-sidebar && !root.welcome-collapsed : Rectangle {
-                x: root.welcome-sidebar-dock == "right" ? parent.width - parent.quick-right - parent.sidebar-outside-strip - parent.welcome-size
-                 : root.welcome-sidebar-dock == "left" ? parent.quick-left + parent.sidebar-outside-strip
-                 : parent.quick-left;
-                y: root.welcome-sidebar-dock == "bottom" ? parent.height - parent.quick-bottom - parent.sidebar-outside-strip - parent.welcome-size
-                 : root.welcome-sidebar-dock == "top" ? parent.quick-top + parent.sidebar-outside-strip
-                 : parent.quick-top;
+                x: root.welcome-sidebar-dock == "right"
+                    ? parent.width - parent.ai-right - parent.quick-right - parent.sidebar-outside-strip - parent.welcome-size
+                  : root.welcome-sidebar-dock == "left"
+                    ? parent.ai-left + parent.quick-left + parent.sidebar-outside-strip
+                  : parent.ai-left + parent.quick-left;
+                y: root.welcome-sidebar-dock == "bottom"
+                    ? parent.height - parent.ai-bottom - parent.quick-bottom - parent.sidebar-outside-strip - parent.welcome-size
+                  : root.welcome-sidebar-dock == "top"
+                    ? parent.ai-top + parent.quick-top + parent.sidebar-outside-strip
+                  : parent.ai-top + parent.quick-top;
                 width: parent.welcome-horizontal ? parent.welcome-size
-                    : parent.width - parent.quick-left - parent.quick-right;
+                    : parent.width - parent.ai-left - parent.ai-right - parent.quick-left - parent.quick-right;
                 height: parent.welcome-horizontal
-                    ? parent.height - parent.quick-top - parent.quick-bottom : parent.welcome-size;
+                    ? parent.height - parent.ai-top - parent.ai-bottom - parent.quick-top - parent.quick-bottom
+                    : parent.welcome-size;
                 background: Theme.bg-panel;
                 clip: true;
                 Welcome {
@@ -1467,6 +1652,9 @@ export component AppWindow inherits Window {
                             }
                             if (root.quick-panel-open && root.quick-panel-dock == root.dock-target) {
                                 root.quick-panel-collapsed = true;
+                            }
+                            if (root.ai-panel-open && root.ai-panel-dock == root.dock-target) {
+                                root.ai-panel-collapsed = true;
                             }
                             root.persist-welcome-sidebar-dock(root.welcome-sidebar-dock);
                         }
@@ -1507,16 +1695,16 @@ export component AppWindow inherits Window {
 
             // Drag the welcome sidebar's right edge to resize it (v0.5 M3b).
             if root.welcome-as-sidebar && !root.welcome-collapsed : Rectangle {
-                x: root.welcome-sidebar-dock == "left" ? parent.quick-left + parent.sidebar-outside-strip + parent.welcome-size - 2px
-                 : root.welcome-sidebar-dock == "right" ? parent.width - parent.quick-right - parent.sidebar-outside-strip - parent.welcome-size - 2px
-                 : parent.quick-left;
-                y: root.welcome-sidebar-dock == "top" ? parent.quick-top + parent.sidebar-outside-strip + parent.welcome-size - 2px
-                 : root.welcome-sidebar-dock == "bottom" ? parent.height - parent.quick-bottom - parent.sidebar-outside-strip - parent.welcome-size - 2px
-                 : parent.quick-top;
+                x: root.welcome-sidebar-dock == "left" ? parent.ai-left + parent.quick-left + parent.sidebar-outside-strip + parent.welcome-size - 2px
+                  : root.welcome-sidebar-dock == "right" ? parent.width - parent.ai-right - parent.quick-right - parent.sidebar-outside-strip - parent.welcome-size - 2px
+                  : parent.ai-left + parent.quick-left;
+                y: root.welcome-sidebar-dock == "top" ? parent.ai-top + parent.quick-top + parent.sidebar-outside-strip + parent.welcome-size - 2px
+                  : root.welcome-sidebar-dock == "bottom" ? parent.height - parent.ai-bottom - parent.quick-bottom - parent.sidebar-outside-strip - parent.welcome-size - 2px
+                  : parent.ai-top + parent.quick-top;
                 width: parent.welcome-horizontal ? 4px
-                    : parent.width - parent.quick-left - parent.quick-right;
+                    : parent.width - parent.ai-left - parent.ai-right - parent.quick-left - parent.quick-right;
                 height: parent.welcome-horizontal
-                    ? parent.height - parent.quick-top - parent.quick-bottom : 4px;
+                    ? parent.height - parent.ai-top - parent.ai-bottom - parent.quick-top - parent.quick-bottom : 4px;
                 background: ws-split-ta.has-hover || dock-area.welcome-sidebar-dragging
                     ? Theme.accent : transparent;
                 ws-split-ta := TouchArea {
@@ -1557,15 +1745,15 @@ export component AppWindow inherits Window {
             // splitter and the central tab/pane content — sits to the right of them.
             rest := Rectangle {
             x: (root.welcome-sidebar-dock == "left" ? parent.welcome-taken : 0px)
-                + parent.quick-left;
+                + parent.quick-left + parent.ai-left;
             y: (root.welcome-sidebar-dock == "top" ? parent.welcome-taken : 0px)
-                + parent.quick-top;
+                + parent.quick-top + parent.ai-top;
             width: parent.width
                 - (parent.welcome-horizontal ? parent.welcome-taken : 0px)
-                - parent.quick-left - parent.quick-right;
+                - parent.quick-left - parent.quick-right - parent.ai-left - parent.ai-right;
             height: parent.height
                 - (!parent.welcome-horizontal ? parent.welcome-taken : 0px)
-                - parent.quick-top - parent.quick-bottom;
+                - parent.quick-top - parent.quick-bottom - parent.ai-top - parent.ai-bottom;
             // A shared ToolStrip is already reserved outside `rest` while the
             // welcome panel is expanded, or by the merged welcome strip while both
             // panels are collapsed. Do not reserve the same 36px a second time.
@@ -1643,6 +1831,9 @@ export component AppWindow inherits Window {
                         if (root.quick-panel-open && root.quick-panel-dock == root.dock-target) {
                             root.quick-panel-collapsed = true;
                         }
+                        if (root.ai-panel-open && root.ai-panel-dock == root.dock-target) {
+                            root.ai-panel-collapsed = true;
+                        }
                         root.persist-sidebar-dock(root.sidebar-dock);
                     }
                     root.panel-dragging = false;
@@ -1663,8 +1854,10 @@ export component AppWindow inherits Window {
                 height: root.sidebar-horizontal ? parent.height : parent.sb-h;
                 dock-edge: root.sidebar-dock;
                 glyph: "\u{E871}";   // dashboard — resource panel
-                show-second: dock-area.quick-merge-sidebar;
-                second-glyph: "\u{E3E7}";
+                show-second: dock-area.quick-merge-sidebar || dock-area.ai-merge-sidebar;
+                second-glyph: dock-area.quick-merge-sidebar ? "\u{E3E7}" : "\u{E8BD}";
+                show-third: dock-area.quick-merge-sidebar && dock-area.ai-merge-sidebar;
+                third-glyph: "\u{E8BD}";
                 expand => {
                     root.sidebar-collapsed = false;
                     root.set-sidebar-collapsed(false);
@@ -1675,8 +1868,29 @@ export component AppWindow inherits Window {
                     if (root.quick-panel-open && root.quick-panel-dock == root.sidebar-dock) {
                         root.quick-panel-collapsed = true;
                     }
+                    if (root.ai-panel-open && root.ai-panel-dock == root.sidebar-dock) {
+                        root.ai-panel-collapsed = true;
+                    }
                 }
-                expand-second => { root.quick-panel-collapsed = false; }
+                expand-second => {
+                    if (dock-area.quick-merge-sidebar) {
+                        root.quick-panel-collapsed = false;
+                        if (root.ai-panel-open && root.ai-panel-dock == root.quick-panel-dock) {
+                            root.ai-panel-collapsed = true;
+                        }
+                    } else {
+                        root.ai-panel-collapsed = false;
+                        if (root.quick-panel-open && root.quick-panel-dock == root.sidebar-dock) {
+                            root.quick-panel-collapsed = true;
+                        }
+                    }
+                }
+                expand-third => {
+                    root.ai-panel-collapsed = false;
+                    if (root.quick-panel-open && root.quick-panel-dock == root.sidebar-dock) {
+                        root.quick-panel-collapsed = true;
+                    }
+                }
             }
 
             // Splitter — drag to resize the sidebar. Orientation + which dimension it
@@ -1757,11 +1971,14 @@ export component AppWindow inherits Window {
                 property <bool> ai-horizontal:
                     root.ai-panel-dock == "left" || root.ai-panel-dock == "right";
                 property <length> ai-w:
-                    !root.zen-mode && root.ai-panel-open ? root.ai-panel-width : 0px;
+                    !root.zen-mode && root.ai-panel-open && !root.ai-panel-collapsed
+                        ? root.ai-panel-width : 0px;
                 property <length> ai-h:
-                    !root.zen-mode && root.ai-panel-open ? root.ai-panel-height : 0px;
+                    !root.zen-mode && root.ai-panel-open && !root.ai-panel-collapsed
+                        ? root.ai-panel-height : 0px;
                 property <length> ai-sp:
-                    !root.zen-mode && root.ai-panel-open ? 4px : 0px;
+                    !root.zen-mode && root.ai-panel-open && !root.ai-panel-collapsed
+                        ? 4px : 0px;
 
                 central := Rectangle {
                 // Each docked panel shrinks only its own axis: quick-w/ai-w
@@ -1985,6 +2202,9 @@ export component AppWindow inherits Window {
                                     root.welcome-collapsed = true;
                                     root.set-welcome-collapsed(true);
                                 }
+                                if (root.ai-panel-open && root.ai-panel-dock == root.dock-target) {
+                                    root.ai-panel-collapsed = true;
+                                }
                             }
                             root.panel-dragging = false;
                         }
@@ -2179,8 +2399,7 @@ export component AppWindow inherits Window {
                             root.set-welcome-collapsed(true);
                         }
                         if (root.ai-panel-open && root.ai-panel-dock == root.dock-target) {
-                            root.ai-panel-open = false;
-                            root.set-ai-panel-open(false);
+                            root.ai-panel-collapsed = true;
                         }
                     }
                     root.panel-dragging = false;
@@ -2229,6 +2448,9 @@ export component AppWindow inherits Window {
             }
 
             if root.ai-panel-open && !root.zen-mode : AIPanel {
+                // Collapsed → shrink to the edge strip below; keep the element
+                // alive so the draft/scroll state survives the round trip.
+                visible: !root.ai-panel-collapsed;
                 x: root.ai-panel-dock == "right" ? parent.width - parent.ai-w : 0px;
                 y: root.ai-panel-dock == "bottom" ? parent.height - parent.ai-h : 0px;
                 width: parent.ai-horizontal ? parent.ai-w : parent.width;
@@ -2241,10 +2463,7 @@ export component AppWindow inherits Window {
                 send => { root.send-ai-message(root.ai-draft); }
                 stop => { root.stop-ai-message(); }
                 clear => { root.clear-ai-messages(); }
-                close => {
-                    root.ai-panel-open = false;
-                    root.set-ai-panel-open(false);
-                }
+                collapse => { root.ai-panel-collapsed = true; }
                 dock-drag-move(ax, ay) => {
                     root.panel-dragging = true;
                     root.drag-nx = (ax - dock-area.absolute-position.x) / dock-area.width;
@@ -2273,7 +2492,7 @@ export component AppWindow inherits Window {
             }
 
             Rectangle {
-                visible: root.ai-panel-open && !root.zen-mode;
+                visible: root.ai-panel-open && !root.zen-mode && !root.ai-panel-collapsed;
                 x: root.ai-panel-dock == "left" ? parent.ai-w
                  : root.ai-panel-dock == "right" ? parent.width - parent.ai-w - 4px
                  : 0px;
@@ -5007,6 +5226,9 @@ export component AppWindow inherits Window {
                         // persist + apply the same-edge squeeze.
                         root.ai-panel-open = v;
                         root.set-ai-panel-open(v);
+                        // Re-enabling always reveals the panel expanded rather than
+                        // leaving it stuck in the edge strip.
+                        root.ai-panel-collapsed = false;
                         if (v) {
                             if (root.sidebar-dock == root.ai-panel-dock) {
                                 root.sidebar-collapsed = true;

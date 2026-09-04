@@ -469,6 +469,11 @@ pub(super) fn wire_ai_callbacks(
             }
             let mut s = store.borrow_mut();
             s.set_ai_panel_open(open);
+            // Re-enabling the panel always reveals it expanded, never left stuck
+            // in the edge strip.
+            if open {
+                s.set_ai_panel_collapsed(false);
+            }
             let _ = s.save();
         });
     }
@@ -636,11 +641,15 @@ pub(super) fn wire_ai_callbacks(
             {
                 let mut s = store.borrow_mut();
                 s.set_ai_panel_open(true);
+                s.set_ai_panel_collapsed(false);
                 let _ = s.save();
             }
             let Some(w) = weak.upgrade() else { return };
             w.set_ai_panel_open(true);
             w.set_ai_panel_enabled(true);
+            // Reveal the panel: a collapsed AI panel must expand for the user to
+            // see the draft text land.
+            w.set_ai_panel_collapsed(false);
             squeeze_same_edge_panels(&w, w.get_ai_panel_dock().as_str());
             w.set_ai_draft(text.into());
             w.set_ai_draft_revision(w.get_ai_draft_revision() + 1);

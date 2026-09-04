@@ -1086,6 +1086,7 @@ fn open_window(
         let welcome_sidebar_dock = s.welcome_sidebar_dock();
         let ai_panel_dock = s.ai_panel_dock();
         let ai_panel_open = s.ai_panel_open();
+        let ai_panel_collapsed = s.ai_panel_collapsed();
         let mut sidebar_collapsed = s.sidebar_collapsed().unwrap_or(collapse_sidebar);
         let mut welcome_collapsed = s.welcome_collapsed().unwrap_or(false);
         if welcome_as_sidebar
@@ -1104,8 +1105,9 @@ fn open_window(
             }
         }
         // Same-edge squeeze for the AI panel (left-docked by default): at most
-        // one docked panel per edge after restore.
-        if ai_panel_open {
+        // one docked panel per edge after restore. A collapsed AI panel only
+        // shares an edge strip with the others, so it needs no squeezing.
+        if ai_panel_open && !ai_panel_collapsed {
             if sidebar_dock == ai_panel_dock {
                 sidebar_collapsed = true;
             }
@@ -1136,6 +1138,7 @@ fn open_window(
         // AI chat panel: restore the persisted docking layout + chat settings.
         window.set_ai_panel_open(ai_panel_open);
         window.set_ai_panel_enabled(ai_panel_open);
+        window.set_ai_panel_collapsed(ai_panel_collapsed);
         window.set_ai_panel_width(s.ai_panel_width());
         window.set_ai_panel_height(s.ai_panel_height());
         window.set_ai_panel_dock(ai_panel_dock.into());
@@ -3590,24 +3593,53 @@ fn app_content_area(win: &AppWindow) -> LogicalRect {
                 && win.get_welcome_collapsed()
                 && win.get_welcome_sidebar_dock().as_str() == quick_dock.as_str())
                 || (win.get_sidebar_collapsed() && side_dock.as_str() == quick_dock.as_str()));
-        if quick_merged {
-            return area;
+        if !quick_merged {
+            let quick_take = if win.get_quick_panel_collapsed() {
+                36.0
+            } else if quick_dock == "left" || quick_dock == "right" {
+                win.get_quick_panel_width() + 4.0
+            } else {
+                win.get_quick_panel_height() + 4.0
+            };
+            shrink_edge(
+                &mut area.x,
+                &mut area.y,
+                &mut area.w,
+                &mut area.h,
+                &quick_dock,
+                quick_take,
+            );
         }
-        let quick_take = if win.get_quick_panel_collapsed() {
-            36.0
-        } else if quick_dock == "left" || quick_dock == "right" {
-            win.get_quick_panel_width() + 4.0
-        } else {
-            win.get_quick_panel_height() + 4.0
-        };
-        shrink_edge(
-            &mut area.x,
-            &mut area.y,
-            &mut area.w,
-            &mut area.h,
-            &quick_dock,
-            quick_take,
-        );
+    }
+    if win.get_ai_panel_open() {
+        let ai_dock = win.get_ai_panel_dock().to_string();
+        // A collapsed AI panel joined a collapsed strip on the same edge
+        // (welcome > sidebar > quick priority), so it reserves no extra space.
+        let ai_merged = win.get_ai_panel_collapsed()
+            && ((win.get_welcome_as_sidebar()
+                && win.get_welcome_collapsed()
+                && win.get_welcome_sidebar_dock().as_str() == ai_dock.as_str())
+                || (win.get_sidebar_collapsed() && side_dock.as_str() == ai_dock.as_str())
+                || (win.get_quick_panel_open()
+                    && win.get_quick_panel_collapsed()
+                    && win.get_quick_panel_dock().as_str() == ai_dock.as_str()));
+        if !ai_merged {
+            let ai_take = if win.get_ai_panel_collapsed() {
+                36.0
+            } else if ai_dock == "left" || ai_dock == "right" {
+                win.get_ai_panel_width() + 4.0
+            } else {
+                win.get_ai_panel_height() + 4.0
+            };
+            shrink_edge(
+                &mut area.x,
+                &mut area.y,
+                &mut area.w,
+                &mut area.h,
+                &ai_dock,
+                ai_take,
+            );
+        }
     }
     area
 }
@@ -5371,6 +5403,7 @@ fn save_layout(win: &AppWindow, store: &Rc<RefCell<ConfigStore>>) {
     s.set_quick_panel_height(win.get_quick_panel_height());
     s.set_quick_panel_dock(win.get_quick_panel_dock().to_string());
     s.set_ai_panel_open(win.get_ai_panel_open());
+    s.set_ai_panel_collapsed(win.get_ai_panel_collapsed());
     s.set_ai_panel_width(win.get_ai_panel_width());
     s.set_ai_panel_height(win.get_ai_panel_height());
     s.set_ai_panel_dock(win.get_ai_panel_dock().to_string());

@@ -1769,6 +1769,14 @@ impl ConfigStore {
         self.cache.ai_panel_open = open;
     }
 
+    pub fn ai_panel_collapsed(&self) -> bool {
+        self.cache.ai_panel_collapsed
+    }
+
+    pub fn set_ai_panel_collapsed(&mut self, collapsed: bool) {
+        self.cache.ai_panel_collapsed = collapsed;
+    }
+
     pub fn ai_panel_width(&self) -> f32 {
         let width = self.cache.ai_panel_width;
         if width <= 0.0 {

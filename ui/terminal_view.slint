@@ -254,7 +254,7 @@ export component AIPanel inherits Rectangle {
     callback send();
     callback stop();
     callback clear();
-    callback close();
+    callback collapse();
     callback dock-drag-move(length, length);
     callback dock-drag-end();
 
@@ -273,7 +273,7 @@ export component AIPanel inherits Rectangle {
 
     VerticalLayout {
         spacing: 0;
-        // Header: drag to dock + title + clear + close.
+        // Header: drag to dock + title + clear + collapse (shrinks to the edge strip).
         Rectangle {
             height: 34px;
             background: Theme.bg-panel-alt;
@@ -317,9 +317,9 @@ export component AIPanel inherits Rectangle {
                 }
                 Rectangle {
                     width: 28px;
-                    background: close-ta.has-hover ? Theme.bg-hover : transparent;
+                    background: collapse-ta.has-hover ? Theme.bg-hover : transparent;
                     border-radius: Theme.radius-sm;
-                    close-ta := TouchArea { mouse-cursor: pointer; clicked => { root.close(); } }
+                    collapse-ta := TouchArea { mouse-cursor: pointer; clicked => { root.collapse(); } }
                     Text {
                         text: root.dock-edge == "right" ? "\u{E5CC}"
                             : root.dock-edge == "top" ? "\u{E5CE}"

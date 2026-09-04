@@ -376,6 +376,8 @@ pub struct ConfigFile {
     /// persisted so the layout sticks.
     #[serde(default)]
     pub ai_panel_open: bool,
+    #[serde(default)]
+    pub ai_panel_collapsed: bool,
     #[serde(default = "default_ai_panel_width")]
     pub ai_panel_width: f32,
     #[serde(default = "default_ai_panel_height")]
