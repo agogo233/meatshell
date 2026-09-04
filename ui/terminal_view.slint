@@ -619,6 +619,11 @@ export component TerminalView inherits Rectangle {
     callback add-selection-to-quick();      // selection → prefill quick-command dialog
     callback send-selection-to-ai();        // selection → AI panel draft box (no auto-send)
     callback find-query-changed(string);    // recompute search highlights
+    callback find-navigate(bool /* reverse */); // history-mode next/prev
+    callback set-search-history-mode(bool);     // toggle buffer/history search
+    in property <int> find-active: -1;      // current match index (-1 = none)
+    in property <int> find-total: 0;        // total match count (history mode)
+    in property <bool> search-history-mode: false;
     callback terminal-scroll(float);         // scroll history by fractional lines (+ = up); Rust keeps the sub-line remainder so momentum decays smoothly
     // Wheel inside an alt-screen app (tmux/less/vim): forward to the program so it
     // scrolls, instead of doing nothing (#170). dir = +1 up / -1 down; col/row =
@@ -1551,10 +1556,72 @@ export component TerminalView inherits Rectangle {
                                     self.text = "";
                                     ime-input.focus();
                                     accept
+                                } else if (root.search-history-mode && e.text == "\u{000d}") {
+                                    // Enter = next, Shift+Enter = previous.
+                                    root.find-navigate(e.modifiers.shift);
+                                    accept
                                 } else {
                                     reject
                                 }
                             }
+                        }
+                    }
+                    // History-mode: match counter + prev/next navigation.
+                    if root.search-history-mode : Text {
+                        text: root.find-total > 0
+                            ? (root.find-active + 1) + "/" + root.find-total
+                            : "0/0";
+                        color: Theme.text-secondary;
+                        font-size: Theme.fs-sm;
+                        vertical-alignment: center;
+                    }
+                    if root.search-history-mode : Rectangle {
+                        width: 24px;
+                        prev-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.find-navigate(true); }
+                        }
+                        Text {
+                            text: "\u{E5C5}";
+                            font-family: "Material Icons";
+                            color: prev-ta.has-hover ? Theme.text-primary : Theme.text-secondary;
+                            font-size: Theme.fs-sm;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                    if root.search-history-mode : Rectangle {
+                        width: 24px;
+                        next-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.find-navigate(false); }
+                        }
+                        Text {
+                            text: "\u{E5CB}";
+                            font-family: "Material Icons";
+                            color: next-ta.has-hover ? Theme.text-primary : Theme.text-secondary;
+                            font-size: Theme.fs-sm;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                    // Buffer / history search-mode toggle.
+                    Rectangle {
+                        width: 24px;
+                        mode-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.set-search-history-mode(!root.search-history-mode);
+                                root.find-query-changed(find-input.text);
+                            }
+                        }
+                        Text {
+                            text: root.search-history-mode ? "\u{E8FD}" : "\u{E32D}";
+                            font-family: "Material Icons";
+                            color: mode-ta.has-hover ? Theme.text-primary : Theme.text-secondary;
+                            font-size: Theme.fs-sm;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
                         }
                     }
                     Rectangle {

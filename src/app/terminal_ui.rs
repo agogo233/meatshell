@@ -191,9 +191,10 @@ pub(super) fn rebuild_tab_display(win: &AppWindow, bufs: &TermBuffers, tab_id: &
         // Extent-based (not visible-rect-based): a selection scrolled out of
         // view still extracts text, so the ctx-menu item must stay available.
         let has_sel = buf.selection_has_extent();
-        (b, matches, links, sel, has_sel)
+        let (fa, ft) = (buf.find_active, buf.find_positions.len() as i32);
+        (b, matches, links, sel, has_sel, fa, ft)
     });
-    let Some((b, matches, links, sel, has_sel)) = data else {
+    let Some((b, matches, links, sel, has_sel, fa, ft)) = data else {
         return;
     };
     let spans = ModelRc::from(Rc::new(VecModel::from(b.spans)));
@@ -215,6 +216,8 @@ pub(super) fn rebuild_tab_display(win: &AppWindow, bufs: &TermBuffers, tab_id: &
         row.has_selection = has_sel;
         row.scroll_max = smax;
         row.scroll_offset = soff;
+        row.find_active = fa;
+        row.find_total = ft;
     });
     win.window().request_redraw();
 }

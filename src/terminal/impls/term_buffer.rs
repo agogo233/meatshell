@@ -22,6 +22,26 @@ fn terminal_query(sequence: &[u8]) -> Option<TerminalQuery> {
     }
 }
 
+/// Append every case-insensitive occurrence of `q` (already lowercased) in
+/// `text` to `out` as (abs_row, char_start, char_len). Byte/char conversion is
+/// done on the lowercased copy so CJK queries keep their column alignment.
+fn collect_ci_matches(
+    text: &str,
+    q: &str,
+    abs_row: usize,
+    q_chars: usize,
+    out: &mut Vec<(usize, usize, usize)>,
+) {
+    let lower = text.to_lowercase();
+    let mut search_from = 0usize;
+    while let Some(byte_pos) = lower[search_from..].find(q) {
+        let abs_byte = search_from + byte_pos;
+        let char_start = lower[..abs_byte].chars().count();
+        out.push((abs_row, char_start, q_chars));
+        search_from = abs_byte + q.len();
+    }
+}
+
 impl TermBuffer {
     /// Release all retained terminal output and recreate the parser at the
     /// current size. This is used when a session is disconnected or the user
@@ -31,6 +51,8 @@ impl TermBuffer {
         let (rows, cols) = self.parser.screen().size();
         self.parser = vt100::Parser::new(rows, cols, 5000);
         self.find_query.clear();
+        self.find_positions.clear();
+        self.find_active = -1;
         self.history = std::collections::VecDeque::new();
         self.prev = Vec::new();
         self.view_offset = 0;
@@ -161,6 +183,73 @@ impl TermBuffer {
         };
         let top = match_idx.min(combined_len.saturating_sub(rows));
         let new_offset = combined_len.saturating_sub(rows + top);
+        if self.view_offset == new_offset {
+            return false;
+        }
+        self.view_offset = new_offset;
+        true
+    }
+
+    /// Recompute every match of `find_query` across scrollback + live rows for
+    /// history-mode search. Stores (absolute row, char start, char len) and
+    /// resets the active index to the first match. No-op on the alt screen.
+    pub(crate) fn recompute_find_positions(&mut self) {
+        self.find_positions.clear();
+        self.find_active = -1;
+        if self.find_query.is_empty() || self.parser.screen().alternate_screen() {
+            return;
+        }
+        let q = self.find_query.to_lowercase();
+        let q_chars = q.chars().count();
+        if q_chars == 0 {
+            return;
+        }
+        // history rows occupy absolute indices [0, hist_len).
+        for (abs, line) in self.history.iter().enumerate() {
+            collect_ci_matches(&line.0, &q, abs, q_chars, &mut self.find_positions);
+        }
+        // live screen rows follow the history.
+        let (live, _) = self.live_rows();
+        let base = self.history.len();
+        for (r, line) in live.iter().enumerate() {
+            collect_ci_matches(&line.0, &q, base + r, q_chars, &mut self.find_positions);
+        }
+        if !self.find_positions.is_empty() {
+            self.find_active = 0;
+        }
+    }
+
+    /// Move the active match by `dir` (+1 next / -1 prev) and scroll it into
+    /// view. Returns true when the view changed.
+    pub(crate) fn find_goto(&mut self, dir: i32) -> bool {
+        let total = self.find_positions.len();
+        if total == 0 {
+            return false;
+        }
+        let cur = self.find_active.max(0) as usize;
+        let next = if dir > 0 {
+            (cur + 1) % total
+        } else {
+            (cur + total - 1) % total
+        };
+        self.find_active = next as i32;
+        let (abs_row, _, _) = self.find_positions[next];
+        self.scroll_to_abs_row(abs_row)
+    }
+
+    /// Scroll so `abs_row` sits near the vertical centre of the viewport.
+    pub(crate) fn scroll_to_abs_row(&mut self, abs_row: usize) -> bool {
+        let rows = self.parser.screen().size().0 as usize;
+        let (live, _) = self.live_rows();
+        let combined_len = self.history.len() + live.len();
+        if combined_len <= rows {
+            let changed = self.view_offset != 0;
+            self.view_offset = 0;
+            return changed;
+        }
+        let max_top = combined_len - rows;
+        let top = abs_row.saturating_sub(rows / 2).min(max_top);
+        let new_offset = combined_len - rows - top;
         if self.view_offset == new_offset {
             return false;
         }

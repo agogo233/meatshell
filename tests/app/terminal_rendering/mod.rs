@@ -20,6 +20,9 @@ fn make_buf(
     TermBuffer {
         parser,
         find_query: String::new(),
+        find_positions: Vec::new(),
+        find_active: -1,
+        search_history_mode: false,
         is_dark: false,
         output_highlight: OutputHighlightPreset::Log,
         custom_highlight_rules: Vec::new(),
@@ -73,6 +76,49 @@ fn releasing_scrollback_drops_retained_history_and_replay_bytes() {
     assert!(buffer.sel_focus.is_none());
     assert!(buffer.sel_ranges.is_empty());
     assert_eq!(buffer.view_offset, 0);
+}
+
+#[test]
+fn history_search_indexes_all_rows_and_navigates() {
+    let mut buffer = make_buf(
+        3,
+        20,
+        &["alpha foo", "beta", "gamma foo bar"],
+        &["delta foo"],
+        0,
+    );
+    buffer.search_history_mode = true;
+    buffer.find_query = "foo".to_string();
+    buffer.recompute_find_positions();
+    // three matches: history rows 0 and 2, plus the live row (abs index 3).
+    assert_eq!(buffer.find_positions.len(), 3);
+    assert_eq!(buffer.find_active, 0);
+    assert_eq!(buffer.find_positions[0].0, 0);
+    assert_eq!(buffer.find_positions[2].0, 3);
+
+    // Next moves the active index and scrolls the target into view.
+    assert!(buffer.find_goto(1));
+    assert_eq!(buffer.find_active, 1);
+    assert!(buffer.find_goto(1));
+    assert_eq!(buffer.find_active, 2);
+    // Wrap-around.
+    assert!(buffer.find_goto(1));
+    assert_eq!(buffer.find_active, 0);
+    // Previous wraps backwards.
+    assert!(buffer.find_goto(-1));
+    assert_eq!(buffer.find_active, 2);
+}
+
+#[test]
+fn history_search_empty_query_clears_positions() {
+    let mut buffer = make_buf(3, 20, &["foo"], &["foo"], 0);
+    buffer.find_query = "foo".to_string();
+    buffer.recompute_find_positions();
+    assert!(!buffer.find_positions.is_empty());
+    buffer.find_query = "".to_string();
+    buffer.recompute_find_positions();
+    assert!(buffer.find_positions.is_empty());
+    assert_eq!(buffer.find_active, -1);
 }
 
 mod charset;

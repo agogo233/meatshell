@@ -16,6 +16,14 @@ pub(crate) enum CtrlKeySide {
 pub(crate) struct TermBuffer {
     pub(crate) parser: vt100::Parser,
     pub(crate) find_query: String,
+    /// History-mode search: every match as (absolute row, char start, char len)
+    /// across scrollback + live screen. Empty in buffer mode.
+    pub(crate) find_positions: Vec<(usize, usize, usize)>,
+    /// Index into `find_positions` of the current match (-1 = none).
+    pub(crate) find_active: i32,
+    /// When true, search spans the whole scrollback with next/prev navigation;
+    /// when false, only the visible window is highlighted (legacy behaviour).
+    pub(crate) search_history_mode: bool,
     pub(crate) is_dark: bool,
     pub(crate) output_highlight: OutputHighlightPreset,
     pub(crate) custom_highlight_rules: Vec<CompiledOutputRule>,

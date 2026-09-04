@@ -61,6 +61,8 @@ export struct TerminalState {
     mouse-tracked: bool,     // remote app wants mouse events (btop/htop/mc)
     find-matches: [TermMatch], // search-highlight rectangles
     link-matches: [TermMatch], // action-link underline rectangles (IPv4/host:port/URL)
+    find-active: int,          // history-mode: current match index (-1 = none)
+    find-total: int,           // history-mode: total match count
     selection: [TermMatch],    // drag-selection highlight rectangles
     has-selection: bool,       // live selection with extent → ctx-menu "Add as quick command"
 
@@ -518,6 +520,10 @@ export component AppWindow inherits Window {
     // the callback returns true when a link was hit so the terminal skips its
     // own drag-selection. The master enable flag is `action-links-enabled`.
     callback action-link-click(string /* tab-id */, int /* row */, int /* col */) -> bool;
+    // History-mode search: next/prev navigation and the mode toggle.
+    callback find-navigate(string /* tab-id */, bool /* reverse */);
+    in-out property <bool> search-history-mode: false;
+    callback set-search-history-mode(bool);
     in-out property <bool> quick-cmd-manage-open: false;  // manage dialog
     in-out property <length> qcm-dialog-width: 560px;
     in-out property <length> qcm-dialog-height: 560px;
@@ -1877,8 +1883,13 @@ export component AppWindow inherits Window {
                         mouse-tracked: term.mouse-tracked;
                         find-matches: term.find-matches;
                         link-matches: term.link-matches;
+                        find-active: term.find-active;
+                        find-total: term.find-total;
+                        search-history-mode: root.search-history-mode;
                         action-links-enabled: root.action-links-enabled;
                         link-clicked(row, col) => { return root.action-link-click(term.id, row, col); }
+                        find-navigate(reverse) => { root.find-navigate(term.id, reverse); }
+                        set-search-history-mode(v) => { root.set-search-history-mode(v); }
                         selection: term.selection;
                         has-selection: term.has-selection;
                         sftp-panel-height: term.sftp-panel-height;

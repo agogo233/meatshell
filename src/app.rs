@@ -865,6 +865,7 @@ fn open_window(
         window.set_action_links_ipv4(s.action_links_ipv4_pref());
         window.set_action_links_host_port(s.action_links_host_port_pref());
         window.set_action_links_url(s.action_links_url_pref());
+        window.set_search_history_mode(s.search_history_mode());
         window.set_ui_scale(s.ui_scale() as f32 / 100.0); // global UI zoom (#100)
         window.set_panel_font(s.panel_font() as f32 / 100.0); // settings-panel font scale
         window.set_renderer_mode(s.renderer_mode().into());
@@ -1498,6 +1499,25 @@ fn open_window(
                 if let Some(w) = weak.upgrade() {
                     apply_action_links(&w, &bufs, flags, effective);
                 }
+            }
+        });
+    }
+    // Search mode (buffer / history): persist and push to every open terminal.
+    {
+        let weak = window.as_weak();
+        let store = store.clone();
+        let bufs = bufs.clone();
+        window.on_set_search_history_mode(move |history| {
+            {
+                let mut s = store.borrow_mut();
+                s.set_search_history_mode(history);
+                let _ = s.save();
+            }
+            for buffer in bufs.lock().unwrap().values() {
+                buffer.lock().unwrap().search_history_mode = history;
+            }
+            if let Some(w) = weak.upgrade() {
+                w.set_search_history_mode(history);
             }
         });
     }
@@ -4861,6 +4881,9 @@ fn wire_session_callbacks(
                 Arc::new(Mutex::new(TermBuffer {
                     parser: vt100::Parser::new(24, 80, 5000),
                     find_query: String::new(),
+                    find_positions: Vec::new(),
+                    find_active: -1,
+                    search_history_mode: store.borrow().search_history_mode(),
                     is_dark: is_dark_now,
                     output_highlight,
                     custom_highlight_rules,
@@ -6361,25 +6384,42 @@ fn wire_key_input(
     }
 
     // Context menu → 查找: store the query and recompute highlight rectangles.
+    // Buffer mode highlights the visible window (legacy); history mode indexes
+    // every match across scrollback + live and scrolls to the first one.
     {
         let bufs_find = bufs.clone();
         let weak = window.as_weak();
         window.on_find_query_changed(move |tab_id: SharedString, query: SharedString| {
             let tid = tab_id.to_string();
             let q = query.to_string();
-            let (matches, jumped) = with_term_buf(&bufs_find, &tid, |buf| {
+            let (matches, jumped, history_mode) = with_term_buf(&bufs_find, &tid, |buf| {
                 buf.find_query = q.clone();
-                let mut matches = compute_find_matches(&buf.displayed_text, &q);
-                let jumped = matches.is_empty() && buf.scroll_to_first_find_match(&q);
-                if jumped {
-                    buf.render();
-                    matches = compute_find_matches(&buf.displayed_text, &q);
+                if buf.search_history_mode {
+                    buf.recompute_find_positions();
+                    let scrolled = if buf.find_positions.is_empty() {
+                        false
+                    } else {
+                        let (abs_row, _, _) = buf.find_positions[0];
+                        buf.scroll_to_abs_row(abs_row)
+                    };
+                    if scrolled {
+                        buf.render();
+                    }
+                    let m = compute_find_matches(&buf.displayed_text, &q);
+                    (m, scrolled, true)
+                } else {
+                    let mut matches = compute_find_matches(&buf.displayed_text, &q);
+                    let jumped = matches.is_empty() && buf.scroll_to_first_find_match(&q);
+                    if jumped {
+                        buf.render();
+                        matches = compute_find_matches(&buf.displayed_text, &q);
+                    }
+                    (matches, jumped, false)
                 }
-                (matches, jumped)
             })
             .unwrap_or_default();
             if let Some(win) = weak.upgrade() {
-                if jumped {
+                if jumped || history_mode {
                     rebuild_tab_display(&win, &bufs_find, &tid);
                     return;
                 }
@@ -6387,6 +6427,32 @@ fn wire_key_input(
                 set_terminal_row(&win, &tid, |row| {
                     row.find_matches = model.clone();
                 });
+            }
+        });
+    }
+    // Find bar → next / previous (history mode navigation).
+    {
+        let bufs_nav = bufs.clone();
+        let weak = window.as_weak();
+        window.on_find_navigate(move |tab_id: SharedString, reverse: bool| {
+            let tid = tab_id.to_string();
+            let changed = with_term_buf(&bufs_nav, &tid, |buf| {
+                let dir = if reverse { -1 } else { 1 };
+                let scrolled = buf.find_goto(dir);
+                if scrolled {
+                    buf.render();
+                }
+                scrolled
+            })
+            .unwrap_or(false);
+            if changed {
+                if let Some(win) = weak.upgrade() {
+                    rebuild_tab_display(&win, &bufs_nav, &tid);
+                }
+            } else if let Some(win) = weak.upgrade() {
+                // Still refresh the active/total readout even if the view did
+                // not move (e.g. a single match).
+                rebuild_tab_display(&win, &bufs_nav, &tid);
             }
         });
     }
