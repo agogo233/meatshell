@@ -1722,22 +1722,25 @@ impl ConfigStore {
         Ok(count)
     }
 
-    /// Import sessions from a MeatShell portable export or a FinalShell connection
-    /// export. New sessions get fresh ids; duplicates (same host+user+port+kind)
-    /// are skipped.
+    /// Import sessions from a MeatShell portable export, a FinalShell connection
+    /// export, or a MobaXterm `.mxtsessions` export. New sessions get fresh ids;
+    /// duplicates (same host+user+port+kind) are skipped.
     /// Returns `(added, skipped)`. The store is saved if anything was added.
     pub fn import_json(&mut self, raw: &str) -> Result<(usize, usize)> {
         let (sessions, decrypt_meatshell_secrets) =
             match serde_json::from_str::<ExportFile>(raw) {
                 Ok(file) => (file.sessions, true),
-                Err(meatshell_error) => (
-                    super::finalshell::parse_export(raw).with_context(|| {
-                        format!(
-                            "not a valid MeatShell or FinalShell export file; MeatShell parser: {meatshell_error}"
-                        )
-                    })?,
-                    false,
-                ),
+                Err(meatshell_error) => {
+                    let sessions = super::finalshell::parse_export(raw)
+                        .or_else(|finalshell_error| {
+                            super::mobaxterm::parse_export(raw).with_context(|| {
+                                format!(
+                                    "not a valid MeatShell, FinalShell or MobaXterm export file; MeatShell parser: {meatshell_error}; FinalShell parser: {finalshell_error:#}"
+                                )
+                            })
+                        })?;
+                    (sessions, false)
+                }
             };
 
         let mut added = 0usize;
@@ -1787,10 +1790,19 @@ impl ConfigStore {
         Ok((added, skipped))
     }
 
-    /// Import sessions from a MeatShell or FinalShell JSON export file.
+    /// Import sessions from a MeatShell, FinalShell or MobaXterm export file.
     pub fn import_from(&mut self, path: &Path) -> Result<(usize, usize)> {
-        let raw = fs::read_to_string(path)
-            .with_context(|| format!("failed to read {}", path.display()))?;
+        let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+        // MobaXterm `.mxtsessions` files are Windows-1252; MeatShell / FinalShell
+        // exports are UTF-8. Decode UTF-8 first, falling back to CP1252 so a
+        // non-ASCII session name survives the import instead of failing the read.
+        let raw = match String::from_utf8(bytes) {
+            Ok(raw) => raw,
+            Err(err) => encoding_rs::WINDOWS_1252
+                .decode_without_bom_handling_and_without_replacement(err.as_bytes())
+                .map(|value| value.into_owned())
+                .with_context(|| format!("failed to decode {}", path.display()))?,
+        };
         self.import_json(&raw)
     }
 
@@ -2464,6 +2476,53 @@ mod tests {
             .as_str()
             .starts_with(ConfigStore::ENC_PREFIX));
 
+        let _ = std::fs::remove_file(&store.path);
+    }
+
+    #[test]
+    fn imports_mobaxterm_export() {
+        let mut store = temp_store();
+        let raw = "\
+[Bookmarks]\r\n\
+SubRep=\r\n\
+ImgNum=42\r\n\
+prod-server=#109#0%192.0.2.10%22%admin%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0#15%80%24#0# #-1\r\n\
+win-box=#91#4%192.0.2.20%3389%admin%0%0#15%80%24#0# #-1\r\n\
+[Bookmarks_1]\r\n\
+SubRep=Network\r\n\
+ImgNum=41\r\n\
+old-switch=#98#7%10.0.0.1%23%cisco%0%0#15%80%24#0# #-1\r\n";
+
+        assert_eq!(store.import_json(raw).unwrap(), (2, 0));
+        let ssh = &store.cache.sessions[0];
+        assert_eq!(ssh.name, "prod-server");
+        assert_eq!(ssh.host, "192.0.2.10");
+        assert_eq!(ssh.port, 22);
+        assert_eq!(ssh.user, "admin");
+        assert!(ssh.group.is_empty());
+        let telnet = &store.cache.sessions[1];
+        assert_eq!(telnet.name, "old-switch");
+        assert_eq!(telnet.host, "10.0.0.1");
+        assert_eq!(telnet.port, 23);
+        assert_eq!(telnet.user, "cisco");
+        assert_eq!(telnet.group, "Network");
+
+        let _ = std::fs::remove_file(&store.path);
+    }
+
+    #[test]
+    fn imports_mobaxterm_cp1252_file() {
+        let path = std::env::temp_dir().join(format!("ms-mxt-{}.mxtsessions", Uuid::new_v4()));
+        let mut data = b"[Bookmarks]\r\nSubRep=\r\n".to_vec();
+        data.extend_from_slice(b"caf\xe9=#109#0%192.0.2.60%22%root%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0#15%80%24#0# #-1\r\n");
+        std::fs::write(&path, &data).unwrap();
+
+        let mut store = temp_store();
+        assert_eq!(store.import_from(&path).unwrap(), (1, 0));
+        assert_eq!(store.cache.sessions[0].name, "caf\u{e9}");
+        assert_eq!(store.cache.sessions[0].host, "192.0.2.60");
+
+        let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&store.path);
     }
 

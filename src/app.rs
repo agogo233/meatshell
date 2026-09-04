@@ -3784,6 +3784,7 @@ fn wire_session_callbacks(
         window.on_import_sessions(move || {
             if let Some(path) = rfd::FileDialog::new()
                 .add_filter("JSON", &["json"])
+                .add_filter("MobaXterm", &["mxtsessions", "moba"])
                 .pick_file()
             {
                 let res = store.borrow_mut().import_from(&path);

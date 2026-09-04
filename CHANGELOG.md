@@ -5,6 +5,9 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ## [Unreleased]
 
+- **支持导入 MobaXterm 会话（`.mxtsessions` / `.moba`）。** 并入「导入连接」，自动识别 MobaXterm 导出的会话文件，支持文件夹分组、SSH 与 Telnet 会话、私钥路径与代理映射；会话密码由 MobaXterm 加密，无法还原，连接时按现有流程提示输入。
+- **Support importing MobaXterm sessions (`.mxtsessions` / `.moba`).** Folded into "Import connections", the format is auto-detected: folder groups, SSH and Telnet sessions, private-key path and proxy mapping are carried over; passwords are encrypted by MobaXterm and cannot be recovered, so the connect-time prompt asks for them.
+
 - **修复旧版 macOS 启动闪退。** 在 macOS 上禁用 Slint/winit 的 AppKit DisplayLink 帧节流，回退到计时器帧节流，避免旧系统收到不存在的 `displayLinkWithTarget:selector:` 消息。
 - **Fix startup crashes on older macOS.** Disable Slint/winit's AppKit DisplayLink frame throttling on macOS and use timer throttling instead, avoiding calls to the unavailable `displayLinkWithTarget:selector:` method on older systems.
 

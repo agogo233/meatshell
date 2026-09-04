@@ -104,6 +104,7 @@ open /Applications/meatshell.app
 - [x] Serial / Telnet sessions
 - [x] Outbound proxy (SOCKS5 / HTTP)
 - [x] Import `~/.ssh/config`
+- [x] Import MobaXterm sessions (`.mxtsessions` / `.moba`, SSH/Telnet/groups/private-key path)
 - [x] Session passwords encrypted at rest (ChaCha20-Poly1305)
 - [x] Known-hosts (`known_hosts`) verification + first-connect confirmation
 - [x] Split panes for tabbed terminals

@@ -99,6 +99,7 @@ open /Applications/meatshell.app
 - [x] 串口 / Telnet 会话
 - [x] 出站代理（SOCKS5 / HTTP）
 - [x] 导入 `~/.ssh/config`
+- [x] 导入 MobaXterm 会话（`.mxtsessions` / `.moba`，SSH/Telnet/分组/私钥路径）
 - [x] 会话密码加密存储（ChaCha20-Poly1305）
 - [x] 已知主机（`known_hosts`）校验 + 首次连接确认
 - [x] 多标签页终端分屏
