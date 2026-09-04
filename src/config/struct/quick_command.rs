@@ -19,6 +19,11 @@ pub struct QuickCommand {
 /// One user-defined client-side terminal highlighting rule.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputHighlightRule {
+    /// Stable identifier used by the JSON import/export merge (dedupe + update).
+    /// Legacy rules serialized before this field existed get `id: ""` and are
+    /// matched by their content signature during import.
+    #[serde(default)]
+    pub id: String,
     pub pattern: String,
     #[serde(default)]
     pub regex: bool,

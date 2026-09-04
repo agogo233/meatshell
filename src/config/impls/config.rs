@@ -296,6 +296,19 @@ fn normalize_highlight_color(color: &str) -> &'static str {
     }
 }
 
+/// Action links are not exposed on macOS until the modifier-click platform gap
+/// (Slint not surfacing Cmd/meta in `pointer-event`) is resolved. Kept behind
+/// one cfg so the switch is trivial to flip later.
+#[cfg(not(target_os = "macos"))]
+fn action_links_platform_ok() -> bool {
+    true
+}
+
+#[cfg(target_os = "macos")]
+fn action_links_platform_ok() -> bool {
+    false
+}
+
 /// Remove duplicate entries in place, keeping the *last* (most recent)
 /// occurrence of each and preserving relative order (#113). The list is capped
 /// at 200, so the quadratic scan is trivial.
@@ -911,6 +924,9 @@ impl ConfigStore {
     }
 
     pub fn add_output_highlight_rule(&mut self, mut rule: OutputHighlightRule) {
+        if rule.id.trim().is_empty() {
+            rule.id = Uuid::new_v4().to_string();
+        }
         rule.pattern = rule.pattern.trim().to_string();
         rule.color = normalize_highlight_color(&rule.color).to_string();
         self.cache.output_highlight_rules.push(rule);
@@ -926,6 +942,265 @@ impl ConfigStore {
         if let Some(rule) = self.cache.output_highlight_rules.get_mut(index) {
             rule.enabled = enabled;
         }
+    }
+
+    /// Serialize the current custom highlight rules for export as pretty JSON.
+    /// The emitted shape is a bare `[OutputHighlightRule, …]` array; the
+    /// importer also accepts a `{ "output_highlight_rules": [...] }` wrapper so
+    /// users can swap rule snippets in and out of `sessions.json` freely.
+    pub fn export_output_highlight_rules(&self) -> Result<String> {
+        serde_json::to_string_pretty(&self.cache.output_highlight_rules)
+            .context("failed to serialize highlight rules")
+    }
+
+    /// Import highlight rules from a JSON export (array or wrapped object).
+    /// Returns `(imported, updated, skipped)`:
+    ///   - `imported` — rules added to the list (respects the 128 cap),
+    ///   - `updated`  — rules merged into an existing rule (same id, falling
+    ///     back to a content-signature match for legacy un-ided rules),
+    ///   - `skipped`  — blank / invalid rules rejected by validation.
+    /// Rejecting a bad rule never aborts the whole batch; each entry is
+    /// validated independently and skipped on error.
+    pub fn import_output_highlight_rules(&mut self, json: &str) -> Result<(usize, usize, usize)> {
+        let parsed: serde_json::Value =
+            serde_json::from_str(json).context("highlight import is not valid JSON")?;
+        let rules: Vec<OutputHighlightRule> = match parsed {
+            serde_json::Value::Array(entries) => entries
+                .into_iter()
+                .map(serde_json::from_value)
+                .collect::<Result<Vec<_>, _>>()
+                .context("highlight import array contains an invalid rule")?,
+            serde_json::Value::Object(map) => {
+                let entries = map
+                    .get("output_highlight_rules")
+                    .context("highlight import object is missing output_highlight_rules")?;
+                let entries = entries
+                    .as_array()
+                    .context("output_highlight_rules must be an array")?;
+                entries
+                    .iter()
+                    .map(|v| serde_json::from_value(v.clone()))
+                    .collect::<Result<Vec<_>, _>>()
+                    .context("output_highlight_rules contains an invalid rule")?
+            }
+            _ => anyhow::bail!("highlight import must be a JSON array or object"),
+        };
+
+        const MAX_RULES: usize = 128;
+        let mut imported = 0usize;
+        let mut updated = 0usize;
+        let mut skipped = 0usize;
+
+        for mut rule in rules {
+            // Validate before touching state: blank patterns and broken
+            // regexes are skipped (the app-layer dialog reports live errors with
+            // translated messages; here we only need the accept/reject decision).
+            if rule.pattern.trim().is_empty() || rule.pattern.chars().count() > 512 {
+                skipped += 1;
+                continue;
+            }
+            if rule.regex
+                && regex::RegexBuilder::new(&rule.pattern)
+                    .case_insensitive(!rule.case_sensitive)
+                    .build()
+                    .is_err()
+            {
+                skipped += 1;
+                continue;
+            }
+            rule.pattern = rule.pattern.trim().to_string();
+            rule.color = normalize_highlight_color(&rule.color).to_string();
+            if rule.id.trim().is_empty() {
+                rule.id = Uuid::new_v4().to_string();
+            }
+
+            // Merge into an existing rule when the id matches; legacy rules
+            // without an id fall back to a content-signature match so re-import
+            // of an old export stays idempotent.
+            let existing = self.cache.output_highlight_rules.iter_mut().find(|r| {
+                r.id == rule.id
+                    || (r.id.is_empty()
+                        && r.pattern == rule.pattern
+                        && r.regex == rule.regex
+                        && r.case_sensitive == rule.case_sensitive
+                        && r.whole_line == rule.whole_line
+                        && r.color == rule.color)
+            });
+            if let Some(existing) = existing {
+                if existing.id.is_empty() {
+                    existing.id = rule.id.clone();
+                }
+                existing.enabled = rule.enabled;
+                updated += 1;
+                continue;
+            }
+
+            if self.cache.output_highlight_rules.len() >= MAX_RULES {
+                skipped += 1;
+                continue;
+            }
+            self.cache.output_highlight_rules.push(rule);
+            imported += 1;
+        }
+
+        Ok((imported, updated, skipped))
+    }
+
+    // ── Action links ──────────────────────────────────────────────────────
+
+    /// Whether terminal action links are enabled. macOS is excluded until the
+    /// modifier-click platform gap is resolved (see `action_links_platform_ok`).
+    pub fn action_links_enabled(&self) -> bool {
+        self.cache.action_links_enabled && action_links_platform_ok()
+    }
+
+    pub fn set_action_links_enabled(&mut self, enabled: bool) {
+        self.cache.action_links_enabled = enabled;
+    }
+
+    pub fn action_links_ipv4(&self) -> bool {
+        self.cache.action_links_enabled && self.cache.action_links_ipv4
+    }
+
+    pub fn set_action_links_ipv4(&mut self, enabled: bool) {
+        self.cache.action_links_ipv4 = enabled;
+    }
+
+    pub fn action_links_host_port(&self) -> bool {
+        self.cache.action_links_enabled && self.cache.action_links_host_port
+    }
+
+    pub fn set_action_links_host_port(&mut self, enabled: bool) {
+        self.cache.action_links_host_port = enabled;
+    }
+
+    pub fn action_links_url(&self) -> bool {
+        self.cache.action_links_enabled && self.cache.action_links_url
+    }
+
+    pub fn set_action_links_url(&mut self, enabled: bool) {
+        self.cache.action_links_url = enabled;
+    }
+
+    // ── Terminal search ───────────────────────────────────────────────────
+
+    pub fn search_history_mode(&self) -> bool {
+        self.cache.search_history_mode
+    }
+
+    pub fn set_search_history_mode(&mut self, enable: bool) {
+        self.cache.search_history_mode = enable;
+    }
+
+    pub fn search_history_limit(&self) -> u32 {
+        if self.cache.search_history_limit == 0 {
+            5000
+        } else {
+            self.cache.search_history_limit
+        }
+    }
+
+    // ── Large-output backpressure ─────────────────────────────────────────
+
+    pub fn output_backpressure_enabled(&self) -> bool {
+        self.cache.output_backpressure_enabled
+    }
+
+    pub fn set_output_backpressure_enabled(&mut self, enabled: bool) {
+        self.cache.output_backpressure_enabled = enabled;
+    }
+
+    // ── SFTP transfer queue ───────────────────────────────────────────────
+
+    pub fn sftp_queue_concurrency(&self) -> u32 {
+        self.cache.sftp_queue_concurrency.clamp(1, 4)
+    }
+
+    pub fn set_sftp_queue_concurrency(&mut self, workers: u32) {
+        self.cache.sftp_queue_concurrency = workers;
+    }
+
+    pub fn sftp_queue_rate_limit_kbps(&self) -> u32 {
+        self.cache.sftp_queue_rate_limit_kbps
+    }
+
+    pub fn set_sftp_queue_rate_limit_kbps(&mut self, kbps: u32) {
+        self.cache.sftp_queue_rate_limit_kbps = kbps;
+    }
+
+    pub fn sftp_queue_dedup(&self) -> &str {
+        match self.cache.sftp_queue_dedup.as_str() {
+            "overwrite" | "skip" | "rename" => &self.cache.sftp_queue_dedup,
+            _ => "ask",
+        }
+    }
+
+    pub fn set_sftp_queue_dedup(&mut self, policy: String) {
+        self.cache.sftp_queue_dedup = match policy.as_str() {
+            "overwrite" | "skip" | "rename" => policy,
+            _ => "ask".to_string(),
+        };
+    }
+
+    pub fn sftp_queue_preserve_mtime(&self) -> bool {
+        self.cache.sftp_queue_preserve_mtime
+    }
+
+    pub fn set_sftp_queue_preserve_mtime(&mut self, preserve: bool) {
+        self.cache.sftp_queue_preserve_mtime = preserve;
+    }
+
+    pub fn sftp_bookmarks(&self) -> &[String] {
+        &self.cache.sftp_bookmarks
+    }
+
+    pub fn add_sftp_bookmark(&mut self, path: String) {
+        let path = path.trim().to_string();
+        if path.is_empty() {
+            return;
+        }
+        self.cache.sftp_bookmarks.retain(|b| b != &path);
+        self.cache.sftp_bookmarks.push(path);
+        const CAP: usize = 64;
+        let len = self.cache.sftp_bookmarks.len();
+        if len > CAP {
+            self.cache.sftp_bookmarks.drain(0..len - CAP);
+        }
+    }
+
+    pub fn remove_sftp_bookmark(&mut self, path: &str) {
+        self.cache.sftp_bookmarks.retain(|b| b != path);
+    }
+
+    // ── Command-history length filters ────────────────────────────────────
+
+    pub fn command_history_min_len(&self) -> usize {
+        self.cache.command_history_min_len as usize
+    }
+
+    pub fn set_command_history_min_len(&mut self, min: u32) {
+        self.cache.command_history_min_len = min;
+    }
+
+    pub fn command_history_max_len(&self) -> usize {
+        self.cache.command_history_max_len as usize
+    }
+
+    pub fn set_command_history_max_len(&mut self, max: u32) {
+        self.cache.command_history_max_len = max;
+    }
+
+    /// Whether `raw` is within the configured command-history length window.
+    pub fn command_history_accepts(&self, raw: &str) -> bool {
+        let min = self.command_history_min_len();
+        let max = self.command_history_max_len();
+        if min != 0 && raw.chars().count() < min {
+            return false;
+        }
+        if max != 0 && raw.chars().count() > max {
+            return false;
+        }
+        true
     }
 
     /// Global UI scale in percent (#100). Defaults to 100.
@@ -1125,11 +1400,15 @@ impl ConfigStore {
         &self.cache.command_history
     }
 
-    /// Append a command to the history: skips blanks, de-duplicates globally so
-    /// each command appears once, and re-appends at the end so the most-recently
-    /// used command is always last. Capped so it can't grow without bound (#113).
+    /// Append a command to the history: skips blanks, enforces the configured
+    /// min/max length window, de-duplicates globally so each command appears
+    /// once, and re-appends at the end so the most-recently used command is
+    /// always last. Capped so it can't grow without bound (#113).
     pub fn push_command_history(&mut self, cmd: String) {
         if cmd.trim().is_empty() {
+            return;
+        }
+        if !self.command_history_accepts(cmd.trim()) {
             return;
         }
         // Drop any earlier occurrence, then push → no duplicates and "last used"
@@ -2431,6 +2710,7 @@ mod tests {
         assert_eq!(store.output_highlight_preset(), "log");
 
         store.add_output_highlight_rule(OutputHighlightRule {
+            id: String::new(),
             pattern: "  connection refused  ".to_string(),
             regex: false,
             case_sensitive: false,
@@ -2691,6 +2971,147 @@ old-switch=#98#7%10.0.0.1%23%cisco%0%0#15%80%24#0# #-1\r\n";
         // A sessions-export object must not pass as a quick-commands file.
         assert!(store
             .quick_commands_import_json(r#"{"meatshell_export":1,"sessions":[]}"#)
+            .is_err());
+    }
+
+    #[test]
+    fn action_links_defaults_and_toggles() {
+        let mut store = temp_store();
+        // The serde default keeps the feature ON; the per-kind toggles follow
+        // the master switch.
+        assert!(store.action_links_enabled());
+        assert!(store.action_links_ipv4());
+        assert!(store.action_links_host_port());
+        assert!(store.action_links_url());
+
+        store.set_action_links_url(false);
+        assert!(!store.action_links_url());
+        assert!(store.action_links_ipv4());
+        // Master off hides every kind.
+        store.set_action_links_enabled(false);
+        assert!(!store.action_links_url());
+        assert!(!store.action_links_ipv4());
+        assert!(!store.action_links_enabled());
+    }
+
+    #[test]
+    fn search_history_and_backpressure_defaults() {
+        let mut store = temp_store();
+        assert!(!store.search_history_mode());
+        assert_eq!(store.search_history_limit(), 5000);
+        store.set_search_history_mode(true);
+        assert!(store.search_history_mode());
+        assert!(store.output_backpressure_enabled());
+        store.set_output_backpressure_enabled(false);
+        assert!(!store.output_backpressure_enabled());
+    }
+
+    #[test]
+    fn sftp_queue_config_defaults_and_clamps() {
+        let mut store = temp_store();
+        // 0 → default 2 concurrent workers; invalid dedup → "ask".
+        assert_eq!(store.sftp_queue_concurrency(), 2);
+        assert_eq!(store.sftp_queue_dedup(), "ask");
+        store.set_sftp_queue_concurrency(8);
+        store.set_sftp_queue_dedup("rename".into());
+        assert_eq!(store.sftp_queue_concurrency(), 4);
+        assert_eq!(store.sftp_queue_dedup(), "rename");
+        store.set_sftp_queue_dedup("bogus".into());
+        assert_eq!(store.sftp_queue_dedup(), "ask");
+        store.set_sftp_queue_rate_limit_kbps(2048);
+        assert_eq!(store.sftp_queue_rate_limit_kbps(), 2048);
+    }
+
+    #[test]
+    fn sftp_bookmarks_are_deduped_and_capped() {
+        let mut store = temp_store();
+        store.add_sftp_bookmark("/var/log".into());
+        store.add_sftp_bookmark("/data/app".into());
+        // Duplicate moves to the top (retain+push), count still 2.
+        store.add_sftp_bookmark("/var/log".into());
+        assert_eq!(store.sftp_bookmarks().len(), 2);
+        assert_eq!(store.sftp_bookmarks().last().map(String::as_str), Some("/var/log"));
+        store.remove_sftp_bookmark("/data/app");
+        assert_eq!(store.sftp_bookmarks().len(), 1);
+    }
+
+    #[test]
+    fn command_history_length_filters_apply() {
+        let mut store = temp_store();
+        // Defaults: no min/max → everything within cap is recorded.
+        store.set_command_history_min_len(3);
+        store.set_command_history_max_len(50);
+        store.push_command_history("ls".into()); // too short
+        store.push_command_history("kubectl logs app".into());
+        let long = "x".repeat(60);
+        store.push_command_history(long.clone()); // too long
+        assert_eq!(store.command_history().len(), 1);
+        assert_eq!(store.command_history()[0], "kubectl logs app");
+        // Clearing the min filter re-admits short commands.
+        store.set_command_history_min_len(0);
+        store.push_command_history("ls".into());
+        assert_eq!(store.command_history().len(), 2);
+    }
+
+    #[test]
+    fn highlight_export_import_roundtrip_merges_and_skips() {
+        let mut store = temp_store();
+        store.add_output_highlight_rule(OutputHighlightRule {
+            id: String::new(),
+            pattern: "connection refused".into(),
+            regex: false,
+            case_sensitive: false,
+            whole_line: false,
+            color: "red".into(),
+            enabled: true,
+        });
+        let exported = store.export_output_highlight_rules().unwrap();
+
+        // Re-importing the same export is idempotent: 0 imported, 1 updated.
+        let (imported, updated, skipped) = store
+            .import_output_highlight_rules(&exported)
+            .expect("re-import should succeed");
+        assert_eq!((imported, updated, skipped), (0, 1, 0));
+        assert_eq!(store.output_highlight_rules().len(), 1);
+
+        // A fresh rule (new id) is appended; a broken regex is skipped.
+        let batch = r#"{
+          "output_highlight_rules": [
+            {"id":"abc-1","pattern":"disk full","regex":false,"enabled":true,"color":"yellow"},
+            {"id":"abc-2","pattern":"(", "regex":true,"enabled":true,"color":"red"},
+            {"pattern":"  ","regex":false,"enabled":true,"color":"blue"}
+          ]
+        }"#;
+        let (imported, updated, skipped) = store
+            .import_output_highlight_rules(batch)
+            .expect("batch import should succeed");
+        assert_eq!(imported, 1); // "disk full"
+        assert_eq!(updated, 0);
+        assert_eq!(skipped, 2); // broken regex + blank pattern
+        assert_eq!(store.output_highlight_rules().len(), 2);
+        // "disk full" got its color normalized yellow→yellow, blank rejected.
+        assert_eq!(store.output_highlight_rules()[1].pattern, "disk full");
+
+        // First import of a legacy export (no id) is content-matched, second
+        // import updates via the id it gained.
+        let legacy = r#"[{"pattern":"OLD","regex":false,"enabled":true,"color":"gray"}]"#;
+        let (imported, _, _) = store.import_output_highlight_rules(legacy).unwrap();
+        assert_eq!(imported, 1);
+        let (imported, updated, _) = store.import_output_highlight_rules(legacy).unwrap();
+        assert_eq!(imported, 0);
+        assert_eq!(updated, 1);
+    }
+
+    #[test]
+    fn highlight_import_rejects_bad_shapes() {
+        let mut store = temp_store();
+        assert!(store.import_output_highlight_rules("not json").is_err());
+        assert!(store.import_output_highlight_rules(r#"{"foo":1}"#).is_err());
+        assert!(store
+            .import_output_highlight_rules(r#"{"output_highlight_rules":"nope"}"#)
+            .is_err());
+        assert!(store
+            .import_output_highlight_rules(r#"[{"pattern":123}]"#)
             .is_err());
     }
 }

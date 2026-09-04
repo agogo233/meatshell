@@ -38,6 +38,10 @@ fn default_wallpaper() -> String {
     "builtin:tech".to_string()
 }
 
+fn default_search_history_limit() -> u32 {
+    5000
+}
+
 /// Bump when `migrate_defaults` gains a new one-time default-layout change.
 pub const DEFAULTS_REV: u32 = 3;
 
@@ -137,6 +141,56 @@ pub struct ConfigFile {
     /// by default while still allowing users to preserve byte-for-byte display.
     #[serde(default)]
     pub json_format_disabled: bool,
+    // ── Action links (terminal clickable patterns) ─────────────────────────
+    /// Enables terminal action links (IPv4 / host:port / http(s) URLs). One
+    /// global switch; individual matcher kinds can be toggled below. Defaults
+    /// to ON for new and existing configs (additive feature, links are drawn
+    /// only on hover and require a modifier + click to activate).
+    #[serde(default = "default_true")]
+    pub action_links_enabled: bool,
+    #[serde(default = "default_true")]
+    pub action_links_ipv4: bool,
+    #[serde(default = "default_true")]
+    pub action_links_host_port: bool,
+    #[serde(default = "default_true")]
+    pub action_links_url: bool,
+    // ── Terminal search ───────────────────────────────────────────────────
+    /// Search mode: false = live buffer only (legacy), true = full scrollback
+    /// history navigation. Persisted so the toggle sticks across sessions.
+    #[serde(default)]
+    pub search_history_mode: bool,
+    /// Cap for full-history search results (0 = unlimited, default 5000).
+    #[serde(default = "default_search_history_limit")]
+    pub search_history_limit: u32,
+    // ── Large-output backpressure ─────────────────────────────────────────
+    /// Soft backpressure (throttled reads + render downshift + banner) for
+    /// large-output bursts. Defaults ON (additive; existing 33/8/100ms gating
+    /// stays untouched, this only adds the pressure signal + banner).
+    #[serde(default = "default_true")]
+    pub output_backpressure_enabled: bool,
+    // ── SFTP transfer queue ───────────────────────────────────────────────
+    /// Concurrent transfer workers (1..=4). 0 = default (2).
+    #[serde(default)]
+    pub sftp_queue_concurrency: u32,
+    /// Per-transfer rate limit in KiB/s (0 = unlimited).
+    #[serde(default)]
+    pub sftp_queue_rate_limit_kbps: u32,
+    /// Duplicate-target policy: "ask" | "overwrite" | "skip" | "rename" (#v0.7.2).
+    #[serde(default)]
+    pub sftp_queue_dedup: String,
+    /// Preserve the remote file's mtime after upload/download.
+    #[serde(default)]
+    pub sftp_queue_preserve_mtime: bool,
+    /// Saved SFTP panel path bookmarks (most-recent on top).
+    #[serde(default)]
+    pub sftp_bookmarks: Vec<String>,
+    // ── Command-history filters (fuzzy suggestions) ───────────────────────
+    /// Minimum command length (chars) recorded in command history. 0 = no min.
+    #[serde(default)]
+    pub command_history_min_len: u32,
+    /// Maximum command length (chars) recorded in command history. 0 = no max.
+    #[serde(default)]
+    pub command_history_max_len: u32,
     /// Global UI scale in percent (#100). 0 = default (100%).
     #[serde(default)]
     pub ui_scale: u32,

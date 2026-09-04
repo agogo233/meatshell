@@ -20,6 +20,7 @@ fn custom_rule(
     color: &str,
 ) -> CompiledOutputRule {
     compile_output_rules(&[OutputHighlightRule {
+        id: String::new(),
         pattern: pattern.to_string(),
         regex,
         case_sensitive,

@@ -1322,6 +1322,7 @@ fn open_window(
                 {
                     let mut s = store.borrow_mut();
                     s.add_output_highlight_rule(OutputHighlightRule {
+                        id: String::new(),
                         pattern,
                         regex: is_regex,
                         case_sensitive,
