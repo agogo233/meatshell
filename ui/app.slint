@@ -1059,9 +1059,6 @@ export component AppWindow inherits Window {
     // Context menu on a live selection: open the quick-command dialog with the
     // selected text pre-filled as the command.
     callback add-selection-to-quick(string /* tab-id */);
-    // Context menu on a live selection: put the text (redacted) into the AI
-    // panel draft box and open the panel — never auto-sends.
-    callback send-selection-to-ai(string /* tab-id */);
     // Recompute search highlights for a session's visible screen.
     callback find-query-changed(string /* tab-id */, string /* query */);
     // Scroll a session's scrollback history by N lines (+ = up/older).
