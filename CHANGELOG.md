@@ -38,6 +38,21 @@ All notable changes are documented here. 本文件记录所有重要变更。
 - **停止构建 Intel Mac 安装包。** 发布矩阵和独立测试流水线不再构建 `macos-x86_64`，后续 macOS 版本仅提供 Apple Silicon 包，以减少发布耗时和维护成本。
 - **Stop building Intel Mac packages.** Remove `macos-x86_64` from both the release matrix and the dedicated test workflow; future macOS releases provide Apple Silicon packages only, reducing CI time and maintenance cost.
 
+- **安全加固：WebDAV 同步改走口令加密包。** 上传不再使用固定内置密钥的 JSON 导出（拿到文件即可还原全部密码），改为 Argon2id 加密便携包并在上传后尽力删除旧明文文件；下载优先读加密包，仅对旧服务器回退明文格式。SSH 本地/动态转发对存量非回环绑定告警放行、对新增请求明确拒绝并回显；AI 流式生成新增 10 分钟总时长上限。
+- **Security: WebDAV sync now travels in the encrypted bundle.** Uploads no longer ship the fixed-key JSON export (which let anyone with the file recover every password); they send the Argon2id bundle and best-effort delete the legacy plaintext copy. Downloads read the bundle first, falling back to the legacy file only for servers that still have it. Stored non-loopback forwards keep working but announce their exposure, new runtime requests for them are refused with a visible message, and AI generations gain a 10-minute wall-clock cap.
+
+- **传输队列修复：重名竞态、上传策略、限速与并发。** 下载的重名判定移到写入前的最后一刻（点击后新出现的文件不再被静默覆盖），上传同样遵循重名策略（询问/覆盖/跳过/改名，命名与下载一致）；打包下载与编辑器回传纳入并发上限；限速不再把单次等待截断为 1 秒，低速设置真正生效；跳过/取消不再弹出空传输面板。
+- **Transfer-queue fixes: conflict race, upload policy, pacing and caps.** The duplicate-target decision is re-checked at write time so a file appearing after the click is no longer silently overwritten; uploads now honour the same policy (ask/overwrite/skip/rename with download-style numbering); archive downloads and edited-file re-uploads respect the concurrency cap; the rate limiter no longer truncates its sleep to 1 s, so low rates hold; skipped or cancelled transfers no longer pop an empty panel.
+
+- **配置与重连修复。** 导入便携包前自动备份原配置（`sessions.json.pre-bundle`）；高亮规则按 id 导入改为整条更新而非仅同步开关；便携包的加密/网络操作移出 UI 线程，不再冻结窗口；SSH TCP 连接阶段加 30 秒超时（半开网络不再把标签页永久卡在「连接中」）；重连期间取消过的凭据弹窗不再永久静默；重连间隔改设置即时生效。
+- **Config and reconnect fixes.** Importing a bundle backs up the current config first (`sessions.json.pre-bundle`); re-importing a highlight rule by id now updates the whole rule instead of only its enabled flag; bundle encryption and WebDAV traffic moved off the UI thread no longer freeze the window; the SSH TCP phase is capped at 30 s so a half-open network can't strand a tab in "connecting" forever; a credential prompt cancelled during reconnect no longer silences every later attempt; the reconnect interval applies live.
+
+- **终端与杂项修复。** 历史搜索在新输出/缩放后惰性重扫，不再跳到过期行号；OSC 133 序列跨数据块不再丢失或渲染成乱码；动作链接不再把 URL 内部的主机/地址单独加链、拒绝前导零八位组；WebDAV 远端路径按百分号编码，401/403 与「文件夹不存在」区分报错；`secret.key` 以 0600 创建；密钥重建后无法解密的已存密码被清空并一次性提示，而不是当作字面密码保存；快捷命令导入加 128 条上限；命令历史统一按去空格后的文本存储。
+- **Terminal and assorted fixes.** History search re-scans lazily after new output or a resize instead of jumping to stale rows; OSC 133 sequences split across reads survive instead of rendering as garbage; action links no longer linkify a host inside a URL and reject leading-zero octets; WebDAV remote paths are percent-encoded and 401/403 is reported as an auth problem rather than a missing folder; `secret.key` is created 0600; after a key regeneration undecryptable saved passwords are cleared with a one-time warning instead of being kept as literal passwords; quick-command imports are capped at 128 entries; command history stores the trimmed text it filters on.
+
+- **CI 新增单元测试流水线。** 新增 `test.yml`，每次 push/PR 在 Linux 上运行 `cargo test`，此前单元测试从未在 CI 中执行。
+- **CI runs the unit tests.** A new `test.yml` job runs `cargo test` on every push/PR; previously the unit tests were never exercised in CI.
+
 ## [0.7.2] - 2026-09-04
 
 - **修复旧版 macOS 启动闪退。** 在 macOS 上禁用 Slint/winit 的 AppKit DisplayLink 帧节流，回退到计时器帧节流，避免旧系统收到不存在的 `displayLinkWithTarget:selector:` 消息。
