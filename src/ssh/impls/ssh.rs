@@ -1205,9 +1205,9 @@ async fn connect_ssh(
             .await
             .map_err(|_| anyhow!(t("连接超时", "connection timed out")))?
             .with_context(|| format!("connect {} failed", addr))?;
-            if config.nodelay {
-                let _ = stream.set_nodelay(true);
-            }
+            // Best-effort: a shell values latency over throughput (same as the
+            // telnet path; russh's Config has no nodelay knob).
+            let _ = stream.set_nodelay(true);
             client::connect_stream(config, stream, handler)
                 .await
                 .with_context(|| format!("connect {} failed", addr))?

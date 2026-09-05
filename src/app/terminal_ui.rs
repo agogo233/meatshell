@@ -252,11 +252,12 @@ pub(super) fn rebuild_tab_display(win: &AppWindow, bufs: &TermBuffers, tab_id: &
         let bp = buf.backpressure;
         // The buffer tracks "a command is running" from OSC 133 on the pump
         // thread; re-push it so a full row rebuild (which starts at `false`)
-        // doesn't briefly un-suppress history suggestions mid-command.
-        let cr = buf.command_running;
-        (b, matches, links, sel, has_sel, fa, ft, bp, cr)
+        // doesn't briefly un-suppress history suggestions mid-command. Named
+        // to dodge the `cr` cursor-row binding below.
+        let cmd_running = buf.command_running;
+        (b, matches, links, sel, has_sel, fa, ft, bp, cmd_running)
     });
-    let Some((b, matches, links, sel, has_sel, fa, ft, bp, cr)) = data else {
+    let Some((b, matches, links, sel, has_sel, fa, ft, bp, cmd_running)) = data else {
         return;
     };
     let spans = ModelRc::from(Rc::new(VecModel::from(b.spans)));
@@ -281,7 +282,7 @@ pub(super) fn rebuild_tab_display(win: &AppWindow, bufs: &TermBuffers, tab_id: &
         row.find_active = fa;
         row.find_total = ft;
         row.backpressure = bp;
-        row.command_running = cr;
+        row.command_running = cmd_running;
     });
     win.window().request_redraw();
 }
