@@ -87,14 +87,19 @@ fn looks_like_file_host(host: &str) -> bool {
     }
 }
 
-/// Validate an IPv4 octet-quad string (regex already bounds each octet; this
-/// guards against leading-zero oddities like `01.2.3.4` being treated as a host).
+/// Validate an IPv4 octet-quad string. The regex already bounds each octet to
+/// 0-255 without leading zeros; this is the defense-in-depth re-check for any
+/// caller that hands us raw text.
 fn is_valid_ipv4(text: &str) -> bool {
     let mut parts = text.split('.');
     let mut count = 0usize;
     for part in &mut parts {
         count += 1;
         if part.is_empty() || part.len() > 3 || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+        // Reject `01`-style octets: some resolvers read them as octal.
+        if part.len() > 1 && part.starts_with('0') {
             return false;
         }
         if part.parse::<u8>().ok().filter(|v| *v <= 255).is_none() {
@@ -130,7 +135,8 @@ fn sanitize_http_url(raw: &str) -> Option<String> {
         return None;
     }
     let trimmed = trim_url_punctuation(raw);
-    // Require at least one dot or "localhost" so a bare `http:/x` is not opened.
+    // A non-empty authority is required; single-label hosts (`http://intranet/`)
+    // stay valid because they resolve on many LANs.
     let authority = trimmed.split_once("://").map(|(_, r)| r).unwrap_or("");
     let host = authority.split(['/', '?', '#']).next().unwrap_or("");
     if host.is_empty() {
@@ -203,6 +209,9 @@ pub(crate) fn scan_action_links(rows: &[String], flags: &ActionLinkFlags) -> Vec
                 if looks_like_file_host(host) {
                     continue;
                 }
+                if inside_url_authority(line, whole.start()) {
+                    continue;
+                }
                 if port.parse::<u32>().ok().filter(|p| (1..=65535).contains(p)).is_none() {
                     continue;
                 }
@@ -229,6 +238,9 @@ pub(crate) fn scan_action_links(rows: &[String], flags: &ActionLinkFlags) -> Vec
                 if !is_valid_ipv4(text) {
                     continue;
                 }
+                if inside_url_authority(line, m.start()) {
+                    continue;
+                }
                 let cs = byte_to_char(line, m.start());
                 let ce = byte_to_char(line, m.end());
                 if overlaps(&occupied, cs, ce) {
@@ -244,6 +256,15 @@ pub(crate) fn scan_action_links(rows: &[String], flags: &ActionLinkFlags) -> Vec
 
 fn overlaps(occupied: &[(usize, usize)], start: usize, end: usize) -> bool {
     occupied.iter().any(|&(s, e)| start < e && end > s)
+}
+
+/// True when a match starting at `start` is the authority of a `scheme://` URL.
+/// With URL links switched off the `host:port` / IPv4 passes must not grab the
+/// host out of `https://example.com:8080/x` — clicking that would open a
+/// different action than the text suggests.
+fn inside_url_authority(line: &str, start: usize) -> bool {
+    let bytes = line.as_bytes();
+    start >= 2 && &bytes[start - 2..start] == b"//"
 }
 
 fn push_hit(
@@ -406,5 +427,26 @@ mod tests {
             Some("curl http://h:1")
         );
         assert_eq!(default_command(ActionLinkKind::Url, "http://x"), None);
+    }
+
+    #[test]
+    fn url_authority_is_not_linkified_when_urls_are_off() {
+        let no_url = ActionLinkFlags {
+            ipv4: true,
+            host_port: true,
+            url: false,
+        };
+        // The host inside the URL must not become a separate link: clicking it
+        // would run a different action than the text suggests.
+        let hits = scan_action_links(
+            &["see https://example.com:8080/path".to_string()],
+            &no_url,
+        );
+        assert!(hits.is_empty(), "{hits:?}");
+        let hits = scan_action_links(&["see http://192.0.2.1/health".to_string()], &no_url);
+        assert!(hits.is_empty(), "{hits:?}");
+        // Outside a URL the same tokens still link.
+        let hits = scan_action_links(&["connect example.com:8080".to_string()], &no_url);
+        assert_eq!(hits.len(), 1);
     }
 }

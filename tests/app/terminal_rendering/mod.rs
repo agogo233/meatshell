@@ -22,6 +22,7 @@ fn make_buf(
         find_query: String::new(),
         find_positions: Vec::new(),
         find_active: -1,
+        find_dirty: false,
         search_history_mode: false,
         command_running: false,
         backpressure: false,

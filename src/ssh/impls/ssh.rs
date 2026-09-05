@@ -657,6 +657,46 @@ pub fn extract_osc133(text: &str) -> Option<(CommandMark, std::ops::Range<usize>
     None
 }
 
+/// Byte length of a trailing, still-unterminated OSC 133 sequence in `text`
+/// (a chunk boundary split it), or 0 when nothing must be held back. Only
+/// short `133;`-prefixed tails qualify; anything else renders normally.
+fn osc133_partial_tail(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    // Last OSC introducer (ESC ]) in the text. Complete OSC 133 sequences were
+    // already stripped by `extract_osc133`, so an unterminated one can only be
+    // a tail. The introducer may be followed by a lone trailing ESC (the ST's
+    // first byte, whose `\` is in the next chunk), so scan for the pair rather
+    // than inspecting the final ESC alone.
+    let mut start = None;
+    for i in 1..bytes.len() {
+        if bytes[i - 1] == 0x1b && bytes[i] == b']' {
+            start = Some(i - 1);
+        }
+    }
+    let start = match start {
+        Some(s) => s,
+        None => return 0,
+    };
+    let body = &bytes[start + 2..];
+    if body.len() > 64 {
+        return 0; // OSC 133 is short; a long tail is some other sequence
+    }
+    if body.contains(&0x07) || body.windows(2).any(|w| w == [0x1b, b'\\']) {
+        return 0; // already terminated — extract_osc133 handled it
+    }
+    // Hold back only while the body still matches the `133;` prefix (including
+    // a partial one like `13`), so unrelated OSCs are never stalled.
+    const WANT: &[u8] = b"133;";
+    if body.len() >= WANT.len() {
+        if &body[..WANT.len()] == WANT {
+            return bytes.len() - start;
+        }
+    } else if WANT.starts_with(body) {
+        return bytes.len() - start;
+    }
+    0
+}
+
 /// Percent-decode a URL path segment (e.g. `%20` → space).
 fn url_decode(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
@@ -1657,6 +1697,9 @@ async fn run_session(
     // session makes recalling an accidentally saved setup command clear normal
     // terminal rows (#289).
     let mut late_prompt_echo_pending = false;
+    // A trailing OSC 133 sequence that a chunk boundary split (its terminator
+    // arrives with the next read); held here and re-fed with that chunk.
+    let mut osc133_pending = String::new();
     // After a ZMODEM transfer finishes we briefly ignore ZMODEM detection so the
     // sender's lingering close frames can't spawn a spurious second receive (#76).
     let mut zmodem_done_at: Option<std::time::Instant> = None;
@@ -2141,6 +2184,11 @@ async fn run_session(
                             );
                             clean
                         };
+                        // Re-feed a partial OSC 133 held back from the last
+                        // chunk before anything else looks at this text.
+                        if !osc133_pending.is_empty() {
+                            text.insert_str(0, &std::mem::take(&mut osc133_pending));
+                        }
 
                         // Capture commands run in the terminal via our OSC 697
                         // hook, and strip the sequence so it never reaches the
@@ -2157,9 +2205,25 @@ async fn run_session(
                         // Passively consume OSC 133 shell-integration boundaries
                         // (never injected by us). Stripped so they don't render;
                         // drives the "command running" flag for suggestion gating.
-                        while let Some((mark, range)) = extract_osc133(&text) {
+                        // Scan forward from the last removal point: rescanning
+                        // the whole text per match was O(n²) on dense prompts.
+                        let mut osc_pos = 0usize;
+                        while let Some((mark, range)) = extract_osc133(&text[osc_pos..]) {
+                            let range = range.start + osc_pos..range.end + osc_pos;
+                            let start = range.start;
                             text.replace_range(range, "");
                             let _ = events.send(SessionEvent::CommandMark(mark));
+                            osc_pos = start;
+                        }
+                        // A sequence split by a chunk boundary (the ST's ESC and
+                        // `\` landing in different reads) must be held back and
+                        // re-fed with the next chunk, or it renders as garbage
+                        // and the command boundary is lost.
+                        let hold = osc133_partial_tail(&text);
+                        if hold > 0 {
+                            osc133_pending = text.split_off(text.len() - hold);
+                        } else {
+                            osc133_pending.clear();
                         }
 
                         for (response, append_enter) in trigger_engine.feed(&text) {
@@ -3298,7 +3362,24 @@ mod osc_command_tests {
 
 #[cfg(test)]
 mod osc133_tests {
-    use super::{CommandMark, extract_osc133};
+    use super::{osc133_partial_tail, CommandMark, extract_osc133};
+
+    #[test]
+    fn holds_back_a_split_sequence() {
+        // The ST's ESC arrived but `\` is in the next chunk.
+        assert_eq!(osc133_partial_tail("prompt\u{1b}]133;C\u{1b}"), 8);
+        // Terminator missing entirely.
+        assert_eq!(osc133_partial_tail("x\u{1b}]133;"), 6);
+        // Partial prefix of the `133;` introducer.
+        assert_eq!(osc133_partial_tail("x\u{1b}]13"), 4);
+        assert_eq!(osc133_partial_tail("x\u{1b}]"), 2);
+        // Complete sequences need no hold-back.
+        assert_eq!(osc133_partial_tail("x\u{1b}]133;C\u{07}"), 0);
+        assert_eq!(osc133_partial_tail("x\u{1b}]133;A\u{1b}\\y"), 0);
+        assert_eq!(osc133_partial_tail("plain prompt"), 0);
+        // Other OSCs are not stalled.
+        assert_eq!(osc133_partial_tail("x\u{1b}]7;file:///home"), 0);
+    }
 
     #[test]
     fn extracts_command_start_and_end() {

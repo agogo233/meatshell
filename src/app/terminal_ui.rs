@@ -250,9 +250,13 @@ pub(super) fn rebuild_tab_display(win: &AppWindow, bufs: &TermBuffers, tab_id: &
         let has_sel = buf.selection_has_extent();
         let (fa, ft) = (buf.find_active, buf.find_positions.len() as i32);
         let bp = buf.backpressure;
-        (b, matches, links, sel, has_sel, fa, ft, bp)
+        // The buffer tracks "a command is running" from OSC 133 on the pump
+        // thread; re-push it so a full row rebuild (which starts at `false`)
+        // doesn't briefly un-suppress history suggestions mid-command.
+        let cr = buf.command_running;
+        (b, matches, links, sel, has_sel, fa, ft, bp, cr)
     });
-    let Some((b, matches, links, sel, has_sel, fa, ft, bp)) = data else {
+    let Some((b, matches, links, sel, has_sel, fa, ft, bp, cr)) = data else {
         return;
     };
     let spans = ModelRc::from(Rc::new(VecModel::from(b.spans)));
@@ -277,6 +281,7 @@ pub(super) fn rebuild_tab_display(win: &AppWindow, bufs: &TermBuffers, tab_id: &
         row.find_active = fa;
         row.find_total = ft;
         row.backpressure = bp;
+        row.command_running = cr;
     });
     win.window().request_redraw();
 }

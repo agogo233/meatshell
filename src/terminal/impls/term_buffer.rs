@@ -32,6 +32,32 @@ fn collect_ci_matches(
     q_chars: usize,
     out: &mut Vec<(usize, usize, usize)>,
 ) {
+    // Fast path: terminal output is overwhelmingly ASCII, and a history scan
+    // runs this per line (up to MAX_HISTORY) on every keystroke — a
+    // `to_lowercase()` String per line showed up in profiles. For pure-ASCII
+    // text the byte column equals the char column, so no per-match counting
+    // pass is needed either.
+    if q.is_ascii() && text.is_ascii() {
+        let bytes = text.as_bytes();
+        let qb = q.as_bytes();
+        if qb.is_empty() || bytes.len() < qb.len() {
+            return;
+        }
+        let mut i = 0usize;
+        while i + qb.len() <= bytes.len() {
+            if bytes[i..i + qb.len()]
+                .iter()
+                .zip(qb)
+                .all(|(a, b)| a.eq_ignore_ascii_case(b))
+            {
+                out.push((abs_row, i, q_chars));
+                i += qb.len();
+            } else {
+                i += 1;
+            }
+        }
+        return;
+    }
     let lower = text.to_lowercase();
     let mut search_from = 0usize;
     while let Some(byte_pos) = lower[search_from..].find(q) {
@@ -53,6 +79,11 @@ impl TermBuffer {
         self.find_query.clear();
         self.find_positions.clear();
         self.find_active = -1;
+        self.find_dirty = false;
+        // A fresh screen has no running command and no output pressure; the
+        // next OSC 133 / pump cycle re-sets both.
+        self.command_running = false;
+        self.backpressure = false;
         self.history = std::collections::VecDeque::new();
         self.prev = Vec::new();
         self.view_offset = 0;
@@ -196,6 +227,7 @@ impl TermBuffer {
     pub(crate) fn recompute_find_positions(&mut self) {
         self.find_positions.clear();
         self.find_active = -1;
+        self.find_dirty = false;
         if self.find_query.is_empty() || self.parser.screen().alternate_screen() {
             return;
         }
@@ -222,6 +254,19 @@ impl TermBuffer {
     /// Move the active match by `dir` (+1 next / -1 prev) and scroll it into
     /// view. Returns true when the view changed.
     pub(crate) fn find_goto(&mut self, dir: i32) -> bool {
+        if self.find_dirty {
+            // Output, eviction or a reflow shifted the absolute rows since the
+            // last scan: re-scan and land on the first match rather than
+            // advance from an index that no longer means anything. The scan is
+            // deliberately lazy (here, on a user action) — not per render —
+            // so sustained output doesn't re-read the whole scrollback.
+            self.recompute_find_positions();
+            if self.find_positions.is_empty() {
+                return false;
+            }
+            let (abs_row, _, _) = self.find_positions[0];
+            return self.scroll_to_abs_row(abs_row);
+        }
         let total = self.find_positions.len();
         if total == 0 {
             return false;
@@ -660,6 +705,8 @@ impl TermBuffer {
         self.sel_anchor = None;
         self.sel_focus = None;
         self.sel_ranges.clear();
+        // Same for history-mode search: every absolute row may have moved.
+        self.find_dirty = true;
         self.feed_batched(&stream);
     }
 
@@ -718,6 +765,12 @@ impl TermBuffer {
             }
             while self.history.len() > MAX_HISTORY {
                 self.history.pop_front();
+            }
+            // Captured rows shift the live-area absolute indices of any stored
+            // match (and eviction shifts every index): history-mode positions
+            // go stale, re-scanned lazily on the next navigation.
+            if k > 0 {
+                self.find_dirty = true;
             }
             // `view_offset` is measured backwards from the live bottom.  If
             // output scrolls while the user is reading history, keeping the

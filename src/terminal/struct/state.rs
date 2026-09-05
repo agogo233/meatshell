@@ -21,6 +21,10 @@ pub(crate) struct TermBuffer {
     pub(crate) find_positions: Vec<(usize, usize, usize)>,
     /// Index into `find_positions` of the current match (-1 = none).
     pub(crate) find_active: i32,
+    /// Set when output, scrollback eviction or a reflow shifts absolute rows,
+    /// so the next history-mode navigation re-scans instead of jumping to a
+    /// stale row. Cleared by `recompute_find_positions`.
+    pub(crate) find_dirty: bool,
     /// When true, search spans the whole scrollback with next/prev navigation;
     /// when false, only the visible window is highlighted (legacy behaviour).
     pub(crate) search_history_mode: bool,

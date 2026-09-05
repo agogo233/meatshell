@@ -5446,6 +5446,7 @@ fn wire_session_callbacks(
                     find_query: String::new(),
                     find_positions: Vec::new(),
                     find_active: -1,
+                    find_dirty: false,
                     search_history_mode: store.borrow().search_history_mode(),
                     command_running: false,
                     backpressure: false,
