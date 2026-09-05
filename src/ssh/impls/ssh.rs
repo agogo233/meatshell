@@ -275,6 +275,12 @@ impl AuxiliaryStartup {
 
 const AUXILIARY_CHANNEL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// Bound the TCP phase of a connection (direct and via proxy). A half-open
+/// network black-holes the SYN, and the OS default connect timeout (~2 min)
+/// would strand the tab in "connecting" — invisible to the auto-reconnect
+/// scan, which only picks up closed tabs.
+const SSH_TCP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 async fn auxiliary_timeout<F, T>(
     timeout: std::time::Duration,
     future: F,
@@ -1134,16 +1140,38 @@ async fn connect_ssh(
                 crate::ssh::proxy::describe(&p),
                 addr
             )));
-            let stream = crate::ssh::proxy::connect(&p, &session.host, session.port)
-                .await
-                .with_context(|| format!("proxy connect to {} failed", addr))?;
+            // Bound the TCP/proxy phase: a black-holed route would otherwise
+            // hang on the OS default (~2 min) and strand the tab in
+            // "connecting", invisible to the auto-reconnect scan. Auth is
+            // deliberately NOT timed — it waits on user prompts.
+            let stream = tokio::time::timeout(
+                SSH_TCP_CONNECT_TIMEOUT,
+                crate::ssh::proxy::connect(&p, &session.host, session.port),
+            )
+            .await
+            .map_err(|_| anyhow!(t("代理连接超时", "proxy connection timed out")))?
+            .with_context(|| format!("proxy connect to {} failed", addr))?;
             client::connect_stream(config, stream, handler)
                 .await
                 .with_context(|| format!("connect {} failed", addr))?
         }
-        None => client::connect(config, addr.as_str(), handler)
+        None => {
+            // russh's `connect` does an untimed TCP connect; bound that phase
+            // ourselves and hand the established stream to `connect_stream`.
+            let stream = tokio::time::timeout(
+                SSH_TCP_CONNECT_TIMEOUT,
+                tokio::net::TcpStream::connect(addr.as_str()),
+            )
             .await
-            .with_context(|| format!("connect {} failed", addr))?,
+            .map_err(|_| anyhow!(t("连接超时", "connection timed out")))?
+            .with_context(|| format!("connect {} failed", addr))?;
+            if config.nodelay {
+                let _ = stream.set_nodelay(true);
+            }
+            client::connect_stream(config, stream, handler)
+                .await
+                .with_context(|| format!("connect {} failed", addr))?
+        }
     };
     Ok((handle, None))
 }

@@ -62,6 +62,17 @@ fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|p| p.into_inner())
 }
 
+/// A portable bundle decrypted on a worker thread, waiting for the UI-thread
+/// timer to apply it: the store is `Rc`-bound to the UI thread, so only the
+/// already-decrypted config can cross back. `download` picks the failure
+/// wording ("下载失败" for a fetch, "导入失败" for a local file).
+struct BundleDelivery {
+    result: Result<ConfigFile, String>,
+    download: bool,
+}
+
+type BundleMailbox = Arc<Mutex<Vec<BundleDelivery>>>;
+
 /// Output parsed between UI-flush checkpoints during sustained traffic.
 const INGEST_FRAME_BUDGET: usize = 64 * 1024;
 
@@ -163,7 +174,7 @@ use tokio::runtime::Runtime;
 
 use crate::app::core::{AppCore, TabRoute, TabRoutes, WindowRegistry, WindowState};
 use crate::config::{
-    is_reserved_session_group, named_display_groups, AuthMethod, ConfigStore,
+    is_reserved_session_group, named_display_groups, AuthMethod, ConfigFile, ConfigStore,
     OutputHighlightRule, Secret, Session, SessionKind,
 };
 use crate::i18n::t;
@@ -1293,6 +1304,10 @@ fn open_window(
         window.set_webdav_accept_invalid_certs(s.webdav_accept_invalid_certs());
         window.set_webdav_status(String::new().into());
     }
+    // Bundle work (Argon2 KDF + WebDAV round trips) runs on worker threads so
+    // the window stays responsive; decrypted configs come back through this
+    // mailbox and the UI-thread timer below, because the store is Rc-bound.
+    let bundle_mailbox: BundleMailbox = Arc::new(Mutex::new(Vec::new()));
     {
         let weak = window.as_weak();
         let store = store.clone();
@@ -1375,42 +1390,59 @@ fn open_window(
                 return;
             }
             let bundle_path = bundle_remote_path(&remote_path);
-            let res = store.borrow().export_bundle(&pass).and_then(|pack| {
-                let envelope = format!("{{\"meatshell_bundle\":1,\"data\":\"{pack}\"}}");
-                webdav_put_json(
-                    &url,
-                    &bundle_path,
-                    &username,
-                    &password,
-                    accept_invalid_certs,
-                    envelope,
-                )
-            });
-            // Retire the legacy plaintext copy once the bundle is in place.
-            // Best effort: servers that forbid DELETE must not fail the upload.
-            let legacy_url = resolved_url(&url, &remote_path);
-            let bundle_url = resolved_url(&url, &bundle_path);
-            if res.is_ok() && legacy_url != bundle_url {
-                if let Err(e) = webdav_delete(
-                    &url,
-                    &remote_path,
-                    &username,
-                    &password,
-                    accept_invalid_certs,
-                ) {
-                    tracing::warn!("legacy WebDAV connections file left behind: {e}");
+            // Serialize on the UI thread (the store is Rc-bound); the Argon2
+            // KDF, the AEAD and the WebDAV round trips run on a worker.
+            let payload = match store.borrow().bundle_payload() {
+                Ok(payload) => payload,
+                Err(e) => {
+                    w.set_webdav_status(
+                        format!("{}: {}", t("上传失败", "upload failed"), e).into(),
+                    );
+                    return;
                 }
-            }
-            let msg = match res {
-                Ok(()) => format!(
-                    "{} {}{}",
-                    t("已上传加密同步包", "uploaded the encrypted sync bundle"),
-                    store.borrow().sessions().len(),
-                    webdav_status_suffix(accept_invalid_certs)
-                ),
-                Err(e) => format!("{}: {}", t("上传失败", "upload failed"), e),
             };
-            w.set_webdav_status(msg.into());
+            let count = store.borrow().sessions().len();
+            let weak2 = weak.clone();
+            w.set_webdav_status(t("上传中...", "uploading...").into());
+            std::thread::spawn(move || {
+                let res = ConfigStore::seal_bundle(&pass, &payload).and_then(|pack| {
+                    let envelope = format!("{{\"meatshell_bundle\":1,\"data\":\"{pack}\"}}");
+                    webdav_put_json(
+                        &url,
+                        &bundle_path,
+                        &username,
+                        &password,
+                        accept_invalid_certs,
+                        envelope,
+                    )
+                });
+                // Retire the legacy plaintext copy once the bundle is in place.
+                // Best effort: servers that forbid DELETE must not fail the
+                // upload.
+                if res.is_ok()
+                    && resolved_url(&url, &remote_path) != resolved_url(&url, &bundle_path)
+                {
+                    if let Err(e) = webdav_delete(
+                        &url,
+                        &remote_path,
+                        &username,
+                        &password,
+                        accept_invalid_certs,
+                    ) {
+                        tracing::warn!("legacy WebDAV connections file left behind: {e}");
+                    }
+                }
+                let msg = match res {
+                    Ok(()) => format!(
+                        "{} {}{}",
+                        t("已上传加密同步包", "uploaded the encrypted sync bundle"),
+                        count,
+                        webdav_status_suffix(accept_invalid_certs)
+                    ),
+                    Err(e) => format!("{}: {}", t("上传失败", "upload failed"), e),
+                };
+                let _ = weak2.upgrade_in_event_loop(move |w| w.set_webdav_status(msg.into()));
+            });
         });
     }
     {
@@ -2245,6 +2277,49 @@ fn open_window(
     // so closing the window stops them instead of leaking.
     let window_timers: Rc<RefCell<Vec<slint::Timer>>> = Rc::new(RefCell::new(Vec::new()));
 
+    // Bundle results computed on worker threads are applied here, on the UI
+    // thread that owns the store. 250 ms is invisible behind a network round
+    // trip and costs one uncontended lock when idle.
+    {
+        let store = store.clone();
+        let weak = window.as_weak();
+        let mailbox = bundle_mailbox.clone();
+        let sessions_model = sessions_model.clone();
+        let registry = registry.clone();
+        let timer = slint::Timer::default();
+        timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_millis(250),
+            move || {
+                let pending: Vec<BundleDelivery> =
+                    lock_or_recover(&mailbox).drain(..).collect();
+                for delivery in pending {
+                    let Some(w) = weak.upgrade() else { continue };
+                    let msg = match delivery.result {
+                        Ok(cfg) => match store.borrow_mut().apply_bundle(cfg) {
+                            Ok(n) => {
+                                sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
+                                registry.broadcast_config_changed();
+                                format!("{} {}", t("已导入便携包", "bundle imported"), n)
+                            }
+                            Err(e) => format!("{}: {}", t("导入失败", "import failed"), e),
+                        },
+                        Err(e) => format!(
+                            "{}: {}",
+                            t(
+                                if delivery.download { "下载失败" } else { "导入失败" },
+                                if delivery.download { "download failed" } else { "import failed" }
+                            ),
+                            e
+                        ),
+                    };
+                    w.set_portable_status(msg.into());
+                }
+            },
+        );
+        window_timers.borrow_mut().push(timer);
+    }
+
     // Expose this window's state to the rest of the process so tabs can be
     // dragged out into a new window or merged into another one (#tab-detach).
     core.window_states.borrow_mut().insert(
@@ -2381,6 +2456,7 @@ fn open_window(
         sftp_follow_cd.clone(),
         core.tab_routes.clone(),
         tab_titles.clone(),
+        bundle_mailbox.clone(),
     );
 
     // Recompute the sidebar whenever the active tab changes (fired from Slint's
@@ -2798,24 +2874,38 @@ fn open_window(
     // Periodic scan: reconnect dropped (non-local) tabs in place, up to
     // `max_attempts` consecutive tries each (reset on a successful connect).
     // The timer always runs (cheap: it scans a mostly-empty map); the enabled
-    // flag and attempt cap are read live from the store on the UI thread, so
-    // toggling them takes effect without reopening the window. Only the scan
-    // interval is fixed at startup.
+    // flag, attempt cap and scan interval are read live from the store, so
+    // changing any of them takes effect without reopening the window. The
+    // 1 Hz tick only decides *when* to scan; the scan itself is due-time
+    // gated, so an idle app pays one early return per second.
     {
-        let interval = store.borrow().auto_reconnect_interval_secs();
         let ctx = connect_ctx.clone();
+        let next_scan = Rc::new(std::cell::Cell::new(std::time::Instant::now()));
         let timer = slint::Timer::default();
         timer.start(
             slint::TimerMode::Repeated,
-            std::time::Duration::from_secs(interval),
+            std::time::Duration::from_secs(1),
             move || {
-                let (enabled, max_attempts) = {
+                let (enabled, max_attempts, interval) = {
                     let cfg = ctx.store.borrow();
-                    (cfg.auto_reconnect_enabled(), cfg.auto_reconnect_max_attempts())
+                    (
+                        cfg.auto_reconnect_enabled(),
+                        cfg.auto_reconnect_max_attempts(),
+                        cfg.auto_reconnect_interval_secs(),
+                    )
                 };
+                let due = std::time::Duration::from_secs(interval);
+                let now = std::time::Instant::now();
                 if !enabled {
+                    // Keep the deadline fresh while disabled so re-enabling
+                    // doesn't fire an immediate scan.
+                    next_scan.set(now + due);
                     return;
                 }
+                if now < next_scan.get() {
+                    return;
+                }
+                next_scan.set(now + due);
                 let dead: Vec<String> = {
                     let statuses = lock_or_recover(&ctx.tab_statuses);
                     statuses
@@ -3966,6 +4056,7 @@ fn wire_session_callbacks(
     sftp_follow_cd: Arc<std::sync::atomic::AtomicBool>,
     tab_routes: TabRoutes,
     tab_titles: Rc<RefCell<HashMap<String, String>>>,
+    bundle_mailbox: BundleMailbox,
 ) {
     // Working set of port forwards (#56) for the session being created/edited.
     // The forward add/delete callbacks mutate it; saving reads it into
@@ -4140,24 +4231,39 @@ fn wire_session_callbacks(
                 );
                 return;
             }
-            if let Some(path) = rfd::FileDialog::new()
+            let Some(path) = rfd::FileDialog::new()
                 .set_file_name("meatshell-connections.mpack")
                 .add_filter("MeatShell bundle", &["mpack"])
                 .save_file()
-            {
-                let res = store.borrow().export_bundle_to(&path, &pass);
-                if let Some(w) = weak.upgrade() {
-                    let hint = match res {
-                        Ok(n) => format!(
-                            "{} {}",
-                            t("已导出连接（口令加密）", "exported (encrypted)"),
-                            n
-                        ),
-                        Err(e) => format!("{}: {}", t("导出失败", "export failed"), e),
-                    };
-                    w.set_ssh_import_hint(hint.into());
+            else {
+                return;
+            };
+            let payload = match store.borrow().bundle_payload() {
+                Ok(payload) => payload,
+                Err(e) => {
+                    w.set_ssh_import_hint(
+                        format!("{}: {}", t("导出失败", "export failed"), e).into(),
+                    );
+                    return;
                 }
-            }
+            };
+            let count = store.borrow().sessions().len();
+            let weak2 = weak.clone();
+            std::thread::spawn(move || {
+                let res = ConfigStore::seal_bundle(&pass, &payload).and_then(|pack| {
+                    std::fs::write(&path, pack)
+                        .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))
+                });
+                let hint = match res {
+                    Ok(()) => format!(
+                        "{} {}",
+                        t("已导出连接（口令加密）", "exported (encrypted)"),
+                        count
+                    ),
+                    Err(e) => format!("{}: {}", t("导出失败", "export failed"), e),
+                };
+                let _ = weak2.upgrade_in_event_loop(move |w| w.set_ssh_import_hint(hint.into()));
+            });
         });
     }
 
@@ -4256,27 +4362,41 @@ fn wire_session_callbacks(
                 );
                 return;
             }
-            if let Some(path) = rfd::FileDialog::new()
+            let Some(path) = rfd::FileDialog::new()
                 .set_file_name("meatshell.mpack")
                 .add_filter("MeatShell bundle", &["mpack"])
                 .save_file()
-            {
-                let res = store.borrow().export_bundle_to(&path, &pass);
-                if let Some(w) = weak.upgrade() {
-                    let msg = match res {
-                        Ok(n) => format!("{} {}", t("已导出便携包", "bundle exported"), n),
-                        Err(e) => format!("{}: {}", t("导出失败", "export failed"), e),
-                    };
-                    w.set_portable_status(msg.into());
+            else {
+                return;
+            };
+            let payload = match store.borrow().bundle_payload() {
+                Ok(payload) => payload,
+                Err(e) => {
+                    w.set_portable_status(
+                        format!("{}: {}", t("导出失败", "export failed"), e).into(),
+                    );
+                    return;
                 }
-            }
+            };
+            let count = store.borrow().sessions().len();
+            let weak2 = weak.clone();
+            w.set_portable_status(t("导出中...", "exporting...").into());
+            std::thread::spawn(move || {
+                let res = ConfigStore::seal_bundle(&pass, &payload).and_then(|pack| {
+                    std::fs::write(&path, pack)
+                        .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))
+                });
+                let msg = match res {
+                    Ok(()) => format!("{} {}", t("已导出便携包", "bundle exported"), count),
+                    Err(e) => format!("{}: {}", t("导出失败", "export failed"), e),
+                };
+                let _ = weak2.upgrade_in_event_loop(move |w| w.set_portable_status(msg.into()));
+            });
         });
     }
     {
         let weak = window.as_weak();
-        let store = store.clone();
-        let sessions_model = sessions_model.clone();
-        let registry = registry.clone();
+        let mailbox = bundle_mailbox.clone();
         window.on_import_portable_bundle(move || {
             let Some(w) = weak.upgrade() else { return };
             let pass = w.get_portable_passphrase().to_string();
@@ -4286,23 +4406,27 @@ fn wire_session_callbacks(
                 );
                 return;
             }
-            if let Some(path) = rfd::FileDialog::new()
+            let Some(path) = rfd::FileDialog::new()
                 .add_filter("MeatShell bundle", &["mpack"])
                 .pick_file()
-            {
-                let res = store.borrow_mut().import_bundle_from(&path, &pass);
-                if let Some(w) = weak.upgrade() {
-                    let msg = match res {
-                        Ok(n) => {
-                            sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
-                            registry.broadcast_config_changed();
-                            format!("{} {}", t("已导入便携包", "bundle imported"), n)
-                        }
-                        Err(e) => format!("{}: {}", t("导入失败", "import failed"), e),
-                    };
-                    w.set_portable_status(msg.into());
-                }
-            }
+            else {
+                return;
+            };
+            // The Argon2 KDF is deliberately slow; run it (and the file read)
+            // off the UI thread and let the bundle timer apply the result.
+            let mailbox = mailbox.clone();
+            w.set_portable_status(t("解密中...", "decrypting...").into());
+            std::thread::spawn(move || {
+                let result = std::fs::read_to_string(&path)
+                    .map_err(|e| format!("{e}"))
+                    .and_then(|pack| {
+                        ConfigStore::decrypt_bundle(&pass, &pack).map_err(|e| format!("{e:#}"))
+                    });
+                lock_or_recover(&mailbox).push(BundleDelivery {
+                    result,
+                    download: false,
+                });
+            });
         });
     }
     {
@@ -4323,31 +4447,40 @@ fn wire_session_callbacks(
                 return;
             }
             let bundle_path = bundle_remote_path(&remote_path);
-            let res = store.borrow().export_bundle(&pass).and_then(|pack| {
-                let envelope = format!("{{\"meatshell_bundle\":1,\"data\":\"{pack}\"}}");
-                webdav_put_json(
-                    &url,
-                    &bundle_path,
-                    &username,
-                    &password,
-                    accept_invalid_certs,
-                    envelope,
-                )
-            });
-            if let Some(w) = weak.upgrade() {
+            let payload = match store.borrow().bundle_payload() {
+                Ok(payload) => payload,
+                Err(e) => {
+                    w.set_portable_status(
+                        format!("{}: {}", t("上传失败", "upload failed"), e).into(),
+                    );
+                    return;
+                }
+            };
+            let weak2 = weak.clone();
+            w.set_portable_status(t("上传中...", "uploading...").into());
+            std::thread::spawn(move || {
+                let res = ConfigStore::seal_bundle(&pass, &payload).and_then(|pack| {
+                    let envelope = format!("{{\"meatshell_bundle\":1,\"data\":\"{pack}\"}}");
+                    webdav_put_json(
+                        &url,
+                        &bundle_path,
+                        &username,
+                        &password,
+                        accept_invalid_certs,
+                        envelope,
+                    )
+                });
                 let msg = match res {
                     Ok(()) => t("便携包已上传", "bundle uploaded").to_string(),
                     Err(e) => format!("{}: {}", t("上传失败", "upload failed"), e),
                 };
-                w.set_portable_status(msg.into());
-            }
+                let _ = weak2.upgrade_in_event_loop(move |w| w.set_portable_status(msg.into()));
+            });
         });
     }
     {
         let weak = window.as_weak();
-        let store = store.clone();
-        let sessions_model = sessions_model.clone();
-        let registry = registry.clone();
+        let mailbox = bundle_mailbox.clone();
         window.on_download_portable_bundle(move || {
             let Some(w) = weak.upgrade() else { return };
             let pass = w.get_portable_passphrase().to_string();
@@ -4363,22 +4496,25 @@ fn wire_session_callbacks(
                 return;
             }
             let bundle_path = bundle_remote_path(&remote_path);
-            let res = webdav_get_json(&url, &bundle_path, &username, &password, accept_invalid_certs)
-                .and_then(|body| {
-                    let pack = extract_bundle_data(&body)?;
-                    store.borrow_mut().import_bundle(&pass, &pack)
+            // Fetch + KDF off the UI thread; the bundle timer applies the
+            // decrypted config where the store lives.
+            let mailbox = mailbox.clone();
+            w.set_portable_status(t("下载中...", "downloading...").into());
+            std::thread::spawn(move || {
+                let result =
+                    webdav_get_json(&url, &bundle_path, &username, &password, accept_invalid_certs)
+                        .map_err(|e| format!("{e:#}"))
+                        .and_then(|body| {
+                            extract_bundle_data(&body).map_err(|e| format!("{e}"))
+                        })
+                        .and_then(|pack| {
+                            ConfigStore::decrypt_bundle(&pass, &pack).map_err(|e| format!("{e:#}"))
+                        });
+                lock_or_recover(&mailbox).push(BundleDelivery {
+                    result,
+                    download: true,
                 });
-            if let Some(w) = weak.upgrade() {
-                let msg = match res {
-                    Ok(n) => {
-                        sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
-                        registry.broadcast_config_changed();
-                        format!("{} {}", t("已导入便携包", "bundle imported"), n)
-                    }
-                    Err(e) => format!("{}: {}", t("下载失败", "download failed"), e),
-                };
-                w.set_portable_status(msg.into());
-            }
+            });
         });
     }
 
@@ -7262,6 +7398,9 @@ fn reconnect_tab_in_place(tab_id: &str, ctx: &ConnectCtx) -> bool {
     let Some(session) = ctx.store.borrow().get(&session_id).cloned() else {
         return false;
     };
+    // A credential prompt cancelled during an earlier attempt must not silence
+    // this one: the answer cache lives for the whole process run otherwise.
+    forget_cred_decision(&session_id);
     // Drop the dead shell/SFTP handles for this tab.
     ctx.handles.borrow_mut().remove(tab_id);
     if let Some(h) = lock_or_recover(&ctx.sftp_handles).remove(tab_id) {

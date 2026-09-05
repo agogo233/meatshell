@@ -195,6 +195,15 @@ thread_local! {
         RefCell::new(HashMap::new());
 }
 
+/// Forget a session's cached credential answer so the next (re)connection can
+/// prompt again: a cancelled prompt during auto-reconnect must not silence the
+/// remaining attempts, nor a later manual connect, until the process restarts.
+pub(super) fn forget_cred_decision(session_id: &str) {
+    CRED_DECIDED.with(|decided| {
+        decided.borrow_mut().remove(session_id);
+    });
+}
+
 /// Queue a credential prompt: answer immediately if already decided this run,
 /// merge into an existing pending entry for the same session *in the same
 /// window*, otherwise enqueue (and show it in the owning window if that

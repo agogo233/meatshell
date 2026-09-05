@@ -1064,10 +1064,17 @@ impl ConfigStore {
                         && r.color == rule.color)
             });
             if let Some(existing) = existing {
-                if existing.id.is_empty() {
-                    existing.id = rule.id.clone();
+                // Same id (or same content for a legacy rule) means the import
+                // updates this rule: replace the whole content, not just the
+                // enabled flag, so editing an exported pattern and re-importing
+                // actually changes the pattern. A legacy content-match keeps the
+                // stored id so the rule's identity survives the import.
+                let keep_id = !incoming_had_id && !existing.id.is_empty();
+                let id = existing.id.clone();
+                *existing = rule;
+                if keep_id {
+                    existing.id = id;
                 }
-                existing.enabled = rule.enabled;
                 updated += 1;
                 continue;
             }
@@ -2281,21 +2288,28 @@ impl ConfigStore {
         Ok(material)
     }
 
-    /// Seal the entire config (sessions + settings, secrets in plaintext) into a
-    /// passphrase-encrypted bundle string: `base64url("MPB1" ‖ salt‖ nonce ‖ ct)`.
-    pub fn export_bundle(&self, passphrase: &str) -> Result<String> {
+    /// Serialize the current config for bundling. Cheap and store-bound, so it
+    /// runs on the UI thread; the expensive half is [`Self::seal_bundle`].
+    pub fn bundle_payload(&self) -> Result<Vec<u8>> {
+        Ok(serde_json::to_vec(&self.cache)?)
+    }
+
+    /// Seal an already-serialized payload (sessions + settings, secrets in
+    /// plaintext) into a passphrase-encrypted bundle string:
+    /// `base64url("MPB1" ‖ salt ‖ nonce ‖ ct)`. No store access, so the Argon2
+    /// KDF and the AEAD can run on a worker thread while the UI stays live.
+    pub fn seal_bundle(passphrase: &str, payload: &[u8]) -> Result<String> {
         use rand::RngCore as _;
         if passphrase.is_empty() {
             return Err(anyhow::anyhow!("empty passphrase"));
         }
-        let json = serde_json::to_vec(&self.cache)?;
         let mut salt = [0u8; 16];
         OsRng.fill_bytes(&mut salt);
         let key = Self::bundle_key(passphrase, &salt)?;
         let cipher = ChaCha20Poly1305::new((&*key).into());
         let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
         let ct = cipher
-            .encrypt(&nonce, json.as_slice())
+            .encrypt(&nonce, payload)
             .map_err(|e| anyhow::anyhow!("bundle encrypt error: {e}"))?;
         let mut blob = Vec::with_capacity(4 + salt.len() + nonce.len() + ct.len());
         blob.extend_from_slice(b"MPB1");
@@ -2305,9 +2319,15 @@ impl ConfigStore {
         Ok(URL_SAFE_NO_PAD.encode(&blob))
     }
 
-    /// Open a bundle produced by [`Self::export_bundle`], replacing the current
-    /// config wholesale. Returns the number of sessions restored.
-    pub fn import_bundle(&mut self, passphrase: &str, pack: &str) -> Result<usize> {
+    /// Seal the entire config into a bundle (UI-thread convenience wrapper over
+    /// [`Self::bundle_payload`] + [`Self::seal_bundle`]).
+    pub fn export_bundle(&self, passphrase: &str) -> Result<String> {
+        Self::seal_bundle(passphrase, &self.bundle_payload()?)
+    }
+
+    /// Open a bundle into a config without touching the store — the
+    /// worker-thread half of [`Self::import_bundle`].
+    pub fn decrypt_bundle(passphrase: &str, pack: &str) -> Result<ConfigFile> {
         let blob = URL_SAFE_NO_PAD
             .decode(pack.trim())
             .map_err(|_| anyhow::anyhow!("not a valid bundle"))?;
@@ -2322,25 +2342,30 @@ impl ConfigStore {
         let plain = cipher
             .decrypt(nonce, ct)
             .map_err(|_| anyhow::anyhow!("wrong passphrase or corrupt bundle"))?;
-        let cfg: ConfigFile = serde_json::from_slice(&plain)?;
+        Ok(serde_json::from_slice(&plain)?)
+    }
+
+    /// Replace the current config with a decrypted bundle. The outgoing config
+    /// file is copied to `<name>.pre-bundle` first: a bundle that decrypts
+    /// cleanly but is not the one the user meant should still be recoverable.
+    pub fn apply_bundle(&mut self, cfg: ConfigFile) -> Result<usize> {
         let n = cfg.sessions.len();
+        if self.path.exists() {
+            let backup = self.path.with_extension("json.pre-bundle");
+            if let Err(e) = fs::copy(&self.path, &backup) {
+                tracing::warn!("config backup before bundle import failed: {e}");
+            }
+        }
         self.cache = cfg;
         self.save()?;
         Ok(n)
     }
 
-    /// Write an encrypted bundle to `path`.
-    pub fn export_bundle_to(&self, path: &Path, passphrase: &str) -> Result<usize> {
-        let pack = self.export_bundle(passphrase)?;
-        fs::write(path, pack).with_context(|| format!("failed to write {}", path.display()))?;
-        Ok(self.cache.sessions.len())
-    }
-
-    /// Read and open an encrypted bundle from `path`.
-    pub fn import_bundle_from(&mut self, path: &Path, passphrase: &str) -> Result<usize> {
-        let pack = fs::read_to_string(path)
-            .with_context(|| format!("failed to read {}", path.display()))?;
-        self.import_bundle(passphrase, &pack)
+    /// Open a bundle produced by [`Self::export_bundle`], replacing the current
+    /// config wholesale. Returns the number of sessions restored.
+    pub fn import_bundle(&mut self, passphrase: &str, pack: &str) -> Result<usize> {
+        let cfg = Self::decrypt_bundle(passphrase, pack)?;
+        self.apply_bundle(cfg)
     }
 
     /// Export quick commands + group names to a portable JSON string. No

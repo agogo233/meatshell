@@ -296,12 +296,8 @@ pub(super) fn start_session_in_tab(tab_id: &str, session: Session, ctx: &Connect
                             // off-thread; forward to the UI so the history
                             // dropdown can suppress itself mid-program.
                             if let Some(h) = crate::app::term_buf(&rt.bufs, &tab_id_pump) {
-                                if let Ok(mut buf) = h.lock() {
-                                    buf.command_running = matches!(
-                                        mark,
-                                        crate::ssh::CommandMark::CommandStart
-                                    );
-                                }
+                                lock_or_recover(&h).command_running =
+                                    matches!(mark, crate::ssh::CommandMark::CommandStart);
                             }
                             ui_batch.push(SessionEvent::CommandMark(mark));
                         }
@@ -387,7 +383,10 @@ pub(super) fn start_session_in_tab(tab_id: &str, session: Session, ctx: &Connect
                     const BP_LOW: usize = 4;
                     let pending = shell_rx.len();
                     if let Some(h) = crate::app::term_buf(&rt.bufs, &tab_id_pump) {
-                        let changed = if let Ok(mut buf) = h.lock() {
+                        // Scope the guard so it is released before the render
+                        // request below re-locks the same buffer.
+                        let changed = {
+                            let mut buf = lock_or_recover(&h);
                             let next = if buf.backpressure {
                                 pending > BP_LOW
                             } else {
@@ -399,8 +398,6 @@ pub(super) fn start_session_in_tab(tab_id: &str, session: Session, ctx: &Connect
                             } else {
                                 false
                             }
-                        } else {
-                            false
                         };
                         if changed {
                             let _ = request_tab_render(
