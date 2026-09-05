@@ -187,21 +187,25 @@ fn charset_to_encoding(value: &str) -> String {
 mod tests {
     use super::*;
 
+    // Fixtures follow the real field layout (`group1` indices 0..22 and
+    // `group2` index 5 = charset; the terminal group starts with the font name
+    // and size, so the charset sits five slots in, not first).
     #[test]
     fn parses_folders_ssh_and_telnet_sessions() {
         let raw = "\
 [Bookmarks]\r\n\
 SubRep=\r\n\
 ImgNum=42\r\n\
-prod-server=#109#0%192.0.2.10%22%admin%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0#15%80%24#0# #-1\r\n\
+prod-server=#109#0%192.0.2.10%22%admin%%1%1%%%%%%0%%%%1%1%%%%1080%#MobaFont%10%0%0%1%15%236,236,236%30,30,30#0# #-1\r\n\
 win-box=#91#4%192.0.2.20%3389%admin%0%0#15%80%24#0# #-1\r\n\
 [Bookmarks_1]\r\n\
 SubRep=My Folder\r\n\
 ImgNum=41\r\n\
-old-switch=#98#7%10.0.0.1%23%cisco%0%0#13%80%24#0# #-1\r\n";
+real-export= #109#0%roottest%22%%%0%-1%%%%%0%-1%0%%%-1%0%0%0%%1080%%0%0%1%%0%%%%0%-1%-1%0#MobaFont%10%0%0%-1%15%236,236,236%30,30,30%180,180,192%0%-1%0%%xterm%-1%0%_Std_Colors_0_%80%24%0%0%-1%<none>%%0%1%-1%-1#0# #-1\r\n\
+old-switch=#98#7%10.0.0.1%23%cisco%%1%1%%%%%%0%%%%1%1%%%%1080%#MobaFont%10%0%0%1%13%236,236,236%30,30,30#0# #-1\r\n";
 
         let sessions = parse_export(raw).unwrap();
-        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions.len(), 3);
 
         let ssh = &sessions[0];
         assert_eq!(ssh.name, "prod-server");
@@ -212,7 +216,17 @@ old-switch=#98#7%10.0.0.1%23%cisco%0%0#13%80%24#0# #-1\r\n";
         assert!(ssh.group.is_empty());
         assert_eq!(ssh.encoding, "UTF-8");
 
-        let telnet = &sessions[1];
+        // A verbatim line from a real `.mxtsessions` export (sessionator
+        // fixture): 35 `group1` fields and a 28-field terminal group.
+        let real = &sessions[1];
+        assert_eq!(real.host, "roottest");
+        assert_eq!(real.user, "");
+        assert!(matches!(real.auth, AuthMethod::Password));
+        assert_eq!(real.proxy.as_str(), "");
+        assert_eq!(real.encoding, "UTF-8");
+        assert_eq!(real.note, "");
+
+        let telnet = &sessions[2];
         assert_eq!(telnet.name, "old-switch");
         assert_eq!(telnet.host, "10.0.0.1");
         assert_eq!(telnet.port, 23);
@@ -227,7 +241,7 @@ old-switch=#98#7%10.0.0.1%23%cisco%0%0#13%80%24#0# #-1\r\n";
         let raw = "\
 [Bookmarks]\r\n\
 SubRep=My Folder\r\n\
-keyhost=#109#0%192.0.2.30%22%admin__PERCENT__x%0%0%0%0%0%0%0%0%0%0%0%_CurrentDrive_\\Users\\me\\.ssh\\id.ppk%0%0%0%0%2%proxy.example.com%8080%me#15%80%24#0#note with __DIEZE__ and __PIPE__#-1\r\n";
+keyhost=#109#0%192.0.2.30%22%admin__PERCENT__x%%1%1%%%%%%0%%_CurrentDrive_\\Users\\me\\.ssh\\id.ppk%%1%1%%2%proxy.example.com%8080%me#MobaFont%10%0%0%1%15%236,236,236%30,30,30#0# note with __DIEZE__ and __PIPE__#-1\r\n";
 
         let sessions = parse_export(raw).unwrap();
         assert_eq!(sessions.len(), 1);
@@ -245,9 +259,9 @@ keyhost=#109#0%192.0.2.30%22%admin__PERCENT__x%0%0%0%0%0%0%0%0%0%0%0%_CurrentDri
         let raw = "\
 [Bookmarks]\r\n\
 SubRep=\r\n\
-defuser=#109#0%192.0.2.40%22%<default>%0%0#0%80%24#0# #-1\r\n\
-short=#109#0%192.0.2.50%22#22%80%24#0# #-1\r\n\
-nohost=#109#0%%22%root%0%0#15%80%24#0# #-1\r\n";
+defuser=#109#0%192.0.2.40%22%<default>%%1%1%%%%%%1%%%%1%1%%%%1080%#MobaFont%10%0%0%1%0%236,236,236%30,30,30#0# #-1\r\n\
+short=#109#0%192.0.2.50%%#MobaFont%10%0%0%1%22%236,236,236%30,30,30#0# #-1\r\n\
+nohost=#109#0%%22%root%%0%1%%%%%%%%%%%%%%%%#MobaFont%10%0%0%1%15%236,236,236%30,30,30#0# #-1\r\n";
 
         let sessions = parse_export(raw).unwrap();
         assert_eq!(sessions.len(), 2);
@@ -262,6 +276,7 @@ nohost=#109#0%%22%root%0%0#15%80%24#0# #-1\r\n";
         assert_eq!(short.host, "192.0.2.50");
         assert_eq!(short.port, 22);
         assert_eq!(short.user, "");
+        assert!(matches!(short.auth, AuthMethod::Password));
         assert_eq!(short.encoding, "CP850");
     }
 

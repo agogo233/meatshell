@@ -1164,7 +1164,13 @@ impl ConfigStore {
     // ── SFTP transfer queue ───────────────────────────────────────────────
 
     pub fn sftp_queue_concurrency(&self) -> u32 {
-        self.cache.sftp_queue_concurrency.clamp(1, 4)
+        // `0` means "never set" (legacy configs / serde default) → the UI
+        // default of 2, so an untouched install doesn't silently drop to one
+        // worker.
+        match self.cache.sftp_queue_concurrency {
+            0 => 2,
+            n => n.clamp(1, 4),
+        }
     }
 
     pub fn set_sftp_queue_concurrency(&mut self, workers: u32) {
