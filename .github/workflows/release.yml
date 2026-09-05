@@ -1,0 +1,68 @@
+name: Release Latest (Windows x86_64)
+
+# Rolling prerelease download: every push to main (and manual runs) rebuilds
+# the Windows x64 portable zip and replaces the assets of a fixed `latest`
+# prerelease, so the Releases page always offers the newest CI build.
+# No version tags are involved; windows-portable.yml (plain artifacts) is
+# untouched.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # create / update the `latest` prerelease
+
+concurrency:
+  group: release-latest
+  cancel-in-progress: true
+
+jobs:
+  windows-x86_64:
+    name: windows-x86_64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-pc-windows-msvc-portable
+
+      - name: Build (release)
+        run: cargo build --release --target x86_64-pc-windows-msvc --locked
+
+      - name: Package portable zip
+        shell: bash
+        run: |
+          set -eu
+          VERSION="$(sed -n '/^\[package\]/,/^\[/ s/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          # Fixed asset name so each run replaces the previous download
+          # instead of piling up versioned files on the `latest` release.
+          STAGE="meatshell-latest-windows-x86_64"
+          rm -rf "$STAGE" "${STAGE}.zip"
+          mkdir "$STAGE"
+          cp "target/x86_64-pc-windows-msvc/release/meatshell.exe" "$STAGE/"
+          7z a "${STAGE}.zip" "$STAGE" >/dev/null
+          echo "ASSET=${STAGE}.zip" >> "$GITHUB_ENV"
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+
+      - name: Publish rolling `latest` prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "Latest CI Build (Windows x64)"
+          prerelease: true
+          update: true
+          files: ${{ env.ASSET }}
+          fail_on_unmatched_files: true
+          body: |
+            meatshell ${{ env.VERSION }} · ${{ github.sha }} · ${{ github.run_number }}
+            自动构建，随 main 分支更新；非正式发布，谨慎用于生产。
+            Automated rolling build of `main` — not an official release.
