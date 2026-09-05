@@ -5134,8 +5134,9 @@ fn wire_session_callbacks(
                 SessionKind::Telnet => format!("telnet {}:{}", session.host, session.port),
                 SessionKind::Local => format!("local {}", session.name),
             };
-            // Serial / Telnet have no SFTP side-channel.
-            let has_sftp = session.kind == SessionKind::Ssh;
+            // Compatibility mode also suppresses the SFTP side-channel so
+            // bastions that only permit one proxied PTY connection stay alive.
+            let has_sftp = should_start_sftp(&session);
 
             // Seed the per-tab status so the sidebar shows "连接中 host" the
             // moment this tab becomes active (the `changed active-tab-id`

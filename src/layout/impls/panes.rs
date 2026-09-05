@@ -139,6 +139,14 @@ impl Layout {
     /// Move `tab_id` into existing leaf `to` (e.g. dropped onto another pane's tab
     /// strip). No-op if it's already there. Collapses an emptied source pane.
     pub fn move_tab(&mut self, tab_id: &str, to: u64) {
+        self.move_tab_at(tab_id, to, usize::MAX);
+    }
+
+    /// Same as [`Self::move_tab`], but the tab lands at `index` in the
+    /// destination's strip instead of at the end — a tab dropped at a specific
+    /// spot on another pane's tab strip (#408). `index` is clamped to the
+    /// destination's length, so a stale drop index can never panic.
+    pub fn move_tab_at(&mut self, tab_id: &str, to: u64, index: usize) {
         let from = match self.leaf_of_tab(tab_id) {
             Some(f) => f,
             None => return,
@@ -153,11 +161,32 @@ impl Layout {
             }
         }
         if let Some(dst) = self.leaf_mut(to) {
-            dst.tabs.push(tab_id.to_string());
+            let at = index.min(dst.tabs.len());
+            dst.tabs.insert(at, tab_id.to_string());
             dst.active = tab_id.to_string();
         }
         self.focused = to;
         self.prune();
+    }
+
+    /// Reorder inside one pane's strip: take the tab at `from` and re-insert it at
+    /// `to`, where `to` indexes the strip *with `from` already removed* — the
+    /// insertion index a drag-to-reorder gesture commits on drop (#408). Both
+    /// indices are clamped, so a drag index left over from a stale model can't
+    /// panic. The pane's active tab is untouched: only the display order changes.
+    pub fn move_tab_within(&mut self, leaf_id: u64, from: usize, to: usize) {
+        let Some(leaf) = self.leaf_mut(leaf_id) else {
+            return;
+        };
+        if leaf.tabs.len() < 2 || from >= leaf.tabs.len() {
+            return;
+        }
+        let to = to.min(leaf.tabs.len() - 1);
+        if from == to {
+            return;
+        }
+        let tab = leaf.tabs.remove(from);
+        leaf.tabs.insert(to, tab);
     }
 
     /// Move every tab from `leaf_id` into another existing pane, then collapse
@@ -512,6 +541,111 @@ mod tests {
         rtabs.sort();
         assert_eq!(rtabs, vec!["b".to_string(), "c".to_string()]);
         assert_eq!(ids(&l.flatten(0.0, 0.0, 800.0, 600.0).0).len(), 2);
+    }
+
+    #[test]
+    fn move_tab_at_inserts_at_the_drop_index() {
+        let mut l = Layout::new(
+            vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            "a".into(),
+        );
+        let right = l.split(1, Dir::Horizontal, "d", false).unwrap();
+        l.move_tab("b", right);
+        l.move_tab("c", right);
+        assert_eq!(
+            l.leaf(right).unwrap().tabs,
+            vec!["d".to_string(), "b".to_string(), "c".to_string()]
+        );
+
+        // Dropped between 'd' and 'b' rather than appended.
+        l.move_tab_at("a", right, 1);
+        assert_eq!(
+            l.leaf(right).unwrap().tabs,
+            vec![
+                "d".to_string(),
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string()
+            ]
+        );
+        assert_eq!(l.leaf(right).unwrap().active, "a");
+        // The source pane emptied, so the split collapsed back to one pane.
+        assert_eq!(l.flatten(0.0, 0.0, 800.0, 600.0).0.len(), 1);
+    }
+
+    #[test]
+    fn move_tab_at_clamps_and_ignores_same_pane() {
+        let mut l = Layout::new(vec!["a".into(), "b".into(), "c".into()], "a".into());
+        let right = l.split(1, Dir::Horizontal, "c", false).unwrap();
+
+        // Way past the end → appended, no panic.
+        l.move_tab_at("a", right, 99);
+        assert_eq!(
+            l.leaf(right).unwrap().tabs,
+            vec!["c".to_string(), "a".to_string()]
+        );
+        // Already in the destination → untouched.
+        l.move_tab_at("a", right, 0);
+        assert_eq!(
+            l.leaf(right).unwrap().tabs,
+            vec!["c".to_string(), "a".to_string()]
+        );
+    }
+
+    #[test]
+    fn move_tab_within_reorders_across_several_slots() {
+        let mut l = Layout::new(
+            vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            "b".into(),
+        );
+
+        // First tab dropped at the end: one drag, three slots.
+        l.move_tab_within(1, 0, 3);
+        assert_eq!(
+            l.leaf(1).unwrap().tabs,
+            vec![
+                "b".to_string(),
+                "c".to_string(),
+                "d".to_string(),
+                "a".to_string()
+            ]
+        );
+        // Last tab dragged back to the front.
+        l.move_tab_within(1, 3, 0);
+        assert_eq!(
+            l.leaf(1).unwrap().tabs,
+            vec![
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+                "d".to_string()
+            ]
+        );
+        // The active tab follows the data, not the slot.
+        assert_eq!(l.leaf(1).unwrap().active, "b");
+    }
+
+    #[test]
+    fn move_tab_within_ignores_no_ops_and_bad_indices() {
+        let mut l = Layout::new(vec!["a".into(), "b".into(), "c".into()], "a".into());
+        let before = l.leaf(1).unwrap().tabs.clone();
+
+        l.move_tab_within(1, 1, 1); // same slot
+        l.move_tab_within(1, 9, 0); // stale source index
+        l.move_tab_within(99, 0, 2); // unknown pane
+        assert_eq!(l.leaf(1).unwrap().tabs, before);
+
+        // A target past the end clamps to the last slot instead of panicking.
+        l.move_tab_within(1, 0, 42);
+        assert_eq!(
+            l.leaf(1).unwrap().tabs,
+            vec!["b".to_string(), "c".to_string(), "a".to_string()]
+        );
+
+        // A single-tab strip has nothing to reorder.
+        let mut solo = Layout::new(vec!["only".into()], "only".into());
+        solo.move_tab_within(1, 0, 0);
+        assert_eq!(solo.leaf(1).unwrap().tabs, vec!["only".to_string()]);
     }
 
     #[test]

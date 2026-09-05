@@ -1008,12 +1008,17 @@ export component AppWindow inherits Window {
     callback tab-closed(string);
     callback new-tab-clicked();
     callback new-window-clicked();   // open another application window (#multi-window)
-    callback tab-reorder(int /* from-index */, int /* dir: -1 left / +1 right */);
     // Per-pane tab actions (v0.5): the int is the pane (leaf) id.
     callback pane-tab-selected(int /* pane-id */, string /* tab-id */);
     callback pane-tab-closed(int /* pane-id */, string /* tab-id */);
     callback pane-new-tab(int /* pane-id */);
-    callback pane-tab-reorder(int /* pane-id */, int /* from */, int /* dir */);
+    // Drag-to-reorder inside a pane's strip (#408), committed once on drop: move
+    // the tab at `from` to `to`, where `to` indexes the list with `from` removed.
+    callback pane-tab-move(int /* pane-id */, int /* from */, int /* to */);
+    // Where a tab dragged in from elsewhere would land in this pane's strip;
+    // -1 when the cursor left it. Rust remembers the last report and uses it when
+    // the drop lands on a tab strip (#408).
+    callback pane-tab-drop-index(int /* pane-id */, int /* index */);
     callback pane-focus(int /* pane-id */);
     callback cycle-tab(bool /* reverse */);
     // Split pane `pane-id`, peeling `tab-id` into a new pane on `dir`
@@ -1030,9 +1035,21 @@ export component AppWindow inherits Window {
     in-out property <string> tab-rename-id: "";
     in-out property <string> tab-rename-value: "";
     // Drag-to-split (v0.5): cursor moved / dropped while dragging `tab-id`, in
-    // pane-area coordinates. Rust hit-tests the pane + edge zone.
-    callback tab-drag-move(string /* tab-id */, length /* x */, length /* y */);
+    // pane-area coordinates. Rust hit-tests the pane + edge zone. `over-own-strip`
+    // means the source strip is already showing an insertion gap of its own, so no
+    // pane drop-zone must light up (#408).
+    callback tab-drag-move(string /* tab-id */, length /* x */, length /* y */,
+                           bool /* over-own-strip */);
     callback tab-drag-drop(string /* tab-id */, length /* x */, length /* y */);
+    // The drag ended without a drop (pointer grab lost, or an in-strip drag that
+    // landed back on its own slot): clear whatever highlight it put up (#408).
+    callback tab-drag-cancel();
+    // Live tab-drag cursor in pane-area coordinates, republished so every pane's
+    // tab strip can tell whether the drag is hovering over it (#408). Pane rects
+    // come from the model, so the hit-test below needs nothing from the layout.
+    property <bool> tab-drag-live;
+    property <length> tab-drag-px;
+    property <length> tab-drag-py;
     // Drop-zone highlight (set by Rust during a drag): the region the dropped
     // tab's new pane would occupy.
     in property <bool> drag-active;
@@ -2021,25 +2038,42 @@ export component AppWindow inherits Window {
                         can-merge-pane: root.panes.length > 1;
                         tabs: pane.tabs;
                         active-id: pane.active-id;
+                        ext-drag-over: root.tab-drag-live
+                            && root.tab-drag-px >= pane.x
+                            && root.tab-drag-px <= pane.x + pane.w
+                            && root.tab-drag-py >= pane.y
+                            // The strip row is the TabBar's own 36px.
+                            && root.tab-drag-py <= pane.y + 36px;
+                        ext-drag-x: root.tab-drag-px - pane.x;
                         tab-selected(id) => { root.pane-tab-selected(pane.id, id); }
                         tab-closed(id) => { root.pane-tab-closed(pane.id, id); }
                         new-tab() => { root.pane-new-tab(pane.id); }
-                        tab-reorder(from-index, direction) => {
-                            root.pane-tab-reorder(pane.id, from-index, direction);
+                        tab-move(from-index, to-index) => {
+                            root.tab-drag-live = false;
+                            root.pane-tab-move(pane.id, from-index, to-index);
+                        }
+                        drop-index-changed(index) => {
+                            root.pane-tab-drop-index(pane.id, index);
                         }
                         tab-split(id, dir) => { root.pane-split(pane.id, id, dir); }
                         merge-pane() => { root.pane-merge(pane.id); }
                         tab-duplicate(id) => { root.tab-duplicate(id); }
                         tab-rename-request(id) => { root.tab-rename-request(id); }
-                        tab-drag-move(id, ax, ay) => {
-                            root.tab-drag-move(id,
-                                ax - pane-area.absolute-position.x,
-                                ay - pane-area.absolute-position.y);
+                        tab-drag-move(id, ax, ay, own-strip) => {
+                            root.tab-drag-px = ax - pane-area.absolute-position.x;
+                            root.tab-drag-py = ay - pane-area.absolute-position.y;
+                            root.tab-drag-live = true;
+                            root.tab-drag-move(id, root.tab-drag-px, root.tab-drag-py, own-strip);
                         }
                         tab-drag-drop(id, ax, ay) => {
+                            root.tab-drag-live = false;
                             root.tab-drag-drop(id,
                                 ax - pane-area.absolute-position.x,
                                 ay - pane-area.absolute-position.y);
+                        }
+                        tab-drag-cancel() => {
+                            root.tab-drag-live = false;
+                            root.tab-drag-cancel();
                         }
                     }
                 }

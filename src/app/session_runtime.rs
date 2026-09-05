@@ -23,11 +23,18 @@ pub(super) fn resolve_jump(store: &Rc<RefCell<ConfigStore>>, session: &Session) 
     store.borrow().get(&session.jump_session_id).cloned()
 }
 
+pub(super) fn should_start_sftp(session: &Session) -> bool {
+    // Compatibility mode must keep the connection to a single, plain PTY.
+    // Bastions such as JumpServer/Koko can terminate an active proxied shell
+    // when the client immediately opens a second SSH connection for SFTP.
+    session.kind == SessionKind::Ssh && !session.disable_shell_integration
+}
+
 /// Spawn the shell (+ SFTP) workers and their event-pump threads for an
 /// already-registered tab. Used by the initial connect and by in-place
 /// reconnect (#79); the tab/terminal/parser must already exist.
 pub(super) fn start_session_in_tab(tab_id: &str, session: Session, ctx: &ConnectCtx) {
-    let has_sftp = session.kind == SessionKind::Ssh;
+    let has_sftp = should_start_sftp(&session);
     let (initial_cols, initial_rows) = *lock_or_recover(&ctx.last_term_size);
     // Resolve the optional SSH jump host now (on the UI thread, where the store
     // lives) so the owned Session can be handed to the worker threads (#211).
@@ -479,5 +486,28 @@ pub(super) fn start_session_in_tab(tab_id: &str, session: Session, ctx: &Connect
                 });
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_start_sftp;
+    use crate::config::{Session, SessionKind};
+
+    #[test]
+    fn compatibility_mode_keeps_ssh_to_one_connection() {
+        let mut session = Session::new_empty();
+        session.kind = SessionKind::Ssh;
+        assert!(should_start_sftp(&session));
+
+        session.disable_shell_integration = true;
+        assert!(!should_start_sftp(&session));
+    }
+
+    #[test]
+    fn non_ssh_sessions_never_start_sftp() {
+        let mut session = Session::new_empty();
+        session.kind = SessionKind::Telnet;
+        assert!(!should_start_sftp(&session));
     }
 }

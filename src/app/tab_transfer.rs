@@ -208,6 +208,14 @@ pub(super) fn handle_global_tab_drag_move(
     true
 }
 
+/// A drag that ended without a drop (the pointer grab was cancelled, or the
+/// tab landed back where it started): forget the hover target and take every
+/// window's merge highlight down (#408).
+pub(super) fn handle_global_tab_drag_cancel(core: &Rc<AppCore>) {
+    LAST_TARGET.with(|t| t.set(None));
+    clear_all_highlights(core);
+}
+
 /// Drop handling. Returns true when the drop was consumed here (caller skips
 /// the in-window split logic).
 pub(super) fn handle_global_tab_drag_drop(

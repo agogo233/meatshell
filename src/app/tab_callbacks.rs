@@ -82,8 +82,10 @@ pub(super) fn wire_tab_callbacks(
         });
     }
 
-    // Drag-to-reorder within a pane's strip: move the tab at `from` one slot in
-    // `dir`. Only the pane's own tab order changes; content shows by active id.
+    // Drag-to-reorder within a pane's strip (#408). The strip animates the drag on
+    // its own and commits exactly once, here, on drop: the tab at `from` is
+    // re-inserted at `to` (an index into the strip with `from` removed). Only the
+    // pane's own tab order changes; content still shows by active id.
     {
         let weak = window.as_weak();
         let layout = layout.clone();
@@ -91,27 +93,14 @@ pub(super) fn wire_tab_callbacks(
         let tabs_model = tabs_model.clone();
         let panes_model = panes_model.clone();
         let splitters_model = splitters_model.clone();
-        window.on_pane_tab_reorder(move |pane_id: i32, from: i32, dir: i32| {
-            {
-                let mut lay = layout.borrow_mut();
-                if let Some(l) = lay.leaf_mut(pane_id as u64) {
-                    let n = l.tabs.len() as i32;
-                    if n <= 1 {
-                        return;
-                    }
-                    let from = from.clamp(0, n - 1);
-                    let to = (from + dir).clamp(0, n - 1);
-                    if from == to {
-                        return;
-                    }
-                    let item = l.tabs.remove(from as usize);
-                    l.tabs.insert(to as usize, item);
-                }
+        window.on_pane_tab_move(move |pane_id: i32, from: i32, to: i32| {
+            if from < 0 || to < 0 || from == to {
+                return;
             }
+            layout
+                .borrow_mut()
+                .move_tab_within(pane_id as u64, from as usize, to as usize);
             if let Some(w) = weak.upgrade() {
-                // Reordering refreshes the tab model and replaces the original
-                // drag source before it can receive pointer-up. Clear the
-                // insertion caret on this same-pane path before refreshing.
                 w.set_drag_active(false);
                 refresh_panes(
                     &w,
@@ -391,6 +380,25 @@ pub(super) fn wire_tab_callbacks(
         });
     }
 
+    // Where a tab dragged in from elsewhere would land in a pane's strip, as
+    // reported by that strip while the cursor is over it (#408). `-1` means the
+    // cursor left; the drop handler below reads whatever was reported last.
+    let drop_index: Rc<std::cell::Cell<(i32, i32)>> = Rc::new(std::cell::Cell::new((-1, -1)));
+    {
+        let drop_index = drop_index.clone();
+        window.on_pane_tab_drop_index(move |pane_id: i32, index: i32| {
+            if index < 0 {
+                // Only the strip that currently owns the offer may withdraw it:
+                // strips report in an arbitrary order as the cursor crosses them.
+                if drop_index.get().0 == pane_id {
+                    drop_index.set((-1, -1));
+                }
+            } else {
+                drop_index.set((pane_id, index));
+            }
+        });
+    }
+
     // Drag-to-split: while a tab is dragged over the pane area, highlight the
     // drop zone the cursor is in (an edge band → split, the middle → move).
     {
@@ -398,25 +406,48 @@ pub(super) fn wire_tab_callbacks(
         let layout = layout.clone();
         let content_size = content_size.clone();
         let core = core.clone();
-        window.on_tab_drag_move(move |tab_id: SharedString, x: f32, y: f32| {
-            let tab_id = tab_id.to_string();
-            // Cross-window detach/merge owns the feedback once the cursor
-            // leaves the window (the torn-off window follows the pointer,
-            // the window under the cursor lights up) (#tab-detach).
-            if handle_global_tab_drag_move(&core, window_id, &tab_id, x, y) {
-                return;
-            }
-            if let Some(w) = weak.upgrade() {
-                match drag_target(&layout.borrow(), content_size.get(), x, y) {
-                    Some((_, _, (hx, hy, hw, hh))) => {
-                        w.set_drag_active(true);
-                        w.set_drag_hl_x(hx);
-                        w.set_drag_hl_y(hy);
-                        w.set_drag_hl_w(hw);
-                        w.set_drag_hl_h(hh);
-                    }
-                    None => w.set_drag_active(false),
+        window.on_tab_drag_move(
+            move |tab_id: SharedString, x: f32, y: f32, over_own_strip: bool| {
+                let tab_id = tab_id.to_string();
+                // Cross-window detach/merge owns the feedback once the cursor
+                // leaves the window (the torn-off window follows the pointer,
+                // the window under the cursor lights up) (#tab-detach).
+                if handle_global_tab_drag_move(&core, window_id, &tab_id, x, y) {
+                    return;
                 }
+                if let Some(w) = weak.upgrade() {
+                    // The source strip is already showing an insertion gap of its
+                    // own; a pane drop-zone on top of it would just be noise.
+                    if over_own_strip {
+                        w.set_drag_active(false);
+                        return;
+                    }
+                    match drag_target(&layout.borrow(), content_size.get(), x, y) {
+                        Some((_, _, (hx, hy, hw, hh))) => {
+                            w.set_drag_active(true);
+                            w.set_drag_hl_x(hx);
+                            w.set_drag_hl_y(hy);
+                            w.set_drag_hl_w(hw);
+                            w.set_drag_hl_h(hh);
+                        }
+                        None => w.set_drag_active(false),
+                    }
+                }
+            },
+        );
+    }
+
+    // The gesture ended without a drop (the pointer grab was cancelled, or an
+    // in-strip drag landed back on its own slot): drop every highlight it raised.
+    {
+        let weak = window.as_weak();
+        let core = core.clone();
+        let drop_index = drop_index.clone();
+        window.on_tab_drag_cancel(move || {
+            drop_index.set((-1, -1));
+            handle_global_tab_drag_cancel(&core);
+            if let Some(w) = weak.upgrade() {
+                w.set_drag_active(false);
             }
         });
     }
@@ -433,6 +464,7 @@ pub(super) fn wire_tab_callbacks(
         let splitters_model = splitters_model.clone();
         window.on_tab_drag_drop(move |tab_id: SharedString, x: f32, y: f32| {
             let tab_id = tab_id.to_string();
+            let dropped_at = drop_index.replace((-1, -1));
             // A cross-window drag (torn-off window following the cursor) is
             // settled here: merged into the window under the pointer, or
             // kept where it is (#tab-detach).
@@ -458,7 +490,13 @@ pub(super) fn wire_tab_callbacks(
                     }
                     "tabstrip" => {
                         if src != Some(pane) {
-                            lay.move_tab(&tab_id, pane);
+                            // Land it where the strip said it would, not at the end.
+                            match dropped_at {
+                                (p, at) if p == pane as i32 && at >= 0 => {
+                                    lay.move_tab_at(&tab_id, pane, at as usize)
+                                }
+                                _ => lay.move_tab(&tab_id, pane),
+                            }
                         }
                     }
                     _ => {

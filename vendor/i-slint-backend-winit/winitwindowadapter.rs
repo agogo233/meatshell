@@ -1581,7 +1581,14 @@ impl WindowAdapterInternal for WinitWindowAdapter {
     #[cfg(enable_accesskit)]
     fn handle_focus_change(&self, _old: Option<ItemRc>, _new: Option<ItemRc>) {
         let Some(accesskit_adapter_cell) = self.accesskit_adapter() else { return };
-        accesskit_adapter_cell.borrow_mut().handle_focus_item_change();
+        // Focus can change re-entrantly during item-tree construction (e.g. the
+        // rename dialog focusing its LineEdit from `init`), which would leave the
+        // adapter's RefCell already mutably borrowed. Skip the redundant focus
+        // notify in that case — the pending tree update reconciles it — instead
+        // of panicking (`RefCell already borrowed`).
+        if let Ok(mut a) = accesskit_adapter_cell.try_borrow_mut() {
+            a.handle_focus_item_change();
+        }
     }
 
     #[cfg(enable_accesskit)]
