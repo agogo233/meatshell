@@ -1036,6 +1036,27 @@ fn start_runtime_forward(
     forward: PortForward,
     events: &UnboundedSender<SessionEvent>,
 ) -> RuntimeForward {
+    // Saved configs written before the loopback rule may still bind 0.0.0.0 or a
+    // LAN address. Keep the tunnel up so an upgrade doesn't break a working
+    // setup, but surface the exposure instead of binding silently.
+    if forward.kind.as_str() != "remote" && !crate::tunnel::is_loopback_bind(&forward.bind_addr) {
+        crate::tunnel::notice(
+            events,
+            format!(
+                "{} {}{}",
+                t(
+                    "警告：转发正在监听非回环地址，局域网内其他设备也可访问；建议在会话设置里改成 127.0.0.1",
+                    "warning: this forward listens on a non-loopback address and is reachable from the whole LAN; set it to 127.0.0.1 in the session settings"
+                ),
+                if forward.name.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!("[{}] ", forward.name)
+                },
+                format!("{}:{}", forward.bind_addr.trim(), forward.bind_port)
+            ),
+        );
+    }
     let info = tunnel_info(id, &forward, true, t("运行中", "running"));
     let task = match forward.kind.as_str() {
         "local" => Some(crate::tunnel::spawn_local(
@@ -1863,11 +1884,25 @@ async fn run_session(
                     }
                     Some(SessionCommand::AddTunnel { id, forward }) => {
                         if forward.kind == "local" || forward.kind == "dynamic" {
-                            runtime_forwards.insert(
-                                id.clone(),
-                                start_runtime_forward(handle.clone(), id, forward, &events),
-                            );
-                            emit_tunnel_update(&runtime_forwards, &events);
+                            if !crate::tunnel::is_loopback_bind(&forward.bind_addr) {
+                                // Saved configs keep working (see
+                                // `start_runtime_forward`); a fresh request
+                                // gets a visible refusal instead of vanishing.
+                                crate::tunnel::notice(
+                                    &events,
+                                    t(
+                                        "本地/动态转发的监听地址仅允许回环地址（127.0.0.1 / localhost / ::1），本次未添加",
+                                        "a local or dynamic forward may only bind a loopback address (127.0.0.1 / localhost / ::1); this one was not added"
+                                    )
+                                    .to_string(),
+                                );
+                            } else {
+                                runtime_forwards.insert(
+                                    id.clone(),
+                                    start_runtime_forward(handle.clone(), id, forward, &events),
+                                );
+                                emit_tunnel_update(&runtime_forwards, &events);
+                            }
                         } else {
                             let _ = events.send(SessionEvent::Output(format!(
                                 "\r\n[meatshell] {}\r\n",

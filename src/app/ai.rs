@@ -39,6 +39,9 @@ const AI_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Wall-clock read timeout per chunk: long generations keep producing data so
 /// the timer only fires when the stream stalls.
 const AI_STREAM_READ_TIMEOUT: Duration = Duration::from_secs(120);
+/// Hard wall-clock cap for one generation. The read timeout above only bounds
+/// a stall; a server that drips one byte at a time would never trip it.
+const AI_STREAM_TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
 const AI_MODELS_READ_TIMEOUT: Duration = Duration::from_secs(15);
 
 const SYSTEM_PROMPT_ZH: &str = "你是一个 SSH 终端客户端里的 AI 助手。用户可能粘贴终端输出或命令行内容。请用简洁的 Markdown 回答：先给结论，再给解释；涉及命令时给出可直接复制的命令。";
@@ -285,10 +288,15 @@ fn stream_chat(
     let mut pending = String::new();
     let mut total: usize = 0;
     let mut last_flush = Instant::now();
+    let started = Instant::now();
     let mut stream_err: Option<String> = None;
 
     for line in reader.lines() {
         if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        if started.elapsed() > AI_STREAM_TOTAL_TIMEOUT {
+            stream_err = Some(t("生成超时，已中止", "generation timed out; stopped").to_string());
             break;
         }
         let Ok(line) = line else {

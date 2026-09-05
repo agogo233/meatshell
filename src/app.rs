@@ -1363,22 +1363,48 @@ fn open_window(
                 w.set_webdav_status(t("请先启用 WebDAV 同步", "enable WebDAV sync first").into());
                 return;
             }
-            let res = store.borrow().export_json().and_then(|(json, count)| {
+            // Sessions travel in the passphrase-encrypted bundle, not in the
+            // fixed-key JSON export: that file exposed every saved password to
+            // anyone who could read the WebDAV share.
+            let pass = w.get_portable_passphrase().to_string();
+            if pass.is_empty() {
+                w.set_webdav_status(
+                    t("请先填写便携包口令", "enter a bundle passphrase first").into(),
+                );
+                return;
+            }
+            let bundle_path = bundle_remote_path(&remote_path);
+            let res = store.borrow().export_bundle(&pass).and_then(|pack| {
+                let envelope = format!("{{\"meatshell_bundle\":1,\"data\":\"{pack}\"}}");
                 webdav_put_json(
+                    &url,
+                    &bundle_path,
+                    &username,
+                    &password,
+                    accept_invalid_certs,
+                    envelope,
+                )
+            });
+            // Retire the legacy plaintext copy once the bundle is in place.
+            // Best effort: servers that forbid DELETE must not fail the upload.
+            let legacy_url = resolved_url(&url, &remote_path);
+            let bundle_url = resolved_url(&url, &bundle_path);
+            if res.is_ok() && legacy_url != bundle_url {
+                if let Err(e) = webdav_delete(
                     &url,
                     &remote_path,
                     &username,
                     &password,
                     accept_invalid_certs,
-                    json,
-                )
-                .map(|_| count)
-            });
+                ) {
+                    tracing::warn!("legacy WebDAV connections file left behind: {e}");
+                }
+            }
             let msg = match res {
-                Ok(n) => format!(
+                Ok(()) => format!(
                     "{} {}{}",
-                    t("已上传连接", "uploaded connections"),
-                    n,
+                    t("已上传加密同步包", "uploaded the encrypted sync bundle"),
+                    store.borrow().sessions().len(),
                     webdav_status_suffix(accept_invalid_certs)
                 ),
                 Err(e) => format!("{}: {}", t("上传失败", "upload failed"), e),
@@ -1923,14 +1949,52 @@ fn open_window(
                 w.set_webdav_status(t("请先启用 WebDAV 同步", "enable WebDAV sync first").into());
                 return;
             }
-            let res = webdav_get_json(
-                &url,
-                &remote_path,
-                &username,
-                &password,
-                accept_invalid_certs,
-            )
-            .and_then(|json| store.borrow_mut().import_json(&json));
+            // Encrypted bundle first; a server holding only the pre-encryption
+            // file falls back to the legacy JSON export. A bundle that fails to
+            // open never falls back, so a wrong passphrase can't double-import.
+            let pass = w.get_portable_passphrase().to_string();
+            let bundle_path = bundle_remote_path(&remote_path);
+            let bundle_fetch: Result<Option<Option<String>>> = if pass.is_empty() {
+                Ok(None)
+            } else {
+                webdav_get_optional(
+                    &url,
+                    &bundle_path,
+                    &username,
+                    &password,
+                    accept_invalid_certs,
+                )
+            };
+            let res: Result<(usize, usize), anyhow::Error> = match bundle_fetch {
+                Ok(Some(body)) => extract_bundle_data(&body).and_then(|pack| {
+                    store.borrow_mut().import_bundle(&pass, &pack).map(|n| (n, 0))
+                }),
+                Ok(None) => webdav_get_json(
+                    &url,
+                    &remote_path,
+                    &username,
+                    &password,
+                    accept_invalid_certs,
+                )
+                .and_then(|json| store.borrow_mut().import_json(&json))
+                .map_err(|e| {
+                    // Without a passphrase the bundle was never tried, so a
+                    // missing legacy file most likely means the server only
+                    // holds the encrypted bundle.
+                    if pass.is_empty() {
+                        anyhow::anyhow!(
+                            "{} ({e})",
+                            t(
+                                "远端可能只保存了加密同步包，请先填写便携包口令",
+                                "the server may only hold an encrypted bundle; enter a bundle passphrase first"
+                            )
+                        )
+                    } else {
+                        e
+                    }
+                }),
+                Err(err) => Err(err),
+            };
             let msg = match res {
                 Ok((added, skipped)) => {
                     sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
@@ -5717,11 +5781,9 @@ fn wire_key_input(
                 if kind != "local" && kind != "dynamic" {
                     return;
                 }
-                // Client-side listeners stay loopback-only; a wider bind would
-                // expose the tunnel to the whole LAN (#port-forward-bind).
-                if !is_loopback_bind(&bind) {
-                    return;
-                }
+                // The loopback bind check runs in the session worker, so a
+                // rejected tunnel reports itself in the terminal instead of
+                // vanishing silently (#port-forward-bind).
                 let Ok(bind_port) = bind_port.trim().parse::<u16>() else {
                     return;
                 };

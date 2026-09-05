@@ -1,4 +1,5 @@
-use super::{blank_forward_draft, is_loopback_bind, validated_port_forwards};
+use super::{blank_forward_draft, validated_port_forwards};
+use crate::tunnel::is_loopback_bind;
 
 #[test]
 fn blank_rows_are_ignored_when_saving() {

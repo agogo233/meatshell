@@ -262,6 +262,13 @@ pub(super) fn webdav_status_suffix(accept_invalid_certs: bool) -> String {
     }
 }
 
+/// The URL a remote path resolves to, or `None` when it is invalid. Callers
+/// compare resolved URLs rather than paths, since a base URL that already
+/// ends in the file name ignores the remote path entirely.
+pub(super) fn resolved_url(base_url: &str, remote_path: &str) -> Option<String> {
+    webdav_url(base_url, remote_path).ok()
+}
+
 pub(super) fn webdav_put_json(
     base_url: &str,
     remote_path: &str,
@@ -298,6 +305,56 @@ pub(super) fn webdav_get_json(
         .map_err(webdav_error)?
         .into_string()
         .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// Fetch a remote file; `Ok(None)` when the server says there is nothing there
+/// (404/409/410). Callers use the difference to tell "bundle not uploaded yet"
+/// apart from a failed decryption, so a wrong passphrase never silently
+/// falls back to the legacy plaintext file.
+pub(super) fn webdav_get_optional(
+    base_url: &str,
+    remote_path: &str,
+    username: &str,
+    password: &str,
+    accept_invalid_certs: bool,
+) -> Result<Option<String>> {
+    require_tls_for_skipped_verification(accept_invalid_certs, base_url)?;
+    let url = webdav_url(base_url, remote_path)?;
+    let agent = webdav_agent(accept_invalid_certs);
+    let auth = webdav_auth_header(username, password);
+    let req = webdav_auth_req(agent.get(&url), auth.as_deref());
+    match req.call() {
+        Ok(response) => response
+            .into_string()
+            .map(Some)
+            .map_err(|e| anyhow::anyhow!("{e}")),
+        Err(ureq::Error::Status(status, _)) if status == 404 || status == 409 || status == 410 => {
+            Ok(None)
+        }
+        Err(e) => Err(webdav_error(e)),
+    }
+}
+
+/// Delete a remote file: `404`/`409` mean it is already gone, which counts as
+/// success. Used for best-effort cleanup of the pre-encryption connections
+/// file, so a server that forbids `DELETE` cannot fail the upload.
+pub(super) fn webdav_delete(
+    base_url: &str,
+    remote_path: &str,
+    username: &str,
+    password: &str,
+    accept_invalid_certs: bool,
+) -> Result<()> {
+    require_tls_for_skipped_verification(accept_invalid_certs, base_url)?;
+    let url = webdav_url(base_url, remote_path)?;
+    let agent = webdav_agent(accept_invalid_certs);
+    let auth = webdav_auth_header(username, password);
+    let req = webdav_auth_req(agent.delete(&url), auth.as_deref());
+    match req.call() {
+        Ok(_) => Ok(()),
+        Err(ureq::Error::Status(status, _)) if status == 404 || status == 409 => Ok(()),
+        Err(e) => Err(webdav_error(e)),
+    }
 }
 
 #[cfg(test)]
