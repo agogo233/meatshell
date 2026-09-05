@@ -159,7 +159,7 @@ pub struct ConfigFile {
     /// history navigation. Persisted so the toggle sticks across sessions.
     #[serde(default)]
     pub search_history_mode: bool,
-    /// Cap for full-history search results (0 = unlimited, default 5000).
+    /// Cap for full-history search results (0 = the default of 5000).
     #[serde(default = "default_search_history_limit")]
     pub search_history_limit: u32,
     // ── Large-output backpressure ─────────────────────────────────────────
@@ -181,7 +181,8 @@ pub struct ConfigFile {
     /// Preserve the remote file's mtime after upload/download.
     #[serde(default)]
     pub sftp_queue_preserve_mtime: bool,
-    /// Saved SFTP panel path bookmarks (most-recent on top).
+    /// Saved SFTP panel path bookmarks, most-recent last (`add_sftp_bookmark`
+    /// moves a re-added path to the end).
     #[serde(default)]
     pub sftp_bookmarks: Vec<String>,
     // ── Command-history filters (fuzzy suggestions) ───────────────────────

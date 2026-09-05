@@ -110,7 +110,11 @@ pub(super) fn start_session_in_tab(tab_id: &str, session: Session, ctx: &Connect
         let sftp_route = route.clone();
         let sftp_tab_id = tab_id.to_string();
         // Snapshot the transfer-queue settings now (UI thread) so the worker
-        // task doesn't need to reach back into the config store.
+        // task doesn't need to reach back into the config store. Concurrency,
+        // rate limit and mtime therefore apply from the next connection, not
+        // to live transfers; the dedup policy is read live by the UI at click
+        // time, and this snapshot only drives the worker's last-moment
+        // re-check when a target appears after the click.
         let queue_cfg = {
             let cfg = ctx.store.borrow();
             let dedup = match cfg.sftp_queue_dedup() {

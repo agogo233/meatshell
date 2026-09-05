@@ -161,7 +161,17 @@ fn build_proxy(g1: &[&str]) -> String {
     if host.is_empty() {
         return String::new();
     }
-    let port = g1.get(21).copied().unwrap_or("1080").trim();
+    // A non-numeric port would build a malformed proxy URL; fall back to the
+    // format's documented default instead.
+    let port = g1
+        .get(21)
+        .copied()
+        .unwrap_or("")
+        .trim()
+        .parse::<u16>()
+        .ok()
+        .filter(|port| *port > 0)
+        .unwrap_or(1080);
     let login = restore_escapes(g1.get(22).copied().unwrap_or("")).trim().to_string();
     let cred = if login.is_empty() {
         String::new()

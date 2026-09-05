@@ -2320,6 +2320,30 @@ fn open_window(
         window_timers.borrow_mut().push(timer);
     }
 
+    // Saved secrets that survived a key regeneration: tell the user once,
+    // rather than letting them wonder why every session now asks for a
+    // password again.
+    {
+        let lost = store.borrow_mut().take_lost_secrets();
+        if lost > 0 {
+            slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+                let msg = format!(
+                    "{} {}",
+                    t(
+                        "本机加密密钥已重建，已清空无法解密的已保存密码/密钥数量：",
+                        "The local encryption key was rebuilt; undecryptable saved secrets cleared:"
+                    ),
+                    lost
+                );
+                let _ = rfd::MessageDialog::new()
+                    .set_title(t("部分已保存凭据失效", "some saved credentials lost"))
+                    .set_description(msg)
+                    .set_level(rfd::MessageLevel::Warning)
+                    .show();
+            });
+        }
+    }
+
     // Expose this window's state to the rest of the process so tabs can be
     // dragged out into a new window or merged into another one (#tab-detach).
     core.window_states.borrow_mut().insert(
@@ -7720,7 +7744,8 @@ fn parent_path(path: &str) -> String {
 /// Derive the WebDAV path for the encrypted bundle from the configured
 /// connections path: swap the extension for `.mpack` so the two never collide.
 fn bundle_remote_path(connections_path: &str) -> String {
-    let p = connections_path.trim();
+    // A trailing slash would produce a hidden `.mpack` file in the folder.
+    let p = connections_path.trim().trim_end_matches('/');
     if p.is_empty() {
         return "meatshell.mpack".to_string();
     }
@@ -7731,18 +7756,19 @@ fn bundle_remote_path(connections_path: &str) -> String {
 }
 
 /// Pull the base64url bundle out of the `{"meatshell_bundle":1,"data":"..."}`
-/// envelope written by the upload path.
+/// envelope written by the upload path. Parsed as JSON (not string-searched)
+/// so an unexpected server body can't be mis-read as a bundle.
 fn extract_bundle_data(body: &str) -> Result<String, anyhow::Error> {
-    let marker = "\"data\":\"";
-    let start = body
-        .find(marker)
-        .map(|i| i + marker.len())
-        .ok_or_else(|| anyhow::anyhow!("not a bundle envelope"))?;
-    let end = body[start..]
-        .find('"')
-        .map(|i| start + i)
-        .ok_or_else(|| anyhow::anyhow!("malformed bundle envelope"))?;
-    Ok(body[start..end].to_string())
+    let value: serde_json::Value =
+        serde_json::from_str(body).map_err(|_| anyhow::anyhow!("not a bundle envelope"))?;
+    if value.get("meatshell_bundle").and_then(|v| v.as_i64()) != Some(1) {
+        return Err(anyhow::anyhow!("not a meatshell bundle envelope"));
+    }
+    value
+        .get("data")
+        .and_then(|v| v.as_str())
+        .map(|data| data.to_string())
+        .ok_or_else(|| anyhow::anyhow!("malformed bundle envelope"))
 }
 
 #[cfg(test)]

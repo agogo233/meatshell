@@ -425,6 +425,41 @@ impl ConfigStore {
         String::from_utf8(plain).ok()
     }
 
+    /// Open one stored secret in place at load. Values without our prefix
+    /// (legacy plaintext, empty) are left alone; an `enc:v1:` blob that cannot
+    /// be opened — the key was regenerated after a lost/corrupt `secret.key` —
+    /// is cleared and counted, because kept verbatim it would be saved back
+    /// and later used as a literal password.
+    fn open_secret(key: &[u8; 32], value: &mut Secret, lost: &mut usize) {
+        if !value.as_str().starts_with(Self::ENC_PREFIX) {
+            return;
+        }
+        match Self::try_decrypt(key, value.as_str()) {
+            Some(plain) => *value = Secret::new(plain),
+            None => {
+                *value = Secret::new(String::new());
+                *lost += 1;
+            }
+        }
+    }
+
+    /// Take the number of secrets that could not be decrypted at load, so the
+    /// UI warns exactly once per process run.
+    pub fn take_lost_secrets(&mut self) -> usize {
+        std::mem::take(&mut self.lost_secrets)
+    }
+
+    /// Clear a value that still carries one of our encryption prefixes after
+    /// every decryption attempt failed (imported from a machine with a
+    /// different key). Used as a literal password, such a blob only ever fails
+    /// confusingly at connect time.
+    fn strip_undecryptable(value: &mut Secret) {
+        let s = value.as_str();
+        if s.starts_with(Self::ENC_PREFIX) || s.starts_with(Self::EXPORT_PREFIX) {
+            *value = Secret::new(String::new());
+        }
+    }
+
     // ── Key file management ───────────────────────────────────────────────
 
     fn unix_secs() -> u64 {
@@ -478,13 +513,30 @@ impl ConfigStore {
 
         let mut key = [0u8; 32];
         OsRng.fill_bytes(&mut key);
-        fs::write(&key_path, &key)
-            .with_context(|| format!("failed to write {}", key_path.display()))?;
+        // Create with the final permissions up front: writing first and
+        // chmod-ing after leaves a window where the key is world-readable.
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
+            use std::io::Write as _;
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&key_path)
+                .with_context(|| format!("failed to create {}", key_path.display()))?;
+            file.write_all(&key)
+                .with_context(|| format!("failed to write {}", key_path.display()))?;
+            // `.mode()` only applies on creation; force the bits in case the
+            // file already existed with looser permissions.
             fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600))
                 .with_context(|| format!("failed to set permissions on {}", key_path.display()))?;
+        }
+        #[cfg(not(unix))]
+        {
+            fs::write(&key_path, &key)
+                .with_context(|| format!("failed to write {}", key_path.display()))?;
         }
         tracing::info!("generated new encryption key at {}", key_path.display());
         Ok(key)
@@ -513,6 +565,10 @@ impl ConfigStore {
         let key = Self::load_or_create_key(&config_dir)?;
 
         let mut migrated = false;
+        // Secrets that carried our encryption prefix but could not be opened
+        // with the current key (a regenerated `secret.key`); surfaced once to
+        // the user instead of silently becoming literal passwords.
+        let mut lost_secrets = 0usize;
         let cache = if path.exists() {
             let raw = fs::read_to_string(&path)
                 .with_context(|| format!("failed to read {}", path.display()))?;
@@ -521,30 +577,15 @@ impl ConfigStore {
                     // Decrypt any encrypted passwords; leave legacy plaintext
                     // values untouched (they will be encrypted on next save).
                     for session in &mut cfg.sessions {
-                        if let Some(plain) = Self::try_decrypt(&key, session.password.as_str()) {
-                            session.password = Secret::new(plain);
-                        }
-                        if let Some(plain) =
-                            Self::try_decrypt(&key, session.private_key_inline.as_str())
-                        {
-                            session.private_key_inline = Secret::new(plain);
-                        }
-                        if let Some(plain) = Self::try_decrypt(&key, session.proxy.as_str()) {
-                            session.proxy = Secret::new(plain);
-                        }
+                        Self::open_secret(&key, &mut session.password, &mut lost_secrets);
+                        Self::open_secret(&key, &mut session.private_key_inline, &mut lost_secrets);
+                        Self::open_secret(&key, &mut session.proxy, &mut lost_secrets);
                         for trigger in &mut session.triggers {
-                            if let Some(plain) = Self::try_decrypt(&key, trigger.response.as_str())
-                            {
-                                trigger.response = Secret::new(plain);
-                            }
+                            Self::open_secret(&key, &mut trigger.response, &mut lost_secrets);
                         }
                     }
-                    if let Some(plain) = Self::try_decrypt(&key, cfg.webdav_password.as_str()) {
-                        cfg.webdav_password = Secret::new(plain);
-                    }
-                    if let Some(plain) = Self::try_decrypt(&key, cfg.ai_api_key.as_str()) {
-                        cfg.ai_api_key = Secret::new(plain);
-                    }
+                    Self::open_secret(&key, &mut cfg.webdav_password, &mut lost_secrets);
+                    Self::open_secret(&key, &mut cfg.ai_api_key, &mut lost_secrets);
                     // Clean up any duplicate history accumulated before #113,
                     // keeping the last (most recent) occurrence of each command.
                     dedup_keep_last(&mut cfg.command_history);
@@ -576,6 +617,7 @@ impl ConfigStore {
             backup_dir,
             cache,
             key,
+            lost_secrets,
         };
         // Persist the migration so it runs exactly once (and so a later opt-out —
         // e.g. turning the welcome sidebar back off — isn't reverted next launch).
@@ -991,30 +1033,36 @@ impl ConfigStore {
     ///   - `imported` — rules added to the list (respects the 128 cap),
     ///   - `updated`  — rules merged into an existing rule (same id, falling
     ///     back to a content-signature match for legacy un-ided rules),
-    ///   - `skipped`  — blank / invalid rules rejected by validation.
-    /// Rejecting a bad rule never aborts the whole batch; each entry is
-    /// validated independently and skipped on error.
+    ///   - `skipped`  — entries rejected by validation or by a malformed
+    ///     shape (a bad entry never aborts the batch).
     pub fn import_output_highlight_rules(&mut self, json: &str) -> Result<(usize, usize, usize)> {
+        // Parse entry by entry: one typo'd field in a hand-edited file should
+        // drop that rule, not the whole import.
+        fn parse_rules(entries: Vec<serde_json::Value>) -> (Vec<OutputHighlightRule>, usize) {
+            let mut rules = Vec::new();
+            let mut malformed = 0usize;
+            for entry in entries {
+                match serde_json::from_value(entry) {
+                    Ok(rule) => rules.push(rule),
+                    Err(e) => {
+                        tracing::warn!("highlight import: skipping malformed rule: {e}");
+                        malformed += 1;
+                    }
+                }
+            }
+            (rules, malformed)
+        }
+
         let parsed: serde_json::Value =
             serde_json::from_str(json).context("highlight import is not valid JSON")?;
-        let rules: Vec<OutputHighlightRule> = match parsed {
-            serde_json::Value::Array(entries) => entries
-                .into_iter()
-                .map(serde_json::from_value)
-                .collect::<Result<Vec<_>, _>>()
-                .context("highlight import array contains an invalid rule")?,
+        let (rules, malformed) = match parsed {
+            serde_json::Value::Array(entries) => parse_rules(entries),
             serde_json::Value::Object(map) => {
                 let entries = map
                     .get("output_highlight_rules")
-                    .context("highlight import object is missing output_highlight_rules")?;
-                let entries = entries
-                    .as_array()
-                    .context("output_highlight_rules must be an array")?;
-                entries
-                    .iter()
-                    .map(|v| serde_json::from_value(v.clone()))
-                    .collect::<Result<Vec<_>, _>>()
-                    .context("output_highlight_rules contains an invalid rule")?
+                    .and_then(|value| value.as_array())
+                    .context("highlight import object is missing an output_highlight_rules array")?;
+                parse_rules(entries.clone())
             }
             _ => anyhow::bail!("highlight import must be a JSON array or object"),
         };
@@ -1022,7 +1070,7 @@ impl ConfigStore {
         const MAX_RULES: usize = 128;
         let mut imported = 0usize;
         let mut updated = 0usize;
-        let mut skipped = 0usize;
+        let mut skipped = malformed;
 
         for mut rule in rules {
             // Validate before touching state: blank patterns and broken
@@ -1500,10 +1548,13 @@ impl ConfigStore {
     /// once, and re-appends at the end so the most-recently used command is
     /// always last. Capped so it can't grow without bound (#113).
     pub fn push_command_history(&mut self, cmd: String) {
-        if cmd.trim().is_empty() {
+        // Filter and store the same trimmed text: `"ls "` and `"ls"` must not
+        // become two separate history entries.
+        let cmd = cmd.trim().to_string();
+        if cmd.is_empty() {
             return;
         }
-        if !self.command_history_accepts(cmd.trim()) {
+        if !self.command_history_accepts(&cmd) {
             return;
         }
         // Drop any earlier occurrence, then push → no duplicates and "last used"
@@ -2234,6 +2285,16 @@ impl ConfigStore {
                         trigger.response = Secret::new(plain);
                     }
                 }
+                // Anything still carrying one of our prefixes was sealed with a
+                // key this machine does not have (a foreign export); kept
+                // verbatim it would be saved back and used as a literal
+                // password.
+                Self::strip_undecryptable(&mut s.password);
+                Self::strip_undecryptable(&mut s.private_key_inline);
+                Self::strip_undecryptable(&mut s.proxy);
+                for trigger in &mut s.triggers {
+                    Self::strip_undecryptable(&mut trigger.response);
+                }
             }
             let dup = self.cache.sessions.iter().any(|x| {
                 x.host == s.host && x.user == s.user && x.port == s.port && x.kind == s.kind
@@ -2430,6 +2491,12 @@ impl ConfigStore {
                 skipped += 1;
                 continue;
             }
+            // Same ceiling as the highlight-rule import: a huge file must not
+            // bloat the config (and the menu) without bound.
+            if self.cache.quick_commands.len() >= 128 {
+                skipped += 1;
+                continue;
+            }
             self.cache.quick_commands.push(QuickCommand {
                 name,
                 command: c.command,
@@ -2472,6 +2539,7 @@ mod tests {
             backup_dir: None,
             cache: ConfigFile::default(),
             key: [7u8; 32],
+            lost_secrets: 0,
         }
     }
 
@@ -2846,6 +2914,7 @@ mod tests {
                 ..ConfigFile::default()
             },
             key: [7u8; 32],
+            lost_secrets: 0,
         };
         std::fs::write(primary.join("secret.key"), [7u8; 32]).unwrap();
         store.save().unwrap();
@@ -3436,8 +3505,12 @@ old-switch=#98#7%10.0.0.1%23%cisco%0%0#15%80%24#0# #-1\r\n";
         assert!(store
             .import_output_highlight_rules(r#"{"output_highlight_rules":"nope"}"#)
             .is_err());
-        assert!(store
-            .import_output_highlight_rules(r#"[{"pattern":123}]"#)
-            .is_err());
+        // A type-invalid entry is skipped, not fatal for the batch.
+        assert_eq!(
+            store
+                .import_output_highlight_rules(r#"[{"pattern":123}]"#)
+                .unwrap(),
+            (0, 0, 1)
+        );
     }
 }

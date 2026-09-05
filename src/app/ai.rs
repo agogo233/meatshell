@@ -17,7 +17,7 @@
 //! rest like the WebDAV password. Message content is never logged.
 
 use std::cell::RefCell;
-use std::io::BufRead;
+use std::io::{BufRead, Read};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -284,7 +284,11 @@ fn stream_chat(
         }
     };
 
-    let reader = std::io::BufReader::new(resp.into_reader());
+    // Bound the raw stream too, not just the decoded deltas: `lines()` would
+    // happily allocate an unbounded single line from a hostile endpoint. The
+    // 4x headroom covers SSE framing overhead around the 1 MiB reply cap.
+    let reader =
+        std::io::BufReader::new(resp.into_reader().take((AI_STREAM_CAP_BYTES * 4) as u64));
     let mut pending = String::new();
     let mut total: usize = 0;
     let mut last_flush = Instant::now();
@@ -451,6 +455,9 @@ pub(super) fn wire_ai_callbacks(
     bufs: &TermBuffers,
 ) {
     let cancel_flag = Arc::new(AtomicBool::new(false));
+    // Warn about a plain http:// endpoint (cleartext Bearer key) once per
+    // window, not on every message.
+    let http_warned = Rc::new(std::cell::Cell::new(false));
     // Bumped on every send: late finish/flush hops from a cancelled stream are
     // validated against this counter so they cannot corrupt a newer request.
     let generation = Arc::new(AtomicU64::new(0));
@@ -506,6 +513,7 @@ pub(super) fn wire_ai_callbacks(
         let store = store.clone();
         let cancel = cancel_flag.clone();
         let generation = generation.clone();
+        let http_warned = http_warned.clone();
         let weak = window.as_weak();
         window.on_send_ai_message(move |text: SharedString| {
             let Some(w) = weak.upgrade() else { return };
@@ -536,6 +544,20 @@ pub(super) fn wire_ai_callbacks(
                 // The draft is only cleared after the message is accepted, so
                 // a misconfigured send keeps the user's text.
                 return;
+            }
+            // A plain http:// endpoint carries the Bearer key in cleartext;
+            // WebDAV refuses this combination outright, so surface it here too
+            // (once per window — the setting is the user's to keep).
+            if base_url.starts_with("http://") && !api_key.is_empty() && !http_warned.get() {
+                http_warned.set(true);
+                push_ai_message(
+                    &w,
+                    "error",
+                    t(
+                        "AI 地址是明文 http://，API key 会随请求被窃听；建议改用 https://",
+                        "the AI endpoint is plain http:// — your API key travels in cleartext; switch to https://",
+                    ),
+                );
             }
             // Show the redacted text: what the user sees is what is sent.
             let user_text = redact_sensitive_text(text);
@@ -582,8 +604,14 @@ pub(super) fn wire_ai_callbacks(
     {
         let weak = window.as_weak();
         let cancel = cancel_flag.clone();
+        let generation = generation.clone();
         window.on_clear_ai_messages(move || {
             cancel.store(true, Ordering::Relaxed);
+            // Retire the generation too: the aborted stream's late finish hop
+            // is only suppressed while the generation still matches, so
+            // without this a straggling error bubble lands in the fresh
+            // conversation exactly as the comment above promises it won't.
+            generation.fetch_add(1, Ordering::Relaxed);
             let Some(w) = weak.upgrade() else { return };
             with_ai_model(&w, |vm| vm.set_vec(Vec::new()));
         });

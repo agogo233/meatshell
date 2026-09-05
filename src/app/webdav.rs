@@ -1,5 +1,23 @@
 use super::*;
 
+/// Percent-encode a remote path for safe URL embedding: keep `/` separators
+/// and the RFC-3986 unreserved set, encode everything else (spaces, `#`, `?`,
+/// `%`, non-ASCII). Without this a path like `my share/#1.json` silently
+/// becomes a fragment or a different URL.
+fn encode_webdav_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        match byte {
+            b'/' => out.push('/'),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 fn webdav_url(base: &str, remote_path: &str) -> Result<String> {
     let base = base.trim().trim_end_matches('/');
     if !base.starts_with("http://") && !base.starts_with("https://") {
@@ -48,7 +66,7 @@ fn webdav_url(base: &str, remote_path: &str) -> Result<String> {
     if remote.is_empty() {
         anyhow::bail!("{}", t("远端文件不能为空", "remote file cannot be empty"));
     }
-    Ok(format!("{base}/{remote}"))
+    Ok(format!("{base}/{}", encode_webdav_path(remote)))
 }
 
 fn webdav_url_uses_port(base: &str, port: u16) -> bool {
@@ -182,14 +200,27 @@ fn webdav_dir_missing_or_no_create_error() -> anyhow::Error {
     )
 }
 
+/// 401/403 is an auth problem, not a missing folder: saying "folder does not
+/// exist" sends users to check the path while the real fix is the credentials.
+fn webdav_auth_error() -> anyhow::Error {
+    anyhow::anyhow!(
+        "{}",
+        t(
+            "WebDAV 凭据被拒绝或无权限（401/403），请检查用户名/密码",
+            "WebDAV rejected the credentials or denied access (401/403); check the username and password"
+        )
+    )
+}
+
 fn webdav_dir_exists(agent: &ureq::Agent, url: &str, auth: Option<&str>) -> Result<bool> {
     let req = webdav_auth_req(agent.request("PROPFIND", url).set("Depth", "0"), auth);
     match req.call() {
         Ok(_) => Ok(true),
         Err(ureq::Error::Status(status, _)) if status == 404 || status == 409 => Ok(false),
-        Err(ureq::Error::Status(status, _)) if status == 401 || status == 403 || status == 405 => {
-            Err(webdav_dir_missing_or_no_create_error())
+        Err(ureq::Error::Status(status, _)) if status == 401 || status == 403 => {
+            Err(webdav_auth_error())
         }
+        Err(ureq::Error::Status(405, _)) => Err(webdav_dir_missing_or_no_create_error()),
         Err(e) => Err(webdav_error(e)),
     }
 }
@@ -199,9 +230,10 @@ fn webdav_create_dir(agent: &ureq::Agent, url: &str, auth: Option<&str>) -> Resu
     match req.call() {
         Ok(_) => Ok(()),
         Err(ureq::Error::Status(status, _)) if status == 405 => Ok(()),
-        Err(ureq::Error::Status(status, _))
-            if status == 401 || status == 403 || status == 404 || status == 409 =>
-        {
+        Err(ureq::Error::Status(status, _)) if status == 401 || status == 403 => {
+            Err(webdav_auth_error())
+        }
+        Err(ureq::Error::Status(status, _)) if status == 404 || status == 409 => {
             Err(webdav_dir_missing_or_no_create_error())
         }
         Err(e) => Err(webdav_error(e)),
@@ -368,5 +400,17 @@ mod tests {
         // Verification off: HTTP must be refused, HTTPS stays allowed.
         assert!(require_tls_for_skipped_verification(true, "http://nas:5005/all/").is_err());
         assert!(require_tls_for_skipped_verification(true, "https://nas:5006/all/").is_ok());
+    }
+
+    #[test]
+    fn remote_paths_are_percent_encoded() {
+        assert_eq!(encode_webdav_path("all/meatshell.json"), "all/meatshell.json");
+        assert_eq!(encode_webdav_path("my share/a#1.json"), "my%20share/a%231.json");
+        assert_eq!(encode_webdav_path("中文/文件.txt"), "%E4%B8%AD%E6%96%87/%E6%96%87%E4%BB%B6.txt");
+        // A full URL through webdav_url keeps its separators intact.
+        assert_eq!(
+            webdav_url("https://nas/all/", "my share/x.json").unwrap(),
+            "https://nas/all/my%20share/x.json"
+        );
     }
 }
