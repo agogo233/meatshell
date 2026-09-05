@@ -228,15 +228,25 @@ fn normalize_hex_color(value: &str) -> Option<String> {
 /// update check disabled (no network on startup, fork A), and marks the
 /// migration done so it isn't re-applied.
 fn fresh_config() -> ConfigFile {
-    ConfigFile {
-        wallpaper: "builtin:ms".to_string(),
-        welcome_as_sidebar: true,
-        sidebar_dock: "right".to_string(),
-        wallpaper_overlay: DEFAULT_WALLPAPER_OVERLAY,
-        update_check_disabled: true,
-        defaults_rev: DEFAULTS_REV,
-        ..ConfigFile::default()
-    }
+    // Deserialize `{}` rather than `ConfigFile::default()`: the derived
+    // Default ignores the `#[serde(default = "default_true")]` markers and
+    // would hand a brand-new install the default-ON features switched OFF.
+    let mut cfg: ConfigFile = match serde_json::from_str("{}") {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            // Only reachable if a field is added without a serde default;
+            // degrade to the derive rather than bricking startup.
+            tracing::error!("ConfigFile field without a serde default broke fresh config: {e}");
+            ConfigFile::default()
+        }
+    };
+    cfg.wallpaper = "builtin:ms".to_string();
+    cfg.welcome_as_sidebar = true;
+    cfg.sidebar_dock = "right".to_string();
+    cfg.wallpaper_overlay = DEFAULT_WALLPAPER_OVERLAY;
+    cfg.update_check_disabled = true;
+    cfg.defaults_rev = DEFAULTS_REV;
+    cfg
 }
 
 /// One-time push of the new default layout to *existing* users — but only for
@@ -2555,6 +2565,20 @@ mod tests {
         }
     }
 
+    /// A store seeded like a brand-new install. `temp_store` uses the derived
+    /// `Default`, which misses the `default_true` serde markers; tests that
+    /// assert default-ON behaviour must start from `fresh_config`.
+    fn fresh_store() -> ConfigStore {
+        let path = std::env::temp_dir().join(format!("ms-test-{}.json", Uuid::new_v4()));
+        ConfigStore {
+            path,
+            backup_dir: None,
+            cache: fresh_config(),
+            key: [7u8; 32],
+            lost_secrets: 0,
+        }
+    }
+
     #[test]
     fn terminal_cursor_style_defaults_and_validates() {
         let mut store = temp_store();
@@ -3385,7 +3409,7 @@ old-switch=#98#7%10.0.0.1%23%cisco%0%0#15%80%24#0# #-1\r\n";
 
     #[test]
     fn action_links_defaults_and_toggles() {
-        let mut store = temp_store();
+        let mut store = fresh_store();
         // The serde default keeps the feature ON; the per-kind toggles follow
         // the master switch.
         assert!(store.action_links_enabled());
@@ -3405,7 +3429,7 @@ old-switch=#98#7%10.0.0.1%23%cisco%0%0#15%80%24#0# #-1\r\n";
 
     #[test]
     fn search_history_and_backpressure_defaults() {
-        let mut store = temp_store();
+        let mut store = fresh_store();
         assert!(!store.search_history_mode());
         assert_eq!(store.search_history_limit(), 5000);
         store.set_search_history_mode(true);

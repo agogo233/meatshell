@@ -39,15 +39,15 @@ fn fuzzy_subsequence_matches_and_ranks_best_last() {
 #[test]
 fn fuzzy_prefers_substring_over_subsequence() {
     let history = vec![
-        "docker compose up".to_string(), // subsequence "co"
-        "git checkout".to_string(),      // substring "checkout" contains "co"
+        "git checkout".to_string(),      // subsequence: c…o across "checkout"
+        "docker compose up".to_string(), // substring: "co" in "compose"
     ];
     let rows: Vec<String> = history_view_rows(&history, "co")
         .into_iter()
         .map(Into::into)
         .collect();
     // Best match (substring) is last (dropdown default selection).
-    assert_eq!(rows.last().map(String::as_str), Some("git checkout"));
+    assert_eq!(rows.last().map(String::as_str), Some("docker compose up"));
 }
 
 #[test]
