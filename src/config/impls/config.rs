@@ -3066,7 +3066,8 @@ mod tests {
 
         let fresh = ConfigStore::load_or_create_key(&dir).unwrap();
         assert_eq!(fresh.len(), 32);
-        assert_ne!(fresh, corrupt);
+        // Slice compare: [u8; 32] and [u8; 31] have no PartialEq between them.
+        assert_ne!(&fresh[..], &corrupt[..]);
 
         let backups: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
