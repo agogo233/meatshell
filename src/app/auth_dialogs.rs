@@ -195,12 +195,17 @@ thread_local! {
         RefCell::new(HashMap::new());
 }
 
-/// Forget a session's cached credential answer so the next (re)connection can
-/// prompt again: a cancelled prompt during auto-reconnect must not silence the
-/// remaining attempts, nor a later manual connect, until the process restarts.
+/// Forget a session's *cancelled* credential answer so the next (re)connection
+/// can prompt again: a cancelled prompt during auto-reconnect must not silence
+/// the remaining attempts, nor a later manual connect, until the process
+/// restarts. A real answer the user already gave stays cached — re-prompting
+/// on every unattended reconnect would be worse than the status quo.
 pub(super) fn forget_cred_decision(session_id: &str) {
     CRED_DECIDED.with(|decided| {
-        decided.borrow_mut().remove(session_id);
+        let mut decided = decided.borrow_mut();
+        if matches!(decided.get(session_id), Some(None)) {
+            decided.remove(session_id);
+        }
     });
 }
 

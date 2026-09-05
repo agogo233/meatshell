@@ -335,11 +335,14 @@ pub(super) fn wire_sftp_callbacks(
                             }
                         }
                         // Mirror to the other online sessions, each into its own
-                        // current SFTP directory.
+                        // current SFTP directory. The picked file's decision was
+                        // computed against *this* tab's listing; a mirror may
+                        // have a completely different state, so let each worker
+                        // apply the configured policy to its own target.
                         for (id, dir) in &sync_targets {
                             if let Some(h) = handles.get(id) {
-                                for (local, decision) in &picked {
-                                    h.upload(local.clone(), dir.clone(), *decision);
+                                for (local, _) in &picked {
+                                    h.upload(local.clone(), dir.clone(), UploadDecision::Proceed);
                                 }
                             }
                         }

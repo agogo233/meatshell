@@ -429,8 +429,15 @@ impl ConfigStore {
     /// (legacy plaintext, empty) are left alone; an `enc:v1:` blob that cannot
     /// be opened — the key was regenerated after a lost/corrupt `secret.key` —
     /// is cleared and counted, because kept verbatim it would be saved back
-    /// and later used as a literal password.
+    /// and later used as a literal password. A foreign `enc:exp:v1:` blob
+    /// (stored verbatim by an older version's cross-machine import) can never
+    /// be opened here and is cleared the same way.
     fn open_secret(key: &[u8; 32], value: &mut Secret, lost: &mut usize) {
+        if value.as_str().starts_with(Self::EXPORT_PREFIX) {
+            *value = Secret::new(String::new());
+            *lost += 1;
+            return;
+        }
         if !value.as_str().starts_with(Self::ENC_PREFIX) {
             return;
         }
@@ -1061,7 +1068,9 @@ impl ConfigStore {
                 let entries = map
                     .get("output_highlight_rules")
                     .and_then(|value| value.as_array())
-                    .context("highlight import object is missing an output_highlight_rules array")?;
+                    .context(
+                        "highlight import object is missing an output_highlight_rules array",
+                    )?;
                 parse_rules(entries.clone())
             }
             _ => anyhow::bail!("highlight import must be a JSON array or object"),
@@ -2198,6 +2207,10 @@ impl ConfigStore {
     /// proxy credentials are re-encrypted with the built-in export key;
     /// everything else stays plaintext so the file is human-readable and
     /// editable. Returns the number of sessions.
+    ///
+    /// The UI exports encrypted bundles now; this legacy writer stays (and
+    /// stays tested) because [`Self::import_json`] still reads its format.
+    #[allow(dead_code)]
     pub fn export_json(&self) -> Result<(String, usize)> {
         let mut out = ExportFile {
             meatshell_export: 1,
@@ -2387,7 +2400,8 @@ impl ConfigStore {
     }
 
     /// Open a bundle into a config without touching the store — the
-    /// worker-thread half of [`Self::import_bundle`].
+    /// worker-thread half of a bundle import (the UI-thread half is
+    /// [`Self::apply_bundle`]).
     pub fn decrypt_bundle(passphrase: &str, pack: &str) -> Result<ConfigFile> {
         let blob = URL_SAFE_NO_PAD
             .decode(pack.trim())
@@ -2420,13 +2434,6 @@ impl ConfigStore {
         self.cache = cfg;
         self.save()?;
         Ok(n)
-    }
-
-    /// Open a bundle produced by [`Self::export_bundle`], replacing the current
-    /// config wholesale. Returns the number of sessions restored.
-    pub fn import_bundle(&mut self, passphrase: &str, pack: &str) -> Result<usize> {
-        let cfg = Self::decrypt_bundle(passphrase, pack)?;
-        self.apply_bundle(cfg)
     }
 
     /// Export quick commands + group names to a portable JSON string. No
@@ -3182,13 +3189,14 @@ mod tests {
 
         // Right passphrase restores the session and its plaintext secret.
         let mut b = temp_store();
-        assert_eq!(b.import_bundle("correct horse", &pack).unwrap(), 1);
+        let cfg = ConfigStore::decrypt_bundle("correct horse", &pack).unwrap();
+        assert_eq!(b.apply_bundle(cfg).unwrap(), 1);
         assert_eq!(b.cache.sessions[0].password.as_str(), "hunter2");
         assert_eq!(b.cache.sessions[0].host, "10.0.0.9");
 
         // Wrong passphrase fails to authenticate (AEAD tag mismatch).
-        let mut c = temp_store();
-        assert!(c.import_bundle("wrong horse", &pack).is_err());
+        let c = temp_store();
+        assert!(ConfigStore::decrypt_bundle("wrong horse", &pack).is_err());
 
         let _ = std::fs::remove_file(&a.path);
         let _ = std::fs::remove_file(&b.path);

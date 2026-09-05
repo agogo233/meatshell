@@ -62,13 +62,29 @@ fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|p| p.into_inner())
 }
 
+/// Params for the legacy (pre-encryption) JSON import the WebDAV download
+/// falls back to when the server holds no bundle. Runs on the UI thread: a
+/// plain fetch + merge, no Argon2.
+struct WebdavFallback {
+    url: String,
+    remote_path: String,
+    username: String,
+    password: String,
+    accept_invalid_certs: bool,
+}
+
 /// A portable bundle decrypted on a worker thread, waiting for the UI-thread
 /// timer to apply it: the store is `Rc`-bound to the UI thread, so only the
 /// already-decrypted config can cross back. `download` picks the failure
-/// wording ("下载失败" for a fetch, "导入失败" for a local file).
+/// wording ("下载失败" for a fetch, "导入失败" for a local file); `webdav`
+/// routes the status message to the WebDAV page instead of the portable one;
+/// `fallback` carries the legacy-import params when no bundle was on the
+/// server.
 struct BundleDelivery {
     result: Result<ConfigFile, String>,
     download: bool,
+    webdav: bool,
+    fallback: Option<WebdavFallback>,
 }
 
 type BundleMailbox = Arc<Mutex<Vec<BundleDelivery>>>;
@@ -1958,6 +1974,7 @@ fn open_window(
         let store = store.clone();
         let sessions_model = sessions_model.clone();
         let registry = registry.clone();
+        let mailbox = bundle_mailbox.clone();
         window.on_webdav_download(move || {
             let Some(w) = weak.upgrade() else { return };
             let enabled = w.get_webdav_enabled();
@@ -1986,23 +2003,10 @@ fn open_window(
             // file falls back to the legacy JSON export. A bundle that fails to
             // open never falls back, so a wrong passphrase can't double-import.
             let pass = w.get_portable_passphrase().to_string();
-            let bundle_path = bundle_remote_path(&remote_path);
-            let bundle_fetch: Result<Option<Option<String>>> = if pass.is_empty() {
-                Ok(None)
-            } else {
-                webdav_get_optional(
-                    &url,
-                    &bundle_path,
-                    &username,
-                    &password,
-                    accept_invalid_certs,
-                )
-            };
-            let res: Result<(usize, usize), anyhow::Error> = match bundle_fetch {
-                Ok(Some(body)) => extract_bundle_data(&body).and_then(|pack| {
-                    store.borrow_mut().import_bundle(&pass, &pack).map(|n| (n, 0))
-                }),
-                Ok(None) => webdav_get_json(
+            if pass.is_empty() {
+                // Without a passphrase only the legacy plaintext file can be
+                // tried, and that import is fast (no KDF), so it stays inline.
+                let res: Result<(usize, usize), anyhow::Error> = webdav_get_json(
                     &url,
                     &remote_path,
                     &username,
@@ -2011,39 +2015,76 @@ fn open_window(
                 )
                 .and_then(|json| store.borrow_mut().import_json(&json))
                 .map_err(|e| {
-                    // Without a passphrase the bundle was never tried, so a
-                    // missing legacy file most likely means the server only
-                    // holds the encrypted bundle.
-                    if pass.is_empty() {
-                        anyhow::anyhow!(
-                            "{} ({e})",
-                            t(
-                                "远端可能只保存了加密同步包，请先填写便携包口令",
-                                "the server may only hold an encrypted bundle; enter a bundle passphrase first"
-                            )
+                    // The bundle was never tried, so a missing legacy file most
+                    // likely means the server only holds the encrypted bundle.
+                    anyhow::anyhow!(
+                        "{} ({e})",
+                        t(
+                            "远端可能只保存了加密同步包，请先填写便携包口令",
+                            "the server may only hold an encrypted bundle; enter a bundle passphrase first"
                         )
-                    } else {
-                        e
-                    }
-                }),
-                Err(err) => Err(err),
-            };
-            let msg = match res {
-                Ok((added, skipped)) => {
-                    sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
-                    registry.broadcast_config_changed();
-                    format!(
-                        "{} {}, {} {}{}",
-                        t("已导入", "imported"),
-                        added,
-                        t("跳过", "skipped"),
-                        skipped,
-                        webdav_status_suffix(accept_invalid_certs)
                     )
-                }
-                Err(e) => format!("{}: {}", t("下载失败", "download failed"), e),
-            };
-            w.set_webdav_status(msg.into());
+                });
+                let msg = match res {
+                    Ok((added, skipped)) => {
+                        sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
+                        registry.broadcast_config_changed();
+                        format!(
+                            "{} {}, {} {}{}",
+                            t("已导入", "imported"),
+                            added,
+                            t("跳过", "skipped"),
+                            skipped,
+                            webdav_status_suffix(accept_invalid_certs)
+                        )
+                    }
+                    Err(e) => format!("{}: {}", t("下载失败", "download failed"), e),
+                };
+                w.set_webdav_status(msg.into());
+                return;
+            }
+            // Fetch + Argon2 off the UI thread; the bundle timer applies the
+            // decrypted config (or runs the legacy fallback) where the store
+            // lives.
+            let bundle_path = bundle_remote_path(&remote_path);
+            w.set_webdav_status(t("下载中...", "downloading...").into());
+            let mailbox = mailbox.clone();
+            std::thread::spawn(move || {
+                let (result, fallback) = match webdav_get_optional(
+                    &url,
+                    &bundle_path,
+                    &username,
+                    &password,
+                    accept_invalid_certs,
+                ) {
+                    Ok(Some(body)) => (
+                        extract_bundle_data(&body)
+                            .map_err(|e| format!("{e:#}"))
+                            .and_then(|pack| {
+                                ConfigStore::decrypt_bundle(&pass, &pack)
+                                    .map_err(|e| format!("{e:#}"))
+                            }),
+                        None,
+                    ),
+                    Ok(None) => (
+                        Err(String::new()),
+                        Some(WebdavFallback {
+                            url,
+                            remote_path,
+                            username,
+                            password,
+                            accept_invalid_certs,
+                        }),
+                    ),
+                    Err(e) => (Err(format!("{e:#}")), None),
+                };
+                lock_or_recover(&mailbox).push(BundleDelivery {
+                    result,
+                    download: true,
+                    webdav: true,
+                    fallback,
+                });
+            });
         });
     }
 
@@ -2291,10 +2332,38 @@ fn open_window(
             slint::TimerMode::Repeated,
             std::time::Duration::from_millis(250),
             move || {
-                let pending: Vec<BundleDelivery> =
-                    lock_or_recover(&mailbox).drain(..).collect();
+                let pending: Vec<BundleDelivery> = lock_or_recover(&mailbox).drain(..).collect();
                 for delivery in pending {
                     let Some(w) = weak.upgrade() else { continue };
+                    if let Some(fb) = delivery.fallback {
+                        // No bundle on the server: try the legacy plaintext
+                        // export (a fast fetch + merge, no KDF) right here.
+                        let res = webdav_get_json(
+                            &fb.url,
+                            &fb.remote_path,
+                            &fb.username,
+                            &fb.password,
+                            fb.accept_invalid_certs,
+                        )
+                        .and_then(|json| store.borrow_mut().import_json(&json));
+                        let msg = match res {
+                            Ok((added, skipped)) => {
+                                sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
+                                registry.broadcast_config_changed();
+                                format!(
+                                    "{} {}, {} {}{}",
+                                    t("已导入", "imported"),
+                                    added,
+                                    t("跳过", "skipped"),
+                                    skipped,
+                                    webdav_status_suffix(fb.accept_invalid_certs)
+                                )
+                            }
+                            Err(e) => format!("{}: {}", t("下载失败", "download failed"), e),
+                        };
+                        w.set_webdav_status(msg.into());
+                        continue;
+                    }
                     let msg = match delivery.result {
                         Ok(cfg) => match store.borrow_mut().apply_bundle(cfg) {
                             Ok(n) => {
@@ -2307,13 +2376,25 @@ fn open_window(
                         Err(e) => format!(
                             "{}: {}",
                             t(
-                                if delivery.download { "下载失败" } else { "导入失败" },
-                                if delivery.download { "download failed" } else { "import failed" }
+                                if delivery.download {
+                                    "下载失败"
+                                } else {
+                                    "导入失败"
+                                },
+                                if delivery.download {
+                                    "download failed"
+                                } else {
+                                    "import failed"
+                                }
                             ),
                             e
                         ),
                     };
-                    w.set_portable_status(msg.into());
+                    if delivery.webdav {
+                        w.set_webdav_status(msg.into());
+                    } else {
+                        w.set_portable_status(msg.into());
+                    }
                 }
             },
         );
@@ -4013,12 +4094,14 @@ fn handle_file_drop(win: &AppWindow, sftp_handles: &SftpHandles, path: std::path
             h.upload(path.clone(), dir, decision);
         }
         if sync {
+            // The decision was made against the active tab's listing; mirrors
+            // get their own live check in the worker instead.
             for (id, h) in handles.iter() {
                 if id == &active {
                     continue;
                 }
                 if let Some(d) = other_dirs.get(id).filter(|d| !d.is_empty()) {
-                    h.upload(path.clone(), d.clone(), decision);
+                    h.upload(path.clone(), d.clone(), UploadDecision::Proceed);
                 }
             }
         }
@@ -4449,6 +4532,8 @@ fn wire_session_callbacks(
                 lock_or_recover(&mailbox).push(BundleDelivery {
                     result,
                     download: false,
+                    webdav: false,
+                    fallback: None,
                 });
             });
         });
@@ -4537,6 +4622,8 @@ fn wire_session_callbacks(
                 lock_or_recover(&mailbox).push(BundleDelivery {
                     result,
                     download: true,
+                    webdav: false,
+                    fallback: None,
                 });
             });
         });

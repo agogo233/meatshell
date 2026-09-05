@@ -1888,7 +1888,12 @@ async fn resolve_upload_target(
             skipped_upload_status(events, name);
             None
         }
-        DedupPolicy::Rename => {
+        DedupPolicy::Overwrite => Some(requested),
+        // Rename, and Ask where the UI showed no conflict: the worker cannot
+        // prompt, so a target that appeared after the click is kept alongside
+        // (matching the download side) rather than silently replacing a file
+        // the user never agreed to overwrite.
+        DedupPolicy::Rename | DedupPolicy::Ask => {
             let path = available_remote_path(sftp, &requested).await;
             let _ = events.send(SessionEvent::SftpStatus(format!(
                 "{}: {} → {}",
@@ -1898,9 +1903,6 @@ async fn resolve_upload_target(
             )));
             Some(path)
         }
-        // Overwrite, and Ask where the UI showed no conflict: the worker cannot
-        // prompt, so Ask falls back to the historical replace behaviour.
-        _ => Some(requested),
     }
 }
 
@@ -2081,17 +2083,6 @@ fn emit_transfer(
     });
 }
 
-/// Download a remote file over a dedicated, *pipelined* raw SFTP channel.
-///
-/// The high-level reader issues one READ and waits for the reply before the
-/// next, so throughput is capped by the round-trip time (slow on any latent
-/// link). Here we keep many READ requests in flight at once, each tagged with
-/// its absolute offset so out-of-order completion is fine — mirroring
-/// `upload_pipelined`.
-///
-/// Returns `Ok(true)` when the whole file was written, or `Ok(false)` if the
-/// transfer was cancelled. In both the cancel and error cases the partial
-/// local file is removed so no half-downloaded junk is left behind.
 /// Paces a transfer to `rate_kbps` KiB/s in 100 ms windows; `0` is unlimited.
 /// An overrun makes the caller sleep for exactly as long as the surplus takes
 /// to be allowed — deliberately uncapped, so a small configured rate really
@@ -2111,7 +2102,7 @@ impl RatePacer {
         }
     }
 
-    async fn pace(&mut self, bytes: u64) {
+    async fn pace(&mut self, bytes: u64, cancel: &AtomicBool) {
         if self.rate_bytes_per_sec == 0 {
             return;
         }
@@ -2123,14 +2114,32 @@ impl RatePacer {
         if self.window_bytes > allowed {
             let over = self.window_bytes - allowed;
             let ms = (over as f64 / self.rate_bytes_per_sec as f64 * 1000.0) as u64;
-            if ms > 0 {
-                tokio::time::sleep(Duration::from_millis(ms)).await;
+            // Sleep in ≤1 s slices: at a low configured rate a single surplus
+            // can otherwise park the task for tens of seconds without ever
+            // re-reading the cancel flag.
+            let mut remaining = Duration::from_millis(ms);
+            while !remaining.is_zero() && !cancel.load(Ordering::Relaxed) {
+                let slice = remaining.min(Duration::from_secs(1));
+                tokio::time::sleep(slice).await;
+                remaining -= slice;
             }
         }
         self.window = Instant::now();
         self.window_bytes = 0;
     }
 }
+
+/// Download a remote file over a dedicated, *pipelined* raw SFTP channel.
+///
+/// The high-level reader issues one READ and waits for the reply before the
+/// next, so throughput is capped by the round-trip time (slow on any latent
+/// link). Here we keep many READ requests in flight at once, each tagged with
+/// its absolute offset so out-of-order completion is fine — mirroring
+/// `upload_pipelined`.
+///
+/// Returns `Ok(true)` when the whole file was written, or `Ok(false)` if the
+/// transfer was cancelled. In both the cancel and error cases the partial
+/// local file is removed so no half-downloaded junk is left behind.
 
 async fn download_impl(
     handle: &client::Handle<SftpClientHandler>,
@@ -2251,7 +2260,7 @@ async fn download_impl(
                             done += data.len() as u64;
                         }
                     }
-                    pacer.pace(data.len() as u64).await;
+                    pacer.pace(data.len() as u64, cancel).await;
                     if last.elapsed() >= Duration::from_millis(150) {
                         last = Instant::now();
                         emit_transfer(events, id, name, false, done, total, 0, "");
@@ -2283,7 +2292,7 @@ async fn download_impl(
                         .context("write local file")?;
                     off += d.data.len() as u64;
                     done += d.data.len() as u64;
-                    pacer.pace(d.data.len() as u64).await;
+                    pacer.pace(d.data.len() as u64, cancel).await;
                     if last.elapsed() >= Duration::from_millis(150) {
                         last = Instant::now();
                         emit_transfer(events, id, name, false, done, done, 0, "");
@@ -2578,7 +2587,7 @@ async fn upload_pipelined(
         match inflight.next().await {
             Some(Ok(n)) => {
                 done += n;
-                pacer.pace(n).await;
+                pacer.pace(n, cancel).await;
                 if last.elapsed() >= Duration::from_millis(150) {
                     last = Instant::now();
                     emit_transfer(events, id, name, true, done, total, 0, "");
