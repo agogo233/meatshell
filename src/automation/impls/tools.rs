@@ -45,6 +45,8 @@ async fn upload_file(arguments: &Value, frontend: Frontend) -> Result<Value> {
             local: local_path,
             remote_dir: remote_directory.to_string(),
             cleanup_after: None,
+            // The worker applies the session's queue policy to the target.
+            decision: crate::sftp::UploadDecision::Proceed,
         },
         true,
         timeout,
@@ -80,6 +82,9 @@ async fn download_file(arguments: &Value, frontend: Frontend) -> Result<Value> {
             // Never overwrite: the download fails if the target exists, with no
             // check-then-write race window in between.
             conflict: crate::sftp::DownloadConflict::Fail,
+            // Unused for `Fail` (the atomic create decides it); kept consistent
+            // with the never-overwrite intent.
+            policy: crate::sftp::DedupPolicy::Skip,
         },
         false,
         timeout,

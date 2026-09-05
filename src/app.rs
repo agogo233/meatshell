@@ -176,6 +176,7 @@ use crate::resource::{SystemSampler, SystemSnapshot};
 use crate::session::{ConnectCtx, PendingCred, PendingHostKey, PendingMfa};
 use crate::sftp::{
     download_target_path, spawn_sftp, DedupPolicy, DownloadConflict, SftpHandles, SftpLastCwd,
+    UploadDecision,
 };
 use crate::ssh::{
     format_mtime, format_size, spawn_session, test_session_auth, ProcInfo, SessionCommand,
@@ -3887,10 +3888,15 @@ fn handle_file_drop(win: &AppWindow, sftp_handles: &SftpHandles, path: std::path
     } else {
         HashMap::new()
     };
+    // The duplicate prompt mirrors the upload button's behaviour; a dropped
+    // folder merges on the worker side, so it never prompts.
+    let dedup = configured_dedup_policy(&win.as_weak());
+    let known = terminal_sftp_entry_names(win, &active);
+    let decision = upload_decision(&path, &known, dedup, path.is_dir());
     if let Ok(handles) = sftp_handles.lock() {
         if let Some(h) = handles.get(&active) {
             win.set_download_open(true);
-            h.upload(path.clone(), dir);
+            h.upload(path.clone(), dir, decision);
         }
         if sync {
             for (id, h) in handles.iter() {
@@ -3898,7 +3904,7 @@ fn handle_file_drop(win: &AppWindow, sftp_handles: &SftpHandles, path: std::path
                     continue;
                 }
                 if let Some(d) = other_dirs.get(id).filter(|d| !d.is_empty()) {
-                    h.upload(path.clone(), d.clone());
+                    h.upload(path.clone(), d.clone(), decision);
                 }
             }
         }

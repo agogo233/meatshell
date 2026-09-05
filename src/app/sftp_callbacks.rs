@@ -7,7 +7,9 @@ fn choose_download_conflict(
 ) -> Option<DownloadConflict> {
     let target = download_target_path(remote, local_dir);
     if !target.is_file() {
-        return Some(DownloadConflict::Replace);
+        // Nothing to conflict with *now*; the worker re-checks before writing
+        // and applies the policy if a file appears in the meantime.
+        return Some(DownloadConflict::Absent);
     }
     // A configured policy resolves the conflict without prompting.
     match policy {
@@ -49,9 +51,57 @@ fn choose_download_conflict(
     }
 }
 
+/// Decide how to handle an upload whose name already appears in the current
+/// remote listing. Only `Ask` prompts here; the other policies resolve
+/// silently, and the worker re-checks against the live server state anyway
+/// (the listing can be stale). Folder uploads merge, so they never prompt.
+pub(super) fn upload_decision(
+    local: &std::path::Path,
+    known: &[String],
+    policy: DedupPolicy,
+    folder: bool,
+) -> UploadDecision {
+    if policy != DedupPolicy::Ask || folder {
+        return UploadDecision::Proceed;
+    }
+    let Some(name) = local.file_name().and_then(|name| name.to_str()) else {
+        return UploadDecision::Proceed;
+    };
+    if !known.iter().any(|entry| entry == name) {
+        return UploadDecision::Proceed;
+    }
+    let replace = t("替换", "Replace");
+    let keep_both = t("共存", "Keep both");
+    let cancel = t("取消", "Cancel");
+    let result = rfd::MessageDialog::new()
+        .set_title(t("远端文件已存在", "Remote file already exists"))
+        .set_description(format!(
+            "{}\n{}",
+            name,
+            t(
+                "请选择替换远端文件，或保留两份文件。",
+                "Choose whether to replace the remote file or keep both files."
+            )
+        ))
+        .set_level(rfd::MessageLevel::Warning)
+        .set_buttons(rfd::MessageButtons::YesNoCancelCustom(
+            replace.to_string(),
+            keep_both.to_string(),
+            cancel.to_string(),
+        ))
+        .show();
+    match result {
+        rfd::MessageDialogResult::Yes => UploadDecision::Overwrite,
+        rfd::MessageDialogResult::No => UploadDecision::KeepBoth,
+        rfd::MessageDialogResult::Custom(value) if value == replace => UploadDecision::Overwrite,
+        rfd::MessageDialogResult::Custom(value) if value == keep_both => UploadDecision::KeepBoth,
+        _ => UploadDecision::Skip,
+    }
+}
+
 /// Read the configured duplicate-target policy from the window mirror of the
 /// global setting (defaults to `Ask` when the window is gone).
-fn configured_dedup_policy(weak: &slint::Weak<AppWindow>) -> DedupPolicy {
+pub(super) fn configured_dedup_policy(weak: &slint::Weak<AppWindow>) -> DedupPolicy {
     match weak
         .upgrade()
         .map(|w| w.get_sftp_queue_dedup().to_string())
@@ -160,22 +210,27 @@ pub(super) fn wire_sftp_callbacks(
                 })
                 .unwrap_or_default();
             if !always_ask && !preset.is_empty() {
+                let mut dispatched = false;
                 if let Ok(handles) = sftp_handles.lock() {
                     if let Some(h) = handles.get(&tab_id) {
+                        let dedup = configured_dedup_policy(&weak);
                         if let Some(ref dir) = arc_dir {
                             h.download_archive(dir.clone(), arc_names.clone(), preset);
-                        } else if let Some(conflict) = choose_download_conflict(
-                            &remote_path,
-                            &preset,
-                            configured_dedup_policy(&weak),
-                        ) {
-                            h.download(remote_path, preset, conflict);
+                            dispatched = true;
+                        } else if let Some(conflict) =
+                            choose_download_conflict(&remote_path, &preset, dedup)
+                        {
+                            h.download(remote_path, preset, conflict, dedup);
+                            dispatched = true;
                         }
-                        // Pop the transfers panel so progress is visible (user
-                        // request: any download opens the download popup).
-                        if let Some(w) = weak.upgrade() {
-                            w.set_download_open(true);
-                        }
+                    }
+                }
+                // Pop the transfers panel so progress is visible (user request:
+                // any download opens the download popup) — but not when the
+                // file was skipped or the conflict dialog cancelled.
+                if dispatched {
+                    if let Some(w) = weak.upgrade() {
+                        w.set_download_open(true);
                     }
                 }
                 return;
@@ -188,18 +243,23 @@ pub(super) fn wire_sftp_callbacks(
             std::thread::spawn(move || {
                 if let Some(dir) = rfd::FileDialog::new().pick_folder() {
                     let local_dir = dir.to_string_lossy().to_string();
+                    let mut dispatched = false;
                     if let Ok(handles) = sftp_handles.lock() {
                         if let Some(h) = handles.get(&tab_id) {
                             if let Some(ref rdir) = arc_dir {
                                 h.download_archive(rdir.clone(), arc_names.clone(), local_dir);
+                                dispatched = true;
                             } else if let Some(conflict) =
                                 choose_download_conflict(&remote_path, &local_dir, dedup)
                             {
-                                h.download(remote_path, local_dir, conflict);
+                                h.download(remote_path, local_dir, conflict, dedup);
+                                dispatched = true;
                             }
                         }
                     }
-                    let _ = weak.upgrade_in_event_loop(|w| w.set_download_open(true));
+                    if dispatched {
+                        let _ = weak.upgrade_in_event_loop(|w| w.set_download_open(true));
+                    }
                 }
             });
         });
@@ -235,6 +295,13 @@ pub(super) fn wire_sftp_callbacks(
                             .collect()
                     })
                     .unwrap_or_default();
+                // The duplicate prompt needs the policy and the current listing,
+                // both only reachable on the UI thread.
+                let dedup = configured_dedup_policy(&weak);
+                let known: Vec<String> = weak
+                    .upgrade()
+                    .map(|w| terminal_sftp_entry_names(&w, &tab_id))
+                    .unwrap_or_default();
                 std::thread::spawn(move || {
                     // The remote SFTP upload handles a file or a whole directory;
                     // only the local picker differs (#85). Folder uploads one dir;
@@ -253,18 +320,26 @@ pub(super) fn wire_sftp_callbacks(
                     if locals.is_empty() {
                         return;
                     }
+                    // One decision per picked file; sync mirrors reuse it.
+                    let picked: Vec<(std::path::PathBuf, UploadDecision)> = locals
+                        .iter()
+                        .map(|local| {
+                            let decision = upload_decision(local, &known, dedup, folder);
+                            (local.clone(), decision)
+                        })
+                        .collect();
                     if let Ok(handles) = sftp_handles.lock() {
                         if let Some(h) = handles.get(&tab_id) {
-                            for local in &locals {
-                                h.upload(local.clone(), remote_dir.clone());
+                            for (local, decision) in &picked {
+                                h.upload(local.clone(), remote_dir.clone(), *decision);
                             }
                         }
                         // Mirror to the other online sessions, each into its own
                         // current SFTP directory.
                         for (id, dir) in &sync_targets {
                             if let Some(h) = handles.get(id) {
-                                for local in &locals {
-                                    h.upload(local.clone(), dir.clone());
+                                for (local, decision) in &picked {
+                                    h.upload(local.clone(), dir.clone(), *decision);
                                 }
                             }
                         }
@@ -456,22 +531,26 @@ pub(super) fn wire_sftp_callbacks(
             let preset = w.get_download_dir().to_string();
             let always_ask = w.get_download_always_ask();
             if !always_ask && !preset.is_empty() {
+                let mut dispatched = false;
                 if let Ok(handles) = sftp_handles.lock() {
                     if let Some(h) = handles.get(tab_id.as_str()) {
+                        let dedup = configured_dedup_policy(&weak);
                         if single {
-                            if let Some(conflict) = choose_download_conflict(
-                                &paths[0],
-                                &preset,
-                                configured_dedup_policy(&weak),
-                            ) {
-                                h.download(paths[0].clone(), preset.clone(), conflict);
+                            if let Some(conflict) =
+                                choose_download_conflict(&paths[0], &preset, dedup)
+                            {
+                                h.download(paths[0].clone(), preset.clone(), conflict, dedup);
+                                dispatched = true;
                             }
                         } else {
                             h.download_archive(remote_dir.clone(), names.clone(), preset.clone());
+                            dispatched = true;
                         }
                     }
                 }
-                w.set_download_open(true);
+                if dispatched {
+                    w.set_download_open(true);
+                }
             } else {
                 let sftp_handles = sftp_handles.clone();
                 let weak2 = weak.clone();
@@ -482,13 +561,15 @@ pub(super) fn wire_sftp_callbacks(
                 std::thread::spawn(move || {
                     if let Some(dir) = rfd::FileDialog::new().pick_folder() {
                         let dir = dir.to_string_lossy().to_string();
+                        let mut dispatched = false;
                         if let Ok(handles) = sftp_handles.lock() {
                             if let Some(h) = handles.get(&tab) {
                                 if single {
                                     if let Some(conflict) =
                                         choose_download_conflict(&paths[0], &dir, dedup)
                                     {
-                                        h.download(paths[0].clone(), dir.clone(), conflict);
+                                        h.download(paths[0].clone(), dir.clone(), conflict, dedup);
+                                        dispatched = true;
                                     }
                                 } else {
                                     h.download_archive(
@@ -496,10 +577,13 @@ pub(super) fn wire_sftp_callbacks(
                                         names.clone(),
                                         dir.clone(),
                                     );
+                                    dispatched = true;
                                 }
                             }
                         }
-                        let _ = weak2.upgrade_in_event_loop(|w| w.set_download_open(true));
+                        if dispatched {
+                            let _ = weak2.upgrade_in_event_loop(|w| w.set_download_open(true));
+                        }
                     }
                 });
             }

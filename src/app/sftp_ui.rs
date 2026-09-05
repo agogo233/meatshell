@@ -14,6 +14,33 @@ pub(super) fn terminal_sftp_paths(w: &AppWindow) -> HashMap<String, String> {
     out
 }
 
+/// Names currently shown in a tab's SFTP listing (UI thread only). The upload
+/// path uses this to decide whether the duplicate-file prompt is needed before
+/// the file-picker thread starts.
+pub(super) fn terminal_sftp_entry_names(w: &AppWindow, tab_id: &str) -> Vec<String> {
+    use slint::Model as _;
+    let model = w.get_terminals();
+    let Some(terminals) = model.as_any().downcast_ref::<VecModel<TerminalState>>() else {
+        return Vec::new();
+    };
+    for i in 0..terminals.row_count() {
+        let Some(row) = terminals.row_data(i) else {
+            continue;
+        };
+        if row.id != tab_id {
+            continue;
+        }
+        let Some(entries) = row.sftp_entries.as_any().downcast_ref::<VecModel<SftpEntry>>() else {
+            return Vec::new();
+        };
+        return (0..entries.row_count())
+            .filter_map(|j| entries.row_data(j))
+            .map(|entry| entry.name.to_string())
+            .collect();
+    }
+    Vec::new()
+}
+
 pub(super) fn sorted_sftp_entries_from_model(
     model: &ModelRc<SftpEntry>,
     key: &str,

@@ -26,6 +26,9 @@ pub enum SftpCommand {
         remote: String,
         local_dir: String,
         conflict: DownloadConflict,
+        /// Applied by the worker if the target appears after the caller's
+        /// existence check (the race the check alone cannot close).
+        policy: DedupPolicy,
     },
     /// Multi-select download (#100): tar the named entries under `remote_dir`
     /// into one archive on the remote, download it, then delete the temp.
@@ -42,6 +45,8 @@ pub enum SftpCommand {
         local: PathBuf,
         remote_dir: String,
         cleanup_after: Option<PathBuf>,
+        /// What the caller decided about an already-existing remote target.
+        decision: UploadDecision,
     },
     /// Re-upload an externally edited temp file to its exact original path.
     /// The local name may include a host prefix, so deriving the remote name
@@ -77,11 +82,31 @@ pub enum SftpCommand {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DownloadConflict {
+    /// Nothing was there when the caller checked. The worker re-checks right
+    /// before writing and applies the configured policy if a file appeared in
+    /// the meantime, so a race can never silently truncate a file the user
+    /// never saw.
+    Absent,
     Replace,
     KeepBoth,
     /// Refuse instead of overwriting: the download fails if the target exists.
     /// Kept out of the UI path, which always asks; automation tools use it.
     Fail,
+}
+
+/// Duplicate-target decision for an upload, resolved by the UI (which can
+/// prompt) and re-checked by the worker against the live server state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UploadDecision {
+    /// No conflict was seen by the caller; the worker applies the configured
+    /// policy if the target turns out to exist.
+    Proceed,
+    /// The target existed and the user / policy chose to replace it.
+    Overwrite,
+    /// The target existed and the user / policy chose to keep both copies.
+    KeepBoth,
+    /// The target existed and the user / policy chose to skip the upload.
+    Skip,
 }
 
 /// Duplicate-target policy for transfers, chosen from settings. `Ask` keeps the
