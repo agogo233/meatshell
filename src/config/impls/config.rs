@@ -430,12 +430,17 @@ impl ConfigStore {
     /// be opened — the key was regenerated after a lost/corrupt `secret.key` —
     /// is cleared and counted, because kept verbatim it would be saved back
     /// and later used as a literal password. A foreign `enc:exp:v1:` blob
-    /// (stored verbatim by an older version's cross-machine import) can never
-    /// be opened here and is cleared the same way.
+    /// (stored verbatim by an older version's cross-machine import) is
+    /// recovered with the built-in export key; only a corrupted one is cleared.
     fn open_secret(key: &[u8; 32], value: &mut Secret, lost: &mut usize) {
         if value.as_str().starts_with(Self::EXPORT_PREFIX) {
-            *value = Secret::new(String::new());
-            *lost += 1;
+            match Self::decrypt_export(value.as_str()) {
+                Some(plain) => *value = Secret::new(plain),
+                None => {
+                    *value = Secret::new(String::new());
+                    *lost += 1;
+                }
+            }
             return;
         }
         if !value.as_str().starts_with(Self::ENC_PREFIX) {

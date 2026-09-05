@@ -2067,6 +2067,8 @@ fn open_window(
                         None,
                     ),
                     Ok(None) => (
+                        // Placeholder: the timer checks `fallback` before
+                        // `result`, so this Err never surfaces.
                         Err(String::new()),
                         Some(WebdavFallback {
                             url,
