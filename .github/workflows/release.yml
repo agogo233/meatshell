@@ -1,27 +1,28 @@
 name: Release Latest (Windows x86_64)
 
-# Rolling prerelease download: every push to main (and manual runs) rebuilds
-# the Windows x64 portable zip and replaces the assets of a fixed `latest`
-# prerelease, so the Releases page always offers the newest CI build.
-# No version tags are involved; windows-portable.yml (plain artifacts) is
-# untouched.
+# Single Windows build entry point:
+# - every push (any branch/tag) rebuilds the Windows x64 portable zip and
+#   uploads it as a plain artifact (contents: read only);
+# - on `main` a release job then replaces the assets of a fixed `latest`
+#   prerelease, so the Releases page always offers the newest CI build.
+# No version tags are involved; tag pushes build an artifact but never publish.
 
 on:
   push:
-    branches: [main]
   workflow_dispatch:
 
-permissions:
-  contents: write   # create / update the `latest` prerelease
-
 concurrency:
-  group: release-latest
+  group: windows-build-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   windows-x86_64:
     name: windows-x86_64
     runs-on: windows-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.package.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -39,30 +40,63 @@ jobs:
         run: cargo build --release --target x86_64-pc-windows-msvc --locked
 
       - name: Package portable zip
+        id: package
         shell: bash
         run: |
           set -eu
-          VERSION="$(sed -n '/^\[package\]/,/^\[/ s/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
-          # Fixed asset name so each run replaces the previous download
-          # instead of piling up versioned files on the `latest` release.
-          STAGE="meatshell-latest-windows-x86_64"
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION=""
+          fi
+          if [ -z "$VERSION" ] || [ "$VERSION" = "dev" ]; then
+            VERSION="$(sed -n '/^\[package\]/,/^\[/ s/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          fi
+          STAGE="meatshell-${VERSION}-windows-x86_64"
           rm -rf "$STAGE" "${STAGE}.zip"
           mkdir "$STAGE"
           cp "target/x86_64-pc-windows-msvc/release/meatshell.exe" "$STAGE/"
-          7z a "${STAGE}.zip" "$STAGE" >/dev/null
-          echo "ASSET=${STAGE}.zip" >> "$GITHUB_ENV"
-          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          7z a -y "${STAGE}.zip" "$STAGE" >/dev/null
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
-      - name: Publish rolling `latest` prerelease
-        uses: softprops/action-gh-release@v2
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64-portable
+          path: meatshell-*-windows-x86_64.zip
+          retention-days: 7
+          if-no-files-found: error
+
+  release-latest:
+    name: release-latest
+    if: github.ref == 'refs/heads/main'
+    needs: windows-x86_64
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # update the `latest` prerelease
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-x86_64-portable
+
+      - name: Prepare fixed asset name
+        shell: bash
+        run: |
+          set -eu
+          # Fixed asset name so each run replaces the previous download
+          # instead of piling up versioned files on the `latest` release.
+          rm -rf meatshell-latest-windows-x86_64.zip
+          cp windows-x86_64-portable/meatshell-*-windows-x86_64.zip meatshell-latest-windows-x86_64.zip
+
+      - uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
           name: "Latest CI Build (Windows x64)"
           prerelease: true
           update: true
-          files: ${{ env.ASSET }}
+          files: meatshell-latest-windows-x86_64.zip
           fail_on_unmatched_files: true
           body: |
-            meatshell ${{ env.VERSION }} · ${{ github.sha }} · ${{ github.run_number }}
+            meatshell ${{ needs.windows-x86_64.outputs.version }} · ${{ github.sha }} · ${{ github.run_number }}
             自动构建，随 main 分支更新；非正式发布，谨慎用于生产。
             Automated rolling build of `main` — not an official release.
