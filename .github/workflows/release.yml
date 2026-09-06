@@ -83,10 +83,13 @@ jobs:
         shell: bash
         run: |
           set -eu
+          # Locate the downloaded zip wherever download-artifact put it.
+          ZIP="$(find . -maxdepth 3 -name 'meatshell-*-windows-x86_64.zip' -print -quit)"
+          test -n "$ZIP"
           # Fixed asset name so each run replaces the previous download
           # instead of piling up versioned files on the `latest` release.
           rm -rf meatshell-latest-windows-x86_64.zip
-          cp windows-x86_64-portable/meatshell-*-windows-x86_64.zip meatshell-latest-windows-x86_64.zip
+          cp "$ZIP" meatshell-latest-windows-x86_64.zip
 
       - uses: softprops/action-gh-release@v2
         with:
