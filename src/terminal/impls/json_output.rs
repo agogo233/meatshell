@@ -201,7 +201,18 @@ fn colour_json(input: &str) -> String {
             out.push_str(&format!("\x1b[{colour}m{}\x1b[0m", &input[i..i + len]));
             i += len;
         } else {
-            let ch = input[i..].chars().next().expect("valid UTF-8 boundary");
+            // The byte cursor should always sit on a char boundary here (every
+            // advance either lands after an ASCII byte or steps by
+            // ch.len_utf8()). Guard it anyway: this runs on the pump thread and
+            // a panic aborts the whole app in release — degrade to uncoloured
+            // tail bytes instead.
+            if !input.is_char_boundary(i) {
+                out.push_str(&String::from_utf8_lossy(&bytes[i..]));
+                break;
+            }
+            let Some(ch) = input[i..].chars().next() else {
+                break;
+            };
             out.push(ch);
             i += ch.len_utf8();
         }

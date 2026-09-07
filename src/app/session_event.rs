@@ -14,14 +14,17 @@ pub(super) fn apply_session_event_to_window(
     let tabs_rc = win.get_tabs();
     let terminals_rc = win.get_terminals();
     // `ModelRc::as_any` lets us downcast to the concrete `VecModel<T>`.
-    let tabs = tabs_rc
-        .as_any()
-        .downcast_ref::<VecModel<TabInfo>>()
-        .expect("tabs model must be a VecModel");
-    let terminals = terminals_rc
-        .as_any()
-        .downcast_ref::<VecModel<TerminalState>>()
-        .expect("terminals model must be a VecModel");
+    // Never expected in practice (every set_tabs/set_terminals installs a
+    // VecModel), but a panic here aborts the whole process in release, so a
+    // dropped event beats a dead app.
+    let Some(tabs) = tabs_rc.as_any().downcast_ref::<VecModel<TabInfo>>() else {
+        tracing::warn!("tabs model is not a VecModel; dropping session event for {tab_id}");
+        return;
+    };
+    let Some(terminals) = terminals_rc.as_any().downcast_ref::<VecModel<TerminalState>>() else {
+        tracing::warn!("terminals model is not a VecModel; dropping session event for {tab_id}");
+        return;
+    };
 
     let update_terminal = |mutator: &dyn Fn(&mut TerminalState)| {
         for i in 0..terminals.row_count() {

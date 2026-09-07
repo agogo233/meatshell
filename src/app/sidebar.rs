@@ -17,7 +17,7 @@ pub(super) fn refresh_process_model(win: &AppWindow, statuses: &TabStatuses) {
     let active = win.get_active_tab_id().to_string();
     let rows = statuses
         .lock()
-        .unwrap()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(&active)
         .filter(|status| status.state == 1)
         .map(|status| proc_rows(&status.procs, &status.user, &active))

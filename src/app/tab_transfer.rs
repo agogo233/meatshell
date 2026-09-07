@@ -392,7 +392,10 @@ pub(super) fn move_tab_between_windows(
     else {
         return false;
     };
-    let tab_row = src.tabs_model.row_data(tab_i).unwrap();
+    let Some(tab_row) = src.tabs_model.row_data(tab_i) else {
+        tracing::warn!("tab {tab_id} vanished from source model mid-move");
+        return false;
+    };
     src.tabs_model.remove(tab_i);
     let term_row = {
         let mut row = None;

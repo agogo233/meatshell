@@ -195,7 +195,8 @@ async fn run_serial(
                 let res = tokio::time::timeout(
                     Duration::from_secs(30),
                     tokio::task::spawn_blocking(move || {
-                        let mut guard = w.lock().unwrap();
+                        let mut guard =
+                            w.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         guard.write_all(&bytes).and_then(|_| guard.flush())
                     }),
                 )
