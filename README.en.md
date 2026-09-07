@@ -28,7 +28,7 @@ Every `v*` tag triggers a GitHub Actions build that produces native binaries for
 
 ### Windows
 
-Download `meatshell-*-windows-x86_64.zip`, unzip, and run `meatshell.exe`.
+Download `meatshell-windows-x86_64-portable.zip`, unzip, and run `meatshell.exe`.
 
 ### Linux
 

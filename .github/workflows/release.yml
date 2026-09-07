@@ -52,7 +52,8 @@ jobs:
           if [ -z "$VERSION" ] || [ "$VERSION" = "dev" ]; then
             VERSION="$(sed -n '/^\[package\]/,/^\[/ s/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
           fi
-          STAGE="meatshell-${VERSION}-windows-x86_64"
+          # Fixed name: also serves as the `latest` prerelease asset name.
+          STAGE="meatshell-windows-x86_64-portable"
           rm -rf "$STAGE" "${STAGE}.zip"
           mkdir "$STAGE"
           cp "target/x86_64-pc-windows-msvc/release/meatshell.exe" "$STAGE/"
@@ -63,7 +64,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-x86_64-portable
-          path: meatshell-*-windows-x86_64.zip
+          path: meatshell-windows-x86_64-portable.zip
           retention-days: 7
           if-no-files-found: error
 
@@ -78,18 +79,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: windows-x86_64-portable
-
-      - name: Prepare fixed asset name
-        shell: bash
-        run: |
-          set -eu
-          # Locate the downloaded zip wherever download-artifact put it.
-          ZIP="$(find . -maxdepth 3 -name 'meatshell-*-windows-x86_64.zip' -print -quit)"
-          test -n "$ZIP"
-          # Fixed asset name so each run replaces the previous download
-          # instead of piling up versioned files on the `latest` release.
-          rm -rf meatshell-latest-windows-x86_64.zip
-          cp "$ZIP" meatshell-latest-windows-x86_64.zip
+          path: .
 
       - uses: softprops/action-gh-release@v2
         with:
@@ -97,7 +87,7 @@ jobs:
           name: "Latest CI Build (Windows x64)"
           prerelease: true
           update: true
-          files: meatshell-latest-windows-x86_64.zip
+          files: meatshell-windows-x86_64-portable.zip
           fail_on_unmatched_files: true
           body: |
             meatshell ${{ needs.windows-x86_64.outputs.version }} · ${{ github.sha }} · ${{ github.run_number }}

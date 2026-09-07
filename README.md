@@ -26,7 +26,7 @@ JVM 压到几十 MB 原生级别。
 
 ### Windows
 
-下载 `meatshell-*-windows-x86_64.zip`，解压后双击 `meatshell.exe`。
+下载 `meatshell-windows-x86_64-portable.zip`，解压后双击 `meatshell.exe`。
 
 ### Linux
 
