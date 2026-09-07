@@ -1110,6 +1110,9 @@ export component AppWindow inherits Window {
     callback sftp-edit-external(string /* tab-id */, string /* path */);
     callback sftp-sort-request(string /* tab-id */, string /* key */);
     callback sftp-clear-sort(string /* tab-id */);
+    // Keyboard type-ahead in the SFTP file list (#sftp-typeahead): Rust matches
+    // the prefix against the tab's entry names, case-insensitively.
+    callback sftp-type-ahead(string /* tab-id */, string /* prefix */) -> int;
     callback tunnel-add(string /* tab-id */, string /* name */, string /* kind */, string /* bind */, string /* bind-port */, string /* host */, string /* host-port */);
     callback tunnel-stop(string /* tab-id */, string /* tunnel-id */);
     // SFTP context-menu extensions (#69): rename / chmod / mkdir / touch share
@@ -2290,6 +2293,7 @@ export component AppWindow inherits Window {
                         sftp-edit-external(path) => { root.sftp-edit-external(term.id, path); }
                         sftp-sort-request(key) => { root.sftp-sort-request(term.id, key); }
                         sftp-clear-sort() => { root.sftp-clear-sort(term.id); }
+                        sftp-type-ahead(prefix) => { return root.sftp-type-ahead(term.id, prefix); }
                         tunnel-add(name, kind, bind, bind-port, host, host-port) => {
                             root.tunnel-add(term.id, name, kind, bind, bind-port, host, host-port);
                         }

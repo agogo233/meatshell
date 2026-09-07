@@ -93,6 +93,14 @@ export component SftpPanel inherits Rectangle {
     property <bool> show-modified-col: root.show-tree || (root.list-w - 36px - 120px > root.name-min);
     property <int> selected-row: -1;       // clicked/highlighted file-list row (#70)
     in property <int> selected-count;      // number of checked entries (#100)
+    // Keyboard type-ahead (#sftp-typeahead): after clicking a row the panel grabs
+    // keyboard focus, letters narrow to the first matching name, arrow keys move
+    // the selection and Enter opens/downloads it. `jump-prefix` accumulates typed
+    // characters (Reset by type-ahead-timer); `jump-target` is what scrolls the
+    // list — kept separate from `selected-row` (also driven by the mouse) so a
+    // click never yanks the viewport.
+    property <string> jump-prefix: "";
+    property <int> jump-target: -1;
     // Panel-level right-click context menu (#84). One menu for the whole list:
     // an empty `menu-target` means the click landed on whitespace, which greys
     // out the item-specific actions (download/rename/…) but keeps new/refresh.
@@ -133,6 +141,7 @@ export component SftpPanel inherits Rectangle {
     callback edit-external(string);     // open externally + watch/re-upload (#81)
     callback sort-request(string /* name|size|modified */);
     callback clear-sort();
+    callback type-ahead(string /* prefix */) -> int;   // first row whose name starts with prefix, -1 if none
     callback tunnel-add(string /* name */, string /* kind */, string /* bind */, string /* bind-port */, string /* host */, string /* host-port */);
     callback tunnel-stop(string /* id */);
     // Context-menu extensions (#69). The *-request callbacks open dialogs in
@@ -157,6 +166,30 @@ export component SftpPanel inherits Rectangle {
         path-input.text = root.current-path;
         compact-path-input.text = root.current-path;
         root.selected-row = -1;
+        root.jump-prefix = "";
+        root.jump-target = -1;
+    }
+
+    // Bring the type-ahead target into view. Rows are a fixed 24px tall, so the
+    // needed scroll is pure arithmetic on the ScrollView's viewport-y (mirrors
+    // the `bring-into-view` trick the std ListView uses; Slint has no scroll-to
+    // API). Multiplied out so `+=` isn't needed in this expression language.
+    changed jump-target => {
+        if (root.jump-target >= 0 && root.jump-target < root.entries.length) {
+            let item-top = file-scroll-view.viewport-y + root.jump-target * 24px;
+            if (item-top < 0px) {
+                file-scroll-view.viewport-y = file-scroll-view.viewport-y - item-top;
+            } else if (item-top + 24px > file-scroll-view.visible-height) {
+                file-scroll-view.viewport-y = file-scroll-view.viewport-y - (item-top + 24px - file-scroll-view.visible-height);
+            }
+        }
+    }
+
+    // Resets the accumulated type-ahead prefix when the user pauses typing.
+    type-ahead-timer := Timer {
+        interval: 900ms;
+        running: root.jump-prefix != "";
+        triggered => { root.jump-prefix = ""; }
     }
 
     // Drag empty space to re-dock; interactive widgets (file list, tree, toolbar
@@ -737,136 +770,193 @@ export component SftpPanel inherits Rectangle {
                 file-area := Rectangle {
                     vertical-stretch: 1;
                     clip: true;
-                    ScrollView {
-                        width: parent.width;
-                        height: parent.height;
-                        viewport-width: self.visible-width;
-                        viewport-height: max(self.visible-height, file-list.preferred-height);
-
-                        file-list := VerticalLayout {
-                            spacing: 0;
-
-                            if root.loading : Rectangle {
-                                height: 40px;
-                                Text { text: @tr("Loading..."); color: Theme.text-muted; font-size: Theme.fs-sm;
-                                       horizontal-alignment: center; vertical-alignment: center; }
-                            }
-
-                            if !root.loading && root.entries.length == 0 : Rectangle {
-                                height: 40px;
-                                Text { text: @tr("Empty directory"); color: Theme.text-muted; font-size: Theme.fs-sm;
-                                       horizontal-alignment: center; vertical-alignment: center; }
-                            }
-
-                            for entry[i] in root.entries : row := Rectangle {
-                                height: 24px;
-                                background: entry.selected
-                                    ? #4a90e235
-                                    : (i == root.selected-row
-                                        ? #4a90e240
-                                        : (row-ta.has-hover
-                                            ? #4a90e225
-                                            : (mod(i, 2) == 0 ? transparent : #ffffff08)));
-
-                                row-ta := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.selected-row = i; }
-                                    double-clicked => {
-                                        if (entry.is-dir) {
-                                            root.navigate(entry.full-path);
-                                        } else {
-                                            root.download(entry.full-path);
-                                        }
+                    // Keyboard type-ahead (#sftp-typeahead). focus-on-click is off:
+                    // focus is grabbed only when a row is clicked (below), so
+                    // clicking whitespace or the toolbar leaves the terminal's
+                    // keyboard untouched, and a focused path-input keeps priority.
+                    list-focus := FocusScope {
+                        focus-on-click: false;
+                        focus-on-tab-navigation: false;
+                        key-pressed(event) => {
+                            if (root.panel-mode != "files" || root.loading || root.entries.length == 0) {
+                                reject
+                            } else if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
+                                reject   // AppWindow shortcuts (Ctrl+Tab, new window, zoom…) keep working
+                            } else if (event.text == Key.Escape) {
+                                root.jump-prefix = "";
+                                accept
+                            } else if (event.text == Key.Return) {
+                                if (root.selected-row >= 0 && root.selected-row < root.entries.length) {
+                                    let hit = root.entries[root.selected-row];
+                                    if (hit.is-dir) { root.navigate(hit.full-path); } else { root.download(hit.full-path); }
+                                }
+                                accept
+                            } else if (event.text == Key.UpArrow) {
+                                root.jump-prefix = "";
+                                let idx = max(0, root.selected-row < 0 ? 0 : root.selected-row - 1);
+                                root.selected-row = idx;
+                                root.jump-target = idx;
+                                accept
+                            } else if (event.text == Key.DownArrow) {
+                                root.jump-prefix = "";
+                                let idx = min(root.entries.length - 1, root.selected-row < 0 ? 0 : root.selected-row + 1);
+                                root.selected-row = idx;
+                                root.jump-target = idx;
+                                accept
+                            } else if (event.text.character-count() == 1 && event.text != " " && event.text != "\t") {
+                                root.jump-prefix = root.jump-prefix + event.text;
+                                type-ahead-timer.restart();
+                                let idx = root.type-ahead(root.jump-prefix);
+                                if (idx >= 0) {
+                                    root.selected-row = idx;
+                                    root.jump-target = idx;
+                                } else {
+                                    // No name starts with the whole chunk; fall back to
+                                    // just the newest character so a fast "ca…" typed
+                                    // before the timer fires still lands somewhere.
+                                    let idx2 = root.type-ahead(event.text);
+                                    if (idx2 >= 0) {
+                                        root.selected-row = idx2;
+                                        root.jump-target = idx2;
                                     }
-                                    pointer-event(ev) => {
-                                        if (ev.kind == PointerEventKind.down
-                                                && ev.button == PointerEventButton.right) {
-                                            root.selected-row = i;
-                                            root.menu-target = entry.full-path;
-                                            root.menu-target-name = entry.name;
-                                            root.menu-target-is-dir = entry.is-dir;
-                                            root.menu-target-mode = entry.mode;
-                                            root.menu-x = self.absolute-position.x + self.mouse-x - file-area.absolute-position.x;
-                                            root.menu-y = self.absolute-position.y + self.mouse-y - file-area.absolute-position.y;
-                                            file-menu.show();
-                                        }
-                                    }
+                                    root.jump-prefix = event.text;
+                                }
+                                accept
+                            } else {
+                                reject
+                            }
+                        }
+                        file-scroll-view := ScrollView {
+                            width: parent.width;
+                            height: parent.height;
+                            viewport-width: self.visible-width;
+                            viewport-height: max(self.visible-height, file-list.preferred-height);
+
+                            file-list := VerticalLayout {
+                                spacing: 0;
+
+                                if root.loading : Rectangle {
+                                    height: 40px;
+                                    Text { text: @tr("Loading..."); color: Theme.text-muted; font-size: Theme.fs-sm;
+                                           horizontal-alignment: center; vertical-alignment: center; }
                                 }
 
-                                HorizontalLayout {
-                                    padding-left: 8px; padding-right: 8px; spacing: 8px;
-                                    // Multi-select checkbox (#100). Its own TouchArea
-                                    // sits above the row, so toggling doesn't trigger
-                                    // navigate/select.
-                                    Rectangle {
-                                        width: 16px;
-                                        y: (parent.height - self.height) / 2;
-                                        height: 16px;
-                                        border-radius: 3px;
-                                        border-width: 1px;
-                                        border-color: entry.selected ? Theme.accent : Theme.border-strong;
-                                        background: entry.selected ? Theme.accent : transparent;
-                                        cb-ta := TouchArea {
-                                            mouse-cursor: pointer;
-                                            clicked => { root.toggle-select(i); }
+                                if !root.loading && root.entries.length == 0 : Rectangle {
+                                    height: 40px;
+                                    Text { text: @tr("Empty directory"); color: Theme.text-muted; font-size: Theme.fs-sm;
+                                           horizontal-alignment: center; vertical-alignment: center; }
+                                }
+
+                                for entry[i] in root.entries : row := Rectangle {
+                                    height: 24px;
+                                    background: entry.selected
+                                        ? #4a90e235
+                                        : (i == root.selected-row
+                                            ? #4a90e240
+                                            : (row-ta.has-hover
+                                                ? #4a90e225
+                                                : (mod(i, 2) == 0 ? transparent : #ffffff08)));
+
+                                    row-ta := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { root.selected-row = i; list-focus.focus(); }
+                                        double-clicked => {
+                                            if (entry.is-dir) {
+                                                root.navigate(entry.full-path);
+                                            } else {
+                                                root.download(entry.full-path);
+                                            }
                                         }
-                                        if entry.selected : Text {
-                                            text: "\u{E5CA}"; // check
-                                            font-family: "Material Icons";
-                                            color: #ffffff;
-                                            font-size: 13px;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
-                                            width: parent.width; height: parent.height;
+                                        pointer-event(ev) => {
+                                            if (ev.kind == PointerEventKind.down
+                                                    && ev.button == PointerEventButton.right) {
+                                                root.selected-row = i;
+                                                root.menu-target = entry.full-path;
+                                                root.menu-target-name = entry.name;
+                                                root.menu-target-is-dir = entry.is-dir;
+                                                root.menu-target-mode = entry.mode;
+                                                root.menu-x = self.absolute-position.x + self.mouse-x - file-area.absolute-position.x;
+                                                root.menu-y = self.absolute-position.y + self.mouse-y - file-area.absolute-position.y;
+                                                file-menu.show();
+                                            }
                                         }
                                     }
 
                                     HorizontalLayout {
-                                        horizontal-stretch: 1;
-                                        spacing: 4px;
-                                        Text {
-                                            text: entry.is-dir ? "\u{E2C7}" : "\u{E24D}"; // folder / insert_drive_file
-                                            font-family: "Material Icons";
-                                            color: entry.is-dir ? Theme.accent : Theme.text-secondary;
-                                            font-size: Theme.fs-sm;
-                                            vertical-alignment: center;
+                                        padding-left: 8px; padding-right: 8px; spacing: 8px;
+                                        // Multi-select checkbox (#100). Its own TouchArea
+                                        // sits above the row, so toggling doesn't trigger
+                                        // navigate/select.
+                                        Rectangle {
+                                            width: 16px;
+                                            y: (parent.height - self.height) / 2;
+                                            height: 16px;
+                                            border-radius: 3px;
+                                            border-width: 1px;
+                                            border-color: entry.selected ? Theme.accent : Theme.border-strong;
+                                            background: entry.selected ? Theme.accent : transparent;
+                                            cb-ta := TouchArea {
+                                                mouse-cursor: pointer;
+                                                clicked => { root.toggle-select(i); }
+                                            }
+                                            if entry.selected : Text {
+                                                text: "\u{E5CA}"; // check
+                                                font-family: "Material Icons";
+                                                color: #ffffff;
+                                                font-size: 13px;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                                width: parent.width; height: parent.height;
+                                            }
                                         }
-                                        Text {
-                                            text: entry.name;
-                                            color: entry.is-dir ? Theme.accent : Theme.text-primary;
-                                            font-size: Theme.fs-sm;
+
+                                        HorizontalLayout {
                                             horizontal-stretch: 1;
-                                            overflow: elide;
-                                            vertical-alignment: center;
+                                            spacing: 4px;
+                                            Text {
+                                                text: entry.is-dir ? "\u{E2C7}" : "\u{E24D}"; // folder / insert_drive_file
+                                                font-family: "Material Icons";
+                                                color: entry.is-dir ? Theme.accent : Theme.text-secondary;
+                                                font-size: Theme.fs-sm;
+                                                vertical-alignment: center;
+                                            }
+                                            Text {
+                                                text: entry.name;
+                                                color: entry.is-dir ? Theme.accent : Theme.text-primary;
+                                                font-size: Theme.fs-sm;
+                                                horizontal-stretch: 1;
+                                                overflow: elide;
+                                                vertical-alignment: center;
+                                            }
                                         }
-                                    }
-                                    if root.show-size-col : Text {
-                                        text: entry.is-dir ? "" : entry.size;
-                                        color: Theme.text-secondary; font-size: Theme.fs-xs;
-                                        width: 72px; horizontal-alignment: right; vertical-alignment: center;
-                                    }
-                                    if root.show-modified-col : Text {
-                                        text: entry.modified;
-                                        color: Theme.text-muted; font-size: Theme.fs-xs;
-                                        width: 116px; horizontal-alignment: right; vertical-alignment: center;
+                                        if root.show-size-col : Text {
+                                            text: entry.is-dir ? "" : entry.size;
+                                            color: Theme.text-secondary; font-size: Theme.fs-xs;
+                                            width: 72px; horizontal-alignment: right; vertical-alignment: center;
+                                        }
+                                        if root.show-modified-col : Text {
+                                            text: entry.modified;
+                                            color: Theme.text-muted; font-size: Theme.fs-xs;
+                                            width: 116px; horizontal-alignment: right; vertical-alignment: center;
+                                        }
                                     }
                                 }
-                            }
 
-                            // Whitespace below the rows: right-click here opens the
-                            // menu with no target (item actions greyed out) (#84).
-                            ws := Rectangle {
-                                vertical-stretch: 1;
-                                min-height: 24px;
-                                ws-ta := TouchArea {
-                                    pointer-event(ev) => {
-                                        if (ev.kind == PointerEventKind.down
-                                                && ev.button == PointerEventButton.right) {
-                                            root.selected-row = -1;
-                                            root.menu-target = "";
-                                            root.menu-x = self.absolute-position.x + self.mouse-x - file-area.absolute-position.x;
-                                            root.menu-y = self.absolute-position.y + self.mouse-y - file-area.absolute-position.y;
-                                            file-menu.show();
+                                // Whitespace below the rows: right-click here opens the
+                                // menu with no target (item actions greyed out) (#84).
+                                ws := Rectangle {
+                                    vertical-stretch: 1;
+                                    min-height: 24px;
+                                    ws-ta := TouchArea {
+                                        pointer-event(ev) => {
+                                            if (ev.kind == PointerEventKind.down
+                                                    && ev.button == PointerEventButton.right) {
+                                                root.selected-row = -1;
+                                                root.menu-target = "";
+                                                root.menu-x = self.absolute-position.x + self.mouse-x - file-area.absolute-position.x;
+                                                root.menu-y = self.absolute-position.y + self.mouse-y - file-area.absolute-position.y;
+                                                file-menu.show();
+                                            }
                                         }
                                     }
                                 }

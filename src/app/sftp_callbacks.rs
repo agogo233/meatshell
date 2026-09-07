@@ -464,6 +464,47 @@ pub(super) fn wire_sftp_callbacks(
         });
     }
 
+    // Keyboard type-ahead (#sftp-typeahead): return the index of the first entry
+    // in the tab's listing whose name starts with `prefix` (case-insensitive), or
+    // -1 when nothing matches. Purely a lookup — the Slint side owns selection
+    // and scrolling. Model order is the displayed order, so the match follows the
+    // active sort.
+    {
+        let weak = window.as_weak();
+        window.on_sftp_type_ahead(move |tab_id: SharedString, prefix: SharedString| -> i32 {
+            let prefix = prefix.trim().to_uppercase();
+            if prefix.is_empty() {
+                return -1;
+            }
+            let Some(w) = weak.upgrade() else { return -1 };
+            let terminals = w.get_terminals();
+            let Some(tm) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>() else {
+                return -1;
+            };
+            for ti in 0..tm.row_count() {
+                let Some(row) = tm.row_data(ti) else { continue };
+                if row.id.as_str() != tab_id.as_str() {
+                    continue;
+                }
+                let Some(entries) = row
+                    .sftp_entries
+                    .as_any()
+                    .downcast_ref::<VecModel<SftpEntry>>()
+                else {
+                    return -1;
+                };
+                for j in 0..entries.row_count() {
+                    let Some(entry) = entries.row_data(j) else { continue };
+                    if entry.name.to_uppercase().starts_with(&prefix) {
+                        return j as i32;
+                    }
+                }
+                return -1;
+            }
+            -1
+        });
+    }
+
     // SFTP multi-select: toggle a row's checkbox + recount (#100).
     {
         let weak = window.as_weak();

@@ -606,6 +606,9 @@ export component TerminalView inherits Rectangle {
     callback sftp-edit-external(string);
     callback sftp-sort-request(string);
     callback sftp-clear-sort();
+    // Keyboard type-ahead in the file list (#sftp-typeahead): returns the first
+    // row index whose name starts with the prefix, -1 if none.
+    callback sftp-type-ahead(string) -> int;
     callback tunnel-add(string, string, string, string, string, string);
     callback tunnel-stop(string);
     // Context-menu extensions (#69), forwarded up to the app shell.
@@ -2489,6 +2492,7 @@ export component TerminalView inherits Rectangle {
             edit-external(path) => { root.sftp-edit-external(path); }
             sort-request(key)   => { root.sftp-sort-request(key); }
             clear-sort()        => { root.sftp-clear-sort(); }
+            type-ahead(prefix)  => { return root.sftp-type-ahead(prefix); }
             tunnel-add(name, kind, bind, bind-port, host, host-port) => {
                 root.tunnel-add(name, kind, bind, bind-port, host, host-port);
             }
