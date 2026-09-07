@@ -44,6 +44,12 @@ impl StartMode {
 }
 
 fn main() -> anyhow::Result<()> {
+    // First thing the process does: a release build sets panic = "abort", so
+    // any panic kills the app without unwinding — and without the tracing
+    // layers ever flushing. The hook appends the panic site straight to
+    // error.log so a one-shot crash still leaves a diagnosable scene.
+    logging::install_panic_hook();
+
     let args: Vec<String> = std::env::args().collect();
 
     let mode = StartMode::detect(&args);
@@ -128,20 +134,38 @@ fn init_tracing() {
         .with_filter(env_filter);
 
     // One file, capped at 50 MiB, auto-overwriting when full (5 MiB was too
-    // small to diagnose anything useful).
-    let file_layer = logging::path()
-        .and_then(|p| logging::CappedFile::open(p, 50 * 1024 * 1024).ok())
-        .map(|cf| {
-            fmt::layer()
-                .with_ansi(false)
-                .with_writer(logging::CappedWriter::new(cf))
-                .with_filter(quiet_noise(EnvFilter::new("warn")))
-        });
+    // small to diagnose anything useful). An open failure is NOT silently
+    // dropped any more: surface it once the subscriber is up so a user who
+    // goes looking for error.log learns why it isn't there.
+    let mut file_open_error: Option<String> = None;
+    let file_layer = match logging::path() {
+        Some(p) => match logging::CappedFile::open(p, 50 * 1024 * 1024) {
+            Ok(cf) => Some(
+                fmt::layer()
+                    .with_ansi(false)
+                    .with_writer(logging::CappedWriter::new(cf))
+                    .with_filter(quiet_noise(EnvFilter::new("warn"))),
+            ),
+            Err(error) => {
+                file_open_error = Some(error.to_string());
+                None
+            }
+        },
+        None => {
+            file_open_error = Some("no log dir resolved".to_string());
+            None
+        }
+    };
 
     tracing_subscriber::registry()
         .with(stderr_layer)
         .with(file_layer)
         .init();
+
+    tracing::info!("log dir: {:?}", logging::path());
+    if let Some(error) = file_open_error {
+        tracing::warn!("error.log unavailable: {error}");
+    }
 }
 
 #[cfg(test)]
