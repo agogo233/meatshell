@@ -32,9 +32,10 @@ pub(super) fn wire_tab_callbacks(
                 return;
             };
             if let Some(w) = weak.upgrade() {
+                let lay = layout.borrow().clone();
                 refresh_panes(
                     &w,
-                    &layout.borrow(),
+                    &lay,
                     content_size.get(),
                     &tabs_model,
                     &panes_model,
@@ -67,9 +68,10 @@ pub(super) fn wire_tab_callbacks(
                 }
             }
             if let Some(w) = weak.upgrade() {
+                let lay = layout.borrow().clone();
                 refresh_panes(
                     &w,
-                    &layout.borrow(),
+                    &lay,
                     content_size.get(),
                     &tabs_model,
                     &panes_model,
@@ -102,9 +104,10 @@ pub(super) fn wire_tab_callbacks(
                 .move_tab_within(pane_id as u64, from as usize, to as usize);
             if let Some(w) = weak.upgrade() {
                 w.set_drag_active(false);
+                let lay = layout.borrow().clone();
                 refresh_panes(
                     &w,
-                    &layout.borrow(),
+                    &lay,
                     content_size.get(),
                     &tabs_model,
                     &panes_model,
@@ -185,9 +188,10 @@ pub(super) fn wire_tab_callbacks(
 
             layout.borrow_mut().remove_tab(&id);
             if let Some(w) = weak.upgrade() {
+                let lay = layout.borrow().clone();
                 refresh_panes(
                     &w,
-                    &layout.borrow(),
+                    &lay,
                     content_size.get(),
                     &tabs_model,
                     &panes_model,
@@ -229,9 +233,10 @@ pub(super) fn wire_tab_callbacks(
                 }
             }
             if let Some(w) = weak.upgrade() {
+                let lay = layout.borrow().clone();
                 refresh_panes(
                     &w,
-                    &layout.borrow(),
+                    &lay,
                     content_size.get(),
                     &tabs_model,
                     &panes_model,
@@ -259,9 +264,10 @@ pub(super) fn wire_tab_callbacks(
                 }
             }
             if let Some(w) = weak.upgrade() {
+                let lay = layout.borrow().clone();
                 refresh_panes(
                     &w,
-                    &layout.borrow(),
+                    &lay,
                     content_size.get(),
                     &tabs_model,
                     &panes_model,
@@ -297,9 +303,10 @@ pub(super) fn wire_tab_callbacks(
                 }
             }
             if let Some(w) = weak.upgrade() {
+                let lay = layout.borrow().clone();
                 refresh_panes(
                     &w,
-                    &layout.borrow(),
+                    &lay,
                     content_size.get(),
                     &tabs_model,
                     &panes_model,
@@ -340,9 +347,10 @@ pub(super) fn wire_tab_callbacks(
                     lay.split(pane_id as u64, d, &tab_id, before);
                 }
                 if let Some(w) = weak.upgrade() {
+                    let lay = layout.borrow().clone();
                     refresh_panes(
                         &w,
-                        &layout.borrow(),
+                        &lay,
                         content_size.get(),
                         &tabs_model,
                         &panes_model,
@@ -368,9 +376,10 @@ pub(super) fn wire_tab_callbacks(
                 lay.merge_leaf_into_other(pane_id as u64);
             }
             if let Some(w) = weak.upgrade() {
+                let lay = layout.borrow().clone();
                 refresh_panes(
                     &w,
-                    &layout.borrow(),
+                    &lay,
                     content_size.get(),
                     &tabs_model,
                     &panes_model,
@@ -508,9 +517,10 @@ pub(super) fn wire_tab_callbacks(
             }
             if let Some(w) = weak.upgrade() {
                 w.set_drag_active(false);
+                let lay = layout.borrow().clone();
                 refresh_panes(
                     &w,
-                    &layout.borrow(),
+                    &lay,
                     content_size.get(),
                     &tabs_model,
                     &panes_model,

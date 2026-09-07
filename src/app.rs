@@ -2124,9 +2124,14 @@ fn open_window(
     window.set_panes(ModelRc::from(panes_model.clone()));
     let splitters_model: Rc<VecModel<SplitterInfo>> = Rc::new(VecModel::default());
     window.set_splitters(ModelRc::from(splitters_model.clone()));
+    // Snapshot the layout and drop the RefCell guard before mutating Slint
+    // models: a model change can synchronously run binding callbacks, and one
+    // of those re-entering `layout.borrow*()` while this shared guard is still
+    // alive would panic (RefCell already borrowed) → abort in release.
+    let lay = layout.borrow().clone();
     refresh_panes(
         &window,
-        &layout.borrow(),
+        &lay,
         content_size.get(),
         &tabs_model,
         &panes_model,
@@ -2146,9 +2151,10 @@ fn open_window(
             }
             content_size.set(next);
             if let Some(win) = weak.upgrade() {
+                let lay = layout.borrow().clone();
                 refresh_panes(
                     &win,
-                    &layout.borrow(),
+                    &lay,
                     content_size.get(),
                     &tabs_model,
                     &panes_model,
@@ -2194,9 +2200,10 @@ fn open_window(
                         let mut lay = layout.borrow_mut();
                         update_welcome_tab(&mut lay, v);
                     }
+                    let lay = layout.borrow().clone();
                     refresh_panes(
                         &w,
-                        &layout.borrow(),
+                        &lay,
                         content_size.get(),
                         &tabs_model,
                         &panes_model,
@@ -5596,9 +5603,10 @@ fn wire_session_callbacks(
             // active-tab-id to the new tab via refresh_panes).
             layout.borrow_mut().add_tab(tab_id.clone());
             if let Some(w) = weak.upgrade() {
+                let lay = layout.borrow().clone();
                 refresh_panes(
                     &w,
-                    &layout.borrow(),
+                    &lay,
                     content_size.get(),
                     &tabs_model,
                     &panes_model,

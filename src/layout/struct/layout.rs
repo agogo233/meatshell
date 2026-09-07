@@ -29,7 +29,12 @@ pub struct Leaf {
 }
 
 /// The whole layout plus an id allocator and which leaf currently has focus.
-#[derive(Debug)]
+///
+/// Cheap to clone (a few small panes): `refresh_panes` callers snapshot the
+/// layout and release the `RefCell` guard before touching Slint models, so a
+/// synchronous Slint binding callback can never re-enter `layout.borrow_mut()`
+/// while a shared guard is still held.
+#[derive(Clone, Debug)]
 pub struct Layout {
     pub root: Node,
     pub focused: u64,

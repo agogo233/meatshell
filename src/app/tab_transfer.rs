@@ -451,9 +451,10 @@ pub(super) fn move_tab_between_windows(
         dst.terminals_model.push(row);
     }
     if let Some(w) = dst.weak.upgrade() {
+        let lay = dst.layout.borrow().clone();
         refresh_panes(
             &w,
-            &dst.layout.borrow(),
+            &lay,
             dst.content_size.get(),
             &dst.tabs_model,
             &dst.panes_model,
@@ -462,9 +463,10 @@ pub(super) fn move_tab_between_windows(
         rebuild_tab_display(&w, &dst.bufs, tab_id);
     }
     if let Some(w) = src.weak.upgrade() {
+        let lay = src.layout.borrow().clone();
         refresh_panes(
             &w,
-            &src.layout.borrow(),
+            &lay,
             src.content_size.get(),
             &src.tabs_model,
             &src.panes_model,
