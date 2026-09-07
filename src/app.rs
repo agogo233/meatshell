@@ -5525,6 +5525,7 @@ fn wire_session_callbacks(
                     )
                     .into()
                 },
+                sftp_status_kind: 0,
                 sftp_loading: has_sftp,
                 sftp_tree_nodes: ModelRc::from(std::rc::Rc::new(
                     VecModel::<SftpTreeNode>::default(),

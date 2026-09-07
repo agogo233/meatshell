@@ -274,15 +274,40 @@ pub(super) fn apply_session_event_to_window(
             });
         }
         SessionEvent::SftpStatus(msg) => {
-            update_terminal(&|t| t.sftp_status = msg.clone().into());
+            update_terminal(&|t| {
+                t.sftp_status = msg.clone().into();
+                t.sftp_status_kind = 0;
+            });
         }
         SessionEvent::SftpError(msg) => {
             // Show the reason and stop the spinner; leave the current listing in
             // place so a failed navigation doesn't blank the panel (#112).
             update_terminal(&|t| {
                 t.sftp_status = msg.clone().into();
+                t.sftp_status_kind = 2;
                 t.sftp_loading = false;
             });
+        }
+        SessionEvent::SftpSaveResult {
+            path,
+            ok,
+            message,
+        } => {
+            // Built-in editor save outcome (#70). The status bar is colour-coded
+            // via `sftp-status-kind` (1 saved / 2 failed). A failure re-marks the
+            // editor dirty (nothing was written), but only when this same file is
+            // still open — a stale failure must not flag a different file.
+            let kind = if ok { 1 } else { 2 };
+            update_terminal(&|t| {
+                t.sftp_status = message.clone().into();
+                t.sftp_status_kind = kind;
+            });
+            if !ok
+                && win.get_editor_open()
+                && win.get_editor_path().as_str() == path.as_str()
+            {
+                win.set_editor_dirty(true);
+            }
         }
         SessionEvent::SftpFileText {
             path,
@@ -320,7 +345,10 @@ pub(super) fn apply_session_event_to_window(
                     local,
                     local_net_hist,
                 );
-                update_terminal(&|t| t.sftp_status = error.clone().into());
+                update_terminal(&|t| {
+                    t.sftp_status = error.clone().into();
+                    t.sftp_status_kind = 2;
+                });
             }
         }
         SessionEvent::SftpTreeUpdate(nodes) => {

@@ -1483,17 +1483,18 @@ async fn run_sftp(
                 let name = base_name(&remote);
                 match write_text_file(&sftp, &remote, &content).await {
                     Ok(_) => {
-                        let _ = events.send(SessionEvent::SftpStatus(format!(
-                            "{}: {}",
-                            t("已保存", "Saved"),
-                            name
-                        )));
+                        let _ = events.send(SessionEvent::SftpSaveResult {
+                            path: remote,
+                            ok: true,
+                            message: format!("{}: {}", t("已保存", "Saved"), name),
+                        });
                     }
                     Err(e) => {
-                        let _ = events.send(SessionEvent::SftpStatus(format!(
-                            "{}: {e:#}",
-                            t("保存失败", "Save failed")
-                        )));
+                        let _ = events.send(SessionEvent::SftpSaveResult {
+                            path: remote,
+                            ok: false,
+                            message: format!("{}: {e:#}", t("保存失败", "Save failed")),
+                        });
                     }
                 }
             }

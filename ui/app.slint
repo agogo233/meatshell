@@ -72,6 +72,7 @@ export struct TerminalState {
     sftp-path: string,
     sftp-entries: [SftpEntry],
     sftp-status: string,
+    sftp-status-kind: int,      // 0 neutral / 1 saved / 2 failed (colour-coded status bar)
     sftp-loading: bool,
     sftp-tree-nodes: [SftpTreeNode],
     sftp-selected-count: int,   // checked entries in the SFTP panel (#100)
@@ -2190,6 +2191,7 @@ export component AppWindow inherits Window {
                         sftp-path: term.sftp-path;
                         sftp-entries: term.sftp-entries;
                         sftp-status: term.sftp-status;
+                        sftp-status-kind: term.sftp-status-kind;
                         sftp-loading: term.sftp-loading;
                         sftp-tree-nodes: term.sftp-tree-nodes;
                         sftp-transfer-targets: root.tabs;

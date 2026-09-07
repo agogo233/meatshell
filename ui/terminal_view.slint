@@ -496,6 +496,7 @@ export component TerminalView inherits Rectangle {
     in property <string>  sftp-path: "/";
     in property <[SftpEntry]> sftp-entries;
     in property <string>  sftp-status: "";
+    in property <int>     sftp-status-kind: 0; // 0 neutral / 1 saved / 2 failed
     in property <bool>    sftp-loading: false;
     in property <[SftpTreeNode]> sftp-tree-nodes: [];
     in property <[TabInfo]> sftp-transfer-targets: [];
@@ -2457,6 +2458,7 @@ export component TerminalView inherits Rectangle {
             current-path:  root.sftp-path;
             entries:       root.sftp-entries;
             status:        root.sftp-status;
+            status-kind:   root.sftp-status-kind;
             loading:       root.sftp-loading;
             tree-nodes:    root.sftp-tree-nodes;
             transfer-targets: root.sftp-transfer-targets;

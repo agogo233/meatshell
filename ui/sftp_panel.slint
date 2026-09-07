@@ -68,6 +68,7 @@ export component SftpPanel inherits Rectangle {
     in property <string>  current-path: "/";
     in property <[SftpEntry]>    entries;
     in property <string>  status: @tr("SFTP not connected");
+    in property <int>     status-kind: 0;   // 0 neutral / 1 saved / 2 failed
     in property <bool>    loading: false;
     in property <[SftpTreeNode]> tree-nodes: [];
     in property <string> current-tab-id;
@@ -1213,7 +1214,9 @@ export component SftpPanel inherits Rectangle {
             Text {
                 x: 8px;
                 text: root.status;
-                color: Theme.text-muted;
+                color: root.status-kind == 1 ? Theme.success
+                     : root.status-kind == 2 ? Theme.danger
+                     : Theme.text-muted;
                 font-size: Theme.fs-xs;
                 vertical-alignment: center;
                 height: parent.height;
