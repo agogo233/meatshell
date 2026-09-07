@@ -596,7 +596,11 @@ export component SftpPanel inherits Rectangle {
         }
 
         // --- Main area: tree (left) + file list (right) --------------------
-        if root.panel-mode == "files" : HorizontalLayout {
+        // Always instantiated and merely hidden (`visible`, not `if`) so the
+        // root-level `changed jump-target` handler can reach file-scroll-view:
+        // ids inside `if` subtrees are not accessible from outside (#dock).
+        HorizontalLayout {
+            visible: root.panel-mode == "files";
             vertical-stretch: 1;
             spacing: 0;
 
@@ -804,7 +808,7 @@ export component SftpPanel inherits Rectangle {
                                 root.selected-row = idx;
                                 root.jump-target = idx;
                                 accept
-                            } else if (event.text.character-count() == 1 && event.text != " " && event.text != "\t") {
+                            } else if (event.text.character-count == 1 && event.text != " " && event.text != "\u{9}") {
                                 root.jump-prefix = root.jump-prefix + event.text;
                                 type-ahead-timer.restart();
                                 let idx = root.type-ahead(root.jump-prefix);
