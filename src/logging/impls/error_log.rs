@@ -72,7 +72,10 @@ pub fn install_panic_hook() {
 fn append_panic_report(report: &str) {
     let Some(path) = path() else { return };
     // Truncate when near the cap so the report always fits (CappedFile's
-    // truncate-and-restart, with headroom for this one write).
+    // truncate-and-restart, with headroom for this one write). The truncate
+    // races the tracing layer's own cap logic, but both write with O_APPEND
+    // semantics, so a lost race only skews the cap accounting — never
+    // overwrites an in-flight report.
     if let Ok(meta) = std::fs::metadata(&path) {
         if meta.len() + report.len() as u64 > PANIC_HOOK_CAP_BYTES && File::create(&path).is_err()
         {

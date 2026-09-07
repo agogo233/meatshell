@@ -431,7 +431,10 @@ pub(super) fn wire_tab_callbacks(
                         w.set_drag_active(false);
                         return;
                     }
-                    match drag_target(&layout.borrow(), content_size.get(), x, y) {
+                    // Snapshot first: the match arms write Slint properties and
+                    // the temporary `layout.borrow()` would otherwise span them.
+                    let lay = layout.borrow().clone();
+                    match drag_target(&lay, content_size.get(), x, y) {
                         Some((_, _, (hx, hy, hw, hh))) => {
                             w.set_drag_active(true);
                             w.set_drag_hl_x(hx);
