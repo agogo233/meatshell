@@ -78,6 +78,7 @@ export struct TerminalState {
     sftp-selected-count: int,   // checked entries in the SFTP panel (#100)
     sftp-sort-key: string,      // ""|"name"|"size"|"modified" (#248)
     sftp-sort-dir: int,         // 0 default / 1 asc / -1 desc (#248)
+    sftp-bookmarks: [string],   // saved paths for this tab's server (bookmark menu)
     sftp-available: bool,       // false for local/serial/telnet sessions
     font-size: int,             // per-session zoom override in px (0 = follow window)
     tunnels: [TunnelInfo],      // runtime SSH tunnels (#206)
@@ -1114,6 +1115,10 @@ export component AppWindow inherits Window {
     // Keyboard type-ahead in the SFTP file list (#sftp-typeahead): Rust matches
     // the prefix against the tab's entry names, case-insensitively.
     callback sftp-type-ahead(string /* tab-id */, string /* prefix */) -> int;
+    // Per-server path bookmarks: add current dir, jump to, or drop a saved path.
+    // Jump reuses sftp-navigate; only add/remove need Rust wiring.
+    callback sftp-bookmark-add(string /* tab-id */);
+    callback sftp-bookmark-remove(string /* tab-id */, string /* path */);
     callback tunnel-add(string /* tab-id */, string /* name */, string /* kind */, string /* bind */, string /* bind-port */, string /* host */, string /* host-port */);
     callback tunnel-stop(string /* tab-id */, string /* tunnel-id */);
     // SFTP context-menu extensions (#69): rename / chmod / mkdir / touch share
@@ -2199,6 +2204,7 @@ export component AppWindow inherits Window {
                         sftp-sort-key: term.sftp-sort-key;
                         sftp-sort-dir: term.sftp-sort-dir;
                         sftp-available: term.sftp-available;
+                        sftp-bookmarks: term.sftp-bookmarks;
                         tunnels: term.tunnels;
                         quick-commands: root.quick-commands;
                         quick-sidebar-enabled: root.quick-commands-as-sidebar;
@@ -2266,6 +2272,9 @@ export component AppWindow inherits Window {
                         term-font-size-px: term.font-size > 0 ? term.font-size * 1.0 : root.term-font-size / 1px;
                         terminal-resize(w, h) => { root.terminal-resize(term.id, w, h) }
                         sftp-navigate(path) => { root.sftp-navigate(term.id, path); }
+                        sftp-bookmark-add() => { root.sftp-bookmark-add(term.id); }
+                        sftp-bookmark-jump(path) => { root.sftp-navigate(term.id, path); }
+                        sftp-bookmark-remove(path) => { root.sftp-bookmark-remove(term.id, path); }
                         sftp-download(path) => { root.sftp-download(term.id, path); }
                         sftp-upload-clicked(dir, folder) => { root.sftp-upload-clicked(term.id, dir, folder); }
                         sftp-refresh(path) => { root.sftp-refresh(term.id, path); }

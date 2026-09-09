@@ -504,6 +504,8 @@ export component TerminalView inherits Rectangle {
     in property <int> sftp-sort-dir: 0;
     in property <bool> sftp-available: true;
     in property <[TunnelInfo]> tunnels: [];
+    // Saved paths for this tab's server (SFTP bookmark menu).
+    in property <[string]> sftp-bookmarks: [];
 
     // Per-session now (#v0.5): the AppWindow stores these in each TerminalState
     // and writes back via the set-* callbacks, so each tab/pane keeps its own SFTP
@@ -618,6 +620,9 @@ export component TerminalView inherits Rectangle {
     callback sftp-copy-path(string);
     callback sftp-new-folder(string);
     callback sftp-new-file(string);
+    callback sftp-bookmark-add();
+    callback sftp-bookmark-jump(string /* path */);
+    callback sftp-bookmark-remove(string /* path */);
     callback paste-from-clipboard();
     callback copy-terminal-text();
     callback clear-terminal();              // wipe this session's screen buffer
@@ -2466,6 +2471,7 @@ export component TerminalView inherits Rectangle {
             sort-key: root.sftp-sort-key;
             sort-dir: root.sftp-sort-dir;
             tunnels: root.tunnels;
+            bookmarks: root.sftp-bookmarks;
             toggle-collapsed => {
                 if (root.sftp-collapsed) {
                     // Re-expand; the panel height was preserved while collapsed.
@@ -2504,6 +2510,9 @@ export component TerminalView inherits Rectangle {
             copy-path(path)     => { root.sftp-copy-path(path); }
             new-folder(dir)     => { root.sftp-new-folder(dir); }
             new-file(dir)       => { root.sftp-new-file(dir); }
+            bookmark-add()      => { root.sftp-bookmark-add(); }
+            bookmark-jump(path) => { root.sftp-bookmark-jump(path); }
+            bookmark-remove(path) => { root.sftp-bookmark-remove(path); }
         }
 
         // Drag-to-dock snap overlay — four edge zones; the one under the cursor

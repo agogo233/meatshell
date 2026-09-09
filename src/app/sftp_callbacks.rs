@@ -118,6 +118,8 @@ pub(super) fn wire_sftp_callbacks(
     window: &AppWindow,
     sftp_handles: SftpHandles,
     sftp_last_cwd: SftpLastCwd,
+    store: Rc<RefCell<ConfigStore>>,
+    tab_statuses: TabStatuses,
 ) {
     // Navigate to a remote path (or ".." to go up one level).
     {
@@ -976,6 +978,85 @@ pub(super) fn wire_sftp_callbacks(
             w.set_editor_lines(editor_lines_for(&replaced));
             w.set_editor_match_count(0);
         });
+    }
+
+    // Per-server path bookmarks: the panel menu adds the tab's current dir and
+    // drops saved entries; jumping reuses sftp-navigate in Slint. Both
+    // mutations persist the config and refresh the owning tab's model (other
+    // tabs on the same server catch up when next opened — bookmarks rarely
+    // churn mid-session).
+    {
+        let store = store.clone();
+        let tab_statuses = tab_statuses.clone();
+        let weak = window.as_weak();
+        window.on_sftp_bookmark_add(move |tab_id: SharedString| {
+            let tab_id = tab_id.to_string();
+            let Some(w) = weak.upgrade() else { return };
+            let Some(server) = sftp_server_key(&tab_statuses, &tab_id) else {
+                return;
+            };
+            let terminals_rc = w.get_terminals();
+            let Some(terminals) =
+                terminals_rc.as_any().downcast_ref::<VecModel<TerminalState>>()
+            else {
+                return;
+            };
+            let path = (0..terminals.row_count())
+                .filter_map(|i| terminals.row_data(i))
+                .find(|row| row.id.as_str() == tab_id)
+                .map(|row| row.sftp_path.to_string());
+            let Some(path) = path else { return };
+            {
+                let mut s = store.borrow_mut();
+                s.add_sftp_bookmark(server.clone(), path);
+                let _ = s.save();
+            }
+            set_tab_bookmarks(terminals, &tab_id, store.borrow().sftp_bookmarks(&server));
+        });
+        window.on_sftp_bookmark_remove(move |tab_id: SharedString, path: SharedString| {
+            let tab_id = tab_id.to_string();
+            let Some(w) = weak.upgrade() else { return };
+            let Some(server) = sftp_server_key(&tab_statuses, &tab_id) else {
+                return;
+            };
+            let terminals_rc = w.get_terminals();
+            let Some(terminals) =
+                terminals_rc.as_any().downcast_ref::<VecModel<TerminalState>>()
+            else {
+                return;
+            };
+            {
+                let mut s = store.borrow_mut();
+                s.remove_sftp_bookmark(&server, path.as_str());
+                let _ = s.save();
+            }
+            set_tab_bookmarks(terminals, &tab_id, store.borrow().sftp_bookmarks(&server));
+        });
+    }
+}
+
+/// Bookmark key for a tab: its connection label ("user@host"), the same string
+/// the sidebar shows. Local/telnet tabs never expose SFTP, so no special case.
+fn sftp_server_key(tab_statuses: &TabStatuses, tab_id: &str) -> Option<String> {
+    let host = lock_or_recover(tab_statuses)
+        .get(tab_id)
+        .map(|st| st.host.clone())?;
+    (!host.is_empty()).then_some(host)
+}
+
+/// Replace one tab's bookmark model with `paths` (clone-modify-set: rows are
+/// plain structs, the Slint binding re-reads on set_row_data).
+fn set_tab_bookmarks(terminals: &VecModel<TerminalState>, tab_id: &str, paths: &[String]) {
+    let model: Vec<SharedString> = paths.iter().map(|p| p.as_str().into()).collect();
+    for i in 0..terminals.row_count() {
+        let Some(mut row) = terminals.row_data(i) else {
+            continue;
+        };
+        if row.id.as_str() == tab_id {
+            row.sftp_bookmarks = ModelRc::from(std::rc::Rc::new(VecModel::from(model)));
+            terminals.set_row_data(i, row);
+            return;
+        }
     }
 }
 

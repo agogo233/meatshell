@@ -596,3 +596,9 @@ msgstr "大输出保护已启用"
 
 msgid "Only 127.0.0.1 / localhost / ::1 is allowed — other addresses would expose the tunnel to your whole network"
 msgstr "仅允许 127.0.0.1 / localhost / ::1，其他地址会把隧道暴露到整个局域网"
+
+msgid "Bookmark current path"
+msgstr "收藏当前路径"
+
+msgid "No bookmarks for this server"
+msgstr "此服务器暂无书签"

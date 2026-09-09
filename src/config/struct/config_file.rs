@@ -16,6 +16,16 @@ fn default_wsl_home() -> String {
     "~".to_string()
 }
 
+/// Per-server group of saved SFTP panel path bookmarks. `server` is the
+/// connection label (e.g. "user@host") the paths were collected under; the
+/// panel only ever shows the group matching the tab it belongs to.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SftpBookmarkGroup {
+    pub server: String,
+    #[serde(default)]
+    pub paths: Vec<String>,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -181,10 +191,10 @@ pub struct ConfigFile {
     /// Preserve the remote file's mtime after upload/download.
     #[serde(default)]
     pub sftp_queue_preserve_mtime: bool,
-    /// Saved SFTP panel path bookmarks, most-recent last (`add_sftp_bookmark`
-    /// moves a re-added path to the end).
+    /// Saved SFTP panel path bookmarks grouped per server (`add_sftp_bookmark`
+    /// moves a re-added path to the end of that server's list).
     #[serde(default)]
-    pub sftp_bookmarks: Vec<String>,
+    pub sftp_bookmarks: Vec<SftpBookmarkGroup>,
     // ── Command-history filters (fuzzy suggestions) ───────────────────────
     /// Minimum command length (chars) recorded in command history. 0 = no min.
     #[serde(default)]

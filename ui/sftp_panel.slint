@@ -76,6 +76,8 @@ export component SftpPanel inherits Rectangle {
     in property <string> sort-key: "";
     in property <int> sort-dir: 0; // 0 default / 1 asc / -1 desc
     in property <[TunnelInfo]> tunnels: [];
+    // Saved paths for the server behind this tab (bookmarks menu).
+    in property <[string]> bookmarks: [];
     in property <bool> collapsed: false;   // when true only the toolbar shows
     in property <bool> show-tree: true;    // hide the directory tree when narrow (#dock)
     in property <bool> compact: false;     // side-docked + collapsed → render nothing but a clean strip (#dock)
@@ -150,6 +152,10 @@ export component SftpPanel inherits Rectangle {
     callback rename-request(string /* path */, string /* current name */);
     callback chmod-request(string /* path */, string /* name */, int /* mode */);
     callback copy-path(string);
+    // Per-server path bookmarks: add the current path, jump to / drop one.
+    callback bookmark-add();
+    callback bookmark-jump(string /* path */);
+    callback bookmark-remove(string /* path */);
     callback new-folder(string /* parent dir */);
     callback new-file(string /* parent dir */);
     // Drag-to-dock: empty areas of the panel are a grab handle; coordinates are
@@ -407,6 +413,95 @@ export component SftpPanel inherits Rectangle {
                     }
                     Text { text: "↑"; color: Theme.text-secondary; font-size: Theme.fs-md;
                            horizontal-alignment: center; vertical-alignment: center; }
+                }
+
+                // Bookmarks: per-server saved paths. Stays a plain 24px icon in
+                // the compact toolbar (the path row moved down anyway). The icon
+                // tints when the current server has bookmarks.
+                Rectangle {
+                    visible: root.panel-mode == "files";
+                    width: 24px; height: 22px;
+                    border-radius: Theme.radius-sm;
+                    background: bm-ta.has-hover ? Theme.bg-hover : transparent;
+                    bm-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { bookmarks-menu.show(); }
+                    }
+                    Text { text: "\u{E866}"; font-family: "Material Icons";
+                           color: root.bookmarks.length > 0 ? Theme.accent : Theme.text-secondary;
+                           font-size: Theme.fs-sm;
+                           horizontal-alignment: center; vertical-alignment: center; }
+                    bookmarks-menu := PopupWindow {
+                        x: parent.width - self.width;
+                        y: parent.height + 2px;
+                        width: 300px;
+                        height: (root.bookmarks.length == 0 ? 2 : 1 + min(root.bookmarks.length, 8)) * 27px + 8px;
+                        Rectangle {
+                            background: Theme.popup-bg;
+                            border-radius: Theme.radius-sm;
+                            border-width: 1px;
+                            border-color: Theme.border-strong;
+                            drop-shadow-blur: 12px;
+                            drop-shadow-color: #00000060;
+                            ScrollView {
+                                width: parent.width; height: parent.height;
+                                viewport-width: self.visible-width;
+                                viewport-height: max(self.visible-height, bm-body.preferred-height);
+                                bm-body := VerticalLayout {
+                                    padding: 4px;
+                                    spacing: 1px;
+                                    SftpMenuItem {
+                                        label: @tr("Bookmark current path");
+                                        clicked => { root.bookmark-add(); }
+                                    }
+                                    if root.bookmarks.length == 0 : Text {
+                                        text: @tr("No bookmarks for this server");
+                                        color: Theme.text-muted;
+                                        font-size: Theme.fs-sm;
+                                        height: 26px; vertical-alignment: center;
+                                        padding-left: 10px;
+                                    }
+                                    // Custom row (not SftpMenuItem): the path is a
+                                    // jump target while a trailing × deletes it. The
+                                    // delete TouchArea is declared after the row's,
+                                    // so it wins the hit-test on its own 20px area.
+                                    for bm in root.bookmarks : Rectangle {
+                                        height: 26px;
+                                        border-radius: Theme.radius-sm;
+                                        background: bm-row-ta.has-hover ? Theme.bg-hover : transparent;
+                                        bm-row-ta := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.bookmark-jump(bm); }
+                                        }
+                                        HorizontalLayout {
+                                            padding-left: 10px;
+                                            padding-right: 4px;
+                                            spacing: 2px;
+                                            Text {
+                                                horizontal-stretch: 1;
+                                                text: bm;
+                                                color: Theme.text-primary;
+                                                font-size: Theme.fs-sm;
+                                                vertical-alignment: center;
+                                                overflow: elide;
+                                            }
+                                            Rectangle {
+                                                width: 20px; height: 20px;
+                                                border-radius: 3px;
+                                                background: bm-del-ta.has-hover ? Theme.danger.with-alpha(0.25) : transparent;
+                                                bm-del-ta := TouchArea {
+                                                    mouse-cursor: pointer;
+                                                    clicked => { root.bookmark-remove(bm); }
+                                                }
+                                                Text { text: "×"; color: Theme.danger; font-size: Theme.fs-md;
+                                                       horizontal-alignment: center; vertical-alignment: center; }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // Upload: a small menu offers file vs folder (#85). The remote

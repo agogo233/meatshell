@@ -1317,26 +1317,65 @@ impl ConfigStore {
         self.cache.auto_reconnect_interval_secs = n;
     }
 
-    pub fn sftp_bookmarks(&self) -> &[String] {
-        &self.cache.sftp_bookmarks
+    /// Bookmarked paths for one server, most-recent last. Empty slice when the
+    /// server has no bookmarks yet. Keys are trimmed like `add_sftp_bookmark`
+    /// stores them, so lookups never miss on stray whitespace.
+    pub fn sftp_bookmarks(&self, server: &str) -> &[String] {
+        let server = server.trim();
+        self.cache
+            .sftp_bookmarks
+            .iter()
+            .find(|g| g.server == server)
+            .map(|g| g.paths.as_slice())
+            .unwrap_or(&[])
     }
 
-    pub fn add_sftp_bookmark(&mut self, path: String) {
+    pub fn add_sftp_bookmark(&mut self, server: String, path: String) {
+        let server = server.trim().to_string();
         let path = path.trim().to_string();
-        if path.is_empty() {
+        if server.is_empty() || path.is_empty() {
             return;
         }
-        self.cache.sftp_bookmarks.retain(|b| b != &path);
-        self.cache.sftp_bookmarks.push(path);
         const CAP: usize = 64;
-        let len = self.cache.sftp_bookmarks.len();
-        if len > CAP {
-            self.cache.sftp_bookmarks.drain(0..len - CAP);
+        if let Some(group) = self
+            .cache
+            .sftp_bookmarks
+            .iter_mut()
+            .find(|g| g.server == server)
+        {
+            group.paths.retain(|b| b != &path);
+            group.paths.push(path);
+            let len = group.paths.len();
+            if len > CAP {
+                group.paths.drain(0..len - CAP);
+            }
+        } else {
+            self.cache.sftp_bookmarks.push(SftpBookmarkGroup {
+                server,
+                paths: vec![path],
+            });
         }
     }
 
-    pub fn remove_sftp_bookmark(&mut self, path: &str) {
-        self.cache.sftp_bookmarks.retain(|b| b != path);
+    pub fn remove_sftp_bookmark(&mut self, server: &str, path: &str) {
+        let server = server.trim();
+        let path = path.trim();
+        let Some(group) = self
+            .cache
+            .sftp_bookmarks
+            .iter()
+            .position(|g| g.server == server)
+        else {
+            return;
+        };
+        self.cache.sftp_bookmarks[group]
+            .paths
+            .retain(|b| b != path);
+        // Drop the whole group once its last path is removed so the config
+        // doesn't accumulate empty per-server entries.
+        if self.cache.sftp_bookmarks[group].paths.is_empty() {
+            self.cache.sftp_bookmarks.remove(group);
+        }
     }
 
     // ── Command-history length filters ────────────────────────────────────
@@ -3456,16 +3495,42 @@ old-switch=#98#7%10.0.0.1%23%cisco%0%0#15%80%24#0# #-1\r\n";
     }
 
     #[test]
-    fn sftp_bookmarks_are_deduped_and_capped() {
+    fn sftp_bookmarks_are_grouped_per_server_and_deduped() {
         let mut store = temp_store();
-        store.add_sftp_bookmark("/var/log".into());
-        store.add_sftp_bookmark("/data/app".into());
-        // Duplicate moves to the top (retain+push), count still 2.
-        store.add_sftp_bookmark("/var/log".into());
-        assert_eq!(store.sftp_bookmarks().len(), 2);
-        assert_eq!(store.sftp_bookmarks().last().map(String::as_str), Some("/var/log"));
-        store.remove_sftp_bookmark("/data/app");
-        assert_eq!(store.sftp_bookmarks().len(), 1);
+        store.add_sftp_bookmark("u@a".into(), "/var/log".into());
+        store.add_sftp_bookmark("u@b".into(), "/data/app".into());
+        // Re-adding on the same server moves it to the end; other servers
+        // keep their own lists untouched.
+        store.add_sftp_bookmark("u@a".into(), "/var/log".into());
+        assert_eq!(store.sftp_bookmarks("u@a").len(), 1);
+        assert_eq!(
+            store.sftp_bookmarks("u@a").last().map(String::as_str),
+            Some("/var/log")
+        );
+        assert_eq!(store.sftp_bookmarks("u@b").len(), 1);
+        assert!(store.sftp_bookmarks("u@c").is_empty());
+        store.add_sftp_bookmark("u@a".into(), "/etc".into());
+        store.remove_sftp_bookmark("u@a", "/var/log");
+        assert_eq!(store.sftp_bookmarks("u@a"), ["/etc".to_string()]);
+        // Removing the last path of a server drops the whole group.
+        store.remove_sftp_bookmark("u@a", "/etc");
+        assert!(store.sftp_bookmarks("u@a").is_empty());
+        store.remove_sftp_bookmark("u@b", "/data/app");
+        assert!(store.cache.sftp_bookmarks.is_empty());
+    }
+
+    #[test]
+    fn sftp_bookmarks_cap_drops_oldest_per_server() {
+        let mut store = temp_store();
+        for i in 0..70 {
+            store.add_sftp_bookmark("u@a".into(), format!("/p{i}"));
+        }
+        store.add_sftp_bookmark("u@b".into(), "/keep".into());
+        let bm = store.sftp_bookmarks("u@a");
+        assert_eq!(bm.len(), 64);
+        assert_eq!(bm.first().map(String::as_str), Some("/p6"));
+        assert_eq!(bm.last().map(String::as_str), Some("/p69"));
+        assert_eq!(store.sftp_bookmarks("u@b"), ["/keep".to_string()]);
     }
 
     #[test]

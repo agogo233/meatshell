@@ -2953,7 +2953,13 @@ fn open_window(
         sftp_last_cwd.clone(),
         tab_titles.clone(),
     );
-    wire_sftp_callbacks(&window, sftp_handles.clone(), sftp_last_cwd.clone());
+    wire_sftp_callbacks(
+        &window,
+        sftp_handles.clone(),
+        sftp_last_cwd.clone(),
+        store.clone(),
+        tab_statuses.clone(),
+    );
     // AI chat panel: install the (empty) conversation model before wiring the
     // send/stream callbacks, which push into it via downcast.
     window.set_ai_messages(ModelRc::from(Rc::new(VecModel::<AiMessage>::default())));
@@ -5533,6 +5539,15 @@ fn wire_session_callbacks(
                 sftp_selected_count: 0,
                 sftp_sort_key: "".into(),
                 sftp_sort_dir: 0,
+                sftp_bookmarks: {
+                    let v: Vec<slint::SharedString> = store
+                        .borrow()
+                        .sftp_bookmarks(&conn_label)
+                        .iter()
+                        .map(|p| p.as_str().into())
+                        .collect();
+                    ModelRc::from(std::rc::Rc::new(VecModel::from(v)))
+                },
                 sftp_available: has_sftp,
                 font_size: 0,
                 tunnels: ModelRc::from(std::rc::Rc::new(VecModel::<TunnelInfo>::default())),
