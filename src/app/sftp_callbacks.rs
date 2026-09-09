@@ -1013,6 +1013,11 @@ pub(super) fn wire_sftp_callbacks(
             }
             set_tab_bookmarks(terminals, &tab_id, store.borrow().sftp_bookmarks(&server));
         });
+    }
+    {
+        let store = store.clone();
+        let tab_statuses = tab_statuses.clone();
+        let weak = window.as_weak();
         window.on_sftp_bookmark_remove(move |tab_id: SharedString, path: SharedString| {
             let tab_id = tab_id.to_string();
             let Some(w) = weak.upgrade() else { return };
