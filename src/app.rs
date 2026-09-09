@@ -24,6 +24,7 @@ mod sidebar;
 mod single_instance;
 mod tab_callbacks;
 mod tab_transfer;
+mod dock_stacks;
 mod terminal_ui;
 mod webdav;
 mod window;
@@ -40,6 +41,7 @@ use self::session_runtime::*;
 use self::sftp_callbacks::*;
 use self::sftp_ui::*;
 use self::sidebar::*;
+use self::dock_stacks::*;
 use self::tab_callbacks::*;
 use self::tab_transfer::*;
 use self::terminal_ui::*;
@@ -2117,6 +2119,43 @@ fn open_window(
     }));
     let content_size: Rc<std::cell::Cell<(f32, f32)>> =
         Rc::new(std::cell::Cell::new((1200.0, 800.0)));
+
+    // Docked-panel edge stacks (#dock-stack): which window panels share an edge
+    // at the same time. Restored from config and applied to the panel dock /
+    // collapse state below, so a persisted stacked layout survives restart
+    // even before the stacked renderer lights up.
+    let dock_stacks: Rc<RefCell<DockStacks>> = Rc::new(RefCell::new(DockStacks::default()));
+    {
+        let saved = store.borrow().dock_stacks();
+        {
+            let mut ds = dock_stacks.borrow_mut();
+            ds.from_saved(&saved);
+        }
+        for e in &saved {
+            for s in &e.slots {
+                let edge: slint::SharedString = e.edge.clone().into();
+                match s.kind.as_str() {
+                    "sidebar" => {
+                        window.set_sidebar_dock(edge.clone());
+                        window.set_sidebar_collapsed(false);
+                    }
+                    "welcome" => {
+                        window.set_welcome_sidebar_dock(edge.clone());
+                        window.set_welcome_collapsed(false);
+                    }
+                    "quick" => {
+                        window.set_quick_panel_dock(edge.clone());
+                        window.set_quick_panel_collapsed(false);
+                    }
+                    "ai" => {
+                        window.set_ai_panel_dock(edge.clone());
+                        window.set_ai_panel_collapsed(false);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
     // Persistent pane / splitter models. refresh_panes updates these IN PLACE so
     // the rendered `for pane` / `for sp` elements are reused (terminals survive,
     // and the splitter keeps its pointer-grab during a drag).
@@ -2450,6 +2489,7 @@ fn open_window(
             net_hist: local_net_hist.clone(),
             follow_cd: sftp_follow_cd.clone(),
             layout: layout.clone(),
+            dock_stacks: dock_stacks.clone(),
             tabs_model: tabs_model.clone(),
             terminals_model: terminals_model.clone(),
             panes_model: panes_model.clone(),
@@ -3141,6 +3181,7 @@ fn open_window(
         let ev_exit_confirmed = exit_confirmed.clone();
         let ev_registry = registry.clone();
         let ev_core = core.clone();
+        let ev_ds = dock_stacks.clone();
         let ev_window_size_tracking_ready = window_size_tracking_ready.clone();
         let ev_pending_window_size_restore = pending_window_size_restore.clone();
         let mut last_cursor_logical: Option<(f32, f32)> = None;
@@ -3478,7 +3519,7 @@ fn open_window(
                         ev_exit_confirmed.set(true);
                         // No sessions → the window is about to close; persist layout.
                         if let Some(win) = weak.upgrade() {
-                            save_layout(&win, &ev_store);
+                            save_layout(&win, &ev_store, &ev_ds);
                             clear_zen_on_close(&win, &ev_store);
                         }
                         // The event is not prevented, so Slint will destroy this
@@ -3509,6 +3550,7 @@ fn open_window(
         let proc_weak = proc_win.as_weak();
         let sys_weak = sys_win.as_weak();
         let cc_store = store.clone();
+        let cc_ds = dock_stacks.clone();
         let close_handles = handles.clone();
         let close_sftp_handles = sftp_handles.clone();
         let close_exit_confirmed = exit_confirmed.clone();
@@ -3522,7 +3564,7 @@ fn open_window(
             }
             if let Some(w) = weak.upgrade() {
                 w.set_confirm_close_open(false);
-                save_layout(&w, &cc_store);
+                save_layout(&w, &cc_store, &cc_ds);
                 clear_zen_on_close(&w, &cc_store);
                 let _ = w.hide();
             }
@@ -3575,6 +3617,7 @@ fn open_window(
         let wc_proc_weak = proc_win.as_weak();
         let wc_sys_weak = sys_win.as_weak();
         let wc_store = store.clone();
+        let wc_ds = dock_stacks.clone();
         let wc_exit_confirmed = exit_confirmed.clone();
         let wc_registry = registry.clone();
         let wc_core = core.clone();
@@ -3584,7 +3627,7 @@ fn open_window(
                 if !should_block_close(wc_exit_confirmed.get(), !close_handles.borrow().is_empty())
                 {
                     wc_exit_confirmed.set(true);
-                    save_layout(&w, &wc_store);
+                    save_layout(&w, &wc_store, &wc_ds);
                     clear_zen_on_close(&w, &wc_store);
                     // Tear down this window's workers and hide its monitor
                     // windows; quit only if it was the last one.
@@ -5780,7 +5823,11 @@ fn wire_session_callbacks(
 
 /// Resolve a session's configured SSH jump host to the saved session it points
 /// at, ignoring a missing / dangling / self reference (#211).
-fn save_layout(win: &AppWindow, store: &Rc<RefCell<ConfigStore>>) {
+fn save_layout(
+    win: &AppWindow,
+    store: &Rc<RefCell<ConfigStore>>,
+    dock_stacks: &Rc<RefCell<DockStacks>>,
+) {
     let scale = win.window().scale_factor().max(0.01);
     let size = win.window().size();
     let w = size.width as f32 / scale;
@@ -5803,6 +5850,8 @@ fn save_layout(win: &AppWindow, store: &Rc<RefCell<ConfigStore>>) {
     s.set_ai_panel_width(win.get_ai_panel_width());
     s.set_ai_panel_height(win.get_ai_panel_height());
     s.set_ai_panel_dock(win.get_ai_panel_dock().to_string());
+    // Per-edge stacked panels (#dock-stack), ratios included.
+    s.set_dock_stacks(dock_stacks.borrow().to_saved());
     s.set_welcome_sidebar_width(win.get_welcome_sidebar_width());
     s.set_welcome_sidebar_dock(win.get_welcome_sidebar_dock().to_string());
     s.set_welcome_collapsed(win.get_welcome_collapsed());

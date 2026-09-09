@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use tokio::runtime::Runtime;
 
 use crate::config::ConfigStore;
+use crate::app::dock_stacks::DockStacks;
 use crate::resource::{LocalSnap, NetHist, TabStatuses};
 use crate::sftp::{SftpHandles, SftpLastCwd};
 use crate::ssh::SessionHandle;
@@ -58,6 +59,8 @@ pub struct WindowState {
     pub net_hist: NetHist,
     pub follow_cd: Arc<std::sync::atomic::AtomicBool>,
     pub layout: Rc<RefCell<crate::layout::Layout>>,
+    /// Per-edge stacks of simultaneously-expanded docked panels (#dock-stack).
+    pub dock_stacks: Rc<RefCell<DockStacks>>,
     pub tabs_model: Rc<slint::VecModel<TabInfo>>,
     pub terminals_model: Rc<slint::VecModel<TerminalState>>,
     pub panes_model: Rc<slint::VecModel<PaneInfo>>,

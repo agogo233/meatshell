@@ -395,6 +395,12 @@ pub struct ConfigFile {
     pub ai_panel_height: f32,
     #[serde(default)]
     pub ai_panel_dock: String,
+    /// Per-edge stacks of simultaneously-expanded docked panels (#dock-stack),
+    /// e.g. session list + Quick shared on the left edge, split vertically.
+    /// Empty (or <2 slots on a valid edge) → the legacy single-panel-per-edge
+    /// layout.
+    #[serde(default)]
+    pub dock_stacks: Vec<DockEdgeSer>,
 }
 
 /// Portable export file (issue #46): sessions with everything in plaintext

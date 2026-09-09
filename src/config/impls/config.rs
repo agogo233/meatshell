@@ -1974,6 +1974,32 @@ impl ConfigStore {
         self.cache.ai_panel_dock = dock;
     }
 
+    /// Per-edge stacks of simultaneously-expanded docked panels (#dock-stack).
+    /// The stored value is sanitised (unknown kinds dropped, sidebar/welcome
+    /// deduplicated, ratios renormalised to sum to 1) before it is handed out.
+    pub fn dock_stacks(&self) -> Vec<DockEdgeSer> {
+        let mut out: Vec<DockEdgeSer> = Vec::new();
+        // A panel can only occupy one edge: the first edge a kind appears in
+        // wins across the whole store, so a corrupt config with the same panel
+        // on two edges cannot hide it from both.
+        let mut seen: std::collections::HashSet<String> = Default::default();
+        for e in self.cache.dock_stacks.iter().filter_map(sanitize_edge) {
+            let mut edge = e;
+            edge.slots.retain(|s| seen.insert(s.kind.clone()));
+            if edge.slots.len() >= 2 {
+                out.push(edge);
+            }
+        }
+        out
+    }
+
+    pub fn set_dock_stacks(&mut self, stacks: Vec<DockEdgeSer>) {
+        self.cache.dock_stacks = stacks
+            .into_iter()
+            .filter_map(sanitize_edge)
+            .collect();
+    }
+
     /// Whether each download prompts for a save location (default false) (#87).
     pub fn download_always_ask(&self) -> bool {
         self.cache.download_always_ask
