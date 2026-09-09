@@ -29,7 +29,7 @@ const MIN_THICK: f32 = 120.0;
 const MAX_THICK_FRAC: f32 = 0.38;
 
 /// Absolute rectangle in dock-area logical px.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct RectGeom {
     pub x: f32,
     pub y: f32,
@@ -121,7 +121,7 @@ impl DockStacks {
     /// Move (or add) `kind` onto `edge`, taking it off whatever edge it was on.
     /// Ratios are rebalanced evenly for the edge's new member count.
     pub fn dock_to(&mut self, edge: &str, kind: &str) {
-        if let Some((old_edge, _)) = self.edge_of(kind) {
+        if let Some(old_edge) = self.edge_of(kind) {
             if old_edge == edge {
                 return;
             }
@@ -159,11 +159,12 @@ impl DockStacks {
                 return;
             }
             let (a, b) = (r, 1.0 - r);
+            let len = t.len();
             for (i, s) in t.iter_mut().enumerate() {
                 s.ratio = if i <= index {
                     a * if group_a > 0.0 { s.ratio / group_a } else { 1.0 / (index + 1) as f32 }
                 } else {
-                    b * if group_b > 0.0 { s.ratio / group_b } else { 1.0 / (t.len() - index - 1) as f32 }
+                    b * if group_b > 0.0 { s.ratio / group_b } else { 1.0 / (len - index - 1) as f32 }
                 };
                 s.ratio = s.ratio.clamp(MIN_RATIO, 1.0 - MIN_RATIO);
             }
@@ -352,6 +353,7 @@ impl DockStacks {
                 "bottom" => {
                     g.central.h -= thickness;
                 }
+                _ => {}
             }
         }
         g

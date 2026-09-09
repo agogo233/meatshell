@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::{OutputHighlightRule, QuickCommand, Secret, Session};
+use super::{DockEdgeSer, OutputHighlightRule, QuickCommand, Secret, Session};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WslProfile {

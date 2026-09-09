@@ -2331,6 +2331,9 @@ fn open_window(
             let tabs_model = tabs_model.clone();
             let panes_model = panes_model.clone();
             let splitters_model = splitters_model.clone();
+            let wds_dock = wds_dock.clone();
+            let wds_pm = wds_pm.clone();
+            let wds_dm = wds_dm.clone();
             slint::Timer::single_shot(std::time::Duration::ZERO, move || {
                 if let Some(w) = weak.upgrade() {
                     w.set_welcome_as_sidebar(v);
