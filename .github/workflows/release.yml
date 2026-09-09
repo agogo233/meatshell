@@ -1,14 +1,10 @@
-name: Release Latest (Windows x86_64)
+name: Build (Windows x86_64)
 
-# Single Windows build entry point:
-# - every push (any branch/tag) rebuilds the Windows x64 portable build and
-#   uploads it as a plain artifact (contents: read only); the artifact ships the
-#   bare directory under a timestamped name, so the downloaded zip is
-#   single-layer and unique per build;
-# - on `main` a release job then refreshes the fixed-name asset of the `latest`
-#   prerelease (stable download entry) and appends a timestamped copy as a
-#   per-build archive, so the Releases page always offers the newest CI build.
-# No version tags are involved; tag pushes build an artifact but never publish.
+# Single Windows build entry point, artifact only — never publishes a release:
+# every push (any branch/tag) rebuilds the Windows x64 portable build and
+# uploads it as a plain artifact (contents: read only); the artifact ships the
+# bare directory under a timestamped name, so the downloaded zip is
+# single-layer and unique per build.
 
 on:
   push:
@@ -24,9 +20,6 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: read
-    outputs:
-      version: ${{ steps.package.outputs.version }}
-      artifact-name: ${{ steps.package.outputs.artifact-name }}
     steps:
       - uses: actions/checkout@v4
 
@@ -48,21 +41,12 @@ jobs:
         shell: bash
         run: |
           set -eu
-          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
-            VERSION="${GITHUB_REF_NAME#v}"
-          else
-            VERSION=""
-          fi
-          if [ -z "$VERSION" ] || [ "$VERSION" = "dev" ]; then
-            VERSION="$(sed -n '/^\[package\]/,/^\[/ s/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
-          fi
           # Fixed stage dir name; the timestamped zip name is the artifact name.
           STAGE="meatshell-windows-x86_64-portable"
           TS="$(date -u +%Y%m%d-%H%M%S)"
           rm -rf "$STAGE"
           mkdir "$STAGE"
           cp "target/x86_64-pc-windows-msvc/release/meatshell.exe" "$STAGE/"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "artifact-name=${STAGE}-${TS}" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifact
@@ -76,42 +60,3 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
-  release-latest:
-    name: release-latest
-    if: github.ref == 'refs/heads/main'
-    needs: windows-x86_64
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write   # update the `latest` prerelease
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs.windows-x86_64.outputs.artifact-name }}
-          # The artifact stores the directory contents flat, so restore them
-          # explicitly under the staging dir before zipping.
-          path: meatshell-windows-x86_64-portable
-
-      - name: Repack portable zips
-        shell: bash
-        run: |
-          set -eu
-          # Fixed-name asset: stable download entry, replaced on every build.
-          zip -r -q meatshell-windows-x86_64-portable.zip meatshell-windows-x86_64-portable
-          # Timestamped copy: appended on every build as a per-build archive.
-          cp meatshell-windows-x86_64-portable.zip \
-             "${{ needs.windows-x86_64.outputs.artifact-name }}.zip"
-
-      - uses: softprops/action-gh-release@v2
-        with:
-          tag_name: latest
-          name: "Latest CI Build (Windows x64)"
-          prerelease: true
-          update: true
-          files: |
-            meatshell-windows-x86_64-portable.zip
-            ${{ needs.windows-x86_64.outputs.artifact-name }}.zip
-          fail_on_unmatched_files: true
-          body: |
-            meatshell ${{ needs.windows-x86_64.outputs.version }} · ${{ github.sha }} · ${{ github.run_number }}
-            自动构建，随 main 分支更新；非正式发布，谨慎用于生产。
-            Automated rolling build of `main` — not an official release.
