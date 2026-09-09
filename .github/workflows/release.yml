@@ -1,10 +1,13 @@
 name: Release Latest (Windows x86_64)
 
 # Single Windows build entry point:
-# - every push (any branch/tag) rebuilds the Windows x64 portable zip and
-#   uploads it as a plain artifact (contents: read only);
-# - on `main` a release job then replaces the assets of a fixed `latest`
-#   prerelease, so the Releases page always offers the newest CI build.
+# - every push (any branch/tag) rebuilds the Windows x64 portable build and
+#   uploads it as a plain artifact (contents: read only); the artifact ships the
+#   bare directory under a timestamped name, so the downloaded zip is
+#   single-layer and unique per build;
+# - on `main` a release job then refreshes the fixed-name asset of the `latest`
+#   prerelease (stable download entry) and appends a timestamped copy as a
+#   per-build archive, so the Releases page always offers the newest CI build.
 # No version tags are involved; tag pushes build an artifact but never publish.
 
 on:
@@ -23,6 +26,7 @@ jobs:
       contents: read
     outputs:
       version: ${{ steps.package.outputs.version }}
+      artifact-name: ${{ steps.package.outputs.artifact-name }}
     steps:
       - uses: actions/checkout@v4
 
@@ -39,7 +43,7 @@ jobs:
       - name: Build (release)
         run: cargo build --release --target x86_64-pc-windows-msvc --locked
 
-      - name: Package portable zip
+      - name: Stage portable build
         id: package
         shell: bash
         run: |
@@ -52,19 +56,23 @@ jobs:
           if [ -z "$VERSION" ] || [ "$VERSION" = "dev" ]; then
             VERSION="$(sed -n '/^\[package\]/,/^\[/ s/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
           fi
-          # Fixed name: also serves as the `latest` prerelease asset name.
+          # Fixed stage dir name; the timestamped zip name is the artifact name.
           STAGE="meatshell-windows-x86_64-portable"
-          rm -rf "$STAGE" "${STAGE}.zip"
+          TS="$(date -u +%Y%m%d-%H%M%S)"
+          rm -rf "$STAGE"
           mkdir "$STAGE"
           cp "target/x86_64-pc-windows-msvc/release/meatshell.exe" "$STAGE/"
-          7z a -y "${STAGE}.zip" "$STAGE" >/dev/null
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "artifact-name=${STAGE}-${TS}" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifact
+        # Upload the bare directory: GitHub wraps artifacts in one zip, so the
+        # download is a single-layer timestamped
+        # `meatshell-windows-x86_64-portable-YYYYMMDD-HHMMSS.zip`.
         uses: actions/upload-artifact@v4
         with:
-          name: windows-x86_64-portable
-          path: meatshell-windows-x86_64-portable.zip
+          name: ${{ steps.package.outputs.artifact-name }}
+          path: meatshell-windows-x86_64-portable
           retention-days: 7
           if-no-files-found: error
 
@@ -78,8 +86,18 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: windows-x86_64-portable
+          name: ${{ needs.windows-x86_64.outputs.artifact-name }}
           path: .
+
+      - name: Repack portable zips
+        shell: bash
+        run: |
+          set -eu
+          # Fixed-name asset: stable download entry, replaced on every build.
+          zip -r -q meatshell-windows-x86_64-portable.zip meatshell-windows-x86_64-portable
+          # Timestamped copy: appended on every build as a per-build archive.
+          cp meatshell-windows-x86_64-portable.zip \
+             "${{ needs.windows-x86_64.outputs.artifact-name }}.zip"
 
       - uses: softprops/action-gh-release@v2
         with:
@@ -87,7 +105,9 @@ jobs:
           name: "Latest CI Build (Windows x64)"
           prerelease: true
           update: true
-          files: meatshell-windows-x86_64-portable.zip
+          files: |
+            meatshell-windows-x86_64-portable.zip
+            ${{ needs.windows-x86_64.outputs.artifact-name }}.zip
           fail_on_unmatched_files: true
           body: |
             meatshell ${{ needs.windows-x86_64.outputs.version }} · ${{ github.sha }} · ${{ github.run_number }}
