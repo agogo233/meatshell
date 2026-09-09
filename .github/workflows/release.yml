@@ -7,6 +7,8 @@ name: Build (Windows x86_64)
 # single-layer and unique per build.
 
 on:
+  # Rebuild on every push to any branch/tag — used as the CI gate: a push
+  # runs a full `cargo build --release`, so compile errors surface here.
   push:
   workflow_dispatch:
 
