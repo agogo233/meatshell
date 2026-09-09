@@ -22,9 +22,11 @@ const MIN_RATIO: f32 = 0.08;
 pub const DIVIDER: f32 = 4.0;
 
 /// Clamp bounds for a stacked panel's thickness along its edge's normal
-/// (its width on a left/right edge, height on a top/bottom edge).
+/// (its width on a left/right edge, height on a top/bottom one).
 const MIN_THICK: f32 = 120.0;
-const MAX_THICK_FRAC: f32 = 0.5;
+/// Max share of the dock-area an edge stack may take. Kept well under half so
+/// the terminal never fully disappears even with opposite edges both maxed.
+const MAX_THICK_FRAC: f32 = 0.38;
 
 /// Absolute rectangle in dock-area logical px.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -39,6 +41,9 @@ pub struct RectGeom {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PanelGeom {
     pub kind: &'static str,
+    /// The dock edge this panel sits on ("left|right|top|bottom") — used by
+    /// the UI to paint the in-edge resize handle on the correct side.
+    pub edge: &'static str,
     pub rect: RectGeom,
 }
 
@@ -207,6 +212,71 @@ impl DockStacks {
         }
     }
 
+    /// Rebuild the stacks from the current *expanded* panel set, so the saved
+    /// (kind, edge, ratio) triples survive while panels folded/closed drop out
+    /// and newly-expanded ones join their edge with an even share. `expanded`
+    /// returns the edge a panel is currently docked to (`None` = folded/off).
+    /// Reads order from the previous state first, then new panels afterwards —
+    /// stable so an untouched layout keeps its exact split.
+    pub fn rebuild_from(
+        &mut self,
+        saved: &DockStacks,
+        expanded: &dyn Fn(&str) -> Option<&'static str>,
+    ) {
+        for edge in ["left", "right", "top", "bottom"] {
+            let mut order: Vec<&'static str> = Vec::new();
+            if let Some(slots) = saved.table(edge) {
+                // Keep the persisted order and ratio for panels still on this
+                // edge and still expanded.
+                let mut kept: Vec<&'static str> =
+                    slots.iter().map(|s| s.kind).collect();
+                kept.retain(|k| expanded(k) == Some(edge));
+                order.append(&mut kept);
+            }
+            // Any newly-expanded panel on this edge joins behind the kept ones.
+            for k in KINDS {
+                if expanded(k) == Some(edge) && !order.contains(&k) {
+                    order.push(k);
+                }
+            }
+            if order.is_empty() {
+                if let Some(t) = self.table_mut(edge) {
+                    t.clear();
+                }
+                continue;
+            }
+            // Inherit the saved ratio for panels we already knew; hand new
+            // panels an equal share of whatever the known ones leave over, so
+            // a user-tuned split never gets wiped by an unrelated stack.
+            let mut slots: Vec<DockSlotInfo> = Vec::with_capacity(order.len());
+            let mut fresh: Vec<&'static str> = Vec::new();
+            let mut known: f32 = 0.0;
+            for k in &order {
+                let ratio = saved
+                    .table(edge)
+                    .and_then(|sl| sl.iter().find(|s| s.kind == *k))
+                    .map(|s| s.ratio);
+                match ratio {
+                    Some(r) => {
+                        known += r;
+                        slots.push(DockSlotInfo { kind: k, ratio: r });
+                    }
+                    None => fresh.push(k),
+                }
+            }
+            if !fresh.is_empty() {
+                let each = ((1.0 - known) / fresh.len() as f32).max(0.0);
+                for k in fresh {
+                    slots.push(DockSlotInfo { kind: k, ratio: each });
+                }
+            }
+            if let Some(target) = self.table_mut(edge) {
+                *target = slots;
+                rebalance(target);
+            }
+        }
+    }
+
     /// Compute absolute rectangles for every expanded panel (and its
     /// dividers) plus the central content rect, for the given dock-area size
     /// in logical px. `extent` returns a panel's preferred thickness along its
@@ -250,7 +320,7 @@ impl DockStacks {
                     "top" => RectGeom { x: pos, y: 0.0, w: seg, h: thickness },
                     _ => RectGeom { x: pos, y: ch - thickness, w: seg, h: thickness },
                 };
-                g.panels.push(PanelGeom { kind: s.kind, rect });
+                g.panels.push(PanelGeom { kind: s.kind, edge, rect });
                 if i < slots.len() - 1 {
                     let drect = if horizontal {
                         RectGeom { x: rect.x, y: pos + seg, w: thickness, h: DIVIDER }
@@ -481,8 +551,56 @@ mod tests {
         let mut s = DockStacks::default();
         s.dock_to("left", "sidebar");
         let g = s.compute_geom(&|_| 900.0, 800.0, 600.0);
-        // cap = 800 → max thickness 400; central keeps >= half the area.
-        assert_eq!(g.panels[0].rect.w, 400.0);
-        assert_eq!(g.central.w, 400.0);
+        // cap = 800 → max thickness 304 (0.38 × 800); central keeps ≥ 62%.
+        assert_eq!(g.panels[0].rect.w, 304.0);
+        assert_eq!(g.central.w, 496.0);
+    }
+
+    fn expanded_left_sidebar_ai(k: &str) -> Option<&'static str> {
+        matches!(k, "sidebar" | "ai").then_some("left")
+    }
+
+    fn expanded_none(_: &str) -> Option<&'static str> {
+        None
+    }
+
+    #[test]
+    fn rebuild_inherits_ratio_and_appends_new_panel() {
+        let mut saved = DockStacks::default();
+        saved.dock_to("left", "sidebar");
+        saved.dock_to("left", "quick");
+        saved.set_ratio("left", 0, 0.7);
+        // Quick folds; AI joins the left edge.
+        let mut cur = DockStacks::default();
+        cur.rebuild_from(&saved, &expanded_left_sidebar_ai);
+        assert_eq!(cur.left.len(), 2);
+        assert_eq!(cur.left[0].kind, "sidebar");
+        assert_eq!(cur.left[1].kind, "ai");
+        // The tuned 0.70 split for the surface panel is kept.
+        assert!((cur.left[0].ratio - 0.7).abs() < 1e-3);
+        assert!((cur.left.iter().map(|s| s.ratio).sum::<f32>() - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn rebuild_drops_folded_panels() {
+        let mut saved = DockStacks::default();
+        saved.dock_to("left", "sidebar");
+        saved.dock_to("left", "quick");
+        let mut cur = DockStacks::default();
+        cur.rebuild_from(&saved, &expanded_none);
+        assert!(cur.left.is_empty());
+        assert!(cur.edge_of("sidebar").is_none());
+    }
+
+    #[test]
+    fn rebuild_moves_panel_to_its_new_edge() {
+        let mut saved = DockStacks::default();
+        saved.dock_to("left", "sidebar");
+        let expanded = |k: &str| if k == "sidebar" { Some("right") } else { None };
+        let mut cur = DockStacks::default();
+        cur.rebuild_from(&saved, &expanded);
+        assert!(cur.left.is_empty());
+        assert_eq!(cur.right.len(), 1);
+        assert_eq!(cur.right[0].kind, "sidebar");
     }
 }

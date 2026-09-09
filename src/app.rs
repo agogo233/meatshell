@@ -2163,6 +2163,98 @@ fn open_window(
     window.set_panes(ModelRc::from(panes_model.clone()));
     let splitters_model: Rc<VecModel<SplitterInfo>> = Rc::new(VecModel::default());
     window.set_splitters(ModelRc::from(splitters_model.clone()));
+    // Docked-panel stack models (#dock-stack): absolute rects for every
+    // expanded panel + the dividers between stacked ones. Kept IN PLACE so the
+    // panel components reuse their instances (draft/scroll state survives).
+    let dock_panels_model: Rc<VecModel<PanelGeomInfo>> = Rc::new(VecModel::default());
+    window.set_dock_panels(ModelRc::from(dock_panels_model.clone()));
+    let dock_dividers_model: Rc<VecModel<DividerGeomInfo>> = Rc::new(VecModel::default());
+    window.set_dock_dividers(ModelRc::from(dock_dividers_model.clone()));
+    // First dock-geometry pass after restore; `dock-layout-changed()` keeps it
+    // fresh whenever a panel docks, resizes or collapses.
+    refresh_dock(
+        &window,
+        &dock_stacks,
+        &dock_panels_model,
+        &dock_dividers_model,
+    );
+    // Any dock/collapse/size change anywhere wants the geometry recomputed.
+    {
+        let weak = window.as_weak();
+        let ds = dock_stacks.clone();
+        let pm = dock_panels_model.clone();
+        let dm = dock_dividers_model.clone();
+        window.on_dock_layout_changed(move || {
+            if let Some(w) = weak.upgrade() {
+                refresh_dock(&w, &ds, &pm, &dm);
+            }
+        });
+        // Dragging a divider between two stacked panels updates their ratio.
+        let weak2 = window.as_weak();
+        let ds2 = dock_stacks.clone();
+        let pm2 = dock_panels_model.clone();
+        let dm2 = dock_dividers_model.clone();
+        window.on_stack_split_drag(move |edge: SharedString, index: i32, pos: f32| {
+            let edge = edge.to_string();
+            let axis = {
+                let (w, h) = weak2
+                    .upgrade()
+                    .map(|w| {
+                        let s = w.window().scale_factor().max(0.01);
+                        let size = w.window().size();
+                        (size.width as f32 / s, size.height as f32 / s)
+                    })
+                    .unwrap_or((1200.0, 800.0));
+                match edge.as_str() {
+                    "left" | "right" => h,
+                    _ => w,
+                }
+            };
+            let ratio = if axis > 0.0 {
+                (pos / axis).clamp(0.02, 0.98)
+            } else {
+                0.5
+            };
+            {
+                let mut lay = ds2.borrow_mut();
+                lay.set_ratio(&edge, index as usize, ratio);
+            }
+            if let Some(w) = weak2.upgrade() {
+                refresh_dock(&w, &ds2, &pm2, &dm2);
+            }
+        });
+        // Dragging a stacked panel's in-edge handle resizes it along the dock
+        // normal and re-runs the geometry pass.
+        let weak3 = window.as_weak();
+        let ds3 = dock_stacks.clone();
+        let pm3 = dock_panels_model.clone();
+        let dm3 = dock_dividers_model.clone();
+        let panels_model_for_extent = dock_panels_model.clone();
+        window.on_panel_extent_drag(
+            move |_panel_index: i32, pos: f32| {
+                let panel = panels_model_for_extent.row_data(_panel_index as usize);
+                if let Some(p) = panel {
+                    let kind = p.kind.to_string();
+                    let edge = p.edge.to_string();
+                    let horizontal_edge = matches!(edge.as_str(), "left" | "right");
+                    let thickness = pos.clamp(100.0, 2600.0);
+                    if let Some(w) = weak3.upgrade() {
+                        match (kind.as_str(), horizontal_edge) {
+                            ("sidebar", true) => w.set_sidebar_width(thickness),
+                            ("sidebar", false) => w.set_sidebar_height(thickness),
+                            ("welcome", _) => w.set_welcome_sidebar_width(thickness),
+                            ("quick", true) => w.set_quick_panel_width(thickness),
+                            ("quick", false) => w.set_quick_panel_height(thickness),
+                            ("ai", true) => w.set_ai_panel_width(thickness),
+                            ("ai", false) => w.set_ai_panel_height(thickness),
+                            _ => {}
+                        }
+                        refresh_dock(&w, &ds3, &pm3, &dm3);
+                    }
+                }
+            },
+        );
+    }
     // Snapshot the layout and drop the RefCell guard before mutating Slint
     // models: a model change can synchronously run binding callbacks, and one
     // of those re-entering `layout.borrow*()` while this shared guard is still
@@ -2183,6 +2275,9 @@ fn open_window(
         let tabs_model = tabs_model.clone();
         let panes_model = panes_model.clone();
         let splitters_model = splitters_model.clone();
+        let cr_dock = dock_stacks.clone();
+        let cr_pm = dock_panels_model.clone();
+        let cr_dm = dock_dividers_model.clone();
         window.on_content_resized(move |w: f32, h: f32| {
             let next = (w.max(1.0), h.max(1.0));
             if content_size.get() == next {
@@ -2199,6 +2294,7 @@ fn open_window(
                     &panes_model,
                     &splitters_model,
                 );
+                refresh_dock(&win, &cr_dock, &cr_pm, &cr_dm);
             }
         });
     }
@@ -2212,6 +2308,9 @@ fn open_window(
         let tabs_model = tabs_model.clone();
         let panes_model = panes_model.clone();
         let splitters_model = splitters_model.clone();
+        let wds_dock = dock_stacks.clone();
+        let wds_pm = dock_panels_model.clone();
+        let wds_dm = dock_dividers_model.clone();
         window.on_set_welcome_as_sidebar(move |v| {
             // The property is two-way-bound through InterfacePanel and changing
             // it destroys/recreates the Welcome subtree that owns the Switch.
@@ -2248,6 +2347,7 @@ fn open_window(
                         &panes_model,
                         &splitters_model,
                     );
+                    refresh_dock(&w, &wds_dock, &wds_pm, &wds_dm);
                 }
             });
         });
@@ -6037,6 +6137,154 @@ fn refresh_panes(
             window.set_active_tab_id(fp.active.clone().into());
         }
     }
+}
+
+// --- Docked-panel edge stacks (#dock-stack) --------------------------------
+
+/// The edge (left|right|top|bottom) a window panel is currently expanded on,
+/// `None` when folded, closed, or off (welcome not in sidebar mode).
+fn panel_edge(window: &AppWindow, kind: &str) -> Option<&'static str> {
+    let norm = |edge: &str| -> &'static str {
+        match edge {
+            "right" => "right",
+            "top" => "top",
+            "bottom" => "bottom",
+            _ => "left",
+        }
+    };
+    match kind {
+        "sidebar" => {
+            (!window.get_sidebar_collapsed()).then(|| norm(window.get_sidebar_dock().as_str()))
+        }
+        "welcome" => {
+            (window.get_welcome_as_sidebar() && !window.get_welcome_collapsed())
+                .then(|| norm(window.get_welcome_sidebar_dock().as_str()))
+        }
+        "quick" => {
+            (window.get_quick_panel_open() && !window.get_quick_panel_collapsed())
+                .then(|| norm(window.get_quick_panel_dock().as_str()))
+        }
+        "ai" => {
+            (window.get_ai_panel_open() && !window.get_ai_panel_collapsed())
+                .then(|| norm(window.get_ai_panel_dock().as_str()))
+        }
+        _ => None,
+    }
+}
+
+/// Current window size in logical px.
+fn window_size_px(window: &AppWindow) -> (f32, f32) {
+    let scale = window.window().scale_factor().max(0.01);
+    let size = window.window().size();
+    (size.width as f32 / scale, size.height as f32 / scale)
+}
+
+/// A panel's preferred thickness along its edge's normal: width on a
+/// left/right edge, height on a top/bottom one (logical px).
+fn panel_extent(window: &AppWindow, kind: &str) -> f32 {
+    let horizontal_edge = matches!(panel_edge(window, kind), Some("left" | "right"));
+    match kind {
+        "sidebar" if horizontal_edge => window.get_sidebar_width(),
+        "sidebar" => window.get_sidebar_height(),
+        "welcome" => window.get_welcome_sidebar_width(),
+        "quick" if horizontal_edge => window.get_quick_panel_width(),
+        "quick" => window.get_quick_panel_height(),
+        "ai" if horizontal_edge => window.get_ai_panel_width(),
+        "ai" => window.get_ai_panel_height(),
+        _ => 220.0,
+    }
+}
+
+/// Rebuild the edge stacks from the current window panel state, recompute the
+/// dock geometry and push the result into the UI (models updated in place so
+/// the rendered panel components keep their state). Call whenever a panel
+/// docks, resizes or collapses; also from the close path before `save_layout`.
+fn refresh_dock(
+    window: &AppWindow,
+    dock_stacks: &Rc<RefCell<DockStacks>>,
+    panels_model: &VecModel<PanelGeomInfo>,
+    dividers_model: &VecModel<DividerGeomInfo>,
+) {
+    let (cw, ch) = window_size_px(window);
+    // Zen mode hides every docked panel and the terminal fills the window.
+    if window.get_zen_mode() {
+        panels_model.set_vec(Vec::new());
+        dividers_model.set_vec(Vec::new());
+        window.set_dock_central_x(0.0);
+        window.set_dock_central_y(0.0);
+        window.set_dock_central_w(cw);
+        window.set_dock_central_h(ch);
+        return;
+    }
+    let saved = dock_stacks.borrow().clone();
+    let geom = {
+        let mut cur = dock_stacks.borrow_mut();
+        cur.rebuild_from(&saved, &|k| panel_edge(window, k));
+        cur.compute_geom(&|k| panel_extent(window, k), cw, ch)
+    };
+    let panels: Vec<PanelGeomInfo> = geom
+        .panels
+        .iter()
+        .map(|p| PanelGeomInfo {
+            kind: p.kind.into(),
+            edge: p.edge.into(),
+            x: p.rect.x,
+            y: p.rect.y,
+            w: p.rect.w,
+            h: p.rect.h,
+        })
+        .collect();
+    let unchanged_rows = panels_model.row_count() == panels.len()
+            && (panels.is_empty()
+                || (0..panels.len()).all(|i| {
+                    panels_model.row_data(i).is_some_and(|r| {
+                        let p = &panels[i];
+                        r.kind == p.kind
+                            && r.edge == p.edge
+                            && r.x == p.x
+                            && r.y == p.y
+                            && r.w == p.w
+                            && r.h == p.h
+                    })
+                }));
+    if !unchanged_rows {
+        panels_model.set_vec(panels);
+    }
+    let dividers: Vec<DividerGeomInfo> = geom
+        .dividers
+        .iter()
+        .map(|d| DividerGeomInfo {
+            edge: d.edge.into(),
+            index: d.index as i32,
+            x: d.rect.x,
+            y: d.rect.y,
+            w: d.rect.w,
+            h: d.rect.h,
+            vertical: d.vertical,
+        })
+        .collect();
+    if dividers_model.row_count() == dividers.len() {
+        for (i, d) in dividers.into_iter().enumerate() {
+            let unchanged = dividers_model.row_data(i).is_some_and(|old| {
+                old.edge == d.edge
+                    && old.index == d.index
+                    && old.x == d.x
+                    && old.y == d.y
+                    && old.w == d.w
+                    && old.h == d.h
+                    && old.vertical == d.vertical
+            });
+            if !unchanged {
+                dividers_model.set_row_data(i, d);
+            }
+        }
+    } else {
+        dividers_model.set_vec(dividers);
+    }
+    window.set_dock_central_x(geom.central.x);
+    window.set_dock_central_y(geom.central.y);
+    window.set_dock_central_w(geom.central.w);
+    window.set_dock_central_h(geom.central.h);
 }
 
 /// Hit-test a drag point (pane-area coords) to a target pane + drop zone, plus
