@@ -87,7 +87,9 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: ${{ needs.windows-x86_64.outputs.artifact-name }}
-          path: .
+          # The artifact stores the directory contents flat, so restore them
+          # explicitly under the staging dir before zipping.
+          path: meatshell-windows-x86_64-portable
 
       - name: Repack portable zips
         shell: bash
