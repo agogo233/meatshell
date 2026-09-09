@@ -1983,7 +1983,7 @@ impl ConfigStore {
         // wins across the whole store, so a corrupt config with the same panel
         // on two edges cannot hide it from both.
         let mut seen: std::collections::HashSet<String> = Default::default();
-        for e in self.cache.dock_stacks.iter().filter_map(sanitize_edge) {
+        for e in self.cache.dock_stacks.iter().cloned().filter_map(sanitize_edge) {
             let mut edge = e;
             edge.slots.retain(|s| seen.insert(s.kind.clone()));
             if edge.slots.len() >= 2 {

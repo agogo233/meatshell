@@ -120,7 +120,7 @@ impl DockStacks {
 
     /// Move (or add) `kind` onto `edge`, taking it off whatever edge it was on.
     /// Ratios are rebalanced evenly for the edge's new member count.
-    pub fn dock_to(&mut self, edge: &str, kind: &str) {
+    pub fn dock_to(&mut self, edge: &str, kind: &'static str) {
         if let Some(old_edge) = self.edge_of(kind) {
             if old_edge == edge {
                 return;
