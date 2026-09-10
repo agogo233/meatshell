@@ -11,6 +11,7 @@ mod app;
 mod automation;
 mod cli;
 mod config;
+mod editor;
 mod i18n;
 mod layout;
 mod logging;

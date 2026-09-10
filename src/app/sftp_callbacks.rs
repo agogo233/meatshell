@@ -875,6 +875,8 @@ pub(super) fn wire_sftp_callbacks(
         window.on_editor_recount(move |text: SharedString| {
             if let Some(w) = weak.upgrade() {
                 w.set_editor_lines(editor_lines_for(text.as_str()));
+                // Incremental: only the rows that actually changed repaint.
+                sync_editor_highlight(&w, false);
             }
         });
     }
@@ -909,6 +911,10 @@ pub(super) fn wire_sftp_callbacks(
             let Some(w) = weak.upgrade() else { return };
             w.set_editor_open(false);
             w.set_editor_dirty(false);
+            // Drop the overlay model so a stale highlight never leaks into the
+            // next file; it is rebuilt from scratch on every open.
+            w.set_editor_hl_lines(slint::ModelRc::default());
+            w.set_editor_hl_active(false);
             w.set_editor_find_query("".into());
             w.set_editor_replace_text("".into());
             w.set_editor_match_count(0);
@@ -976,6 +982,9 @@ pub(super) fn wire_sftp_callbacks(
             w.set_editor_content(replaced.clone().into());
             w.set_editor_dirty(true);
             w.set_editor_lines(editor_lines_for(&replaced));
+            // Replace-all can touch every row; the sync helper diffs them but
+            // a full reset is simpler and equally fast at this size.
+            sync_editor_highlight(&w, true);
             w.set_editor_match_count(0);
         });
     }

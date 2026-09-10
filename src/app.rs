@@ -188,6 +188,8 @@ mod ingest_frame_tests;
 use anyhow::{Context, Result};
 use i_slint_backend_winit::WinitWindowAccessor;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
+
+use crate::editor;
 use tokio::runtime::Runtime;
 
 use crate::app::core::{AppCore, TabRoute, TabRoutes, WindowRegistry, WindowState};
@@ -895,6 +897,7 @@ fn open_window(
             window.set_term_cursor_color(color);
         }
         window.set_output_highlight_enabled(s.output_highlight_enabled());
+        window.set_editor_hl_enabled(s.editor_highlight_enabled());
         window.set_json_format_output(s.json_format_output());
         window.set_output_highlight_preset(s.output_highlight_preset().into());
         window.set_output_highlight_rules(output_highlight_rule_model(&s));
@@ -1664,6 +1667,25 @@ fn open_window(
             }
         });
     }
+    // Built-in editor syntax highlighting (#70 follow-up): persist the switch
+    // and repaint the open editor (or fall back to the plain editor) at once.
+    {
+        let weak = window.as_weak();
+        let store = store.clone();
+        window.on_set_editor_highlight(move |enabled| {
+            {
+                let mut s = store.borrow_mut();
+                s.set_editor_highlight_enabled(enabled);
+                let _ = s.save();
+            }
+            if let Some(w) = weak.upgrade() {
+                w.set_editor_hl_enabled(enabled);
+                // Full reset: flipping the branch swaps the whole rendering
+                // path (wrap mode + overlay), so incremental diffs don't apply.
+                sync_editor_highlight(&w, true);
+            }
+        });
+    }
     // Action links: persist the master + per-kind switches and refresh every
     // open terminal immediately.
     {
@@ -1913,6 +1935,8 @@ fn open_window(
             sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
             // Re-apply the theme to the chrome AND every open terminal buffer.
             apply_dark_mode(&w, &bufs, theme_pref_is_dark(&store.borrow()));
+            // The editor overlay bakes palette colours into its model.
+            sync_editor_highlight(&w, true);
             // Language translations are process-global; refresh our flag only.
             w.set_lang_en(crate::i18n::is_en());
             // Command-bar visibility is a global preference.
@@ -2777,6 +2801,9 @@ fn open_window(
             let next_dark = !w.get_dark_mode();
             // Flip theme + every terminal buffer + re-render (shared with wallpaper).
             apply_dark_mode(&w, &bufs_theme, next_dark);
+            // The editor overlay bakes palette colours into its model; repaint
+            // an open editor with the flipped theme (no-op when closed).
+            sync_editor_highlight(&w, true);
             // Mirror the flip onto the detached process window (its Theme global
             // is a separate instance) so an open process window follows.
             if let Some(p) = proc_weak.upgrade() {
@@ -7947,6 +7974,47 @@ fn editor_lines_for(content: &str) -> ModelRc<SharedString> {
     ModelRc::new(VecModel::from(
         content.split('\n').map(SharedString::from).collect::<Vec<_>>(),
     ))
+}
+
+/// Recompute the editor's highlight state from the window's own properties and
+/// repaint the overlay model.
+///
+/// `reset` swaps in a fresh model (open / theme flip / setting toggle — every
+/// row changes colour or content anyway); otherwise an existing model is
+/// diffed in place so typing only repaints the rows that really changed.
+fn sync_editor_highlight(win: &AppWindow, reset: bool) {
+    let enabled = win.get_editor_hl_enabled();
+    let content = win.get_editor_content().to_string();
+    let dark = win.get_dark_mode();
+    let lang = editor::lang::detect(
+        win.get_editor_name().as_str(),
+        content.lines().next().unwrap_or(""),
+    );
+    let line_count = content.split('\n').count();
+    let active =
+        enabled && lang != editor::lang::Lang::Plain && line_count <= editor::highlight::MAX_EDITOR_HL_LINES;
+    win.set_editor_hl_active(active);
+    if !active {
+        return;
+    }
+    if reset {
+        win.set_editor_hl_lines(editor::highlight::model_rc(
+            editor::highlight::build_lines(&content, lang, dark),
+        ));
+        return;
+    }
+    match win
+        .get_editor_hl_lines()
+        .as_any()
+        .downcast_ref::<VecModel<crate::ui::HlLine>>()
+    {
+        Some(model) => editor::highlight::sync_model(model, &content, lang, dark),
+        None => {
+            win.set_editor_hl_lines(editor::highlight::model_rc(
+                editor::highlight::build_lines(&content, lang, dark),
+            ));
+        }
+    }
 }
 
 /// Write `text` to the system clipboard. Call from a dedicated thread, never the

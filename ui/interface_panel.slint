@@ -374,6 +374,8 @@ export component InterfacePanel inherits Rectangle {
     in property <color> term-cursor-color: #D4D4D4;
     in-out property <bool> output-highlight-enabled;
     in-out property <bool> json-format-output: true;
+    in-out property <bool> editor-hl-enabled: true;
+    callback set-editor-highlight(bool);
     in-out property <string> output-highlight-preset;
     in property <[OutputRuleItem]> output-highlight-rules;
     in-out property <string> output-highlight-rule-status;
@@ -1447,6 +1449,16 @@ export component InterfacePanel inherits Rectangle {
                     Switch {
                         on: root.sftp-follow-cd;
                         toggled(v) => { root.sftp-follow-cd = v; root.set-sftp-follow-cd(v); }
+                    }
+                }
+                SettingRow {
+                    label: root.lang-en ? "Editor syntax highlighting" : "编辑器语法高亮";
+                    desc: root.lang-en
+                        ? "Colour keywords, strings, numbers and comments when viewing or editing remote text files. Files over 2000 lines stay plain."
+                        : "查看/编辑远端文本文件时为关键字、字符串、数字和注释着色。超过 2000 行的文件保持纯文本。";
+                    Switch {
+                        on: root.editor-hl-enabled;
+                        toggled(v) => { root.editor-hl-enabled = v; root.set-editor-highlight(v); }
                     }
                 }
                 SectionHeader { text: root.lang-en ? "TRANSFER QUEUE" : "传输队列"; height: 24px; }

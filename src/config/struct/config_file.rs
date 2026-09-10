@@ -151,6 +151,10 @@ pub struct ConfigFile {
     /// by default while still allowing users to preserve byte-for-byte display.
     #[serde(default)]
     pub json_format_disabled: bool,
+    /// Stored inverted so the built-in SFTP editor's syntax highlighting is on
+    /// by default while remaining switchable under Settings → SFTP.
+    #[serde(default)]
+    pub editor_highlight_disabled: bool,
     // ── Action links (terminal clickable patterns) ─────────────────────────
     /// Enables terminal action links (IPv4 / host:port / http(s) URLs). One
     /// global switch; individual matcher kinds can be toggled below. Defaults

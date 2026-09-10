@@ -1000,6 +1000,15 @@ impl ConfigStore {
         self.cache.json_format_disabled = !enabled;
     }
 
+    /// Whether the built-in SFTP editor paints the syntax-highlight overlay.
+    pub fn editor_highlight_enabled(&self) -> bool {
+        !self.cache.editor_highlight_disabled
+    }
+
+    pub fn set_editor_highlight_enabled(&mut self, enabled: bool) {
+        self.cache.editor_highlight_disabled = !enabled;
+    }
+
     /// Selected built-in rule set. Unknown values safely fall back to the
     /// conservative log-level preset for forward/backward compatibility.
     pub fn output_highlight_preset(&self) -> &str {
@@ -3078,7 +3087,13 @@ mod tests {
         let mut store = temp_store();
         assert!(store.output_highlight_enabled());
         assert!(store.json_format_output());
+        assert!(store.editor_highlight_enabled());
         assert_eq!(store.output_highlight_preset(), "log");
+
+        store.set_editor_highlight_enabled(false);
+        assert!(!store.editor_highlight_enabled());
+        store.set_editor_highlight_enabled(true);
+        assert!(store.editor_highlight_enabled());
 
         store.set_output_highlight_enabled(false);
         store.set_output_highlight_preset("devops".to_string());

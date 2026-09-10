@@ -424,6 +424,8 @@ pub(super) fn apply_wallpaper(
             // dark and greying the text out (#wallpaper).
             if apply_builtin_theme && crate::wallpaper::is_builtin(id) {
                 apply_dark_mode(window, bufs, wp.palette.is_dark);
+                // The editor overlay bakes palette colours into its model.
+                super::sync_editor_highlight(window, true);
             }
             window.set_wallpaper_active(true);
             window.set_current_wallpaper(id.into());
@@ -442,6 +444,7 @@ pub(super) fn apply_wallpaper(
             window.set_current_wallpaper("".into());
             window.set_custom_wallpaper_name("".into());
             apply_dark_mode(window, bufs, theme_pref_is_dark(store));
+            super::sync_editor_highlight(window, true);
         }
     }
 }

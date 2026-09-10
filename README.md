@@ -94,6 +94,7 @@ open /Applications/meatshell.app
     / `~/Library/Application Support/meatshell/sessions.json`（macOS）
 - [x] SSH（`russh`，纯 Rust）：密码 / 私钥 / 加密私钥（密码短语）
 - [x] SFTP 文件浏览 + 上传 / 下载（拖拽）+ 终端内 ZMODEM（`sz` 下载 / `rz` 多文件上传）
+- [x] 内置编辑器语法高亮：Shell / JSON / YAML / TOML / INI / Python（按扩展名或 shebang 识别），可在设置开关；高亮文件不折行、横向滚动，超 2000 行自动退回纯文本
 - [x] SSH 端口转发 / 隧道：本地 -L / 远程 -R / 动态 -D（SOCKS5）
 - [x] 快捷命令 + 命令输入框（可群发到所有会话）+ 命令历史
 - [x] 串口 / Telnet 会话

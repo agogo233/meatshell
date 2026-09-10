@@ -110,6 +110,21 @@ export struct EditorFindResult {
     count: int,
 }
 
+// One coloured run of the editor's syntax-highlight overlay, plus its logical
+// line. `source` mirrors the raw line text so Rust's incremental sync can diff
+// the model without extra state; it is never rendered.
+export struct HlSeg {
+    text: string,
+    color: color,
+}
+
+export struct HlLine {
+    source: string,
+    // Rust-side diff token (open Python triple-quote state). Never rendered.
+    triple: int,
+    segments: [HlSeg],
+}
+
 // A draggable splitter between two regions of the split layout (v0.5).
 export struct SplitterInfo {
     split-id: int,
@@ -653,6 +668,7 @@ export component AppWindow inherits Window {
     callback set-term-cursor-style(string);        // apply + persist cursor shape (#275)
     callback set-term-cursor-color(string) -> bool;// validate + persist cursor colour (#275)
     callback set-output-highlight(bool, string);   // enable + built-in preset
+    callback set-editor-highlight(bool);           // enable the built-in editor overlay
     callback set-json-format-output(bool);
     callback add-output-highlight-rule(string, bool, bool, bool, string) -> bool;
     callback remove-output-highlight-rule(int);
@@ -862,6 +878,13 @@ export component AppWindow inherits Window {
     // can re-enter Windows AccessKit while it is registering the new item tree.
     property <bool> editor-focus-pending: false;
     in-out property <[string]> editor-lines; // logical lines, measured with editor wrapping
+    // Syntax highlighting overlay (#70 follow-up). `editor-hl-active` is
+    // computed by Rust (enabled ∧ known grammar ∧ ≤ row budget) and drives the
+    // dual rendering branches below; `editor-hl-lines` carries the coloured
+    // runs per logical line (`source` mirrors the text for the Rust-side diff).
+    in-out property <bool> editor-hl-enabled: true;
+    in-out property <bool> editor-hl-active: false;
+    in-out property <[HlLine]> editor-hl-lines;
     in-out property <string> editor-find-query;
     in-out property <string> editor-replace-text;
     in-out property <int> editor-match-count: 0;
@@ -3128,6 +3151,12 @@ export component AppWindow inherits Window {
                     // Wrap long lines to the visible editor width so text and
                     // selection painting cannot overflow to the right (#387).
                     // The gutter stays pinned and follows vertical scrolling.
+                    //
+                    // Highlight branch (editor-hl-active): lines render without
+                    // wrapping and scroll horizontally (VS Code-style), which
+                    // gives every logical line one constant row height. The
+                    // plain branch keeps the original char-wrap behaviour with
+                    // per-line measured heights.
                     Rectangle {
                         vertical-stretch: 1;
                         background: Theme.bg-root;
@@ -3137,7 +3166,7 @@ export component AppWindow inherits Window {
                                 width: 48px;
                                 background: Theme.bg-panel-alt;
                                 clip: true;
-                                VerticalLayout {
+                                if !root.editor-hl-active : VerticalLayout {
                                     y: ed-scroll.viewport-y + 8px;
                                     width: parent.width;
                                     height: self.preferred-height;
@@ -3171,16 +3200,54 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                 }
+                                if root.editor-hl-active : VerticalLayout {
+                                    // Constant row height (no wrapping): rows line
+                                    // up with the editor body and the coloured
+                                    // overlay grid.
+                                    y: ed-scroll.viewport-y + 8px;
+                                    width: parent.width;
+                                    height: self.preferred-height;
+                                    spacing: 0px;
+                                    padding: 0px;
+                                    for line[index] in root.editor-hl-lines: Text {
+                                        height: editor-viewport.ed-row-h;
+                                        text: "\{index + 1}";
+                                        horizontal-alignment: right;
+                                        vertical-alignment: top;
+                                        font-family: edit-input.font-family;
+                                        font-size: edit-input.font-size;
+                                        color: Theme.text-muted;
+                                    }
+                                }
                             }
                             Rectangle { width: 1px; background: Theme.border-subtle; }
                             editor-viewport := Rectangle {
                                 horizontal-stretch: 1;
                                 clip: true;
+                                // One no-wrap probe fixes the constant row height
+                                // for the gutter and the highlight overlay; parked
+                                // outside the clip like line-measure above.
+                                property <length> ed-row-h: ed-row-probe.preferred-height;
+                                ed-row-probe := Text {
+                                    x: -500px;
+                                    text: "Ag中";
+                                    wrap: no-wrap;
+                                    font-family: edit-input.font-family;
+                                    font-size: edit-input.font-size;
+                                }
                                 // TextInput owns the pointer grab while selecting
                                 // and ignores wheel events. Catch the rejected
                                 // wheel behind it and scroll the editor (#388).
+                                // The highlight branch also consumes horizontal
+                                // deltas for its no-wrap horizontal panning.
                                 editor-wheel := TouchArea {
                                     scroll-event(event) => {
+                                        if (root.editor-hl-active) {
+                                            ed-scroll.viewport-x = clamp(
+                                                ed-scroll.viewport-x + event.delta-x,
+                                                min(0px, ed-scroll.visible-width - ed-scroll.viewport-width),
+                                                0px);
+                                        }
                                         ed-scroll.viewport-y = clamp(
                                             ed-scroll.viewport-y + event.delta-y,
                                             min(0px, ed-scroll.visible-height - ed-scroll.viewport-height),
@@ -3189,18 +3256,61 @@ export component AppWindow inherits Window {
                                     }
                                 }
                                 ed-scroll := ScrollView {
-                                    viewport-width: self.visible-width;
+                                    // +16px covers the 8px padding on both sides of
+                                    // the no-wrap body so the line's tail is reachable.
+                                    viewport-width: root.editor-hl-active
+                                        ? max(self.visible-width, edit-input.preferred-width + 16px)
+                                        : self.visible-width;
                                     viewport-height: max(self.visible-height, edit-input.preferred-height + 16px);
+                                    // Coloured runs painted under the transparent
+                                    // editor text. Hidden during IME composition:
+                                    // the preedit glyphs shift the line, and the
+                                    // overlay must yield so the composition text
+                                    // (drawn by the TextInput itself) stays visible.
+                                    if root.editor-hl-active : VerticalLayout {
+                                        x: 8px;
+                                        y: 8px;
+                                        width: edit-input.width;
+                                        visible: edit-input.preedit-text == "";
+                                        spacing: 0px;
+                                        padding: 0px;
+                                        for line in root.editor-hl-lines: HorizontalLayout {
+                                            height: editor-viewport.ed-row-h;
+                                            spacing: 0px;
+                                            padding: 0px;
+                                            // stretch 0 keeps every run at its natural
+                                            // width so runs abut like the real text.
+                                            for seg in line.segments: Text {
+                                                text: seg.text;
+                                                color: seg.color;
+                                                wrap: no-wrap;
+                                                horizontal-stretch: 0;
+                                                font-family: edit-input.font-family;
+                                                font-size: edit-input.font-size;
+                                            }
+                                        }
+                                    }
                                     edit-input := TextInput {
                                         x: 8px;
                                         y: 8px;
-                                        width: max(1px, ed-scroll.visible-width - 16px);
+                                        width: root.editor-hl-active
+                                            ? max(self.preferred-width, ed-scroll.visible-width - 16px)
+                                            : max(1px, ed-scroll.visible-width - 16px);
                                         height: max(ed-scroll.visible-height - 16px, self.preferred-height);
                                         text <=> root.editor-content;
                                         read-only: root.editor-readonly;
                                         single-line: false;
-                                        wrap: char-wrap;
-                                        color: Theme.text-primary;
+                                        wrap: root.editor-hl-active ? TextWrap.no-wrap : TextWrap.char-wrap;
+                                        // Transparent text over the coloured overlay;
+                                        // restored while IME composition is active so
+                                        // the preedit glyphs are drawn by the input.
+                                        // selection colours follow the theme's default
+                                        // outside the highlight branch (never override
+                                        // the stock palette there).
+                                        color: (root.editor-hl-active && self.preedit-text == "")
+                                            ? transparent : Theme.text-primary;
+                                        selection-foreground-color: root.editor-hl-active
+                                            ? Theme.text-primary : Palette.selection-foreground;
                                         font-family: Theme.ui-font-family;
                                         font-size: Theme.fs-md;
                                         page-height: ed-scroll.visible-height;
@@ -3218,6 +3328,21 @@ export component AppWindow inherits Window {
                                                     min(0px, ed-scroll.visible-height - ed-scroll.viewport-height),
                                                     ed-scroll.viewport-y
                                                         - (cursor-y - ed-scroll.visible-height + 12px));
+                                            }
+                                            // Same care horizontally in the no-wrap
+                                            // highlight branch so the caret never
+                                            // scrolls past the right edge.
+                                            if (root.editor-hl-active) {
+                                                let cursor-x = position.x + self.x + ed-scroll.viewport-x;
+                                                if (cursor-x < 12px) {
+                                                    ed-scroll.viewport-x = min(0px,
+                                                        ed-scroll.viewport-x + 12px - cursor-x);
+                                                } else if (cursor-x > ed-scroll.visible-width - 12px) {
+                                                    ed-scroll.viewport-x = max(
+                                                        min(0px, ed-scroll.visible-width - ed-scroll.viewport-width),
+                                                        ed-scroll.viewport-x
+                                                            - (cursor-x - ed-scroll.visible-width + 12px));
+                                                }
                                             }
                                         }
                                         edited => {
@@ -5325,6 +5450,8 @@ export component AppWindow inherits Window {
                     term-cursor-color: root.term-cursor-color;
                     output-highlight-enabled <=> root.output-highlight-enabled;
                     json-format-output <=> root.json-format-output;
+                    editor-hl-enabled <=> root.editor-hl-enabled;
+                    set-editor-highlight(v) => { root.set-editor-highlight(v); }
                     output-highlight-preset <=> root.output-highlight-preset;
                     output-highlight-rules: root.output-highlight-rules;
                     output-highlight-rule-status <=> root.output-highlight-rule-status;

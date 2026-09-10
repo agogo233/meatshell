@@ -324,6 +324,9 @@ pub(super) fn apply_session_event_to_window(
                 win.set_editor_content(content.into());
                 win.set_editor_readonly(!edit);
                 win.set_editor_dirty(false);
+                // Fresh document: rebuild the highlight overlay from scratch
+                // (also re-detects the language from the new editor-name).
+                sync_editor_highlight(win, true);
                 win.set_editor_open(true);
             } else {
                 // Couldn't open as text. The SFTP status line alone is easy to
