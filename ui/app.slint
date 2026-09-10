@@ -943,6 +943,10 @@ export component AppWindow inherits Window {
     property <length> dock-bottom-gap: root.height - root.dock-central-y - root.dock-central-h;
     callback stack-split-drag(string /* edge */, int /* index */, float /* pos */);
     callback stack-split-done();
+    // Reports the real dock-area size (window minus title bar): the Rust dock
+    // engine must measure in THIS frame, not the window frame, or every panel
+    // sits ~43px too low at the bottom edge (#dock-stack).
+    callback dock-area-resized(length /* w */, length /* h */);
     // Any panel dock/collapse/size change must land in Rust to recompute the
     // dock geometry (#dock-stack).
     callback dock-layout-changed();
@@ -1361,6 +1365,11 @@ export component AppWindow inherits Window {
             // `sidebar-dock`, so the sidebar can sit on any window edge (#dock).
             dock-area := Rectangle {
             vertical-stretch: 1;
+            // Feed the Rust dock engine the real area it lays panels into, and
+            // re-run the geometry whenever that frame changes (window resize,
+            // zen toggle) — `rest` no longer tracks parent sizes itself.
+            changed width => { root.dock-area-resized(self.width, self.height); }
+            changed height => { root.dock-area-resized(self.width, self.height); }
             // Left-edge layout (welcome-as-sidebar mode): a thin always-on icon strip
             // (IDEA-style) + the welcome/session sidebar (0 when collapsed). The rest
             // (resource panel + central terminal, which never collapses) sits to their

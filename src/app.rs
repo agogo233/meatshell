@@ -2187,6 +2187,11 @@ fn open_window(
     window.set_panes(ModelRc::from(panes_model.clone()));
     let splitters_model: Rc<VecModel<SplitterInfo>> = Rc::new(VecModel::default());
     window.set_splitters(ModelRc::from(splitters_model.clone()));
+    // The dock-area frame in logical px (window minus title bar), reported by
+    // Slint via dock-area-resized. Rust must lay panels out in THIS frame; the
+    // default matches the legacy dock-central-w/h defaults so the very first
+    // pre-show pass already yields sane geometry.
+    let da_size: Rc<std::cell::Cell<(f32, f32)>> = Rc::new(std::cell::Cell::new((1200.0, 800.0)));
     // Docked-panel stack models (#dock-stack): absolute rects for every
     // expanded panel + the dividers between stacked ones. Kept IN PLACE so the
     // panel components reuse their instances (draft/scroll state survives).
@@ -2201,6 +2206,7 @@ fn open_window(
         &dock_stacks,
         &dock_panels_model,
         &dock_dividers_model,
+        da_size.get(),
     );
     // Any dock/collapse/size change anywhere wants the geometry recomputed.
     {
@@ -2208,9 +2214,28 @@ fn open_window(
         let ds = dock_stacks.clone();
         let pm = dock_panels_model.clone();
         let dm = dock_dividers_model.clone();
+        let da = da_size.clone();
         window.on_dock_layout_changed(move || {
             if let Some(w) = weak.upgrade() {
-                refresh_dock(&w, &ds, &pm, &dm);
+                refresh_dock(&w, &ds, &pm, &dm, da.get());
+            }
+        });
+        // The dock-area frame itself: window resizes and zen toggles change it
+        // without any panel event, and `rest` no longer tracks parent sizes, so
+        // this is the trigger that keeps the whole layout following the window.
+        let weak4 = window.as_weak();
+        let ds4 = dock_stacks.clone();
+        let pm4 = dock_panels_model.clone();
+        let dm4 = dock_dividers_model.clone();
+        let da4 = da_size.clone();
+        window.on_dock_area_resized(move |w: f32, h: f32| {
+            let next = (w.max(1.0), h.max(1.0));
+            if da4.get() == next {
+                return;
+            }
+            da4.set(next);
+            if let Some(win) = weak4.upgrade() {
+                refresh_dock(&win, &ds4, &pm4, &dm4, next);
             }
         });
         // Dragging a divider between two stacked panels updates their ratio.
@@ -2218,21 +2243,15 @@ fn open_window(
         let ds2 = dock_stacks.clone();
         let pm2 = dock_panels_model.clone();
         let dm2 = dock_dividers_model.clone();
+        let da2 = da_size.clone();
         window.on_stack_split_drag(move |edge: SharedString, index: i32, pos: f32| {
             let edge = edge.to_string();
-            let axis = {
-                let (w, h) = weak2
-                    .upgrade()
-                    .map(|w| {
-                        let s = w.window().scale_factor().max(0.01);
-                        let size = w.window().size();
-                        (size.width as f32 / s, size.height as f32 / s)
-                    })
-                    .unwrap_or((1200.0, 800.0));
-                match edge.as_str() {
-                    "left" | "right" => h,
-                    _ => w,
-                }
+            // Slint reports divider drags in dock-area coordinates, so the
+            // axis must be the dock-area extent, not the window's.
+            let (w, h) = da2.get();
+            let axis = match edge.as_str() {
+                "left" | "right" => h,
+                _ => w,
             };
             let ratio = if axis > 0.0 {
                 (pos / axis).clamp(0.02, 0.98)
@@ -2244,7 +2263,7 @@ fn open_window(
                 lay.set_ratio(&edge, index as usize, ratio);
             }
             if let Some(w) = weak2.upgrade() {
-                refresh_dock(&w, &ds2, &pm2, &dm2);
+                refresh_dock(&w, &ds2, &pm2, &dm2, da2.get());
             }
         });
         // Dragging a stacked panel's in-edge handle resizes it along the dock
@@ -2253,6 +2272,7 @@ fn open_window(
         let ds3 = dock_stacks.clone();
         let pm3 = dock_panels_model.clone();
         let dm3 = dock_dividers_model.clone();
+        let da3 = da_size.clone();
         let panels_model_for_extent = dock_panels_model.clone();
         window.on_panel_extent_drag(
             move |_panel_index: i32, pos: f32| {
@@ -2273,7 +2293,7 @@ fn open_window(
                             ("ai", false) => w.set_ai_panel_height(thickness),
                             _ => {}
                         }
-                        refresh_dock(&w, &ds3, &pm3, &dm3);
+                        refresh_dock(&w, &ds3, &pm3, &dm3, da3.get());
                     }
                 }
             },
@@ -2302,6 +2322,7 @@ fn open_window(
         let cr_dock = dock_stacks.clone();
         let cr_pm = dock_panels_model.clone();
         let cr_dm = dock_dividers_model.clone();
+        let cr_da = da_size.clone();
         window.on_content_resized(move |w: f32, h: f32| {
             let next = (w.max(1.0), h.max(1.0));
             if content_size.get() == next {
@@ -2318,7 +2339,7 @@ fn open_window(
                     &panes_model,
                     &splitters_model,
                 );
-                refresh_dock(&win, &cr_dock, &cr_pm, &cr_dm);
+                refresh_dock(&win, &cr_dock, &cr_pm, &cr_dm, cr_da.get());
             }
         });
     }
@@ -2335,6 +2356,7 @@ fn open_window(
         let wds_dock = dock_stacks.clone();
         let wds_pm = dock_panels_model.clone();
         let wds_dm = dock_dividers_model.clone();
+        let wds_da = da_size.clone();
         window.on_set_welcome_as_sidebar(move |v| {
             // The property is two-way-bound through InterfacePanel and changing
             // it destroys/recreates the Welcome subtree that owns the Switch.
@@ -2358,6 +2380,7 @@ fn open_window(
             let wds_dock = wds_dock.clone();
             let wds_pm = wds_pm.clone();
             let wds_dm = wds_dm.clone();
+            let wds_da = wds_da.clone();
             slint::Timer::single_shot(std::time::Duration::ZERO, move || {
                 if let Some(w) = weak.upgrade() {
                     w.set_welcome_as_sidebar(v);
@@ -2374,7 +2397,7 @@ fn open_window(
                         &panes_model,
                         &splitters_model,
                     );
-                    refresh_dock(&w, &wds_dock, &wds_pm, &wds_dm);
+                    refresh_dock(&w, &wds_dock, &wds_pm, &wds_dm, wds_da.get());
                 }
             });
         });
@@ -6202,13 +6225,6 @@ fn panel_edge(window: &AppWindow, kind: &str) -> Option<&'static str> {
     }
 }
 
-/// Current window size in logical px.
-fn window_size_px(window: &AppWindow) -> (f32, f32) {
-    let scale = window.window().scale_factor().max(0.01);
-    let size = window.window().size();
-    (size.width as f32 / scale, size.height as f32 / scale)
-}
-
 /// A panel's preferred thickness along its edge's normal: width on a
 /// left/right edge, height on a top/bottom one (logical px).
 fn panel_extent(window: &AppWindow, kind: &str) -> f32 {
@@ -6229,13 +6245,16 @@ fn panel_extent(window: &AppWindow, kind: &str) -> f32 {
 /// dock geometry and push the result into the UI (models updated in place so
 /// the rendered panel components keep their state). Call whenever a panel
 /// docks, resizes or collapses; also from the close path before `save_layout`.
+/// `area` is the dock-area frame in logical px (Slint reports it through
+/// `dock-area-resized`) — panels lay out in that frame, not the window's.
 fn refresh_dock(
     window: &AppWindow,
     dock_stacks: &Rc<RefCell<DockStacks>>,
     panels_model: &VecModel<PanelGeomInfo>,
     dividers_model: &VecModel<DividerGeomInfo>,
+    area: (f32, f32),
 ) {
-    let (cw, ch) = window_size_px(window);
+    let (cw, ch) = area;
     // Zen mode hides every docked panel and the terminal fills the window.
     if window.get_zen_mode() {
         panels_model.set_vec(Vec::new());
