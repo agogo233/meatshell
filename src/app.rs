@@ -2220,9 +2220,11 @@ fn open_window(
                 refresh_dock(&w, &ds, &pm, &dm, da.get());
             }
         });
-        // The dock-area frame itself: window resizes and zen toggles change it
-        // without any panel event, and `rest` no longer tracks parent sizes, so
-        // this is the trigger that keeps the whole layout following the window.
+        // The dock-area frame itself: window resizes change it without any
+        // panel event, and `rest` no longer tracks parent sizes, so this is
+        // the trigger that keeps the whole layout following the window. (Zen
+        // toggles come through `dock-layout-changed` instead — the frame does
+        // not resize there.)
         let weak4 = window.as_weak();
         let ds4 = dock_stacks.clone();
         let pm4 = dock_panels_model.clone();
@@ -2281,7 +2283,7 @@ fn open_window(
                     let kind = p.kind.to_string();
                     let edge = p.edge.to_string();
                     let horizontal_edge = matches!(edge.as_str(), "left" | "right");
-                    let thickness = pos.clamp(100.0, 2600.0);
+                    let thickness = pos.clamp(MIN_THICK, 2600.0);
                     if let Some(w) = weak3.upgrade() {
                         match (kind.as_str(), horizontal_edge) {
                             ("sidebar", true) => w.set_sidebar_width(thickness),
@@ -6241,10 +6243,29 @@ fn panel_extent(window: &AppWindow, kind: &str) -> f32 {
     }
 }
 
+/// Whether the edge shows a 36px collapsed-panel ToolStrip band: any panel
+/// whose folded form docks there (welcome counts only in sidebar mode, where
+/// its strip actually renders). Multiple folded panels on one edge merge
+/// into a single band, hence the boolean.
+fn strip_on_edge(window: &AppWindow, edge: &str) -> bool {
+    let docks = |s: slint::SharedString| s.as_str() == edge;
+    (window.get_sidebar_collapsed() && docks(window.get_sidebar_dock()))
+        || (window.get_welcome_as_sidebar()
+            && window.get_welcome_collapsed()
+            && docks(window.get_welcome_sidebar_dock()))
+        || (window.get_quick_panel_open()
+            && window.get_quick_panel_collapsed()
+            && docks(window.get_quick_panel_dock()))
+        || (window.get_ai_panel_open()
+            && window.get_ai_panel_collapsed()
+            && docks(window.get_ai_panel_dock()))
+}
+
 /// Rebuild the edge stacks from the current window panel state, recompute the
 /// dock geometry and push the result into the UI (models updated in place so
 /// the rendered panel components keep their state). Call whenever a panel
-/// docks, resizes or collapses; also from the close path before `save_layout`.
+/// docks, resizes or collapses — the close path then only has to persist the
+/// already-synced stacks.
 /// `area` is the dock-area frame in logical px (Slint reports it through
 /// `dock-area-resized`) — panels lay out in that frame, not the window's.
 fn refresh_dock(
@@ -6269,7 +6290,12 @@ fn refresh_dock(
     let geom = {
         let mut cur = dock_stacks.borrow_mut();
         cur.rebuild_from(&saved, &|k| panel_edge(window, k));
-        cur.compute_geom(&|k| panel_extent(window, k), cw, ch)
+        cur.compute_geom(
+            &|k| panel_extent(window, k),
+            &|edge| strip_on_edge(window, edge),
+            cw,
+            ch,
+        )
     };
     let panels: Vec<PanelGeomInfo> = geom
         .panels

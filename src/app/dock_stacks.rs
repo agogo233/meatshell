@@ -23,10 +23,13 @@ pub const DIVIDER: f32 = 4.0;
 
 /// Clamp bounds for a stacked panel's thickness along its edge's normal
 /// (its width on a left/right edge, height on a top/bottom one).
-const MIN_THICK: f32 = 120.0;
+pub const MIN_THICK: f32 = 120.0;
 /// Max share of the dock-area an edge stack may take. Kept well under half so
 /// the terminal never fully disappears even with opposite edges both maxed.
 const MAX_THICK_FRAC: f32 = 0.38;
+/// Outer band an edge reserves for the collapsed-panel ToolStrip (a folded
+/// panel still shows its 36px icon strip; stacked panels live inside it).
+pub const STRIP: f32 = 36.0;
 
 /// Absolute rectangle in dock-area logical px.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -282,7 +285,17 @@ impl DockStacks {
     /// dividers) plus the central content rect, for the given dock-area size
     /// in logical px. `extent` returns a panel's preferred thickness along its
     /// edge's normal (width on a left/right edge, height on a top/bottom one).
-    pub fn compute_geom(&self, extent: &dyn Fn(&str) -> f32, w: f32, h: f32) -> DockGeom {
+    /// `has_strip` marks edges whose collapsed panels still show the outer
+    /// 36px ToolStrip band: the band stays at the very edge and the whole
+    /// stack is carved INSIDE it (the band spans the full edge, so the split
+    /// axis and ratios are unaffected).
+    pub fn compute_geom(
+        &self,
+        extent: &dyn Fn(&str) -> f32,
+        has_strip: &dyn Fn(&str) -> bool,
+        w: f32,
+        h: f32,
+    ) -> DockGeom {
         let mut g = DockGeom {
             central: RectGeom {
                 x: 0.0,
@@ -294,10 +307,32 @@ impl DockStacks {
         };
         let (cw, ch) = (w.max(1.0), h.max(1.0));
         for edge in ["left", "right", "top", "bottom"] {
-            let Some(slots) = self.table(edge) else { continue };
-            if slots.is_empty() {
-                continue;
-            }
+            // A collapsed panel's ToolStrip band is reserved even when no
+            // panel on this edge is expanded (the edge is strip-only).
+            let band = if has_strip(edge) { STRIP } else { 0.0 };
+            let slots = match self.table(edge) {
+                Some(t) if !t.is_empty() => t,
+                _ => {
+                    let taken = band;
+                    match edge {
+                        "left" => {
+                            g.central.x += taken;
+                            g.central.w -= taken;
+                        }
+                        "right" => {
+                            g.central.w -= taken;
+                        }
+                        "top" => {
+                            g.central.y += taken;
+                            g.central.h -= taken;
+                        }
+                        _ => {
+                            g.central.h -= taken;
+                        }
+                    }
+                    continue;
+                }
+            };
             let horizontal = matches!(edge, "left" | "right");
             // All stacked panels on an edge share its thickness; clamp so the
             // central area keeps at least half of the dock-area. Tiny
@@ -305,12 +340,15 @@ impl DockStacks {
             // put the cap below MIN_THICK — f32::clamp panics when
             // min > max, so floor the cap at MIN_THICK; the next real
             // resize pass overwrites the transient geometry.
-            let cap = ((if horizontal { cw } else { ch }) * MAX_THICK_FRAC).max(MIN_THICK);
+            let cap = ((((if horizontal { cw } else { ch }) - band).max(0.0)) * MAX_THICK_FRAC)
+                .max(MIN_THICK);
             let thickness = slots
                 .iter()
                 .map(|s| extent(s.kind))
                 .fold(0.0, f32::max)
                 .clamp(MIN_THICK, cap);
+            // The stack sits inside the band; the split axis spans the full
+            // edge (the band runs along it), so only the normal offsets move.
             let axis = if horizontal { ch } else { cw };
             let mut pos = 0.0;
             for (i, s) in slots.iter().enumerate() {
@@ -320,10 +358,10 @@ impl DockStacks {
                     (s.ratio * axis).max(0.0)
                 };
                 let rect = match edge {
-                    "left" => RectGeom { x: 0.0, y: pos, w: thickness, h: seg },
-                    "right" => RectGeom { x: cw - thickness, y: pos, w: thickness, h: seg },
-                    "top" => RectGeom { x: pos, y: 0.0, w: seg, h: thickness },
-                    _ => RectGeom { x: pos, y: ch - thickness, w: seg, h: thickness },
+                    "left" => RectGeom { x: band, y: pos, w: thickness, h: seg },
+                    "right" => RectGeom { x: cw - band - thickness, y: pos, w: thickness, h: seg },
+                    "top" => RectGeom { x: pos, y: band, w: seg, h: thickness },
+                    _ => RectGeom { x: pos, y: ch - band - thickness, w: seg, h: thickness },
                 };
                 g.panels.push(PanelGeom { kind: s.kind, edge, rect });
                 if i < slots.len() - 1 {
@@ -341,21 +379,22 @@ impl DockStacks {
                 }
                 pos += seg;
             }
-            // Carve this edge's stack off the central content rect.
+            // Carve this edge's band + stack off the central content rect.
+            let taken = band + thickness;
             match edge {
                 "left" => {
-                    g.central.x += thickness;
-                    g.central.w -= thickness;
+                    g.central.x += taken;
+                    g.central.w -= taken;
                 }
                 "right" => {
-                    g.central.w -= thickness;
+                    g.central.w -= taken;
                 }
                 "top" => {
-                    g.central.y += thickness;
-                    g.central.h -= thickness;
+                    g.central.y += taken;
+                    g.central.h -= taken;
                 }
                 "bottom" => {
-                    g.central.h -= thickness;
+                    g.central.h -= taken;
                 }
                 _ => {}
             }
@@ -505,12 +544,16 @@ mod tests {
         220.0
     }
 
+    fn no_strip(_: &str) -> bool {
+        false
+    }
+
     #[test]
     fn geom_splits_two_panels_vertically_on_left_edge() {
         let mut s = DockStacks::default();
         s.dock_to("left", "sidebar");
         s.dock_to("left", "quick");
-        let g = s.compute_geom(&extent_220, 800.0, 600.0);
+        let g = s.compute_geom(&extent_220, &no_strip, 800.0, 600.0);
         // Both panels share the left-edge thickness (220) and split the height.
         assert_eq!(g.panels.len(), 2);
         assert_eq!(g.panels[0].kind, "sidebar");
@@ -527,7 +570,7 @@ mod tests {
     fn geom_single_panel_carves_edge_full_height() {
         let mut s = DockStacks::default();
         s.dock_to("right", "ai");
-        let g = s.compute_geom(&extent_220, 800.0, 600.0);
+        let g = s.compute_geom(&extent_220, &no_strip, 800.0, 600.0);
         assert_eq!(g.panels.len(), 1);
         assert_eq!(g.panels[0].rect, RectGeom { x: 580.0, y: 0.0, w: 220.0, h: 600.0 });
         assert!(g.dividers.is_empty());
@@ -539,7 +582,7 @@ mod tests {
         let mut s = DockStacks::default();
         s.dock_to("top", "sidebar");
         s.dock_to("top", "ai");
-        let g = s.compute_geom(&extent_220, 800.0, 600.0);
+        let g = s.compute_geom(&extent_220, &no_strip, 800.0, 600.0);
         assert_eq!(g.panels.len(), 2);
         assert_eq!(g.panels[0].rect, RectGeom { x: 0.0, y: 0.0, w: 400.0, h: 220.0 });
         assert_eq!(g.panels[1].rect, RectGeom { x: 400.0, y: 0.0, w: 400.0, h: 220.0 });
@@ -551,7 +594,7 @@ mod tests {
     #[test]
     fn geom_no_panels_leaves_central_untouched() {
         let s = DockStacks::default();
-        let g = s.compute_geom(&extent_220, 800.0, 600.0);
+        let g = s.compute_geom(&extent_220, &no_strip, 800.0, 600.0);
         assert!(g.panels.is_empty());
         assert!(g.dividers.is_empty());
         assert_eq!(g.central, RectGeom { x: 0.0, y: 0.0, w: 800.0, h: 600.0 });
@@ -561,7 +604,7 @@ mod tests {
     fn geom_clamps_thickness_so_central_survives() {
         let mut s = DockStacks::default();
         s.dock_to("left", "sidebar");
-        let g = s.compute_geom(&|_| 900.0, 800.0, 600.0);
+        let g = s.compute_geom(&|_| 900.0, &no_strip, 800.0, 600.0);
         // cap = 800 → max thickness 304 (0.38 × 800); central keeps ≥ 62%.
         assert_eq!(g.panels[0].rect.w, 304.0);
         assert_eq!(g.central.w, 496.0);
@@ -573,10 +616,28 @@ mod tests {
         s.dock_to("left", "sidebar");
         // The pre-show 0×0 pass: before the cap floor, clamp(120, 0.38)
         // panicked with "min > max" and killed the app at startup.
-        let g = s.compute_geom(&extent_220, 0.0, 0.0);
+        let g = s.compute_geom(&extent_220, &no_strip, 0.0, 0.0);
         assert_eq!(g.panels[0].rect.w, 120.0);
         assert_eq!(g.central.w, 0.0);
         assert_eq!(g.central.h, 1.0);
+    }
+
+    #[test]
+    fn geom_reserves_outer_strip_band() {
+        let mut s = DockStacks::default();
+        s.dock_to("left", "sidebar");
+        s.dock_to("left", "quick");
+        // Left edge stacks behind its band; the right edge is strip-only
+        // (folded panels, nothing expanded) yet still takes its 36px.
+        let strip = |e: &str| e == "left" || e == "right";
+        let g = s.compute_geom(&extent_220, &strip, 800.0, 600.0);
+        assert_eq!(g.panels.len(), 2);
+        assert_eq!(g.panels[0].rect.x, 36.0);
+        // The band runs ALONG the edge: split axis and ratios untouched.
+        assert_eq!(g.panels[0].rect.h, 300.0);
+        assert_eq!(g.panels[1].rect.y, 300.0);
+        assert_eq!(g.central.x, 256.0);
+        assert_eq!(g.central.w, 800.0 - 256.0 - 36.0);
     }
 
     fn expanded_left_sidebar_ai(k: &str) -> Option<&'static str> {
