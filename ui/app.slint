@@ -454,7 +454,9 @@ export component AppWindow inherits Window {
     property <bool> sidebar-horizontal: root.sidebar-dock == "left" || root.sidebar-dock == "right";
     // Drag-to-dock state: while a panel's header is dragged, a 4-edge snap
     // overlay shows and `dock-target` tracks the edge under the cursor.
-    property <bool> panel-dragging;
+    // `out` so Rust can read it from the dock diagnostics (a stale-true flag
+    // is the signature of an end handler that never ran).
+    out property <bool> panel-dragging;
     property <float> drag-nx;   // cursor x within the dock area, 0..1
     property <float> drag-ny;   // cursor y within the dock area, 0..1
     property <string> dock-target:
@@ -2773,12 +2775,21 @@ export component AppWindow inherits Window {
             }
 
             // Drag-to-dock snap overlay — four edge zones; the one under the cursor
-            // (root.dock-target) lights up. Purely visual (no TouchArea) so the
-            // header's drag keeps receiving move events (#dock).
+            // (root.dock-target) lights up. The zones stay input-transparent; the
+            // single TouchArea below only ever sees a press when the drag lifecycle
+            // broke (a live drag keeps its grab on the source), so a stranded
+            // frame can be cleared with one click (#dock).
             if root.panel-dragging : Rectangle {
                 x: 0; y: 0;
                 width: parent.width;
                 height: parent.height;
+                // Self-heal: during a live drag the source keeps the pointer
+                // grab, so this area sees nothing. The only way a press ever
+                // lands here is a stale frame (the drag's end was lost) — one
+                // click then clears it instead of stranding the preview.
+                TouchArea {
+                    clicked => { root.panel-dragging = false; }
+                }
                 Rectangle {   // left zone
                     x: 0; y: 0; width: parent.width * 0.22; height: parent.height;
                     background: root.dock-target == "left"
