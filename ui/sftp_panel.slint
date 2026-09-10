@@ -204,11 +204,16 @@ export component SftpPanel inherits Rectangle {
     dock-bg := TouchArea {
         mouse-cursor: move;
         moved => {
-            root.dock-drag-move(self.absolute-position.x + self.mouse-x,
-                                self.absolute-position.y + self.mouse-y);
+            if (self.pressed) {
+                root.dock-drag-move(self.absolute-position.x + self.mouse-x,
+                                    self.absolute-position.y + self.mouse-y);
+            }
         }
         pointer-event(ev) => {
             if (ev.kind == PointerEventKind.up) { root.dock-drag-end(); }
+            // Grab taken away (popup, deactivation): end the gesture
+            // anyway so no dock preview is stranded.
+            else if (ev.kind == PointerEventKind.cancel) { root.dock-drag-end(); }
         }
     }
 
@@ -249,11 +254,16 @@ export component SftpPanel inherits Rectangle {
                     grip-ta := TouchArea {
                         mouse-cursor: move;
                         moved => {
-                            root.dock-drag-move(self.absolute-position.x + self.mouse-x,
-                                                self.absolute-position.y + self.mouse-y);
+                            if (self.pressed) {
+                                root.dock-drag-move(self.absolute-position.x + self.mouse-x,
+                                                    self.absolute-position.y + self.mouse-y);
+                            }
                         }
                         pointer-event(ev) => {
                             if (ev.kind == PointerEventKind.up) { root.dock-drag-end(); }
+                            // Grab taken away (popup, deactivation): end the
+                            // gesture anyway so no dock preview is stranded.
+                            else if (ev.kind == PointerEventKind.cancel) { root.dock-drag-end(); }
                         }
                     }
                     Text {

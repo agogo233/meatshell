@@ -128,6 +128,9 @@ export component QuickDockPanel inherits Rectangle {
                 }
                 pointer-event(ev) => {
                     if (ev.kind == PointerEventKind.up) { root.dock-drag-end(); }
+                    // Grab taken away (popup, deactivation): end the gesture
+                    // anyway so no dock preview is stranded.
+                    else if (ev.kind == PointerEventKind.cancel) { root.dock-drag-end(); }
                 }
             }
             HorizontalLayout {
@@ -288,6 +291,9 @@ export component AIPanel inherits Rectangle {
                 }
                 pointer-event(ev) => {
                     if (ev.kind == PointerEventKind.up) { root.dock-drag-end(); }
+                    // Grab taken away (popup, deactivation): end the gesture
+                    // anyway so no dock preview is stranded.
+                    else if (ev.kind == PointerEventKind.cancel) { root.dock-drag-end(); }
                 }
             }
             HorizontalLayout {
@@ -2168,6 +2174,13 @@ export component TerminalView inherits Rectangle {
                                         }
                                         pointer-event(ev) => {
                                             if (ev.kind == PointerEventKind.up) {
+                                                root.quick-open = false;
+                                                root.quick-dock-drag-end();
+                                            }
+                                            // Grab taken away (popup, deactivation): end the
+                                            // gesture anyway so no dock preview is stranded
+                                            // (mirrors up, which also closes the popup).
+                                            else if (ev.kind == PointerEventKind.cancel) {
                                                 root.quick-open = false;
                                                 root.quick-dock-drag-end();
                                             }
