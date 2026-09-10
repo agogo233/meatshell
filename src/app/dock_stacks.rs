@@ -300,13 +300,17 @@ impl DockStacks {
             }
             let horizontal = matches!(edge, "left" | "right");
             // All stacked panels on an edge share its thickness; clamp so the
-            // central area keeps at least half of the dock-area.
-            let cap = if horizontal { cw } else { ch };
+            // central area keeps at least half of the dock-area. Tiny
+            // dock-areas (the pre-show 0×0 pass, or a user-shrunk window)
+            // put the cap below MIN_THICK — f32::clamp panics when
+            // min > max, so floor the cap at MIN_THICK; the next real
+            // resize pass overwrites the transient geometry.
+            let cap = ((if horizontal { cw } else { ch }) * MAX_THICK_FRAC).max(MIN_THICK);
             let thickness = slots
                 .iter()
                 .map(|s| extent(s.kind))
                 .fold(0.0, f32::max)
-                .clamp(MIN_THICK, cap * MAX_THICK_FRAC);
+                .clamp(MIN_THICK, cap);
             let axis = if horizontal { ch } else { cw };
             let mut pos = 0.0;
             for (i, s) in slots.iter().enumerate() {
@@ -356,6 +360,11 @@ impl DockStacks {
                 _ => {}
             }
         }
+        // Opposite-edge stacks on a tiny dock-area can over-carve the central
+        // rect into negative extents; the UI derives toolbar offsets from it,
+        // so keep the transient geometry at least self-consistent.
+        g.central.w = g.central.w.max(0.0);
+        g.central.h = g.central.h.max(0.0);
         g
     }
 }
@@ -556,6 +565,18 @@ mod tests {
         // cap = 800 → max thickness 304 (0.38 × 800); central keeps ≥ 62%.
         assert_eq!(g.panels[0].rect.w, 304.0);
         assert_eq!(g.central.w, 496.0);
+    }
+
+    #[test]
+    fn geom_survives_tiny_dock_area() {
+        let mut s = DockStacks::default();
+        s.dock_to("left", "sidebar");
+        // The pre-show 0×0 pass: before the cap floor, clamp(120, 0.38)
+        // panicked with "min > max" and killed the app at startup.
+        let g = s.compute_geom(&extent_220, 0.0, 0.0);
+        assert_eq!(g.panels[0].rect.w, 120.0);
+        assert_eq!(g.central.w, 0.0);
+        assert_eq!(g.central.h, 1.0);
     }
 
     fn expanded_left_sidebar_ai(k: &str) -> Option<&'static str> {
