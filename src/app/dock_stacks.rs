@@ -462,7 +462,7 @@ fn rebalance(t: &mut [DockSlotInfo]) {
     // absolute edge fractions (what compute_geom multiplies by the axis),
     // so each keeps its own share and only the tail takes the remainder —
     // a summed 1.0 means an exactly 50/50 two-panel merge.
-    let mut rem = 1.0;
+    let mut rem: f32 = 1.0;
     let n = t.len();
     for (i, s) in t.iter_mut().enumerate() {
         if i == n - 1 {
