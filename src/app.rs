@@ -2217,10 +2217,6 @@ fn open_window(
         let da = da_size.clone();
         window.on_dock_layout_changed(move || {
             if let Some(w) = weak.upgrade() {
-                dock_debug(&format!(
-                    "dock-layout-changed dragging={}",
-                    w.get_panel_dragging()
-                ));
                 refresh_dock(&w, &ds, &pm, &dm, da.get());
             }
         });
@@ -2241,9 +2237,6 @@ fn open_window(
             }
             da4.set(next);
             if let Some(win) = weak4.upgrade() {
-                if win.get_panel_dragging() {
-                    dock_debug(&format!("dock-area-resized -> {next:?} DURING DRAG"));
-                }
                 refresh_dock(&win, &ds4, &pm4, &dm4, next);
             }
         });
@@ -2339,9 +2332,6 @@ fn open_window(
             }
             content_size.set(next);
             if let Some(win) = weak.upgrade() {
-                if win.get_panel_dragging() {
-                    dock_debug(&format!("content-resized -> {next:?} DURING DRAG"));
-                }
                 let lay = layout.borrow().clone();
                 refresh_panes(
                     &win,
@@ -3304,11 +3294,6 @@ fn open_window(
                 }
                 WinActivity::Active => {}
             }
-            // Heartbeat: `dragging=true` lines after a released drag are the
-            // signature of a stranded preview. Note it only ticks while the
-            // window is active with the sidebar visible — a gap in the log is
-            // not a dead process.
-            dock_debug(&format!("sampler dragging={}", window.get_panel_dragging()));
             let snap = {
                 let mut s = lock_or_recover(&tick_sampler);
                 s.sample()
@@ -6276,27 +6261,6 @@ fn strip_on_edge(window: &AppWindow, edge: &str) -> bool {
             && docks(window.get_ai_panel_dock()))
 }
 
-/// Dock drag diagnostics: a double-clicked GUI build has no console, so the
-/// stale-preview hunt appends to a temp file (ms timestamp per line) — kept
-/// off `warn` so it can't push real alerts out of the capped error.log.
-/// Remove together with its call sites once the root cause is fixed.
-fn dock_debug(msg: &str) {
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    tracing::debug!("[dock] {msg}");
-    let path = std::env::temp_dir().join("meatshell-dock-debug.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
-        use std::io::Write;
-        let _ = writeln!(f, "{ts} {msg}");
-    }
-}
-
 /// Rebuild the edge stacks from the current window panel state, recompute the
 /// dock geometry and push the result into the UI (models updated in place so
 /// the rendered panel components keep their state). Call whenever a panel
@@ -6323,7 +6287,6 @@ fn refresh_dock(
         panels_model.clone(),
         dividers_model.clone(),
         area,
-        0,
     );
 }
 
@@ -6333,7 +6296,6 @@ fn refresh_dock_inner(
     panels_model: Rc<VecModel<PanelGeomInfo>>,
     dividers_model: Rc<VecModel<DividerGeomInfo>>,
     area: (f32, f32),
-    round: u32,
 ) {
     let Some(w) = window.upgrade() else {
         return;
@@ -6343,19 +6305,8 @@ fn refresh_dock_inner(
     // is postponed (and re-postponed until the drag ends), so a mid-drag
     // relayout can never rebuild the dragged panel out from under the grab.
     if w.get_panel_dragging() {
-        dock_debug(&format!(
-            "refresh_dock deferred round={round} rows={} area={cw:.0}x{ch:.0}",
-            panels_model.row_count()
-        ));
         slint::Timer::single_shot(std::time::Duration::from_millis(100), move || {
-            refresh_dock_inner(
-                window,
-                dock_stacks,
-                panels_model,
-                dividers_model,
-                area,
-                round.saturating_add(1),
-            );
+            refresh_dock_inner(window, dock_stacks, panels_model, dividers_model, area);
         });
         return;
     }

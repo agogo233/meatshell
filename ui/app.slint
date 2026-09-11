@@ -454,8 +454,8 @@ export component AppWindow inherits Window {
     property <bool> sidebar-horizontal: root.sidebar-dock == "left" || root.sidebar-dock == "right";
     // Drag-to-dock state: while a panel's header is dragged, a 4-edge snap
     // overlay shows and `dock-target` tracks the edge under the cursor.
-    // `out` so Rust can read it from the dock diagnostics (a stale-true flag
-    // is the signature of an end handler that never ran).
+    // `out` (Rust-read) backs the drag-aware deferral in refresh_dock: the
+    // push must wait while a panel drag holds the pointer.
     out property <bool> panel-dragging;
     property <float> drag-nx;   // cursor x within the dock area, 0..1
     property <float> drag-ny;   // cursor y within the dock area, 0..1
