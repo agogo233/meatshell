@@ -9,8 +9,9 @@
 use crate::config::{DockEdgeSer, DockSlotSer};
 
 /// One stack slot: which panel and how much of the edge it owns (0..1).
-/// A ratio of `0.0` is a sentinel for "just joined" — [`rebalance`] hands
-/// such members an even share and squeezes the existing ones around them.
+/// A non-positive ratio is a sentinel for "just joined" — [`rebalance`]
+/// hands such members an even share and squeezes the established ones
+/// around them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DockSlotInfo {
     pub kind: &'static str,
@@ -273,10 +274,10 @@ impl DockStacks {
             if !fresh.is_empty() {
                 // A comfortable leftover keeps the established split intact
                 // (a user-tuned ratio never gets wiped by an unrelated
-                // stack). But when the edge is already spoken for, handing
-                // newcomers the crumbs would strand them — push the 0.0
-                // sentinel instead and let rebalance squeeze everyone to
-                // even shares.
+                // stack). But a leftover at or below MIN_RATIO means the
+                // edge is already spoken for — handing newcomers the crumbs
+                // would strand them, so push the sentinel instead and let
+                // rebalance squeeze everyone to even shares.
                 let leftover = 1.0 - known;
                 let each = if leftover > MIN_RATIO {
                     leftover / fresh.len() as f32
@@ -465,7 +466,11 @@ fn rebalance(t: &mut [DockSlotInfo]) {
     let n = t.len();
     for (i, s) in t.iter_mut().enumerate() {
         if i == n - 1 {
-            s.ratio = rem;
+            // Floor the tail: a clamped-up overflow elsewhere could leave
+            // less than MIN here, and a 0.0 ratio persisted by to_saved
+            // would read back as a sentinel — or get dropped by the config
+            // sanitiser — silently losing the panel on the next load.
+            s.ratio = rem.max(MIN_RATIO);
         } else {
             let share = s.ratio.min(rem);
             s.ratio = share;
@@ -534,8 +539,9 @@ mod tests {
         s.dock_to("left", "quick");
         s.set_ratio("left", 0, 0.7);
         s.dock_to("left", "ai");
-        // The 70/30 tuning survives as a 2:1 ratio inside the share the
-        // newcomer did NOT take; the newcomer itself gets an even third.
+        // The 70/30 tuning survives as its original 7:3 ratio inside the
+        // share the newcomer did NOT take; the newcomer itself gets an
+        // even third.
         assert!((s.left[2].ratio - 1.0 / 3.0).abs() < 1e-3);
         assert!((s.left[0].ratio / s.left[1].ratio - 7.0 / 3.0).abs() < 0.05);
         let sum: f32 = s.left.iter().map(|x| x.ratio).sum();
