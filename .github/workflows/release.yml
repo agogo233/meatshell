@@ -8,7 +8,8 @@ name: Build (Windows x86_64)
 
 on:
   # Rebuild on every push to any branch/tag — used as the CI gate: a push
-  # runs a full `cargo build --release`, so compile errors surface here.
+  # runs a full `cargo build --release` plus the pure-logic dock stack unit
+  # tests, so compile and layout-math errors surface here.
   push:
   workflow_dispatch:
 
@@ -37,6 +38,12 @@ jobs:
 
       - name: Build (release)
         run: cargo build --release --target x86_64-pc-windows-msvc --locked
+
+      - name: Dock stack unit tests
+        # Pure-logic tests only (no display needed); `--release` shares the
+        # build cache above. The filter keeps unrelated GUI-dependent tests
+        # out of the gate.
+        run: cargo test --release --locked --bin meatshell dock_stacks
 
       - name: Stage portable build
         id: package
