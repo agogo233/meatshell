@@ -3193,10 +3193,11 @@ export component AppWindow inherits Window {
                     // The gutter stays pinned and follows vertical scrolling.
                     //
                     // Highlight branch (editor-hl-active): lines render without
-                    // wrapping and scroll horizontally (VS Code-style), which
-                    // gives every logical line one constant row height. The
-                    // plain branch keeps the original char-wrap behaviour with
-                    // per-line measured heights.
+                    // wrapping and scroll horizontally (VS Code-style); the
+                    // gutter and overlay rows measure their height per line so
+                    // they stay aligned with the editor body and selection.
+                    // The plain branch keeps the original char-wrap behaviour
+                    // with per-line measured heights.
                     Rectangle {
                         vertical-stretch: 1;
                         background: Theme.bg-root;
@@ -3241,22 +3242,39 @@ export component AppWindow inherits Window {
                                     }
                                 }
                                 if root.editor-hl-active : VerticalLayout {
-                                    // Constant row height (no wrapping): rows line
-                                    // up with the editor body and the coloured
-                                    // overlay grid.
+                                    // Rows track the real per-line text height
+                                    // (no wrapping): each row measures its own
+                                    // source with a hidden no-wrap Text, so the
+                                    // numbers stay glued to the body and the
+                                    // selection even when wide glyphs make some
+                                    // lines taller than the Latin floor.
                                     y: ed-scroll.viewport-y + 8px;
                                     width: parent.width;
                                     height: self.preferred-height;
                                     spacing: 0px;
                                     padding: 0px;
-                                    for line[index] in root.editor-hl-lines: Text {
-                                        height: editor-viewport.ed-row-h;
-                                        text: "\{index + 1}";
-                                        horizontal-alignment: right;
-                                        vertical-alignment: top;
-                                        font-family: edit-input.font-family;
-                                        font-size: edit-input.font-size;
-                                        color: Theme.text-muted;
+                                    for line[index] in root.editor-hl-lines: Rectangle {
+                                        // Explicit height locks the row (Slint
+                                        // layouts hand surplus to unlocked rows);
+                                        // the floor covers empty lines whose
+                                        // measurement is 0 but still occupy a
+                                        // line box in the editor body.
+                                        height: max(line-measure.preferred-height, editor-viewport.ed-row-h);
+                                        line-measure := Text {
+                                            x: parent.width;
+                                            text: line.source;
+                                            wrap: no-wrap;
+                                            font-family: edit-input.font-family;
+                                            font-size: edit-input.font-size;
+                                        }
+                                        Text {
+                                            text: "\{index + 1}";
+                                            horizontal-alignment: right;
+                                            vertical-alignment: top;
+                                            font-family: edit-input.font-family;
+                                            font-size: edit-input.font-size;
+                                            color: Theme.text-muted;
+                                        }
                                     }
                                 }
                             }
@@ -3264,13 +3282,15 @@ export component AppWindow inherits Window {
                             editor-viewport := Rectangle {
                                 horizontal-stretch: 1;
                                 clip: true;
-                                // One no-wrap probe fixes the constant row height
-                                // for the gutter and the highlight overlay; parked
-                                // outside the clip like line-measure above.
+                                // One no-wrap Latin probe fixes the minimum row
+                                // height (the floor under the per-line
+                                // measurements in the gutter and overlay);
+                                // parked outside the clip like line-measure
+                                // above.
                                 property <length> ed-row-h: ed-row-probe.preferred-height;
                                 ed-row-probe := Text {
                                     x: -500px;
-                                    text: "Ag中";
+                                    text: "Ag";
                                     wrap: no-wrap;
                                     font-family: edit-input.font-family;
                                     font-size: edit-input.font-size;
@@ -3323,7 +3343,14 @@ export component AppWindow inherits Window {
                                             // layout.rs), which drifts the runs
                                             // rightward off the real glyphs.
                                             width: self.preferred-width;
-                                            height: editor-viewport.ed-row-h;
+                                            // Height is the tallest run's own
+                                            // line box (== the editor's parley
+                                            // line for this row); the floor keeps
+                                            // empty rows at the editor's minimum
+                                            // line height. Explicit sizing also
+                                            // locks the row against vertical
+                                            // surplus distribution.
+                                            height: max(self.preferred-height, editor-viewport.ed-row-h);
                                             spacing: 0px;
                                             padding: 0px;
                                             // stretch 0 keeps every run at its natural
