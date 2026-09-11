@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::{OutputHighlightRule, QuickCommand, Secret, Session};
+use super::{DockEdgeSer, OutputHighlightRule, QuickCommand, Secret, Session};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WslProfile {
@@ -284,6 +284,12 @@ pub struct ConfigFile {
     /// resource panel / wallpaper overlay) to users still sitting on old defaults.
     #[serde(default)]
     pub defaults_rev: u32,
+    /// Per-edge stacks of simultaneously-expanded docked panels (#dock-stack),
+    /// e.g. session list + Quick shared on the left edge, split vertically.
+    /// Empty (or <2 slots on a valid edge) → the legacy single-panel-per-edge
+    /// layout.
+    #[serde(default)]
+    pub dock_stacks: Vec<DockEdgeSer>,
 }
 
 /// Portable export file (issue #46): sessions with everything in plaintext
