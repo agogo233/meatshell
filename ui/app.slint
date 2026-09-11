@@ -3258,8 +3258,8 @@ export component AppWindow inherits Window {
                                         // layouts hand surplus to unlocked rows);
                                         // the floor keeps empty lines at the
                                         // editor's minimum line height.
-                                        height: max(line-measure.preferred-height, editor-viewport.ed-row-h);
-                                        line-measure := Text {
+                                        height: max(hl-line-measure.preferred-height, editor-viewport.ed-row-h);
+                                        hl-line-measure := Text {
                                             x: parent.width;
                                             text: line.source;
                                             wrap: no-wrap;
