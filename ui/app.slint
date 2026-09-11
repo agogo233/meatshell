@@ -3315,6 +3315,14 @@ export component AppWindow inherits Window {
                                         spacing: 0px;
                                         padding: 0px;
                                         for line in root.editor-hl-lines: HorizontalLayout {
+                                            // Natural width: the VerticalLayout
+                                            // would stretch every row to the full
+                                            // content width, and Slint layouts hand
+                                            // the surplus to all-zero-stretch
+                                            // children evenly (i-slint-core
+                                            // layout.rs), which drifts the runs
+                                            // rightward off the real glyphs.
+                                            width: self.preferred-width;
                                             height: editor-viewport.ed-row-h;
                                             spacing: 0px;
                                             padding: 0px;
@@ -3324,6 +3332,7 @@ export component AppWindow inherits Window {
                                                 text: seg.text;
                                                 color: seg.color;
                                                 wrap: no-wrap;
+                                                horizontal-alignment: left;
                                                 horizontal-stretch: 0;
                                                 font-family: edit-input.font-family;
                                                 font-size: edit-input.font-size;
