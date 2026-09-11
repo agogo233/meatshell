@@ -6304,41 +6304,78 @@ fn dock_debug(msg: &str) {
 /// already-synced stacks.
 /// `area` is the dock-area frame in logical px (Slint reports it through
 /// `dock-area-resized`) — panels lay out in that frame, not the window's.
+///
+/// While a panel drag is live the push is deferred: `set_vec` mid-drag can
+/// re-key `for` rows and destroy the very component holding the pointer grab,
+/// which strands the drag (its end handler never runs). The deferred run
+/// retries until the flag drops, so a release commit still lands ~100ms
+/// later.
 fn refresh_dock(
     window: &AppWindow,
     dock_stacks: &Rc<RefCell<DockStacks>>,
-    panels_model: &VecModel<PanelGeomInfo>,
-    dividers_model: &VecModel<DividerGeomInfo>,
+    panels_model: &Rc<VecModel<PanelGeomInfo>>,
+    dividers_model: &Rc<VecModel<DividerGeomInfo>>,
     area: (f32, f32),
 ) {
+    refresh_dock_inner(
+        window.as_weak(),
+        dock_stacks.clone(),
+        panels_model.clone(),
+        dividers_model.clone(),
+        area,
+        0,
+    );
+}
+
+fn refresh_dock_inner(
+    window: slint::Weak<AppWindow>,
+    dock_stacks: Rc<RefCell<DockStacks>>,
+    panels_model: Rc<VecModel<PanelGeomInfo>>,
+    dividers_model: Rc<VecModel<DividerGeomInfo>>,
+    area: (f32, f32),
+    round: u32,
+) {
+    let Some(w) = window.upgrade() else {
+        return;
+    };
     let (cw, ch) = area;
-    // Stale-preview hunt: a mid-drag rebuild that destroys the drag source
-    // shows up here with `dragging=true` and NO adjacent dock-layout-changed
-    // / resized line (the benign commit from the end handler always follows
-    // one of those).
-    if window.get_panel_dragging() {
+    // The deferral itself: any refresh while a panel drag holds the pointer
+    // is postponed (and re-postponed until the drag ends), so a mid-drag
+    // relayout can never rebuild the dragged panel out from under the grab.
+    if w.get_panel_dragging() {
         dock_debug(&format!(
-            "refresh_dock rows={} area={cw:.0}x{ch:.0}",
+            "refresh_dock deferred round={round} rows={} area={cw:.0}x{ch:.0}",
             panels_model.row_count()
         ));
+        slint::Timer::single_shot(std::time::Duration::from_millis(100), move || {
+            refresh_dock_inner(
+                window,
+                dock_stacks,
+                panels_model,
+                dividers_model,
+                area,
+                round.saturating_add(1),
+            );
+        });
+        return;
     }
     // Zen mode hides every docked panel and the terminal fills the window.
-    if window.get_zen_mode() {
+    if w.get_zen_mode() {
         panels_model.set_vec(Vec::new());
         dividers_model.set_vec(Vec::new());
-        window.set_dock_central_x(0.0);
-        window.set_dock_central_y(0.0);
-        window.set_dock_central_w(cw);
-        window.set_dock_central_h(ch);
+        w.set_dock_central_x(0.0);
+        w.set_dock_central_y(0.0);
+        w.set_dock_central_w(cw);
+        w.set_dock_central_h(ch);
         return;
     }
     let saved = dock_stacks.borrow().clone();
     let geom = {
         let mut cur = dock_stacks.borrow_mut();
-        cur.rebuild_from(&saved, &|k| panel_edge(window, k));
+        cur.rebuild_from(&saved, &|k| panel_edge(&w, k));
         cur.compute_geom(
-            &|k| panel_extent(window, k),
-            &|edge| strip_on_edge(window, edge),
+            &|k| panel_extent(&w, k),
+            &|edge| strip_on_edge(&w, edge),
             cw,
             ch,
         )
@@ -6402,10 +6439,10 @@ fn refresh_dock(
     } else {
         dividers_model.set_vec(dividers);
     }
-    window.set_dock_central_x(geom.central.x);
-    window.set_dock_central_y(geom.central.y);
-    window.set_dock_central_w(geom.central.w);
-    window.set_dock_central_h(geom.central.h);
+    w.set_dock_central_x(geom.central.x);
+    w.set_dock_central_y(geom.central.y);
+    w.set_dock_central_w(geom.central.w);
+    w.set_dock_central_h(geom.central.h);
 }
 
 /// Hit-test a drag point (pane-area coords) to a target pane + drop zone, plus
