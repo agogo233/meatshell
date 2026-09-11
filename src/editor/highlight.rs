@@ -519,15 +519,6 @@ mod tests {
     use super::*;
     use crate::editor::lang;
 
-    fn texts(line: &HlLine) -> Vec<String> {
-        let model = &line.segments;
-        (0..model.row_count()).map(|i| model.row_data(i).unwrap().text.to_string()).collect()
-    }
-
-    fn joined(line: &HlLine) -> String {
-        texts(line).concat()
-    }
-
     #[test]
     fn shell_segments() {
         let built = tokenize(Lang::Shell, "if [ -n \"$HOME\" ]; then", 0);
@@ -558,7 +549,8 @@ mod tests {
     #[test]
     fn json_keys_strings_numbers() {
         let built = tokenize(Lang::Json, r#"{"name": "meatshell", "n": 42, "ok": true}"#, 0);
-        assert_eq!(joined(&built), r#"{"name": "meatshell", "n": 42, "ok": true}"#);
+        let joined: String = built.segments.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(joined, r#"{"name": "meatshell", "n": 42, "ok": true}"#);
         // "name" and "ok" are keys (keyword colour); "meatshell" is a value.
         let key_count = built.segments.iter().filter(|(_, r)| *r == Role::Keyword).count();
         let value_count = built.segments.iter().filter(|(_, r)| *r == Role::Str).count();
@@ -676,7 +668,8 @@ mod tests {
         // — sync_model walks but skips set_row_data for stable rows.
         let content = "head\n".to_string() + &"body line\n".repeat(500);
         let model = VecModel::from(build_lines(&content, Lang::Json, true));
-        sync_model(&model, "HEAD\n" + &"body line\n".repeat(500), Lang::Json, true);
+        let edited = "HEAD\n".to_owned() + &"body line\n".repeat(500);
+        sync_model(&model, &edited, Lang::Json, true);
         assert_eq!(model.row_count(), 501);
         assert_eq!(model.row_data(0).unwrap().source, "HEAD");
         // Row 501 stays the (empty) trailing line.
