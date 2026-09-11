@@ -3256,9 +3256,8 @@ export component AppWindow inherits Window {
                                     for line[index] in root.editor-hl-lines: Rectangle {
                                         // Explicit height locks the row (Slint
                                         // layouts hand surplus to unlocked rows);
-                                        // the floor covers empty lines whose
-                                        // measurement is 0 but still occupy a
-                                        // line box in the editor body.
+                                        // the floor keeps empty lines at the
+                                        // editor's minimum line height.
                                         height: max(line-measure.preferred-height, editor-viewport.ed-row-h);
                                         line-measure := Text {
                                             x: parent.width;
@@ -3268,6 +3267,7 @@ export component AppWindow inherits Window {
                                             font-size: edit-input.font-size;
                                         }
                                         Text {
+                                            width: parent.width - 6px;
                                             text: "\{index + 1}";
                                             horizontal-alignment: right;
                                             vertical-alignment: top;
