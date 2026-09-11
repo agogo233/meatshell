@@ -9,6 +9,8 @@
 use crate::config::{DockEdgeSer, DockSlotSer};
 
 /// One stack slot: which panel and how much of the edge it owns (0..1).
+/// A ratio of `0.0` is a sentinel for "just joined" — [`rebalance`] hands
+/// such members an even share and squeezes the existing ones around them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DockSlotInfo {
     pub kind: &'static str,
@@ -249,9 +251,9 @@ impl DockStacks {
                 }
                 continue;
             }
-            // Inherit the saved ratio for panels we already knew; hand new
-            // panels an equal share of whatever the known ones leave over, so
-            // a user-tuned split never gets wiped by an unrelated stack.
+            // Inherit the saved ratio for panels we already knew; a new
+            // panel takes the leftover of the edge, or an even share of the
+            // whole edge when nothing is left over.
             let mut slots: Vec<DockSlotInfo> = Vec::with_capacity(order.len());
             let mut fresh: Vec<&'static str> = Vec::new();
             let mut known: f32 = 0.0;
@@ -269,7 +271,18 @@ impl DockStacks {
                 }
             }
             if !fresh.is_empty() {
-                let each = ((1.0 - known) / fresh.len() as f32).max(0.0);
+                // A comfortable leftover keeps the established split intact
+                // (a user-tuned ratio never gets wiped by an unrelated
+                // stack). But when the edge is already spoken for, handing
+                // newcomers the crumbs would strand them — push the 0.0
+                // sentinel instead and let rebalance squeeze everyone to
+                // even shares.
+                let leftover = 1.0 - known;
+                let each = if leftover > MIN_RATIO {
+                    leftover / fresh.len() as f32
+                } else {
+                    0.0
+                };
                 for k in fresh {
                     slots.push(DockSlotInfo { kind: k, ratio: each });
                 }
@@ -412,9 +425,30 @@ fn rebalance(t: &mut [DockSlotInfo]) {
     if t.is_empty() {
         return;
     }
+    let n = t.len() as f32;
+    // Sentinels: slots that just joined the edge (see `DockSlotInfo`). Give
+    // each an even 1/n share and squeeze the established members around
+    // them — otherwise a merge onto a fully-occupied edge clamps the
+    // newcomer to MIN_RATIO and strands it as an 8% sliver.
+    let fresh = t.iter().filter(|s| s.ratio <= 0.0).count() as f32;
+    if fresh > 0.0 {
+        let each = 1.0 / n;
+        let known: f32 = t.iter().map(|s| s.ratio.max(0.0)).sum();
+        let scale = if known > 0.0 {
+            (1.0 - each * fresh).max(0.0) / known
+        } else {
+            0.0
+        };
+        for s in t.iter_mut() {
+            if s.ratio <= 0.0 {
+                s.ratio = each;
+            } else {
+                s.ratio *= scale;
+            }
+        }
+    }
     let total: f32 = t.iter().map(|s| s.ratio).sum();
     if total <= 0.0 {
-        let n = t.len() as f32;
         for s in t.iter_mut() {
             s.ratio = 1.0 / n;
         }
@@ -423,13 +457,17 @@ fn rebalance(t: &mut [DockSlotInfo]) {
     for s in t.iter_mut() {
         s.ratio = (s.ratio / total).clamp(MIN_RATIO, 1.0 - MIN_RATIO);
     }
+    // Absorb the rounding/clamping drift into the last slot: shares are
+    // absolute edge fractions (what compute_geom multiplies by the axis),
+    // so each keeps its own share and only the tail takes the remainder —
+    // a summed 1.0 means an exactly 50/50 two-panel merge.
     let mut rem = 1.0;
     let n = t.len();
     for (i, s) in t.iter_mut().enumerate() {
         if i == n - 1 {
             s.ratio = rem;
         } else {
-            let share = (s.ratio * rem).clamp(MIN_RATIO, 1.0 - MIN_RATIO);
+            let share = s.ratio.min(rem);
             s.ratio = share;
             rem -= share;
         }
@@ -477,13 +515,67 @@ mod tests {
         let mut s = DockStacks::default();
         s.dock_to("left", "sidebar");
         s.dock_to("left", "quick");
+        // A merge onto an occupied edge splits it in halves, not slivers.
+        assert!((s.left[0].ratio - 0.5).abs() < 1e-5);
+        assert!((s.left[1].ratio - 0.5).abs() < 1e-5);
         s.dock_to("left", "ai");
         assert_eq!(s.left.len(), 3);
         let sum: f32 = s.left.iter().map(|x| x.ratio).sum();
         assert!((sum - 1.0).abs() < 1e-5);
         for x in &s.left {
-            assert!(x.ratio > 0.0);
+            assert!((x.ratio - 1.0 / 3.0).abs() < 1e-5);
         }
+    }
+
+    #[test]
+    fn merge_keeps_established_split_proportional() {
+        let mut s = DockStacks::default();
+        s.dock_to("left", "sidebar");
+        s.dock_to("left", "quick");
+        s.set_ratio("left", 0, 0.7);
+        s.dock_to("left", "ai");
+        // The 70/30 tuning survives as a 2:1 ratio inside the share the
+        // newcomer did NOT take; the newcomer itself gets an even third.
+        assert!((s.left[2].ratio - 1.0 / 3.0).abs() < 1e-3);
+        assert!((s.left[0].ratio / s.left[1].ratio - 7.0 / 3.0).abs() < 0.05);
+        let sum: f32 = s.left.iter().map(|x| x.ratio).sum();
+        assert!((sum - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn rebuild_from_full_edge_expands_evenly() {
+        // Left holds a lone sidebar (ratio 1.0); quick newly expands there.
+        let mut saved = DockStacks::default();
+        saved.dock_to("left", "sidebar");
+        let expanded = |k: &str| match k {
+            "sidebar" | "quick" => Some("left"),
+            _ => None,
+        };
+        let mut cur = DockStacks::default();
+        cur.rebuild_from(&saved, &expanded);
+        assert_eq!(cur.left.len(), 2);
+        assert!((cur.left[0].ratio - 0.5).abs() < 1e-5);
+        assert!((cur.left[1].ratio - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn rebuild_heals_legacy_sliver_on_reexpand() {
+        // A 92/8 pair (the old merge bug's persisted shape) with the sliver
+        // folded; re-expanding a panel onto the edge normalises to halves.
+        let mut saved = DockStacks::default();
+        saved.left.push(DockSlotInfo {
+            kind: "sidebar",
+            ratio: 0.92,
+        });
+        let expanded = |k: &str| match k {
+            "sidebar" | "ai" => Some("left"),
+            _ => None,
+        };
+        let mut cur = DockStacks::default();
+        cur.rebuild_from(&saved, &expanded);
+        assert_eq!(cur.left.len(), 2);
+        assert!((cur.left[0].ratio - 0.5).abs() < 1e-5);
+        assert!((cur.left[1].ratio - 0.5).abs() < 1e-5);
     }
 
     #[test]
