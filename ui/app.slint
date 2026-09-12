@@ -3330,10 +3330,16 @@ export component AppWindow inherits Window {
                                     // caret and copy-paste can never drift from the
                                     // coloured runs. The bands stay visible during
                                     // IME composition and selections on purpose.
+                                    // Height must be pinned to the content height:
+                                    // if the layout outgrew the viewport, Slint
+                                    // hands the surplus to the zero-stretch rows,
+                                    // stretching the tint bands over the rows
+                                    // below them (#389).
                                     if root.editor-hl-active : VerticalLayout {
                                         x: 8px;
                                         y: 8px;
                                         width: edit-input.width;
+                                        height: self.preferred-height;
                                         spacing: 0px;
                                         padding: 0px;
                                         for line in root.editor-hl-lines: HorizontalLayout {
