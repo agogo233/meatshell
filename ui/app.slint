@@ -3244,30 +3244,16 @@ export component AppWindow inherits Window {
                                     }
                                 }
                                 if root.editor-hl-active : VerticalLayout {
-                                    // Rows track the real per-line text height
-                                    // (no wrapping): each row measures its own
-                                    // source with a hidden no-wrap Text, so the
-                                    // numbers stay glued to the body and the
-                                    // selection even when wide glyphs make some
-                                    // lines taller than the Latin floor.
+                                    // Even division of the body's total height;
+                                    // see the tint overlay below for the reason
+                                    // (fractional parley offsets vs per-row ceil).
                                     y: ed-scroll.viewport-y + 8px;
                                     width: parent.width;
-                                    height: self.preferred-height;
+                                    height: edit-input.preferred-height;
                                     spacing: 0px;
                                     padding: 0px;
                                     for line[index] in root.editor-hl-lines: Rectangle {
-                                        // Explicit height locks the row (Slint
-                                        // layouts hand surplus to unlocked rows);
-                                        // the floor keeps empty lines at the
-                                        // editor's minimum line height.
-                                        height: max(hl-line-measure.preferred-height, editor-viewport.ed-row-h);
-                                        hl-line-measure := Text {
-                                            x: parent.width;
-                                            text: line.source;
-                                            wrap: no-wrap;
-                                            font-family: edit-input.font-family;
-                                            font-size: edit-input.font-size;
-                                        }
+                                        vertical-stretch: 1;
                                         Text {
                                             width: parent.width - 6px;
                                             text: "\{index + 1}";
@@ -3284,19 +3270,6 @@ export component AppWindow inherits Window {
                             editor-viewport := Rectangle {
                                 horizontal-stretch: 1;
                                 clip: true;
-                                // One no-wrap Latin probe fixes the minimum row
-                                // height (the floor under the per-line
-                                // measurements in the gutter and overlay);
-                                // parked outside the clip like line-measure
-                                // above.
-                                property <length> ed-row-h: ed-row-probe.preferred-height;
-                                ed-row-probe := Text {
-                                    x: -500px;
-                                    text: "Ag";
-                                    wrap: no-wrap;
-                                    font-family: edit-input.font-family;
-                                    font-size: edit-input.font-size;
-                                }
                                 // TextInput owns the pointer grab while selecting
                                 // and ignores wheel events. Catch the rejected
                                 // wheel behind it and scroll the editor (#388).
@@ -3330,43 +3303,40 @@ export component AppWindow inherits Window {
                                     // caret and copy-paste can never drift from the
                                     // coloured runs. The bands stay visible during
                                     // IME composition and selections on purpose.
-                                    // Height must be pinned to the content height:
-                                    // if the layout outgrew the viewport, Slint
-                                    // hands the surplus to the zero-stretch rows,
-                                    // stretching the tint bands over the rows
-                                    // below them (#389).
+                                    // Row geometry comes from the body itself:
+                                    // parley places TextInput lines at fractional
+                                    // cumulative offsets, while per-row Text
+                                    // measurements would ceil each row separately
+                                    // and the error would grow line over line.
+                                    // Dividing the body's total height by the
+                                    // line count keeps the bands aligned top to
+                                    // bottom as long as the lines share one line
+                                    // pitch (true for the no-wrap hl branch with
+                                    // uniform fonts; a taller fallback-glyph row
+                                    // shifts the rows below it by at most that
+                                    // line-height difference, no accumulation).
                                     if root.editor-hl-active : VerticalLayout {
                                         x: 8px;
                                         y: 8px;
                                         width: edit-input.width;
-                                        height: self.preferred-height;
+                                        height: edit-input.preferred-height;
                                         spacing: 0px;
                                         padding: 0px;
                                         for line in root.editor-hl-lines: HorizontalLayout {
-                                            // Natural width: the VerticalLayout
-                                            // would stretch every row to the full
-                                            // content width, and Slint layouts hand
-                                            // the surplus to all-zero-stretch
-                                            // children evenly (i-slint-core
-                                            // layout.rs), which drifts the runs
+                                            // Natural width: stretching rows
+                                            // horizontally would hand the surplus
+                                            // to the zero-stretch segments (Slint
+                                            // layout.rs) and drift the runs
                                             // rightward off the real glyphs.
                                             width: self.preferred-width;
-                                            // Height is the tallest run's own
-                                            // line box (== the editor's parley
-                                            // line for this row); the floor keeps
-                                            // empty rows at the editor's minimum
-                                            // line height. Explicit sizing also
-                                            // locks the row against vertical
-                                            // surplus distribution.
-                                            height: max(self.preferred-height, editor-viewport.ed-row-h);
+                                            vertical-stretch: 1;
                                             spacing: 0px;
                                             padding: 0px;
                                             // Tint bands: one per coloured run. The
                                             // transparent measurement Text keeps the
                                             // band exactly at the run's natural width
-                                            // (same font/shaping as the editor body).
-                                            // The bands use the row's full height so
-                                            // the tint reaches the text ink.
+                                            // (same font/shaping as the editor body);
+                                            // the band fills the evenly divided row.
                                             for seg in line.segments: Rectangle {
                                                 width: seg-measure.preferred-width;
                                                 horizontal-stretch: 0;
