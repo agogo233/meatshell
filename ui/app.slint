@@ -3323,15 +3323,19 @@ export component AppWindow inherits Window {
                                         : self.visible-width;
                                     viewport-height: max(self.visible-height, edit-input.preferred-height + 16px);
                                     // Coloured runs painted under the transparent
-                                    // editor text. Hidden during IME composition:
-                                    // the preedit glyphs shift the line, and the
-                                    // overlay must yield so the composition text
-                                    // (drawn by the TextInput itself) stays visible.
+                                    // editor text. Hidden while the TextInput draws
+                                    // its own glyphs — during IME composition (the
+                                    // preedit text shifts the line) and while a
+                                    // selection is active (the selection band and
+                                    // its glyphs must come from the same engine so
+                                    // copy-selected text cannot drift off the rows).
                                     if root.editor-hl-active : VerticalLayout {
                                         x: 8px;
                                         y: 8px;
                                         width: edit-input.width;
-                                        visible: edit-input.preedit-text == "";
+                                        visible: edit-input.preedit-text == ""
+                                            && edit-input.cursor-position_byte-offset
+                                                == edit-input.anchor-position-byte-offset;
                                         spacing: 0px;
                                         padding: 0px;
                                         for line in root.editor-hl-lines: HorizontalLayout {
@@ -3378,12 +3382,17 @@ export component AppWindow inherits Window {
                                         single-line: false;
                                         wrap: root.editor-hl-active ? TextWrap.no-wrap : TextWrap.char-wrap;
                                         // Transparent text over the coloured overlay;
-                                        // restored while IME composition is active so
-                                        // the preedit glyphs are drawn by the input.
+                                        // restored while IME composition is active
+                                        // (preedit glyphs are drawn by the input)
+                                        // or while a selection is active (native
+                                        // rendering keeps the selection band and the
+                                        // selected glyphs perfectly aligned for copy).
                                         // selection colours follow the theme's default
                                         // outside the highlight branch (never override
                                         // the stock palette there).
-                                        color: (root.editor-hl-active && self.preedit-text == "")
+                                        color: (root.editor-hl-active && self.preedit-text == ""
+                                            && self.cursor-position_byte-offset
+                                                == self.anchor-position-byte-offset)
                                             ? transparent : Theme.text-primary;
                                         selection-foreground-color: root.editor-hl-active
                                             ? Theme.text-primary : Palette.selection-foreground;
