@@ -3255,6 +3255,16 @@ export component AppWindow inherits Window {
                                     for line[index] in root.editor-hl-lines: Rectangle {
                                         vertical-stretch: 1;
                                         Text {
+                                            // The y binding keeps this label out of
+                                            // the row's aggregated layout_info
+                                            // (default_geometry.rs); without it the
+                                            // row's preferred height becomes the
+                                            // text's ceiled line height again and
+                                            // the even division degenerates into
+                                            // per-row ceil accumulation. y is used
+                                            // rather than x so the label keeps its
+                                            // default horizontal centering.
+                                            y: 0px;
                                             width: parent.width - 6px;
                                             text: "\{index + 1}";
                                             horizontal-alignment: right;
@@ -3342,6 +3352,12 @@ export component AppWindow inherits Window {
                                                 horizontal-stretch: 0;
                                                 background: seg.color.with-alpha(0.26);
                                                 seg-measure := Text {
+                                                    // x-bound: parked off-band so it
+                                                    // is excluded from the band's and
+                                                    // the row's layout_info; the row
+                                                    // height then comes purely from
+                                                    // the even division.
+                                                    x: parent.width;
                                                     text: seg.text;
                                                     color: transparent;
                                                     wrap: no-wrap;
