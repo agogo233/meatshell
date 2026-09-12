@@ -887,8 +887,10 @@ export component AppWindow inherits Window {
     in-out property <[string]> editor-lines; // logical lines, measured with editor wrapping
     // Syntax highlighting overlay (#70 follow-up). `editor-hl-active` is
     // computed by Rust (enabled ∧ known grammar ∧ ≤ row budget) and drives the
-    // dual rendering branches below; `editor-hl-lines` carries the coloured
-    // runs per logical line (`source` mirrors the text for the Rust-side diff).
+    // rendering branch below; `editor-hl-lines` carries the coloured runs as
+    // tint bands per logical line (`source` mirrors the text for the Rust-side
+    // diff). The text itself is always drawn by the TextInput, so the coloured
+    // bands can never drift from selections or copy (#389).
     in-out property <bool> editor-hl-enabled: true;
     in-out property <bool> editor-hl-active: false;
     in-out property <[HlLine]> editor-hl-lines;
@@ -3322,20 +3324,16 @@ export component AppWindow inherits Window {
                                         ? max(self.visible-width, edit-input.preferred-width + 16px)
                                         : self.visible-width;
                                     viewport-height: max(self.visible-height, edit-input.preferred-height + 16px);
-                                    // Coloured runs painted under the transparent
-                                    // editor text. Hidden while the TextInput draws
-                                    // its own glyphs — during IME composition (the
-                                    // preedit text shifts the line) and while a
-                                    // selection is active (the selection band and
-                                    // its glyphs must come from the same engine so
-                                    // copy-selected text cannot drift off the rows).
+                                    // Semi-transparent tinted bands under the editor
+                                    // text. The text itself is always rendered by the
+                                    // TextInput (single engine), so selections, the
+                                    // caret and copy-paste can never drift from the
+                                    // coloured runs. The bands stay visible during
+                                    // IME composition and selections on purpose.
                                     if root.editor-hl-active : VerticalLayout {
                                         x: 8px;
                                         y: 8px;
                                         width: edit-input.width;
-                                        visible: edit-input.preedit-text == ""
-                                            && edit-input.cursor-position_byte-offset
-                                                == edit-input.anchor-position-byte-offset;
                                         spacing: 0px;
                                         padding: 0px;
                                         for line in root.editor-hl-lines: HorizontalLayout {
@@ -3357,16 +3355,23 @@ export component AppWindow inherits Window {
                                             height: max(self.preferred-height, editor-viewport.ed-row-h);
                                             spacing: 0px;
                                             padding: 0px;
-                                            // stretch 0 keeps every run at its natural
-                                            // width so runs abut like the real text.
-                                            for seg in line.segments: Text {
-                                                text: seg.text;
-                                                color: seg.color;
-                                                wrap: no-wrap;
-                                                horizontal-alignment: left;
+                                            // Tint bands: one per coloured run. The
+                                            // transparent measurement Text keeps the
+                                            // band exactly at the run's natural width
+                                            // (same font/shaping as the editor body).
+                                            // The bands use the row's full height so
+                                            // the tint reaches the text ink.
+                                            for seg in line.segments: Rectangle {
+                                                width: seg-measure.preferred-width;
                                                 horizontal-stretch: 0;
-                                                font-family: edit-input.font-family;
-                                                font-size: edit-input.font-size;
+                                                background: seg.color.with-alpha(0.26);
+                                                seg-measure := Text {
+                                                    text: seg.text;
+                                                    color: transparent;
+                                                    wrap: no-wrap;
+                                                    font-family: edit-input.font-family;
+                                                    font-size: edit-input.font-size;
+                                                }
                                             }
                                         }
                                     }
@@ -3381,21 +3386,14 @@ export component AppWindow inherits Window {
                                         read-only: root.editor-readonly;
                                         single-line: false;
                                         wrap: root.editor-hl-active ? TextWrap.no-wrap : TextWrap.char-wrap;
-                                        // Transparent text over the coloured overlay;
-                                        // restored while IME composition is active
-                                        // (preedit glyphs are drawn by the input)
-                                        // or while a selection is active (native
-                                        // rendering keeps the selection band and the
-                                        // selected glyphs perfectly aligned for copy).
-                                        // selection colours follow the theme's default
-                                        // outside the highlight branch (never override
-                                        // the stock palette there).
-                                        color: (root.editor-hl-active && self.preedit-text == ""
-                                            && self.cursor-position_byte-offset
-                                                == self.anchor-position-byte-offset)
-                                            ? transparent : Theme.text-primary;
-                                        selection-foreground-color: root.editor-hl-active
-                                            ? Theme.text-primary : Palette.selection-foreground;
+                                        // The editor text is always drawn here, in
+                                        // the theme foreground, above the tinted
+                                        // bands. One single text engine (the
+                                        // TextInput) renders every glyph, caret and
+                                        // selection band, so copy and drag-select
+                                        // can never drift from the coloured runs.
+                                        color: Theme.text-primary;
+                                        selection-foreground-color: Palette.selection-foreground;
                                         font-family: Theme.ui-font-family;
                                         font-size: Theme.fs-md;
                                         page-height: ed-scroll.visible-height;
