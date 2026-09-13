@@ -2027,8 +2027,8 @@ impl ConfigStore {
     }
 
     /// Per-edge stacks of simultaneously-expanded docked panels (#dock-stack).
-    /// The stored value is sanitised (unknown kinds dropped, sidebar/welcome
-    /// deduplicated, ratios renormalised to sum to 1) before it is handed out.
+    /// The stored value is sanitised (unknown kinds dropped, repeated kinds
+    /// collapsed, ratios renormalised to sum to 1) before it is handed out.
     pub fn dock_stacks(&self) -> Vec<DockEdgeSer> {
         let mut out: Vec<DockEdgeSer> = Vec::new();
         // A panel can only occupy one edge: the first edge a kind appears in

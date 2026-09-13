@@ -40,8 +40,7 @@ pub(crate) fn valid_kind(kind: &str) -> bool {
 
 /// Normalise one edge stack so it is safe to apply:
 /// - drops unknown/empty kinds and out-of-range ratios;
-/// - `sidebar` and `welcome` are the same session list in two forms, so at
-///   most one of each survives (first one wins);
+/// - a kind repeated on one edge collapses to its first occurrence;
 /// - the surviving ratios are clamped to a sane minimum and renormalised to
 ///   sum to 1, so a corrupt config can never gap or overflow the edge.
 pub(crate) fn sanitize_edge(mut edge: DockEdgeSer) -> Option<DockEdgeSer> {
@@ -139,13 +138,13 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_deduplicates_sidebar_and_welcome() {
+    fn sanitize_deduplicates_repeated_kinds() {
         let out = sanitize_edge(edge(
             "left",
-            vec![slot("welcome", 0.5), slot("sidebar", 0.2), slot("quick", 0.3)],
+            vec![slot("welcome", 0.5), slot("welcome", 0.2), slot("quick", 0.3)],
         ))
         .expect("deduplicated stack survives");
-        // First welcome survives, the later sidebar is dropped.
+        // First welcome survives, the later duplicate is dropped.
         assert_eq!(out.slots.len(), 2);
         assert_eq!(out.slots[0].kind, "welcome");
         assert_eq!(out.slots[1].kind, "quick");
