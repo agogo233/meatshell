@@ -72,10 +72,62 @@ pub fn create_clipboard(
             #[cfg(not(feature = "x11"))]
             (Box::new(SilentClipboardContext), Box::new(SilentClipboardContext))
         } else {
+            type ClipboardError = Box<dyn std::error::Error + Send + Sync + 'static>;
+
+            /// On Windows the clipboard is a shared resource that another process
+            /// (the IME, clipboard history, a sync tool, our own terminal-copy
+            /// thread) can hold open for a short moment, and the raw Win32 open
+            /// fails instantly in that window. The plain backend tried exactly once
+            /// and the caller swallowed the error, so a copy silently did nothing
+            /// until the next lucky attempt. Retry a bounded number of times (at
+            /// most 7 * 10ms) and log the final failure instead.
+            struct RetryingClipboard<T: ClipboardProvider> {
+                inner: T,
+            }
+
+            impl<T: ClipboardProvider> RetryingClipboard<T> {
+                const ATTEMPTS: usize = 8;
+
+                fn retry<R>(
+                    &mut self,
+                    name: &str,
+                    mut op: impl FnMut(&mut T) -> Result<R, ClipboardError>,
+                ) -> Result<R, ClipboardError> {
+                    let mut last_err = None;
+                    for attempt in 0..Self::ATTEMPTS {
+                        match op(&mut self.inner) {
+                            Ok(value) => return Ok(value),
+                            Err(err) => last_err = Some(err),
+                        }
+                        if attempt + 1 < Self::ATTEMPTS {
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                    }
+                    let err = last_err.expect("at least one attempt ran");
+                    tracing::warn!(
+                        "clipboard {name} failed after {} attempts: {err}",
+                        Self::ATTEMPTS
+                    );
+                    Err(err)
+                }
+            }
+
+            impl<T: ClipboardProvider> ClipboardProvider for RetryingClipboard<T> {
+                fn get_contents(&mut self) -> Result<String, ClipboardError> {
+                    self.retry("get", |inner| inner.get_contents())
+                }
+
+                fn set_contents(&mut self, data: String) -> Result<(), ClipboardError> {
+                    self.retry("set", move |inner| inner.set_contents(data.clone()))
+                }
+            }
+
             (
                 copypasta::ClipboardContext::new().map_or(
                     Box::new(SilentClipboardContext) as Box<dyn ClipboardProvider>,
-                    |x| Box::new(x) as Box<dyn ClipboardProvider>,
+                    |x| {
+                        Box::new(RetryingClipboard { inner: x }) as Box<dyn ClipboardProvider>
+                    },
                 ),
                 Box::new(SilentClipboardContext),
             )
