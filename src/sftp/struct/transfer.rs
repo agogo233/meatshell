@@ -14,6 +14,8 @@ use tokio::task::JoinHandle;
 pub enum SftpCommand {
     /// List the contents of a remote directory.
     ListDir(String),
+    /// Fill owner/group names after the initial listing is already visible.
+    EnrichEntries { path: String, entries: Vec<crate::ssh::RemoteEntry> },
     /// Refresh button: re-list the directory *and* re-sync the whole expanded
     /// left tree, so external/own changes (deleted/created dirs) show up without
     /// a reconnect (#189). Plain navigation uses `ListDir` to avoid the extra

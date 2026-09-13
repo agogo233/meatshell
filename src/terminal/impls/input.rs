@@ -112,6 +112,118 @@ pub(crate) fn paste_requires_large_review(text: &str) -> bool {
     text.chars().count() > COMPACT_CHAR_LIMIT || lines > COMPACT_LINE_LIMIT
 }
 
+/// Bounds for the paste-confirm preview string.
+///
+/// Slint's software renderer stores glyph geometry in i16 (slint#12985 /
+/// #12994). Binding a multi-thousand-line clipboard payload to the confirm
+/// dialog's `Text` laid out coordinates past ±32767 and panicked. The full
+/// paste stays in Rust until the user confirms; only this bounded preview
+/// enters the UI tree (#434).
+pub(crate) fn build_paste_preview(text: &str) -> String {
+    const MAX_LINES: usize = 48;
+    const MAX_LINE_CHARS: usize = 240;
+    const MAX_CHARS: usize = 6 * 1024;
+    const NOTICE_RESERVE: usize = 120;
+    const ELLIPSIS: &str = "…";
+
+    if text.is_empty() {
+        return String::new();
+    }
+
+    let total_lines = text.lines().count();
+    let total_chars = text.chars().count();
+
+    let mut out = String::new();
+    let mut taken = 0usize;
+    let mut truncated = false;
+
+    for line in text.lines() {
+        if taken >= MAX_LINES {
+            truncated = true;
+            break;
+        }
+
+        let mut display = String::new();
+        let mut n = 0usize;
+        for ch in line.chars() {
+            if n >= MAX_LINE_CHARS {
+                display.push_str(ELLIPSIS);
+                truncated = true;
+                break;
+            }
+            display.push(ch);
+            n += 1;
+        }
+
+        if out.chars().count() + display.chars().count() + 1 + NOTICE_RESERVE > MAX_CHARS {
+            truncated = true;
+            break;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&display);
+        taken += 1;
+    }
+
+    if truncated || taken < total_lines {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&format!(
+            "{}{taken}/{total_lines}{}{total_chars}{}",
+            crate::i18n::t(
+                "…（预览已截断：显示 ",
+                "… (preview truncated: showing ",
+            ),
+            crate::i18n::t(" 行，共 ", " lines, "),
+            crate::i18n::t(
+                " 字符；确认后粘贴完整内容）",
+                " chars; confirming pastes the full content)",
+            ),
+        ));
+    }
+
+    out
+}
+
+/// Full payload for an open multi-line paste review. Keyed by tab so a
+/// confirm for the wrong session cannot steal another tab's clipboard.
+pub(crate) type PendingPaste = std::sync::Mutex<Option<(String /* tab_id */, String /* full */)>>;
+
+/// Store the full clipboard text and return the bounded UI preview (#434).
+///
+/// Callers must only put the returned preview into Slint. The full text stays
+/// here until [`take_pending_paste`] on confirm.
+pub(crate) fn store_pending_paste(
+    pending: &PendingPaste,
+    tab_id: String,
+    full_text: String,
+) -> String {
+    let preview = build_paste_preview(&full_text);
+    if let Ok(mut slot) = pending.lock() {
+        *slot = Some((tab_id, full_text));
+    }
+    preview
+}
+
+/// Take the full paste for `tab_id` (confirm). Returns `None` when empty or
+/// when the pending payload belongs to a different tab.
+pub(crate) fn take_pending_paste(pending: &PendingPaste, tab_id: &str) -> Option<String> {
+    let mut slot = pending.lock().ok()?;
+    match slot.as_ref() {
+        Some((pending_tab, _)) if pending_tab == tab_id => slot.take().map(|(_, text)| text),
+        _ => None,
+    }
+}
+
+/// Drop any pending full paste (cancel / replace).
+pub(crate) fn clear_pending_paste(pending: &PendingPaste) {
+    if let Ok(mut slot) = pending.lock() {
+        *slot = None;
+    }
+}
+
 #[cfg(any(target_os = "windows", test))]
 pub(crate) fn windows_process_ctrl_release(
     state: i_slint_backend_winit::winit::event::ElementState,

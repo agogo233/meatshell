@@ -94,6 +94,16 @@ pub(super) fn sort_sftp_entries(entries: &mut [SftpEntry], key: &str, dir: i32) 
                 .partial_cmp(&b.modified_ts)
                 .unwrap_or(Ordering::Equal)
                 .then_with(|| default_cmp(a, b)),
+            "permissions" => a
+                .permissions_mode
+                .cmp(&b.permissions_mode)
+                .then_with(|| default_cmp(a, b)),
+            "owner" => a.owner.cmp(&b.owner).then_with(|| default_cmp(a, b)),
+            "group" => a.group.cmp(&b.group).then_with(|| default_cmp(a, b)),
+            "type" => a
+                .file_type
+                .cmp(&b.file_type)
+                .then_with(|| default_cmp(a, b)),
             _ => name_cmp(a, b).then_with(|| default_cmp(a, b)),
         };
         if dir < 0 {

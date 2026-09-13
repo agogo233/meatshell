@@ -47,6 +47,12 @@ pub(super) async fn list(
                                 "size": entry.size,
                                 "modified": entry.modified,
                                 "mode": format!("{:04o}", entry.mode),
+                                "permissions": crate::ssh::format_permissions(entry.permissions_mode),
+                                "uid": entry.uid,
+                                "gid": entry.gid,
+                                "owner": entry.owner,
+                                "group": entry.group,
+                                "file_type": entry.file_type,
                             })
                         })
                         .collect::<Vec<_>>();

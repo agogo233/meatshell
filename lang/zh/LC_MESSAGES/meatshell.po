@@ -198,6 +198,15 @@ msgstr "大小"
 msgid "Modified"
 msgstr "修改时间"
 
+msgid "Type"
+msgstr "类型"
+
+msgid "Owner"
+msgstr "用户"
+
+msgid "Group"
+msgstr "用户组"
+
 msgid "Loading..."
 msgstr "加载中..."
 

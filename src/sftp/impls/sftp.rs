@@ -501,6 +501,10 @@ async fn run_sftp(
         Ok(entries) => {
             let _ = events.send(SessionEvent::SftpEntries {
                 path: home.clone(),
+                entries: entries.clone(),
+            });
+            let _ = self_tx.send(SftpCommand::EnrichEntries {
+                path: home.clone(),
                 entries,
             });
             let _ = events.send(SessionEvent::SftpStatus(home.clone()));
@@ -555,6 +559,13 @@ async fn run_sftp(
         match cmd {
             SftpCommand::Close => break,
 
+            SftpCommand::EnrichEntries { path, entries } => {
+                let enriched = enrich_entries_with_owners(&handle, entries).await;
+                if enriched.iter().any(|entry| entry.owner.is_some() || entry.group.is_some()) {
+                    let _ = events.send(SessionEvent::SftpEntries { path, entries: enriched });
+                }
+            }
+
             SftpCommand::ListDir(path) => {
                 let _ = events.send(SessionEvent::SftpStatus(format!(
                     "{} {}...",
@@ -565,8 +576,15 @@ async fn run_sftp(
                     Ok(entries) => {
                         let _ = events.send(SessionEvent::SftpEntries {
                             path: path.clone(),
-                            entries,
+                            entries: entries.clone(),
                         });
+                        let enriched = enrich_entries_with_owners(&handle, entries).await;
+                        if enriched.iter().any(|entry| entry.owner.is_some() || entry.group.is_some()) {
+                            let _ = events.send(SessionEvent::SftpEntries {
+                                path: path.clone(),
+                                entries: enriched,
+                            });
+                        }
                         let _ = events.send(SessionEvent::SftpStatus(path));
                     }
                     Err(e) => {
@@ -586,8 +604,15 @@ async fn run_sftp(
                     Ok(entries) => {
                         let _ = events.send(SessionEvent::SftpEntries {
                             path: path.clone(),
-                            entries,
+                            entries: entries.clone(),
                         });
+                        let enriched = enrich_entries_with_owners(&handle, entries).await;
+                        if enriched.iter().any(|entry| entry.owner.is_some() || entry.group.is_some()) {
+                            let _ = events.send(SessionEvent::SftpEntries {
+                                path: path.clone(),
+                                entries: enriched,
+                            });
+                        }
                         let _ = events.send(SessionEvent::SftpStatus(path.clone()));
                     }
                     Err(e) => {
@@ -1671,6 +1696,29 @@ async fn exec_remote(handle: &client::Handle<SftpClientHandler>, cmd: &str) -> R
     Ok(status)
 }
 
+async fn exec_remote_output(
+    handle: &client::Handle<SftpClientHandler>,
+    cmd: &str,
+) -> Result<String> {
+    let mut ch = handle
+        .channel_open_session()
+        .await
+        .context("open owner lookup channel")?;
+    ch.exec(true, cmd.as_bytes())
+        .await
+        .context("execute owner lookup")?;
+    let mut output = Vec::new();
+    while let Some(msg) = ch.wait().await {
+        match msg {
+            russh::ChannelMsg::Data { data }
+            | russh::ChannelMsg::ExtendedData { data, .. } => output.extend_from_slice(&data),
+            russh::ChannelMsg::Close => break,
+            _ => {}
+        }
+    }
+    Ok(String::from_utf8_lossy(&output).into_owned())
+}
+
 /// Parent directory of a remote path ("/a/b" → "/a", "/a" → "/").
 fn parent_dir(path: &str) -> String {
     let p = path.trim_end_matches('/');
@@ -2038,6 +2086,12 @@ async fn list_dir_impl(sftp: &SftpSession, path: &str) -> Result<Vec<RemoteEntry
                 size,
                 modified,
                 mode: permissions & 0o7777,
+                permissions_mode: permissions,
+                uid: meta.uid,
+                gid: meta.gid,
+                owner: None,
+                group: None,
+                file_type: crate::ssh::file_type_from_mode(permissions).to_string(),
             }
         })
         .collect();
@@ -2050,6 +2104,86 @@ async fn list_dir_impl(sftp: &SftpSession, path: &str) -> Result<Vec<RemoteEntry
     });
 
     Ok(entries)
+}
+
+async fn enrich_entries_with_owners(
+    handle: &client::Handle<SftpClientHandler>,
+    mut entries: Vec<RemoteEntry>,
+) -> Vec<RemoteEntry> {
+    let uids: Vec<u32> = entries.iter().filter_map(|entry| entry.uid).collect();
+    let gids: Vec<u32> = entries.iter().filter_map(|entry| entry.gid).collect();
+    let (owners, groups) = resolve_owner_names(handle, &uids, &gids).await;
+    for entry in &mut entries {
+        entry.owner = entry.uid.and_then(|id| owners.get(&id).cloned());
+        entry.group = entry.gid.and_then(|id| groups.get(&id).cloned());
+    }
+    entries
+}
+
+async fn resolve_owner_names(
+    handle: &client::Handle<SftpClientHandler>,
+    uids: &[u32],
+    gids: &[u32],
+) -> (HashMap<u32, String>, HashMap<u32, String>) {
+    let mut uid_args: Vec<String> = uids.iter().map(u32::to_string).collect();
+    uid_args.sort();
+    uid_args.dedup();
+    let mut gid_args: Vec<String> = gids.iter().map(u32::to_string).collect();
+    gid_args.sort();
+    gid_args.dedup();
+    if uid_args.is_empty() && gid_args.is_empty() {
+        return (HashMap::new(), HashMap::new());
+    }
+
+    // IDs are parsed as u32 above, so interpolating them cannot introduce shell
+    // syntax. A single getent invocation handles all files in the directory.
+    let passwd = if uid_args.is_empty() {
+        "true".to_string()
+    } else {
+        format!("getent passwd {} 2>/dev/null", uid_args.join(" "))
+    };
+    let group = if gid_args.is_empty() {
+        "true".to_string()
+    } else {
+        format!("getent group {} 2>/dev/null", gid_args.join(" "))
+    };
+    let command = format!(
+        "{passwd}; printf '\\n--MEATSHELL-GROUPS--\\n'; {group}"
+    );
+    let Ok(Ok(output)) = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        exec_remote_output(handle, &command),
+    )
+    .await
+    else {
+        return (HashMap::new(), HashMap::new());
+    };
+    let mut owners = HashMap::new();
+    let mut groups = HashMap::new();
+    let mut in_groups = false;
+    for line in output.lines() {
+        if line == "--MEATSHELL-GROUPS--" {
+            in_groups = true;
+            continue;
+        }
+        let fields: Vec<&str> = line.split(':').collect();
+        if in_groups {
+            if let Some((id, name)) = fields
+                .get(2)
+                .and_then(|id| id.parse::<u32>().ok())
+                .zip(fields.first().copied())
+            {
+                groups.insert(id, name.to_string());
+            }
+        } else if let Some((id, name)) = fields
+            .get(2)
+            .and_then(|id| id.parse::<u32>().ok())
+            .zip(fields.first().copied())
+        {
+            owners.insert(id, name.to_string());
+        }
+    }
+    (owners, groups)
 }
 
 /// List only the subdirectories of `path` (no files). Used to build the tree.

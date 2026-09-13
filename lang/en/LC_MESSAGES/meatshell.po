@@ -198,6 +198,15 @@ msgstr "Size"
 msgid "Modified"
 msgstr "Modified"
 
+msgid "Type"
+msgstr "Type"
+
+msgid "Owner"
+msgstr "Owner"
+
+msgid "Group"
+msgstr "Group"
+
 msgid "Loading..."
 msgstr "Loading..."
 

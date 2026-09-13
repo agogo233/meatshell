@@ -35,10 +35,10 @@ pub(crate) use input::c0_letter_key_down;
 #[cfg(test)]
 pub(crate) use input::normalize_pasted_newlines;
 pub(crate) use input::{
-    bare_ctrl_marker_workaround_enabled, encode_command_bar_input, encode_mouse_event,
-    encode_pasted_text, is_terminal_interrupt, key_to_pty_bytes, paste_requires_large_review,
-    should_drop_bare_ctrl_marker,
-    terminal_uses_bracketed_paste,
+    bare_ctrl_marker_workaround_enabled, build_paste_preview, clear_pending_paste,
+    encode_command_bar_input, encode_mouse_event, encode_pasted_text, is_terminal_interrupt,
+    key_to_pty_bytes, paste_requires_large_review, should_drop_bare_ctrl_marker,
+    store_pending_paste, take_pending_paste, terminal_uses_bracketed_paste, PendingPaste,
 };
 pub(crate) use charset::CharsetTracker;
 pub(crate) use encoding::TerminalEncoding;

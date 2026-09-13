@@ -236,6 +236,30 @@ pub(super) fn apply_session_event_to_window(
                     modified: format_mtime(e.modified).into(),
                     modified_ts: e.modified as f32,
                     mode: (e.mode & 0o7777) as i32,
+                    file_type: match e.file_type.as_str() {
+                        "directory" => crate::i18n::t("文件夹", "Folder"),
+                        "symlink" => crate::i18n::t("符号链接", "Symbolic link"),
+                        "socket" => crate::i18n::t("套接字", "Socket"),
+                        "block-device" => crate::i18n::t("块设备", "Block device"),
+                        "character-device" => crate::i18n::t("字符设备", "Character device"),
+                        "fifo" => crate::i18n::t("管道", "FIFO"),
+                        _ => crate::i18n::t("文件", "File"),
+                    }
+                    .into(),
+                    permissions: crate::ssh::format_permissions(e.permissions_mode).into(),
+                    permissions_mode: e.permissions_mode as i32,
+                    owner: e
+                        .owner
+                        .clone()
+                        .or_else(|| e.uid.map(|v| v.to_string()))
+                        .unwrap_or_else(|| "-".to_string())
+                        .into(),
+                    group: e
+                        .group
+                        .clone()
+                        .or_else(|| e.gid.map(|v| v.to_string()))
+                        .unwrap_or_else(|| "-".to_string())
+                        .into(),
                     selected: false,
                 })
                 .collect();

@@ -77,6 +77,13 @@ pub(crate) fn default_sftp_tree_width() -> f32 {
     160.0
 }
 
+pub(crate) fn default_sftp_visible_columns() -> Vec<String> {
+    ["name", "type", "size", "modified", "permissions", "owner", "group"]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
 pub(crate) fn default_quick_panel_width() -> f32 {
     260.0
 }
@@ -307,6 +314,10 @@ pub struct ConfigFile {
     pub sftp_tree_width: f32,
     #[serde(default)]
     pub sftp_dock: String,
+    /// Columns shown in the SFTP file list. Unknown values are ignored by the
+    /// accessor so newer builds can safely read older or hand-edited configs.
+    #[serde(default = "default_sftp_visible_columns")]
+    pub sftp_visible_columns: Vec<String>,
     /// Last window size in logical px (0 = unset → use the built-in default).
     /// Lets users keep their preferred window size across restarts.
     #[serde(default)]

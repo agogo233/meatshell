@@ -58,8 +58,8 @@ pub fn data_dir() -> PathBuf {
 
 /// Directory for diagnostic logs (`error.log`). Kept *separate* from the config
 /// dir so logs don't clutter user data: portable-first → a `log/` folder beside
-/// the executable (a sibling of `config/`), falling back to a `log/` subdir
-/// under the per-user data dir when the exe dir is read-only (Program Files etc.)
+/// the executable (a sibling of `config/`). On Windows, the fallback is
+/// `%APPDATA%/meatshell/meatshell/log/log`, outside the config directory
 /// (#log-dir).
 pub fn log_dir() -> PathBuf {
     // Portable: <exe_dir>/log, sibling of the portable config/ folder.
@@ -71,11 +71,25 @@ pub fn log_dir() -> PathBuf {
             }
         }
     }
-    // Read-only exe dir → put logs in their own subdir under the per-user data
-    // dir (still not mixed in with sessions.json et al.).
-    let dir = data_dir().join("log");
+    // Resolve independently from portable configuration storage.
+    let dir = user_log_dir();
     let _ = fs::create_dir_all(&dir);
     dir
+}
+
+fn user_log_dir() -> PathBuf {
+    let config = legacy_data_dir()
+        .unwrap_or_else(|| std::env::temp_dir().join("meatshell"));
+    user_log_dir_from_config(&config, cfg!(target_os = "windows"))
+}
+
+fn user_log_dir_from_config(config: &Path, windows: bool) -> PathBuf {
+    if windows {
+        if let Some(base) = config.parent() {
+            return base.join("log").join("log");
+        }
+    }
+    config.join("log")
 }
 
 /// Pre-0.4.15 location: the per-user OS config dir
@@ -1822,6 +1836,35 @@ impl ConfigStore {
     pub fn set_sftp_tree_width(&mut self, width: f32) {
         self.cache.sftp_tree_width = width.clamp(120.0, 420.0);
     }
+    pub fn sftp_visible_columns(&self) -> Vec<String> {
+        const COLUMNS: &[&str] = &["name", "type", "size", "modified", "permissions", "owner", "group"];
+        if self.cache.sftp_visible_columns.is_empty() {
+            return COLUMNS.iter().map(|column| (*column).to_string()).collect();
+        }
+        let mut columns: Vec<String> = self
+            .cache
+            .sftp_visible_columns
+            .iter()
+            .filter(|column| COLUMNS.contains(&column.as_str()))
+            .cloned()
+            .collect();
+        if !columns.iter().any(|column| column == "name") {
+            columns.insert(0, "name".to_string());
+        }
+        columns
+    }
+    pub fn set_sftp_visible_columns(&mut self, columns: Vec<String>) {
+        let allowed = ["name", "type", "size", "modified", "permissions", "owner", "group"];
+        let mut normalized: Vec<String> = columns
+            .into_iter()
+            .filter(|column| allowed.contains(&column.as_str()))
+            .collect();
+        normalized.dedup();
+        if !normalized.iter().any(|column| column == "name") {
+            normalized.insert(0, "name".to_string());
+        }
+        self.cache.sftp_visible_columns = normalized;
+    }
     pub fn sftp_dock(&self) -> String {
         let d = self.cache.sftp_dock.trim();
         if d.is_empty() {
@@ -2667,6 +2710,22 @@ mod tests {
 
         store.cache = serde_json::from_str("{}").expect("legacy config must deserialize");
         assert_eq!(store.terminal_cursor_style(), "block");
+    }
+
+    #[test]
+    fn sftp_visible_columns_keep_name_and_ignore_unknown_values() {
+        let mut store = temp_store();
+        store.set_sftp_visible_columns(vec!["owner".into(), "unknown".into(), "owner".into()]);
+        assert_eq!(
+            store.sftp_visible_columns(),
+            vec!["name".to_string(), "owner".to_string()]
+        );
+    }
+
+    #[test]
+    fn missing_sftp_columns_use_the_current_default() {
+        let store = temp_store();
+        assert_eq!(store.sftp_visible_columns().len(), 7);
     }
 
     #[test]
@@ -3656,5 +3715,23 @@ old-switch=#98#7%10.0.0.1%23%cisco%0%0#15%80%24#0# #-1\r\n";
                 .unwrap(),
             (0, 0, 1)
         );
+    }
+}
+
+#[cfg(test)]
+mod log_path_tests {
+    use super::*;
+
+    #[test]
+    fn windows_user_logs_are_outside_config() {
+        let base = Path::new("profile").join("meatshell").join("meatshell");
+        assert_eq!(user_log_dir_from_config(&base.join("config"), true),
+            base.join("log").join("log"));
+    }
+
+    #[test]
+    fn unix_user_log_path_is_unchanged() {
+        let config = Path::new("home/.config/meatshell");
+        assert_eq!(user_log_dir_from_config(config, false), config.join("log"));
     }
 }

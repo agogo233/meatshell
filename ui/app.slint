@@ -758,6 +758,13 @@ export component AppWindow inherits Window {
     in-out property <length> sftp-saved-height: 220px;  // restore height on un-collapse
     in-out property <length> sftp-tree-width: 160px;
     callback persist-sftp-tree-width(length);
+    in-out property <bool> sftp-show-type: true;
+    in-out property <bool> sftp-show-size: true;
+    in-out property <bool> sftp-show-modified: true;
+    in-out property <bool> sftp-show-permissions: true;
+    in-out property <bool> sftp-show-owner: true;
+    in-out property <bool> sftp-show-group: true;
+    callback toggle-sftp-column(string);
     // Per-session SFTP state: persist the collapse + sizes into that tab's
     // TerminalState so split panes / other tabs keep their own (#v0.5).
     callback set-pane-sftp-collapsed(string /* tab-id */, bool);
@@ -1019,9 +1026,11 @@ export component AppWindow inherits Window {
     // Multi-line terminal paste safety prompt (#262).
     in-out property <bool> paste-confirm-open: false;
     in-out property <string> paste-confirm-tab;
-    in-out property <string> paste-confirm-text;
+    // Preview only — Rust truncates this before set. The full paste payload
+    // lives on the Rust side until the user confirms (#434 / slint#12985).
     in-out property <string> paste-confirm-preview;
     in-out property <bool> paste-confirm-large: false;
+    property <int> terminal-focus-sequence;
     callback paste-confirmed(string /* tab-id */);
     callback paste-confirm-cancelled();
     callback connect-session(string /* session-id */);
@@ -2127,6 +2136,13 @@ export component AppWindow inherits Window {
                         set-sftp-saved-height(v) => { root.set-pane-sftp-saved-height(term.id, v); }
                         sftp-tree-width: root.sftp-tree-width;
                         persist-sftp-tree-width(v) => { root.persist-sftp-tree-width(v); }
+                        sftp-show-type: root.sftp-show-type;
+                        sftp-show-size: root.sftp-show-size;
+                        sftp-show-modified: root.sftp-show-modified;
+                        sftp-show-permissions: root.sftp-show-permissions;
+                        sftp-show-owner: root.sftp-show-owner;
+                        sftp-show-group: root.sftp-show-group;
+                        toggle-sftp-column(key) => { root.toggle-sftp-column(key); }
                         sftp-path: term.sftp-path;
                         sftp-entries: term.sftp-entries;
                         sftp-status: term.sftp-status;
@@ -2147,6 +2163,7 @@ export component AppWindow inherits Window {
                         quick-external-command: root.quick-external-command;
                         quick-external-send-enter: root.quick-external-send-enter;
                         quick-external-sequence: root.quick-external-sequence;
+                        focus-sequence: root.terminal-focus-sequence;
                         command-history: root.command-history;
                         history-view: root.history-view;
                         run-command(cmd, all) => { root.run-command(term.id, cmd, all); }
@@ -2505,8 +2522,6 @@ export component AppWindow inherits Window {
             }
             }
             }
-
-            // (Resource collapse now uses a ToolStrip inside `rest`, above.)
 
             // Stacked docked panels (#dock-stack): every expanded panel is
             // placed here at the absolute rect Rust computed, so multiple
@@ -5159,10 +5174,12 @@ export component AppWindow inherits Window {
         confirm => {
             root.paste-confirmed(root.paste-confirm-tab);
             root.paste-confirm-open = false;
+            root.terminal-focus-sequence += 1;
         }
         cancel => {
             root.paste-confirm-cancelled();
             root.paste-confirm-open = false;
+            root.terminal-focus-sequence += 1;
         }
     }
 

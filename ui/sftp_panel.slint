@@ -15,6 +15,11 @@ export struct SftpEntry {
     modified: string,
     modified-ts: float,
     mode: int,        // POSIX permission bits, for the chmod dialog (#84)
+    file-type: string,
+    permissions: string,
+    permissions-mode: int,
+    owner: string,
+    group: string,
     selected: bool,   // multi-select checkbox state (#100)
 }
 
@@ -39,6 +44,7 @@ export struct TunnelInfo {
 // One row of the file-list right-click context menu.
 component SftpMenuItem inherits Rectangle {
     in property <string> label;
+    in property <string> icon;
     in property <brush> tint: Theme.text-primary;
     in property <bool> enabled: true;   // disabled items grey out + ignore clicks
     callback clicked();
@@ -50,7 +56,18 @@ component SftpMenuItem inherits Rectangle {
         clicked => { if (root.enabled) { root.clicked(); } }
     }
     Text {
-        x: 10px;
+        x: 8px;
+        text: root.icon;
+        color: root.enabled ? root.tint : Theme.text-muted;
+        font-family: "Material Icons";
+        font-size: Theme.fs-sm;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        width: 18px;
+        height: parent.height;
+    }
+    Text {
+        x: 30px;
         text: root.label;
         color: root.enabled ? root.tint : Theme.text-muted;
         font-size: Theme.fs-sm;
@@ -75,6 +92,13 @@ export component SftpPanel inherits Rectangle {
     in property <[TabInfo]> transfer-targets: [];
     in property <string> sort-key: "";
     in property <int> sort-dir: 0; // 0 default / 1 asc / -1 desc
+    in property <bool> show-type: true;
+    in property <bool> show-size: true;
+    in property <bool> show-modified: true;
+    in property <bool> show-permissions: true;
+    in property <bool> show-owner: true;
+    in property <bool> show-group: true;
+    callback toggle-column(string);
     in property <[TunnelInfo]> tunnels: [];
     // Saved paths for the server behind this tab (bookmarks menu).
     in property <[string]> bookmarks: [];
@@ -92,8 +116,8 @@ export component SftpPanel inherits Rectangle {
     property <bool> tree-resizing: false;
     property <length> list-w: root.show-tree ? root.width - root.tree-width - 5px : root.width;
     property <length> name-min: 180px;     // narrower than this → start dropping columns
-    property <bool> show-size-col: root.show-tree || (root.list-w - 36px - 76px - 120px > root.name-min);
-    property <bool> show-modified-col: root.show-tree || (root.list-w - 36px - 120px > root.name-min);
+    property <bool> show-size-col: root.show-size-col-user && (root.show-tree || (root.list-w - 36px - 76px - 120px > root.name-min));
+    property <bool> show-modified-col: root.show-modified-col-user && (root.show-tree || (root.list-w - 36px - 120px > root.name-min));
     property <int> selected-row: -1;       // clicked/highlighted file-list row (#70)
     in property <int> selected-count;      // number of checked entries (#100)
     // Keyboard type-ahead (#sftp-typeahead): after clicking a row the panel grabs
@@ -124,6 +148,14 @@ export component SftpPanel inherits Rectangle {
     // Below that, switch deliberately to a two-row compact layout instead of
     // allowing fixed-size controls to squeeze the path and each other (#285).
     property <bool> narrow-toolbar: !root.show-tree && root.width < 480px;
+    property <bool> show-type-col: root.show-type;
+    property <bool> show-size-col-user: root.show-size;
+    property <bool> show-modified-col-user: root.show-modified;
+    property <bool> show-permissions-col: root.show-permissions;
+    property <bool> show-owner-col: root.show-owner;
+    property <bool> show-group-col: root.show-group;
+    property <length> column-menu-x: 8px;
+    property <length> column-menu-y: 22px;
 
     // --- Callbacks ---------------------------------------------------------
     callback toggle-collapsed();    // minimise / restore the panel
@@ -615,11 +647,22 @@ export component SftpPanel inherits Rectangle {
                 }
 
                 // Batch actions on checked entries — only when something's checked (#100).
-                if root.panel-mode == "files" && root.selected-count > 0 && !root.narrow-toolbar : Text {
-                    text: "✓" + root.selected-count;
-                    color: Theme.accent;
-                    font-size: Theme.fs-sm;
-                    vertical-alignment: center;
+                if root.panel-mode == "files" && root.selected-count > 0 && !root.narrow-toolbar : HorizontalLayout {
+                    spacing: 2px;
+                    width: 34px;
+                    Text {
+                        text: "\u{E834}"; // check_box
+                        font-family: "Material Icons";
+                        color: Theme.accent;
+                        font-size: Theme.fs-sm;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: root.selected-count;
+                        color: Theme.accent;
+                        font-size: Theme.fs-sm;
+                        vertical-alignment: center;
+                    }
                 }
                 if root.panel-mode == "files" && root.selected-count > 0 && !root.narrow-toolbar : Rectangle {
                     width: 24px; height: 22px;
@@ -817,7 +860,7 @@ export component SftpPanel inherits Rectangle {
                 spacing: 0;
 
                 // Column headers
-                Rectangle {
+                column-header := Rectangle {
                     height: 20px;
                     background: Theme.bg-root;
                     HorizontalLayout {
@@ -830,6 +873,13 @@ export component SftpPanel inherits Rectangle {
                             header-name-ta := TouchArea {
                                 mouse-cursor: pointer;
                                 clicked => { root.sort-request("name"); }
+                                pointer-event(ev) => {
+                                    if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right) {
+                                        root.column-menu-x = self.absolute-position.x + self.mouse-x - column-header.absolute-position.x;
+                                        root.column-menu-y = self.absolute-position.y + self.mouse-y - column-header.absolute-position.y;
+                                        column-menu.show();
+                                    }
+                                }
                             }
                             Text {
                                 text: @tr("Name") + (root.sort-key == "name" ? (root.sort-dir > 0 ? " ↑" : " ↓") : "");
@@ -845,6 +895,13 @@ export component SftpPanel inherits Rectangle {
                             header-size-ta := TouchArea {
                                 mouse-cursor: pointer;
                                 clicked => { root.sort-request("size"); }
+                                pointer-event(ev) => {
+                                    if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right) {
+                                        root.column-menu-x = self.absolute-position.x + self.mouse-x - column-header.absolute-position.x;
+                                        root.column-menu-y = self.absolute-position.y + self.mouse-y - column-header.absolute-position.y;
+                                        column-menu.show();
+                                    }
+                                }
                             }
                             Text {
                                 text: @tr("Size") + (root.sort-key == "size" ? (root.sort-dir > 0 ? " ↑" : " ↓") : "");
@@ -860,6 +917,13 @@ export component SftpPanel inherits Rectangle {
                             header-modified-ta := TouchArea {
                                 mouse-cursor: pointer;
                                 clicked => { root.sort-request("modified"); }
+                                pointer-event(ev) => {
+                                    if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right) {
+                                        root.column-menu-x = self.absolute-position.x + self.mouse-x - column-header.absolute-position.x;
+                                        root.column-menu-y = self.absolute-position.y + self.mouse-y - column-header.absolute-position.y;
+                                        column-menu.show();
+                                    }
+                                }
                             }
                             Text {
                                 text: @tr("Modified") + (root.sort-key == "modified" ? (root.sort-dir > 0 ? " ↑" : " ↓") : "");
@@ -868,6 +932,90 @@ export component SftpPanel inherits Rectangle {
                                 width: parent.width;
                                 horizontal-alignment: right;
                                 vertical-alignment: center;
+                            }
+                        }
+                        if root.show-type-col : Rectangle {
+                            width: 100px;
+                            type-header-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.sort-request("type"); }
+                                pointer-event(ev) => {
+                                    if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right) {
+                                        root.column-menu-x = self.absolute-position.x + self.mouse-x - column-header.absolute-position.x;
+                                        root.column-menu-y = self.absolute-position.y + self.mouse-y - column-header.absolute-position.y;
+                                        column-menu.show();
+                                    }
+                                }
+                            }
+                            Text { text: @tr("Type") + (root.sort-key == "type" ? (root.sort-dir > 0 ? " ↑" : " ↓") : ""); color: root.sort-key == "type" ? Theme.accent : Theme.text-muted; font-size: Theme.fs-xs;
+                                   width: parent.width; horizontal-alignment: right; vertical-alignment: center; }
+                        }
+                        if root.show-permissions-col : Rectangle {
+                            width: 104px;
+                            permissions-header-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.sort-request("permissions"); }
+                                pointer-event(ev) => {
+                                    if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right) {
+                                        root.column-menu-x = self.absolute-position.x + self.mouse-x - column-header.absolute-position.x;
+                                        root.column-menu-y = self.absolute-position.y + self.mouse-y - column-header.absolute-position.y;
+                                        column-menu.show();
+                                    }
+                                }
+                            }
+                            Text { text: @tr("Permissions") + (root.sort-key == "permissions" ? (root.sort-dir > 0 ? " ↑" : " ↓") : ""); color: root.sort-key == "permissions" ? Theme.accent : Theme.text-muted; font-size: Theme.fs-xs;
+                                   width: parent.width; horizontal-alignment: right; vertical-alignment: center; }
+                        }
+                        if root.show-owner-col : Rectangle {
+                            width: 84px;
+                            owner-header-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.sort-request("owner"); }
+                                pointer-event(ev) => {
+                                    if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right) {
+                                        root.column-menu-x = self.absolute-position.x + self.mouse-x - column-header.absolute-position.x;
+                                        root.column-menu-y = self.absolute-position.y + self.mouse-y - column-header.absolute-position.y;
+                                        column-menu.show();
+                                    }
+                                }
+                            }
+                            Text { text: @tr("Owner") + (root.sort-key == "owner" ? (root.sort-dir > 0 ? " ↑" : " ↓") : ""); color: root.sort-key == "owner" ? Theme.accent : Theme.text-muted; font-size: Theme.fs-xs;
+                                   width: parent.width; horizontal-alignment: right; vertical-alignment: center; }
+                        }
+                        if root.show-group-col : Rectangle {
+                            width: 84px;
+                            group-header-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.sort-request("group"); }
+                                pointer-event(ev) => {
+                                    if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right) {
+                                        column-menu.show();
+                                    }
+                                }
+                            }
+                            Text { text: @tr("Group") + (root.sort-key == "group" ? (root.sort-dir > 0 ? " ↑" : " ↓") : ""); color: root.sort-key == "group" ? Theme.accent : Theme.text-muted; font-size: Theme.fs-xs;
+                                   width: parent.width; horizontal-alignment: right; vertical-alignment: center; }
+                        }
+                    }
+                    column-menu := PopupWindow {
+                        x: root.column-menu-x; y: root.column-menu-y;
+                        width: 180px; height: 7 * 28px + 8px;
+                        Rectangle {
+                            background: Theme.popup-bg;
+                            border-radius: Theme.radius-sm;
+                            border-width: 1px;
+                            border-color: Theme.border-strong;
+                            drop-shadow-blur: 12px;
+                            drop-shadow-color: #00000060;
+                            VerticalLayout {
+                                padding: 4px; spacing: 1px;
+                                SftpMenuItem { icon: root.show-type-col ? "\u{E5CA}" : ""; label: @tr("Type"); clicked => { root.toggle-column("type"); } }
+                                SftpMenuItem { icon: root.show-size-col-user ? "\u{E5CA}" : ""; label: @tr("Size"); clicked => { root.toggle-column("size"); } }
+                                SftpMenuItem { icon: root.show-modified-col-user ? "\u{E5CA}" : ""; label: @tr("Modified"); clicked => { root.toggle-column("modified"); } }
+                                SftpMenuItem { icon: root.show-permissions-col ? "\u{E5CA}" : ""; label: @tr("Permissions"); clicked => { root.toggle-column("permissions"); } }
+                                SftpMenuItem { icon: root.show-owner-col ? "\u{E5CA}" : ""; label: @tr("Owner"); clicked => { root.toggle-column("owner"); } }
+                                SftpMenuItem { icon: root.show-group-col ? "\u{E5CA}" : ""; label: @tr("Group"); clicked => { root.toggle-column("group"); } }
+                                SftpMenuItem { icon: "\u{E5CA}"; label: @tr("Name"); enabled: false; }
                             }
                         }
                     }
@@ -1048,6 +1196,26 @@ export component SftpPanel inherits Rectangle {
                                             text: entry.modified;
                                             color: Theme.text-muted; font-size: Theme.fs-xs;
                                             width: 116px; horizontal-alignment: right; vertical-alignment: center;
+                                        }
+                                        if root.show-type-col : Text {
+                                            text: entry.file-type;
+                                            color: Theme.text-secondary; font-size: Theme.fs-xs;
+                                            width: 100px; horizontal-alignment: right; vertical-alignment: center;
+                                        }
+                                        if root.show-permissions-col : Text {
+                                            text: entry.permissions;
+                                            color: Theme.text-secondary; font-size: Theme.fs-xs;
+                                            width: 104px; horizontal-alignment: right; vertical-alignment: center;
+                                        }
+                                        if root.show-owner-col : Text {
+                                            text: entry.owner;
+                                            color: Theme.text-secondary; font-size: Theme.fs-xs;
+                                            width: 84px; horizontal-alignment: right; vertical-alignment: center;
+                                        }
+                                        if root.show-group-col : Text {
+                                            text: entry.group;
+                                            color: Theme.text-secondary; font-size: Theme.fs-xs;
+                                            width: 84px; horizontal-alignment: right; vertical-alignment: center;
                                         }
                                     }
                                 }
