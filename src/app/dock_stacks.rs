@@ -34,6 +34,27 @@ const MAX_THICK_FRAC: f32 = 0.38;
 /// panel still shows its 36px icon strip; stacked panels live inside it).
 pub const STRIP: f32 = 36.0;
 
+/// Smallest dock-area extent that can still lay out a two-panel stack. The
+/// real main window never gets near it (720x420 minimum minus the title bar
+/// leaves ~720x377), so anything below is a transient size, not user intent.
+pub const MIN_LAYOUT_EXTENT: f32 = 2.0 * MIN_THICK;
+
+/// True when `w`/`h` is a transient degenerate dock-area size. Pushing the
+/// geometry computed from one would strand every panel as an invisible
+/// sliver (compute_geom clamps thickness down to a 1px line); keeping the
+/// last pushed layout until a real size arrives avoids the pop.
+pub fn area_is_transient(w: f32, h: f32) -> bool {
+    w < MIN_LAYOUT_EXTENT || h < MIN_LAYOUT_EXTENT
+}
+
+/// True when `next` differs from the last pushed area `prev` by at most
+/// `eps` logical px on both axes. Window restore re-derives the size through
+/// DPI rounding and can report 1-2px of pure noise; refreshing on it churns
+/// the panel model for no visible gain.
+pub fn area_is_noise(prev: (f32, f32), next: (f32, f32), eps: f32) -> bool {
+    (next.0 - prev.0).abs() <= eps && (next.1 - prev.1).abs() <= eps
+}
+
 /// Absolute rectangle in dock-area logical px.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct RectGeom {
@@ -784,5 +805,25 @@ mod tests {
         assert!(cur.left.is_empty());
         assert_eq!(cur.right.len(), 1);
         assert_eq!(cur.right[0].kind, "sidebar");
+    }
+
+    #[test]
+    fn area_noise_covers_dpi_rounding_only() {
+        assert!(area_is_noise((700.0, 370.0), (701.0, 371.0), 2.0));
+        assert!(area_is_noise((700.0, 370.0), (702.0, 368.0), 2.0));
+        // Past 2px on either axis the change is real (window drag, snap).
+        assert!(!area_is_noise((700.0, 370.0), (703.0, 370.0), 2.0));
+        assert!(!area_is_noise((700.0, 370.0), (700.0, 300.0), 2.0));
+    }
+
+    #[test]
+    fn area_transient_flags_degenerate_sizes() {
+        assert!(area_is_transient(1.0, 370.0));
+        assert!(area_is_transient(700.0, 1.0));
+        assert!(area_is_transient(239.9, 500.0));
+        // The smallest real dock area (window min 720x420 minus title bar)
+        // stays comfortably above the threshold.
+        assert!(!area_is_transient(700.0, 240.0));
+        assert!(!area_is_transient(360.0, 384.0));
     }
 }

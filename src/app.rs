@@ -2268,7 +2268,23 @@ fn open_window(
         let da4 = da_size.clone();
         window.on_dock_area_resized(move |w: f32, h: f32| {
             let next = (w.max(1.0), h.max(1.0));
-            if da4.get() == next {
+            let prev = da4.get();
+            if prev == next {
+                return;
+            }
+            // Restore-from-minimize and snap transitions report transient
+            // areas: 1-2px DPI-rounding noise and sub-panel degenerate sizes.
+            // Skip both without touching da4, so the noise accumulates past
+            // the threshold (or the settled size arrives) before any refresh;
+            // every other trigger path then keeps computing from a good area.
+            if area_is_noise(prev, next, 2.0) || area_is_transient(next.0, next.1) {
+                tracing::debug!(
+                    "[DOCK] skipped transient area {:.0}x{:.0} (last good {:.0}x{:.0})",
+                    next.0,
+                    next.1,
+                    prev.0,
+                    prev.1
+                );
                 return;
             }
             da4.set(next);
@@ -6379,20 +6395,19 @@ fn refresh_dock_inner(
             h: p.rect.h,
         })
         .collect();
-    let unchanged_rows = panels_model.row_count() == panels.len()
-            && (panels.is_empty()
-                || (0..panels.len()).all(|i| {
-                    panels_model.row_data(i).is_some_and(|r| {
-                        let p = &panels[i];
-                        r.kind == p.kind
-                            && r.edge == p.edge
-                            && r.x == p.x
-                            && r.y == p.y
-                            && r.w == p.w
-                            && r.h == p.h
-                    })
-                }));
-    if !unchanged_rows {
+    // Same row-level path as the dividers below: VecModel::set_vec resets the
+    // model, and a Slint repeater reacts by destroying and re-creating every
+    // panel component — visible as the edge panels popping in a frame or two
+    // late whenever a restore-only 1px geometry tweak churns the whole model.
+    // Only a structural change (row count) may take the set_vec path.
+    if panels_model.row_count() == panels.len() {
+        for (i, p) in panels.into_iter().enumerate() {
+            let unchanged = panels_model.row_data(i).is_some_and(|old| old == p);
+            if !unchanged {
+                panels_model.set_row_data(i, p);
+            }
+        }
+    } else {
         panels_model.set_vec(panels);
     }
     let dividers: Vec<DividerGeomInfo> = geom
