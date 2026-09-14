@@ -184,3 +184,10 @@ i-slint-backend-winit = { path = "vendor/i-slint-backend-winit" }
 # 37490e0 (unreleased as of 1.17.1). Drop this patch when upgrading Slint to
 # a release that contains the fix.
 i-slint-renderer-software = { path = "vendor/i-slint-renderer-software" }
+# Slint 1.16.1's TextInput insert() copies a pasted `\r\n` (Windows clipboard)
+# verbatim into the document, while parley counts CR and LF as two independent
+# line breaks — every pasted row shows a stray empty line and the LF-only line
+# model (gutter, highlight bands) built around the document falls out of step.
+# The vendor patch normalises the inserted text to LF. Drop this patch when
+# upgrading Slint to a release that normalises paste line endings upstream.
+i-slint-core = { path = "vendor/i-slint-core" }

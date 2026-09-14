@@ -892,7 +892,12 @@ pub(super) fn wire_sftp_callbacks(
                 return;
             }
             let path = w.get_editor_path().to_string();
-            let content = w.get_editor_content().to_string();
+            // The document is kept on LF, so a CRLF file has to be written back
+            // with its original endings instead of re-writing every line.
+            let mut content = w.get_editor_content().to_string();
+            if w.get_editor_eol_crlf() {
+                content = content.replace('\n', "\r\n");
+            }
             let tab_id = w.get_active_tab_id().to_string();
             if let Ok(handles) = sftp_handles.lock() {
                 if let Some(h) = handles.get(&tab_id) {
@@ -976,9 +981,9 @@ pub(super) fn wire_sftp_callbacks(
             if w.get_editor_readonly() || query.is_empty() {
                 return;
             }
-            let replaced = w
-                .get_editor_content()
-                .replace(query.as_str(), replacement.as_str());
+            let replaced = crate::editor::eol::strip_cr(
+                &w.get_editor_content().replace(query.as_str(), replacement.as_str()),
+            );
             w.set_editor_content(replaced.clone().into());
             w.set_editor_dirty(true);
             w.set_editor_lines(editor_lines_for(&replaced));

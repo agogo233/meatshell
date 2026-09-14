@@ -886,6 +886,10 @@ export component AppWindow inherits Window {
     in-out property <string> editor-name;     // file name shown in the title
     in-out property <string> editor-path;     // remote path (used on save)
     in-out property <string> editor-content;  // text, two-way with the input
+    // The opened file used `\r\n`. The document itself is kept on LF (a
+    // literal `\r` would render as an extra empty row), and this flag restores
+    // the original endings on save so a CRLF file is not silently rewritten.
+    in-out property <bool> editor-eol-crlf: false;
     in-out property <bool> editor-readonly;   // view = true, edit = false
     // True while the editor right-click popup is shown. Popups have no
     // closed-callback (1.16), so Esc uses this to close the menu instead

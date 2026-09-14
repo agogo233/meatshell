@@ -341,7 +341,13 @@ pub(super) fn apply_session_event_to_window(
             error,
         } => {
             if error.is_empty() {
-                // Open the built-in viewer/editor (#70).
+                // Open the built-in viewer/editor (#70). Windows line endings
+                // are normalised to LF — a literal `\r` would render as an
+                // extra empty row in the body and the gutter — and the file's
+                // original ending is remembered so saving rewrites nothing.
+                let crlf = content.contains("\r\n");
+                let content = crate::editor::eol::strip_cr(&content);
+                win.set_editor_eol_crlf(crlf);
                 win.set_editor_lines(editor_lines_for(&content));
                 win.set_editor_path(path.into());
                 win.set_editor_name(name.into());
