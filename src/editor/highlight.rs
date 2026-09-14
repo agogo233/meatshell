@@ -35,19 +35,28 @@ pub enum Role {
     Builtin,
 }
 
+/// Band overlay strength. Applied here (rather than via `.with-alpha()` in
+/// the .slint file) so that `Role::Default` can stay fully transparent:
+/// `with-alpha` overwrites the alpha of whatever it is given.
+const BAND_ALPHA: u8 = 66; // round(0.26 * 255); Color channels are u8 anyway
+
 fn role_color(role: Role, dark: bool) -> Color {
     match (role, dark) {
-        (Role::Keyword, true) => Color::from_rgb_u8(0x56, 0x9c, 0xd6),
-        (Role::Str, true) => Color::from_rgb_u8(0xce, 0x91, 0x78),
-        (Role::Comment, true) => Color::from_rgb_u8(0x6a, 0x99, 0x55),
-        (Role::Number, true) => Color::from_rgb_u8(0xb5, 0xce, 0xa8),
-        (Role::Builtin, true) => Color::from_rgb_u8(0xdc, 0xdc, 0xaa),
-        (Role::Keyword, false) => Color::from_rgb_u8(0x00, 0x00, 0xff),
-        (Role::Str, false) => Color::from_rgb_u8(0xa3, 0x15, 0x15),
-        (Role::Comment, false) => Color::from_rgb_u8(0x00, 0x80, 0x00),
-        (Role::Number, false) => Color::from_rgb_u8(0x09, 0x86, 0x58),
-        (Role::Builtin, false) => Color::from_rgb_u8(0x79, 0x5e, 0x26),
-        (Role::Default, _) => Color::from_rgb_u8(0x00, 0x00, 0x00),
+        (Role::Keyword, true) => Color::from_argb_u8(BAND_ALPHA, 0x56, 0x9c, 0xd6),
+        (Role::Str, true) => Color::from_argb_u8(BAND_ALPHA, 0xce, 0x91, 0x78),
+        (Role::Comment, true) => Color::from_argb_u8(BAND_ALPHA, 0x6a, 0x99, 0x55),
+        (Role::Number, true) => Color::from_argb_u8(BAND_ALPHA, 0xb5, 0xce, 0xa8),
+        (Role::Builtin, true) => Color::from_argb_u8(BAND_ALPHA, 0xdc, 0xdc, 0xaa),
+        (Role::Keyword, false) => Color::from_argb_u8(BAND_ALPHA, 0x00, 0x00, 0xff),
+        (Role::Str, false) => Color::from_argb_u8(BAND_ALPHA, 0xa3, 0x15, 0x15),
+        (Role::Comment, false) => Color::from_argb_u8(BAND_ALPHA, 0x00, 0x80, 0x00),
+        (Role::Number, false) => Color::from_argb_u8(BAND_ALPHA, 0x09, 0x86, 0x58),
+        (Role::Builtin, false) => Color::from_argb_u8(BAND_ALPHA, 0x79, 0x5e, 0x26),
+        // Default (plain text/whitespace) segments only exist to advance the
+        // x position of the coloured runs after them; tinting them black
+        // painted an exposed grey block on whitespace-only "empty" lines
+        // (no glyph covers it there) and a grey wash under plain text.
+        (Role::Default, _) => Color::from_argb_u8(0x00, 0x00, 0x00, 0x00),
     }
 }
 
@@ -635,6 +644,22 @@ mod tests {
         assert_eq!(lines.len(), 4);
         assert_eq!(lines[1].source, "");
         assert_eq!(lines[3].source, "");
+    }
+
+    #[test]
+    fn default_segments_are_bandless_and_roles_are_tinted() {
+        // A whitespace-only row still yields Default segments (they carry the
+        // x advance for later runs) but must not paint a band: that was the
+        // "empty line renders coloured" bug.
+        let lines = build_lines("   \n# c\n", Lang::Shell, true);
+        let ws = &lines[0];
+        assert_eq!(ws.segments.row_count(), 1);
+        assert_eq!(ws.segments.row_data(0).unwrap().color.alpha(), 0);
+        let comment = &lines[1];
+        assert_eq!(comment.segments.row_count(), 1);
+        let band = comment.segments.row_data(0).unwrap().color.to_argb_u8();
+        assert_eq!(band.alpha, 66); // the former .with-alpha(0.26) in the UI
+        assert_eq!((band.red, band.green, band.blue), (0x6a, 0x99, 0x55));
     }
 
     #[test]

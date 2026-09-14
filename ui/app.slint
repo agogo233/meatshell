@@ -3391,7 +3391,10 @@ export component AppWindow inherits Window {
                                             for seg in line.segments: Rectangle {
                                                 width: seg-measure.preferred-width;
                                                 horizontal-stretch: 0;
-                                                background: seg.color.with-alpha(0.26);
+                                                // The strength is baked into the role
+                                                // colour on the Rust side; Default is
+                                                // fully transparent there (bandless).
+                                                background: seg.color;
                                                 seg-measure := Text {
                                                     // x-bound: parked off-band so it
                                                     // is excluded from the band's and
