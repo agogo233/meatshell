@@ -56,6 +56,9 @@ All notable changes are documented here. 本文件记录所有重要变更。
 - **CI 新增单元测试流水线。** 新增 `test.yml`，每次 push/PR 在 Linux 上运行 `cargo test`，此前单元测试从未在 CI 中执行。
 - **CI runs the unit tests.** A new `test.yml` job runs `cargo test` on every push/PR; previously the unit tests were never exercised in CI.
 
+- **窗口从最小化恢复不再闪烁。** 恢复瞬间 1~2px 的尺寸取整噪声与瞬态极小值不再触发四边面板整体重排，面板改为逐行就地更新，消除「背景先出、面板后弹」的滞后；终端恢复遮罩（#183）揭开时改为 160ms 渐隐而非瞬时弹回。
+- **Restoring a minimized window no longer flickers.** 1-2px DPI-rounding noise and transient tiny sizes from the restore resize now skip dock relayout, and panels refresh row-by-row in place instead of being destroyed and re-created a frame later; the terminal restore cover (#183) fades out over 160ms rather than popping the terminal back in.
+
 ## [0.7.3] - 2026-09-07
 
 - **停止 Android Beta 支持。** 移除 Android 客户端源码、APK 构建和发布任务，发布流程仅保留桌面平台。

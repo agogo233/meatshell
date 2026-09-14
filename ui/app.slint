@@ -2293,13 +2293,18 @@ export component AppWindow inherits Window {
                     }
 
                     // Windows may show the terminal model being reconstructed when
-                    // restoring from minimize (#183). Briefly cover the terminal area
-                    // until the restore repaint settles; the underlying PTY/buffer is
-                    // untouched.
-                    if root.terminal-restore-cover && pane.active-id != "welcome" && pane.tabs.length > 0 : Rectangle {
+                    // restoring from minimize (#183). Cover the terminal area until
+                    // the restore repaint settles; the underlying PTY/buffer is
+                    // untouched. The element stays in the tree and is driven by
+                    // opacity so removing the cover fades instead of popping the
+                    // terminal back in: snapping on (0ms) still masks the first
+                    // frame, while the release eases out over 160ms.
+                    Rectangle {
                         width: parent.width;
                         height: parent.height;
                         background: Theme.term-bg;
+                        opacity: root.terminal-restore-cover && pane.active-id != "welcome" && pane.tabs.length > 0 ? 1.0 : 0.0;
+                        animate opacity { duration: root.terminal-restore-cover ? 0ms : 160ms; easing: ease-out; }
                     }
                 }
                 }
