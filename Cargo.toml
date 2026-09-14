@@ -178,3 +178,9 @@ opt-level = 1
 # Avoid Slint/winit's AppKit DisplayLink selector on old macOS. The local
 # patched backend falls back to timer throttling on macOS only.
 i-slint-backend-winit = { path = "vendor/i-slint-backend-winit" }
+# Slint 1.16.1's software renderer fills text selection/cursor/decoration
+# rectangles without honoring the active clip, so a select-all in the editor
+# bleeds over the panel borders while scrolling. Backports upstream commit
+# 37490e0 (unreleased as of 1.17.1). Drop this patch when upgrading Slint to
+# a release that contains the fix.
+i-slint-renderer-software = { path = "vendor/i-slint-renderer-software" }

@@ -3273,13 +3273,25 @@ impl<T: ProcessScene> sharedparley::GlyphRenderer for SceneBuilder<'_, T> {
             (self.current_state.offset.to_vector().cast() * self.scale_factor).cast();
 
         physical_rect.origin += global_offset;
-        let physical_rect = physical_rect.cast().transformed(self.rotation);
+        let geometry: PhysicalRect = physical_rect.cast().transformed(self.rotation);
+        // Backport of slint-ui/slint commit 37490e0088d0 (fix shipped after
+        // 1.16.1): these fills reach the processor directly rather than
+        // through `draw_rectangle`, so they have to bring the clip along
+        // themselves. Without it a text decoration, a selection highlight or
+        // a cursor taller than the item it belongs to paints right over its
+        // surroundings, while the glyphs beside it are clipped.
+        let clip =
+            (self.current_state.clip.translate(self.current_state.offset.to_vector()).cast()
+                * self.scale_factor)
+                .round()
+                .cast()
+                .transformed(self.rotation);
 
         let args = target_pixel_buffer::DrawRectangleArgs::from_rect(
-            physical_rect.cast(),
+            geometry.cast(),
             Brush::SolidColor(color),
         );
-        self.processor.process_rectangle(&args, physical_rect);
+        self.processor.process_rectangle(&args, clip);
     }
 
     fn draw_glyph_run(
