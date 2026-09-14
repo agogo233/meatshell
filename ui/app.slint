@@ -889,9 +889,10 @@ export component AppWindow inherits Window {
     in-out property <bool> editor-readonly;   // view = true, edit = false
     // True while the editor right-click popup is shown. Popups have no
     // closed-callback (1.16), so Esc uses this to close the menu instead
-    // of tearing down the whole editor. An outside click that auto-closes
-    // the popup clears it through the pointer overlay; clicks elsewhere
-    // leave it stale, costing at most one extra Esc.
+    // of tearing down the whole editor. Body clicks go straight to the
+    // TextInput, so an outside click that auto-closes the popup can leave
+    // this stale; worst case one extra Esc press, and it resets whenever
+    // the editor closes.
     property <bool> editor-ctx-open: false;
     changed editor-open => {
         if (!root.editor-open) { root.editor-ctx-open = false; }
@@ -3044,8 +3045,7 @@ export component AppWindow inherits Window {
                 }
                 return reject;
             }
-            Rectangle {
-                id: ed-panel;
+            ed-panel := Rectangle {
                 x: root.ed-x;
                 y: root.ed-y;
                 width: root.ed-w;
@@ -3408,6 +3408,34 @@ export component AppWindow inherits Window {
                                             }
                                         }
                                     }
+                                    // Right-click catcher, deliberately
+                                    // BEHIND the TextInput (like editor-wheel
+                                    // for rejected scroll): core TextInput
+                                    // ignores right-button presses, so only
+                                    // those propagate down to this area —
+                                    // left-click selection and drags stay
+                                    // with the TextInput, untouched.
+                                    ed-ctx-tap := TouchArea {
+                                        x: 8px;
+                                        y: 8px;
+                                        width: edit-input.width;
+                                        height: edit-input.height;
+                                        pointer-event(e) => {
+                                            if (e.kind == PointerEventKind.down
+                                                && e.button == PointerEventButton.right) {
+                                                // Map the click into ed-panel
+                                                // space (the menu's parent);
+                                                // absolute-position already
+                                                // contains the scroll offset.
+                                                ed-panel.ctx-x = self.absolute-position.x
+                                                    + self.mouse-x - ed-panel.absolute-position.x;
+                                                ed-panel.ctx-y = self.absolute-position.y
+                                                    + self.mouse-y - ed-panel.absolute-position.y;
+                                                root.editor-ctx-open = true;
+                                                ed-ctx-menu.show();
+                                            }
+                                        }
+                                    }
                                     edit-input := TextInput {
                                         x: 8px;
                                         y: 8px;
@@ -3467,44 +3495,6 @@ export component AppWindow inherits Window {
                                             root.editor-match-count = root.editor-count-matches(
                                                 root.editor-content, root.editor-find-query);
                                         }
-                                    }
-                                    // Right-click overlay. Accepts only the
-                                    // right-button press (opens the edit
-                                    // context menu); every other event is
-                                    // rejected so the TextInput underneath
-                                    // keeps caret moves, drag-selection and
-                                    // the rejected-wheel scroll path (#388).
-                                    ed-ctx-tap := TouchArea {
-                                        x: 8px;
-                                        y: 8px;
-                                        width: edit-input.width;
-                                        height: edit-input.height;
-                                        mouse-cursor: text;
-                                        pointer-event(e) => {
-                                            if (e.kind == PointerEventKind.down
-                                                && e.button == PointerEventButton.right) {
-                                                // Map the click into ed-panel
-                                                // space (the menu's parent);
-                                                // absolute-position already
-                                                // contains the scroll offset.
-                                                ed-panel.ctx-x = self.absolute-position.x
-                                                    + self.mouse-x - ed-panel.absolute-position.x;
-                                                ed-panel.ctx-y = self.absolute-position.y
-                                                    + self.mouse-y - ed-panel.absolute-position.y;
-                                                root.editor-ctx-open = true;
-                                                ed-ctx-menu.show();
-                                                return accept;
-                                            }
-                                            if (e.kind == PointerEventKind.down) {
-                                                // Left/middle press lands on the
-                                                // body: any open popup is being
-                                                // auto-closed by the click —
-                                                // keep the Esc flag in sync.
-                                                root.editor-ctx-open = false;
-                                            }
-                                            return reject;
-                                        }
-                                        scroll-event(_) => { return reject; }
                                     }
                                 }
                             }
