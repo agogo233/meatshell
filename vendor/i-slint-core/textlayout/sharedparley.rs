@@ -363,20 +363,18 @@ fn create_text_paragraphs(
                 }
             });
 
-            // Meatshell vendor patch: an empty paragraph would otherwise be a
-            // parley layout without a single cluster — break_next still
-            // commits one phantom line, but finish_line leaves its ascent,
-            // descent and line-height at zero (the copy-previous-metrics
-            // fallback only fires after an in-paragraph break, never for a
-            // standalone empty layout), so an empty line has a zero-height
-            // box and its caret rect is degenerate (invisible). Same symptom
-            // as slint#13297, whose fix only covers the legacy linebreaker;
-            // this engine is unfixed upstream. Laying out a zero-width space
-            // instead gives the line its real font height and the caret a
-            // normal rect; `range` still covers zero bytes, so the document
-            // and every byte mapping are untouched (clicks clamp in
-            // `byte_offset_from_point`). Drop when upgrading Slint to a
-            // release with empty-line geometry fixed upstream.
+            // Meatshell vendor patch: an empty paragraph would otherwise be
+            // a parley layout without a single cluster, so the caret on an
+            // empty line has no geometry to resolve against and is never
+            // drawn — the same symptom as slint#13297, whose fix only covers
+            // the legacy linebreaker; this engine is unfixed upstream.
+            // Laying out a zero-width space gives the paragraph a real
+            // cluster for caret placement; `range` still covers zero bytes,
+            // so the document and every byte mapping are untouched (clicks
+            // clamp in `byte_offset_from_point`, and the caret rect is
+            // rebuilt from the paragraph's own line box in
+            // `cursor_rect_for_byte_offset`). Drop when upgrading Slint to a
+            // release with empty-line caret geometry fixed upstream.
             let text = if text.is_empty() { "\u{200b}" } else { text };
             let layout =
                 layout_builder.build(font_context, text, selection, formatting, Some(link_color));
@@ -933,6 +931,26 @@ impl Layout {
             Default::default(),
         );
         let rect = cursor.geometry(&paragraph.layout, cursor_width.get());
+
+        // Meatshell vendor patch: for the zero-width-space paragraph that
+        // stands in for an empty line (see `create_text_paragraphs`), the
+        // vertical extent parley reports for the caret does not match the
+        // line box that is actually drawn (observed: a full-height bar at
+        // the left edge instead of a one-line caret). Rebuild the rect from
+        // the paragraph's own height — the very value that stacks and
+        // renders the lines — while keeping parley's horizontal placement
+        // so alignment offsets survive. Non-empty paragraphs are unaffected;
+        // only Plain paragraphs reach this function (TextInput), so a zero
+        // range always marks a zero-width-space stand-in line.
+        if paragraph.range.len() == 0 {
+            return PhysicalRect::new(
+                PhysicalPoint::from_lengths(
+                    PhysicalLength::new(rect.x0 as _),
+                    self.y_offset + paragraph.y,
+                ),
+                PhysicalSize::new(cursor_width.get(), paragraph.layout.height().max(1.0)),
+            );
+        }
 
         PhysicalRect::new(
             PhysicalPoint::from_lengths(
