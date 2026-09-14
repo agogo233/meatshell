@@ -363,6 +363,21 @@ fn create_text_paragraphs(
                 }
             });
 
+            // Meatshell vendor patch: an empty paragraph would otherwise be a
+            // parley layout without a single cluster — break_next still
+            // commits one phantom line, but finish_line leaves its ascent,
+            // descent and line-height at zero (the copy-previous-metrics
+            // fallback only fires after an in-paragraph break, never for a
+            // standalone empty layout), so an empty line has a zero-height
+            // box and its caret rect is degenerate (invisible). Same symptom
+            // as slint#13297, whose fix only covers the legacy linebreaker;
+            // this engine is unfixed upstream. Laying out a zero-width space
+            // instead gives the line its real font height and the caret a
+            // normal rect; `range` still covers zero bytes, so the document
+            // and every byte mapping are untouched (clicks clamp in
+            // `byte_offset_from_point`). Drop when upgrading Slint to a
+            // release with empty-line geometry fixed upstream.
+            let text = if text.is_empty() { "\u{200b}" } else { text };
             let layout =
                 layout_builder.build(font_context, text, selection, formatting, Some(link_color));
 
@@ -892,7 +907,14 @@ impl Layout {
             pos.x,
             (pos.y_length() - self.y_offset - paragraph.y).get(),
         );
-        paragraph.range.start + cursor.index()
+        // Meatshell vendor patch: an empty paragraph is laid out from a
+        // zero-width space (see `create_text_paragraphs`), so a click past
+        // its start would report an index the zero-length `range` cannot
+        // cover; clamp it back so the caret stays on the clicked empty line.
+        // Only Plain paragraphs reach here (TextInput hit-testing); the
+        // Styled branch keeps `range` 0..0 and never calls this.
+        let index = cursor.index().min(paragraph.range.len());
+        paragraph.range.start + index
     }
 
     fn cursor_rect_for_byte_offset(
