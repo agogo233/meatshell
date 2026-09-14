@@ -887,6 +887,15 @@ export component AppWindow inherits Window {
     in-out property <string> editor-path;     // remote path (used on save)
     in-out property <string> editor-content;  // text, two-way with the input
     in-out property <bool> editor-readonly;   // view = true, edit = false
+    // True while the editor right-click popup is shown. Popups have no
+    // closed-callback (1.16), so Esc uses this to close the menu instead
+    // of tearing down the whole editor. An outside click that auto-closes
+    // the popup clears it through the pointer overlay; clicks elsewhere
+    // leave it stale, costing at most one extra Esc.
+    property <bool> editor-ctx-open: false;
+    changed editor-open => {
+        if (!root.editor-open) { root.editor-ctx-open = false; }
+    }
     in-out property <bool> editor-dirty: false; // edited since load
     // Opening the dynamic editor and focusing its TextInput in the same event
     // can re-enter Windows AccessKit while it is registering the new item tree.
@@ -3022,16 +3031,28 @@ export component AppWindow inherits Window {
                     return accept;
                 }
                 if (e.text == Key.Escape) {
+                    // With the context menu open, Esc closes the menu —
+                    // never the editor (the popup keeps focus here, so
+                    // this branch runs while it is shown).
+                    if (root.editor-ctx-open) {
+                        root.editor-ctx-open = false;
+                        ed-ctx-menu.close();
+                        return accept;
+                    }
                     root.close-editor();
                     return accept;
                 }
                 return reject;
             }
             Rectangle {
+                id: ed-panel;
                 x: root.ed-x;
                 y: root.ed-y;
                 width: root.ed-w;
                 height: root.ed-h;
+                // Context-menu click position, relative to this panel.
+                property <length> ctx-x;
+                property <length> ctx-y;
                 background: Theme.popup-bg;
                 border-radius: Theme.radius-md;
                 border-width: 1px;
@@ -3447,8 +3468,97 @@ export component AppWindow inherits Window {
                                                 root.editor-content, root.editor-find-query);
                                         }
                                     }
+                                    // Right-click overlay. Accepts only the
+                                    // right-button press (opens the edit
+                                    // context menu); every other event is
+                                    // rejected so the TextInput underneath
+                                    // keeps caret moves, drag-selection and
+                                    // the rejected-wheel scroll path (#388).
+                                    ed-ctx-tap := TouchArea {
+                                        x: 8px;
+                                        y: 8px;
+                                        width: edit-input.width;
+                                        height: edit-input.height;
+                                        mouse-cursor: text;
+                                        pointer-event(e) => {
+                                            if (e.kind == PointerEventKind.down
+                                                && e.button == PointerEventButton.right) {
+                                                // Map the click into ed-panel
+                                                // space (the menu's parent);
+                                                // absolute-position already
+                                                // contains the scroll offset.
+                                                ed-panel.ctx-x = self.absolute-position.x
+                                                    + self.mouse-x - ed-panel.absolute-position.x;
+                                                ed-panel.ctx-y = self.absolute-position.y
+                                                    + self.mouse-y - ed-panel.absolute-position.y;
+                                                root.editor-ctx-open = true;
+                                                ed-ctx-menu.show();
+                                                return accept;
+                                            }
+                                            if (e.kind == PointerEventKind.down) {
+                                                // Left/middle press lands on the
+                                                // body: any open popup is being
+                                                // auto-closed by the click —
+                                                // keep the Esc flag in sync.
+                                                root.editor-ctx-open = false;
+                                            }
+                                            return reject;
+                                        }
+                                        scroll-event(_) => { return reject; }
+                                    }
                                 }
                             }
+                        }
+                    }
+                }
+
+                // Right-click edit menu. Copy/Select-all work in read-only
+                // (view) mode too; Cut/Paste are editing-only. Items call
+                // the TextInput's own interface (core clipboard path with
+                // the transient-lock retry). The default close-policy is
+                // CloseOnClick, which already auto-closes on an in-menu
+                // click/release; the explicit close() additionally pins
+                // the popup away before refocusing the body.
+                ed-ctx-menu := PopupWindow {
+                    x: ed-panel.ctx-x;
+                    y: ed-panel.ctx-y;
+                    width: 168px;
+                    height: ed-ctx-vl.preferred-height;
+                    Rectangle {
+                        background: Theme.popup-bg; border-radius: Theme.radius-sm;
+                        border-width: 1px; border-color: Theme.border-strong;
+                        drop-shadow-blur: 10px; drop-shadow-color: #00000050;
+                        ed-ctx-vl := VerticalLayout {
+                            padding: 4px; spacing: 1px;
+                            Rectangle { height: 28px; border-radius: Theme.radius-sm;
+                                background: ecopy-ta.has-hover ? Theme.bg-hover : transparent;
+                                ecopy-ta := TouchArea { mouse-cursor: pointer;
+                                    clicked => { edit-input.copy(); root.editor-ctx-open = false; ed-ctx-menu.close(); edit-input.focus(); } }
+                                HorizontalLayout { padding-left: 10px; spacing: 8px;
+                                    Text { text: "\u{E14D}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: Theme.fs-sm; vertical-alignment: center; }
+                                    Text { text: root.lang-en ? "Copy" : "复制"; color: Theme.text-primary; font-size: Theme.fs-md; vertical-alignment: center; horizontal-stretch: 1; } } }
+                            if !root.editor-readonly : Rectangle { height: 28px; border-radius: Theme.radius-sm;
+                                background: ecut-ta.has-hover ? Theme.bg-hover : transparent;
+                                ecut-ta := TouchArea { mouse-cursor: pointer;
+                                    clicked => { edit-input.cut(); root.editor-ctx-open = false; ed-ctx-menu.close(); edit-input.focus(); } }
+                                HorizontalLayout { padding-left: 10px; spacing: 8px;
+                                    Text { text: "\u{E14E}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: Theme.fs-sm; vertical-alignment: center; }
+                                    Text { text: root.lang-en ? "Cut" : "剪切"; color: Theme.text-primary; font-size: Theme.fs-md; vertical-alignment: center; horizontal-stretch: 1; } } }
+                            if !root.editor-readonly : Rectangle { height: 28px; border-radius: Theme.radius-sm;
+                                background: epaste-ta.has-hover ? Theme.bg-hover : transparent;
+                                epaste-ta := TouchArea { mouse-cursor: pointer;
+                                    clicked => { edit-input.paste(); root.editor-ctx-open = false; ed-ctx-menu.close(); edit-input.focus(); } }
+                                HorizontalLayout { padding-left: 10px; spacing: 8px;
+                                    Text { text: "\u{E14F}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: Theme.fs-sm; vertical-alignment: center; }
+                                    Text { text: root.lang-en ? "Paste" : "粘贴"; color: Theme.text-primary; font-size: Theme.fs-md; vertical-alignment: center; horizontal-stretch: 1; } } }
+                            Rectangle { height: 1px; background: Theme.border-subtle; }
+                            Rectangle { height: 28px; border-radius: Theme.radius-sm;
+                                background: esel-ta.has-hover ? Theme.bg-hover : transparent;
+                                esel-ta := TouchArea { mouse-cursor: pointer;
+                                    clicked => { edit-input.select-all(); root.editor-ctx-open = false; ed-ctx-menu.close(); edit-input.focus(); } }
+                                HorizontalLayout { padding-left: 10px; spacing: 8px;
+                                    Text { text: "\u{E162}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: Theme.fs-sm; vertical-alignment: center; }
+                                    Text { text: root.lang-en ? "Select All" : "全选"; color: Theme.text-primary; font-size: Theme.fs-md; vertical-alignment: center; horizontal-stretch: 1; } } }
                         }
                     }
                 }
