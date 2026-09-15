@@ -95,7 +95,9 @@ pub struct DockGeom {
 }
 
 /// Known panel kinds, in the order they appear in the config / UI.
-pub const KINDS: [&str; 4] = ["sidebar", "welcome", "quick", "ai"];
+/// `sftp` docks like any other window panel; its per-tab data is mirrored onto
+/// the window by `sync_active_sftp_to_root` (#dock-stack).
+pub const KINDS: [&str; 5] = ["sidebar", "welcome", "quick", "ai", "sftp"];
 
 fn edges() -> impl Iterator<Item = &'static str> {
     ["left", "right", "top", "bottom"].into_iter()
@@ -635,6 +637,93 @@ mod tests {
         assert_eq!(t.bottom[0].kind, "sidebar");
         assert_eq!(t.bottom[1].kind, "ai");
         assert!((t.bottom.iter().map(|x| x.ratio).sum::<f32>() - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn sftp_stacks_with_sidebar_on_same_edge() {
+        // SFTP docked to the right alongside a resource sidebar: the two share
+        // the edge, split evenly, and SFTP survives a persist roundtrip.
+        let mut s = DockStacks::default();
+        s.dock_to("right", "sidebar");
+        s.dock_to("right", "sftp");
+        assert_eq!(s.right.len(), 2);
+        assert!((s.right[0].ratio - 0.5).abs() < 1e-5);
+        assert!((s.right[1].ratio - 0.5).abs() < 1e-5);
+        let saved = s.to_saved();
+        let mut t = DockStacks::default();
+        t.from_saved(&saved);
+        assert_eq!(t.right.len(), 2);
+        assert_eq!(t.right[1].kind, "sftp");
+        assert!((t.right.iter().map(|x| x.ratio).sum::<f32>() - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn sftp_moves_between_edges_and_can_fold() {
+        let mut s = DockStacks::default();
+        s.dock_to("bottom", "sftp");
+        s.dock_to("right", "sftp");
+        assert!(s.bottom.is_empty());
+        assert_eq!(s.right.len(), 1);
+        assert_eq!(s.right[0].kind, "sftp");
+        // Collapse = remove; a lone sftp stack is not persisted either.
+        s.remove("right", "sftp");
+        assert!(s.right.is_empty());
+        assert!(s.to_saved().is_empty());
+        assert_eq!(s.edge_of("sftp"), None);
+    }
+
+    #[test]
+    fn sftp_geom_splits_right_edge_with_sidebar() {
+        let mut s = DockStacks::default();
+        s.dock_to("right", "sidebar");
+        s.dock_to("right", "sftp");
+        let extent = |k: &str| match k {
+            "sidebar" => 240.0,
+            _ => 320.0,
+        };
+        let g = s.compute_geom(&extent, &no_strip, 1000.0, 600.0);
+        assert_eq!(g.panels.len(), 2);
+        assert_eq!(g.panels[0].kind, "sidebar");
+        assert_eq!(g.panels[1].kind, "sftp");
+        // Both share the right-edge thickness and split the height in halves.
+        assert_eq!(g.panels[0].rect.w, 320.0);
+        assert_eq!(g.panels[0].rect.h, 300.0);
+        assert_eq!(g.panels[1].rect.h, 300.0);
+        assert_eq!(g.dividers.len(), 1);
+        assert!(g.dividers[0].vertical);
+    }
+
+    #[test]
+    fn sftp_rebuild_joins_existing_sidebar_on_reexpand() {
+        // A live layout where the resource sidebar is expanded on the right and
+        // SFTP re-expands (tab switched back to an SFTP-backed session): the
+        // fresh sftp panel joins behind the established one with an even share.
+        let mut saved = DockStacks::default();
+        saved.dock_to("right", "sidebar");
+        let expanded = |k: &str| match k {
+            "sidebar" | "sftp" => Some("right"),
+            _ => None,
+        };
+        let mut cur = DockStacks::default();
+        cur.rebuild_from(&saved, &expanded);
+        assert_eq!(cur.right.len(), 2);
+        assert_eq!(cur.right[0].kind, "sidebar");
+        assert_eq!(cur.right[1].kind, "sftp");
+        assert!((cur.right[0].ratio - 0.5).abs() < 1e-3);
+        assert!((cur.right[1].ratio - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn sftp_rebuild_drops_when_folded() {
+        let mut saved = DockStacks::default();
+        saved.dock_to("right", "sidebar");
+        saved.dock_to("right", "sftp");
+        // SFTP folded (local tab): it leaves the stack; the sidebar survives.
+        let expanded = |k: &str| if k == "sftp" { None } else { Some("right") };
+        let mut cur = DockStacks::default();
+        cur.rebuild_from(&saved, &expanded);
+        assert_eq!(cur.right.len(), 1);
+        assert_eq!(cur.right[0].kind, "sidebar");
     }
 
     #[test]

@@ -2211,6 +2211,10 @@ fn open_window(
                         window.set_ai_panel_dock(edge.clone());
                         window.set_ai_panel_collapsed(false);
                     }
+                    "sftp" => {
+                        window.set_sftp_dock(edge.clone());
+                        window.set_sftp_collapsed(false);
+                    }
                     _ => {}
                 }
             }
@@ -2328,6 +2332,7 @@ fn open_window(
         let dm3 = dock_dividers_model.clone();
         let da3 = da_size.clone();
         let panels_model_for_extent = dock_panels_model.clone();
+        let terminals_for_extent = terminals_model.clone();
         window.on_panel_extent_drag(
             move |_panel_index: i32, pos: f32| {
                 let panel = panels_model_for_extent.row_data(_panel_index as usize);
@@ -2345,6 +2350,25 @@ fn open_window(
                             ("quick", false) => w.set_quick_panel_height(thickness),
                             ("ai", true) => w.set_ai_panel_width(thickness),
                             ("ai", false) => w.set_ai_panel_height(thickness),
+                            // SFTP keeps its per-tab size memory (#v0.5): update
+                            // the active tab's row too, then mirror both onto the
+                            // window so the docked panel + extents stay in sync.
+                            ("sftp", true) => {
+                                w.set_sftp_panel_width(thickness);
+                                let active = w.get_active_tab_id().to_string();
+                                update_terminal_row(&terminals_for_extent, &active, |r| {
+                                    r.sftp_panel_width = thickness
+                                });
+                                sync_active_sftp_to_root(&w, &terminals_for_extent);
+                            }
+                            ("sftp", false) => {
+                                w.set_sftp_panel_height(thickness);
+                                let active = w.get_active_tab_id().to_string();
+                                update_terminal_row(&terminals_for_extent, &active, |r| {
+                                    r.sftp_panel_height = thickness
+                                });
+                                sync_active_sftp_to_root(&w, &terminals_for_extent);
+                            }
                             _ => {}
                         }
                         refresh_dock(&w, &ds3, &pm3, &dm3, da3.get());
@@ -2461,8 +2485,19 @@ fn open_window(
     // longer bleeds onto the rest) (#v0.5).
     {
         let terminals_model = terminals_model.clone();
+        let weak = window.as_weak();
+        let ds = dock_stacks.clone();
+        let pm = dock_panels_model.clone();
+        let dm = dock_dividers_model.clone();
+        let da = da_size.clone();
         window.on_set_pane_sftp_collapsed(move |tab_id: SharedString, v: bool| {
             update_terminal_row(&terminals_model, &tab_id, |r| r.sftp_collapsed = v);
+            if let Some(w) = weak.upgrade() {
+                // The docked panel's (un)dock state is driven by the ACTIVE
+                // tab's collapse flag — mirror + recompute geometry (#dock-stack).
+                sync_active_sftp_to_root(&w, &terminals_model);
+                refresh_dock(&w, &ds, &pm, &dm, da.get());
+            }
         });
     }
     {
@@ -2530,22 +2565,34 @@ fn open_window(
     {
         let terminals_model = terminals_model.clone();
         let weak = window.as_weak();
+        let ds = dock_stacks.clone();
+        let pm = dock_panels_model.clone();
+        let dm = dock_dividers_model.clone();
+        let da = da_size.clone();
         window.on_set_pane_sftp_height(move |tab_id: SharedString, v: f32| {
             update_terminal_row(&terminals_model, &tab_id, |r| r.sftp_panel_height = v);
             // Mirror to the global default so it persists (saved on close) and
             // seeds new sessions; other open tabs use their own field, unaffected.
             if let Some(w) = weak.upgrade() {
                 w.set_sftp_panel_height(v);
+                sync_active_sftp_to_root(&w, &terminals_model);
+                refresh_dock(&w, &ds, &pm, &dm, da.get());
             }
         });
     }
     {
         let terminals_model = terminals_model.clone();
         let weak = window.as_weak();
+        let ds = dock_stacks.clone();
+        let pm = dock_panels_model.clone();
+        let dm = dock_dividers_model.clone();
+        let da = da_size.clone();
         window.on_set_pane_sftp_width(move |tab_id: SharedString, v: f32| {
             update_terminal_row(&terminals_model, &tab_id, |r| r.sftp_panel_width = v);
             if let Some(w) = weak.upgrade() {
                 w.set_sftp_panel_width(v);
+                sync_active_sftp_to_root(&w, &terminals_model);
+                refresh_dock(&w, &ds, &pm, &dm, da.get());
             }
         });
     }
@@ -2824,9 +2871,20 @@ fn open_window(
         let statuses = tab_statuses.clone();
         let local = local_snap.clone();
         let net = local_net_hist.clone();
+        let mirror_terminals = terminals_model.clone();
+        let mirror_stacks = dock_stacks.clone();
+        let mirror_pm = dock_panels_model.clone();
+        let mirror_dm = dock_dividers_model.clone();
+        let mirror_da = da_size.clone();
         window.on_refresh_sidebar(move || {
             if let Some(w) = weak.upgrade() {
                 refresh_sidebar(&w, &statuses, &local, &net);
+                // The docked SFTP panel follows the active tab: mirror that
+                // tab's state, then re-run the dock geometry so an SFTP-backed
+                // tab (un)docks the panel and local/welcome tabs pull it off.
+                // Cheap: refresh_dock diffs rows and skips no-op frames.
+                sync_active_sftp_to_root(&w, &mirror_terminals);
+                refresh_dock(&w, &mirror_stacks, &mirror_pm, &mirror_dm, mirror_da.get());
             }
         });
     }
@@ -6248,6 +6306,64 @@ fn refresh_panes(
 
 // --- Docked-panel edge stacks (#dock-stack) --------------------------------
 
+/// Mirror the ACTIVE tab's SFTP state onto the window, where the docked
+/// SftpPanel reads it (#dock-stack). Models are copied BY REFERENCE, so the
+/// docked panel shares the same VecModel as the tab's TerminalView and picks
+/// up listing updates for free. Called whenever the active tab or its SFTP
+/// state changes; overwrites unconditionally so no stale seed (e.g. the
+/// startup `collapse-sftp-default`) can leak into the dock decision.
+fn sync_active_sftp_to_root(win: &AppWindow, terminals: &VecModel<TerminalState>) {
+    use slint::Model as _;
+    let active = win.get_active_tab_id().to_string();
+    let Some(row) = (0..terminals.row_count()).find_map(|i| {
+        let r = terminals.row_data(i)?;
+        (r.id.as_str() == active).then_some(r)
+    }) else {
+        // Welcome / unknown tab: no session → the SFTP panel leaves the dock.
+        win.set_sftp_available(false);
+        win.set_sftp_collapsed(false);
+        win.set_sftp_path("/".into());
+        win.set_sftp_status(Default::default());
+        win.set_sftp_status_kind(0);
+        win.set_sftp_loading(false);
+        win.set_sftp_selected_count(0);
+        win.set_sftp_sort_key(Default::default());
+        win.set_sftp_sort_dir(0);
+        win.set_sftp_entries(ModelRc::from(std::rc::Rc::new(
+            VecModel::<SftpEntry>::default(),
+        )));
+        win.set_sftp_tree_nodes(ModelRc::from(std::rc::Rc::new(
+            VecModel::<SftpTreeNode>::default(),
+        )));
+        win.set_sftp_bookmarks(ModelRc::from(std::rc::Rc::new(
+            VecModel::<slint::SharedString>::default(),
+        )));
+        win.set_sftp_tunnels(ModelRc::from(std::rc::Rc::new(
+            VecModel::<TunnelInfo>::default(),
+        )));
+        win.set_sftp_current_tab_id("".into());
+        return;
+    };
+    win.set_sftp_available(row.sftp_available);
+    win.set_sftp_collapsed(row.sftp_collapsed);
+    win.set_sftp_path(row.sftp_path.clone());
+    win.set_sftp_status(row.sftp_status.clone());
+    win.set_sftp_status_kind(row.sftp_status_kind);
+    win.set_sftp_loading(row.sftp_loading);
+    win.set_sftp_selected_count(row.sftp_selected_count);
+    win.set_sftp_sort_key(row.sftp_sort_key.clone());
+    win.set_sftp_sort_dir(row.sftp_sort_dir);
+    win.set_sftp_entries(row.sftp_entries.clone());
+    win.set_sftp_tree_nodes(row.sftp_tree_nodes.clone());
+    win.set_sftp_bookmarks(row.sftp_bookmarks.clone());
+    win.set_sftp_tunnels(row.tunnels.clone());
+    win.set_sftp_current_tab_id(row.id.clone());
+    // Panel extent follows the active tab's remembered size (#v0.5 keeps these
+    // per-tab), so a wide panel on tab A isn't crushed to tab B's narrow one.
+    win.set_sftp_panel_width(row.sftp_panel_width);
+    win.set_sftp_panel_height(row.sftp_panel_height);
+}
+
 /// The edge (left|right|top|bottom) a window panel is currently expanded on,
 /// `None` when folded, closed, or off (welcome not in sidebar mode).
 fn panel_edge(window: &AppWindow, kind: &str) -> Option<&'static str> {
@@ -6275,6 +6391,13 @@ fn panel_edge(window: &AppWindow, kind: &str) -> Option<&'static str> {
             (window.get_ai_panel_open() && !window.get_ai_panel_collapsed())
                 .then(|| norm(window.get_ai_panel_dock().as_str()))
         }
+        // SFTP is a normal window panel now (#dock-stack): expanded when the
+        // active tab offers SFTP and hasn't collapsed it. Mirrored state lives
+        // on the window (`sync_active_sftp_to_root`).
+        "sftp" => {
+            (window.get_sftp_available() && !window.get_sftp_collapsed())
+                .then(|| norm(window.get_sftp_dock().as_str()))
+        }
         _ => None,
     }
 }
@@ -6291,6 +6414,8 @@ fn panel_extent(window: &AppWindow, kind: &str) -> f32 {
         "quick" => window.get_quick_panel_height(),
         "ai" if horizontal_edge => window.get_ai_panel_width(),
         "ai" => window.get_ai_panel_height(),
+        "sftp" if horizontal_edge => window.get_sftp_panel_width(),
+        "sftp" => window.get_sftp_panel_height(),
         _ => 220.0,
     }
 }
@@ -6311,6 +6436,11 @@ fn strip_on_edge(window: &AppWindow, edge: &str) -> bool {
         || (window.get_ai_panel_open()
             && window.get_ai_panel_collapsed()
             && docks(window.get_ai_panel_dock()))
+        // A collapsed SFTP panel keeps its 36px band on its docked edge, exactly
+        // like the other window panels (#dock-stack).
+        || (window.get_sftp_available()
+            && window.get_sftp_collapsed()
+            && docks(window.get_sftp_dock()))
 }
 
 /// Rebuild the edge stacks from the current window panel state, recompute the

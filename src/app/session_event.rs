@@ -36,6 +36,12 @@ pub(super) fn apply_session_event_to_window(
                 }
             }
         }
+        // The docked SFTP panel mirrors the ACTIVE tab's row; keep it fresh
+        // whenever that tab's SFTP state lands (#dock-stack). Content models
+        // are replaced wholesale, so the mirror must re-copy the reference.
+        if win.get_active_tab_id().as_str() == tab_id {
+            sync_active_sftp_to_root(win, terminals);
+        }
     };
     let update_tab = |mutator: &dyn Fn(&mut TabInfo)| {
         for i in 0..tabs.row_count() {

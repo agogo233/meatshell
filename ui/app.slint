@@ -23,6 +23,7 @@ import { ConfirmDialog } from "confirm_dialog.slint";
 import { LabeledInput, PrimaryButton, GhostButton, DockExpandButton, IconButton, ToolStrip } from "widgets.slint";
 import { TerminalView, TermSpan, TermMatch, QuickCmd, QuickDockPanel, AIPanel, AiMessage } from "terminal_view.slint";
 import { SftpEntry, SftpTreeNode, TunnelInfo } from "sftp_panel.slint";
+import { SftpPanel } from "sftp_panel.slint";
 import { ProcWindow, ProcRow } from "proc_window.slint";
 import { SystemInfoWindow, SysInfoRow, SysMetricRow, SysNetRow } from "system_info_window.slint";
 import { InterfacePanel, OutputRuleItem, WslProfileInfo } from "interface_panel.slint";
@@ -771,6 +772,25 @@ export component AppWindow inherits Window {
     callback set-pane-sftp-height(string /* tab-id */, length);
     callback set-pane-sftp-width(string /* tab-id */, length);
     callback set-pane-sftp-saved-height(string /* tab-id */, length);
+    // --- Docked SFTP panel — active-tab mirror (#dock-stack) --------------
+    // The docked SftpPanel renders globally (once, on the dock edge) from the
+    // ACTIVE tab's SFTP state; Rust mirrors that TerminalState row onto these
+    // properties via `sync_active_sftp_to_root` so the panel follows tab
+    // switches without living inside every TerminalView. Models are shared by
+    // reference, so remote listing updates land on the panel automatically.
+    in-out property <bool> sftp-available: false;
+    in-out property <string> sftp-path: "/";
+    in-out property <[SftpEntry]> sftp-entries;
+    in-out property <string> sftp-status;
+    in-out property <int> sftp-status-kind: 0;
+    in-out property <bool> sftp-loading: false;
+    in-out property <[SftpTreeNode]> sftp-tree-nodes;
+    in-out property <int> sftp-selected-count: 0;
+    in-out property <string> sftp-sort-key: "";
+    in-out property <int> sftp-sort-dir: 0;
+    in-out property <[string]> sftp-bookmarks;
+    in-out property <[TunnelInfo]> sftp-tunnels;
+    in-out property <string> sftp-current-tab-id: "";
     // Confirm-before-close when there are live session tabs (#88): a stray
     // double-click on the title-bar icon / X shouldn't drop active sessions.
     in-out property <bool> confirm-close-open: false;
@@ -1478,26 +1498,90 @@ export component AppWindow inherits Window {
                 root.ai-panel-dock == "top" ? dock-area.ai-outer-strip : 0px;
             property <length> ai-bottom:
                 root.ai-panel-dock == "bottom" ? dock-area.ai-outer-strip : 0px;
+            // A collapsed SFTP panel joins the icon-strip chain at the LOWEST
+            // priority (welcome > sidebar > quick > ai > sftp): it merges into
+            // whatever strip already owns its edge, or takes the outermost
+            // 36px slot by itself when nothing else is collapsed there
+            // (#dock-stack).
+            property <bool> sftp-merge-welcome:
+                root.sftp-available && root.sftp-collapsed
+                && root.welcome-as-sidebar && root.welcome-collapsed
+                && root.sftp-dock == root.welcome-sidebar-dock;
+            property <bool> sftp-merge-sidebar:
+                root.sftp-available && root.sftp-collapsed
+                && !dock-area.sftp-merge-welcome && root.sidebar-collapsed
+                && root.sftp-dock == root.sidebar-dock;
+            property <bool> sftp-merge-quick:
+                root.sftp-available && root.sftp-collapsed
+                && !dock-area.sftp-merge-welcome && !dock-area.sftp-merge-sidebar
+                && root.quick-panel-open && root.quick-panel-collapsed
+                && root.sftp-dock == root.quick-panel-dock;
+            property <bool> sftp-merge-ai:
+                root.sftp-available && root.sftp-collapsed
+                && !dock-area.sftp-merge-welcome && !dock-area.sftp-merge-sidebar
+                && !dock-area.sftp-merge-quick
+                && root.ai-panel-open && root.ai-panel-collapsed
+                && root.sftp-dock == root.ai-panel-dock;
+            property <length> sftp-outer-strip:
+                !root.zen-mode && root.sftp-available && root.sftp-collapsed
+                    && !dock-area.sftp-merge-welcome && !dock-area.sftp-merge-sidebar
+                    && !dock-area.sftp-merge-quick && !dock-area.sftp-merge-ai
+                    ? 36px : 0px;
+            property <bool> sftp-outer-horizontal:
+                root.sftp-dock == "left" || root.sftp-dock == "right";
+            property <length> sftp-left:
+                root.sftp-dock == "left" ? dock-area.sftp-outer-strip : 0px;
+            property <length> sftp-right:
+                root.sftp-dock == "right" ? dock-area.sftp-outer-strip : 0px;
+            property <length> sftp-top:
+                root.sftp-dock == "top" ? dock-area.sftp-outer-strip : 0px;
+            property <length> sftp-bottom:
+                root.sftp-dock == "bottom" ? dock-area.sftp-outer-strip : 0px;
 
-            if dock-area.quick-outer-strip > 0px : ToolStrip {
-                x: root.quick-panel-dock == "right" ? parent.width - parent.quick-outer-strip : 0px;
-                y: root.quick-panel-dock == "bottom" ? parent.height - parent.quick-outer-strip : 0px;
-                width: parent.quick-outer-horizontal ? parent.quick-outer-strip : parent.width;
-                height: parent.quick-outer-horizontal ? parent.height : parent.quick-outer-strip;
-                dock-edge: root.quick-panel-dock;
-                glyph: "\u{E3E7}";
-                tooltip: @tr("Quick commands");
-                show-second: parent.ai-merge-quick;
-                second-glyph: "\u{E8BD}";
+            // Standalone collapsed SFTP panel — nothing else is collapsed on
+            // its edge, so it takes the outermost 36px slot alone.
+            if dock-area.sftp-outer-strip > 0px : ToolStrip {
+                x: root.sftp-dock == "right" ? parent.width - parent.sftp-outer-strip : 0px;
+                y: root.sftp-dock == "bottom" ? parent.height - parent.sftp-outer-strip : 0px;
+                width: parent.sftp-outer-horizontal ? parent.sftp-outer-strip : parent.width;
+                height: parent.sftp-outer-horizontal ? parent.height : parent.sftp-outer-strip;
+                dock-edge: root.sftp-dock;
+                glyph: "\u{E2C7}";   // folder — SFTP
+                tooltip: @tr("SFTP");
                 expand => {
-                    root.quick-panel-collapsed = false;
-                    root.dock-layout-changed();
-                }
-                expand-second => {
-                    root.ai-panel-collapsed = false;
-                    root.dock-layout-changed();
+                    root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
                 }
             }
+
+if dock-area.quick-outer-strip > 0px : ToolStrip {
+                 x: root.quick-panel-dock == "right" ? parent.width - parent.quick-outer-strip : 0px;
+                 y: root.quick-panel-dock == "bottom" ? parent.height - parent.quick-outer-strip : 0px;
+                 width: parent.quick-outer-horizontal ? parent.quick-outer-strip : parent.width;
+                 height: parent.quick-outer-horizontal ? parent.height : parent.quick-outer-strip;
+                 dock-edge: root.quick-panel-dock;
+                 glyph: "\u{E3E7}";
+                 tooltip: @tr("Quick commands");
+                 show-second: parent.ai-merge-quick || parent.sftp-merge-quick;
+                 second-glyph: parent.ai-merge-quick ? "\u{E8BD}" : "\u{E2C7}";
+                 show-third: parent.ai-merge-quick && parent.sftp-merge-quick;
+                 third-glyph: "\u{E2C7}";
+                 expand => {
+                     root.quick-panel-collapsed = false;
+                     root.dock-layout-changed();
+                 }
+                 expand-second => {
+                     if (parent.ai-merge-quick) {
+                         root.ai-panel-collapsed = false;
+                     } else {
+                         root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
+                     }
+                     root.dock-layout-changed();
+                 }
+                 expand-third => {
+                     root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
+                     root.dock-layout-changed();
+                 }
+             }
 
             // Standalone collapsed AI panel — nothing else is collapsed on its
             // edge, so it takes the outermost 36px slot.
@@ -1509,8 +1593,14 @@ export component AppWindow inherits Window {
                 dock-edge: root.ai-panel-dock;
                 glyph: "\u{E8BD}";
                 tooltip: @tr("AI assistant");
+                show-second: parent.sftp-merge-ai;
+                second-glyph: "\u{E2C7}";
                 expand => {
                     root.ai-panel-collapsed = false;
+                    root.dock-layout-changed();
+                }
+                expand-second => {
+                    root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
                     root.dock-layout-changed();
                 }
             }
@@ -1531,19 +1621,37 @@ export component AppWindow inherits Window {
                 glyph: "\u{E88A}";   // session list / welcome
                 // Icon priority fills slots left-to-right: welcome, then the
                 // resource panel (when both collapsed into one strip), then
-                // quick commands, then the AI panel.
+                // quick commands, then the AI panel, then SFTP (last).
                 show-second: parent.combine-collapsed-tools || parent.quick-merge-welcome
-                    || parent.ai-merge-welcome;
+                    || parent.ai-merge-welcome || parent.sftp-merge-welcome;
                 second-glyph: parent.combine-collapsed-tools ? "\u{E871}"
-                    : parent.quick-merge-welcome ? "\u{E3E7}" : "\u{E8BD}";
+                    : parent.quick-merge-welcome ? "\u{E3E7}"
+                    : parent.ai-merge-welcome ? "\u{E8BD}" : "\u{E2C7}";
                 show-third: (parent.combine-collapsed-tools
-                            && (parent.quick-merge-welcome || parent.ai-merge-welcome))
-                    || (parent.quick-merge-welcome && parent.ai-merge-welcome);
+                            && (parent.quick-merge-welcome || parent.ai-merge-welcome || parent.sftp-merge-welcome))
+                    || (parent.quick-merge-welcome && (parent.ai-merge-welcome || parent.sftp-merge-welcome))
+                    || (parent.ai-merge-welcome && parent.sftp-merge-welcome);
                 third-glyph: (parent.combine-collapsed-tools && parent.quick-merge-welcome)
-                    ? "\u{E3E7}" : "\u{E8BD}";
-                show-fourth: parent.combine-collapsed-tools
-                    && parent.quick-merge-welcome && parent.ai-merge-welcome;
-                fourth-glyph: "\u{E8BD}";
+                    ? "\u{E3E7}"
+                    : (parent.combine-collapsed-tools && parent.ai-merge-welcome) ? "\u{E8BD}"
+                    : (parent.combine-collapsed-tools && parent.sftp-merge-welcome) ? "\u{E2C7}"
+                    : (parent.quick-merge-welcome && parent.ai-merge-welcome) ? "\u{E8BD}"
+                    : (parent.quick-merge-welcome && parent.sftp-merge-welcome) ? "\u{E2C7}"
+                    : "\u{E2C7}";
+                show-fourth: (parent.combine-collapsed-tools && parent.quick-merge-welcome
+                            && (parent.ai-merge-welcome || parent.sftp-merge-welcome))
+                    || (parent.combine-collapsed-tools && parent.ai-merge-welcome
+                            && parent.sftp-merge-welcome)
+                    || (parent.quick-merge-welcome && parent.ai-merge-welcome
+                            && parent.sftp-merge-welcome);
+                fourth-glyph: (parent.combine-collapsed-tools && parent.quick-merge-welcome && parent.ai-merge-welcome)
+                    ? "\u{E8BD}"
+                    : (parent.combine-collapsed-tools && parent.quick-merge-welcome && parent.sftp-merge-welcome) ? "\u{E2C7}"
+                    : (parent.combine-collapsed-tools && parent.ai-merge-welcome && parent.sftp-merge-welcome) ? "\u{E2C7}"
+                    : "\u{E2C7}";
+                show-fifth: parent.combine-collapsed-tools && parent.quick-merge-welcome
+                    && parent.ai-merge-welcome && parent.sftp-merge-welcome;
+                fifth-glyph: "\u{E2C7}";
                 expand => {
                     root.welcome-collapsed = false;
                     root.set-welcome-collapsed(false);
@@ -1555,21 +1663,43 @@ export component AppWindow inherits Window {
                         root.set-sidebar-collapsed(false);
                     } else if (parent.quick-merge-welcome) {
                         root.quick-panel-collapsed = false;
-                    } else {
+                    } else if (parent.ai-merge-welcome) {
                         root.ai-panel-collapsed = false;
+                    } else {
+                        root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
                     }
                     root.dock-layout-changed();
                 }
                 expand-third => {
                     if (parent.combine-collapsed-tools && parent.quick-merge-welcome) {
                         root.quick-panel-collapsed = false;
-                    } else {
+                    } else if (parent.combine-collapsed-tools && parent.ai-merge-welcome) {
                         root.ai-panel-collapsed = false;
+                    } else if (parent.combine-collapsed-tools && parent.sftp-merge-welcome) {
+                        root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
+                    } else if (parent.quick-merge-welcome && parent.ai-merge-welcome) {
+                        root.ai-panel-collapsed = false;
+                    } else if (parent.quick-merge-welcome && parent.sftp-merge-welcome) {
+                        root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
+                    } else {
+                        root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
                     }
                     root.dock-layout-changed();
                 }
                 expand-fourth => {
-                    root.ai-panel-collapsed = false;
+                    if (parent.combine-collapsed-tools && parent.quick-merge-welcome && parent.ai-merge-welcome) {
+                        root.ai-panel-collapsed = false;
+                    } else if (parent.combine-collapsed-tools && parent.quick-merge-welcome && parent.sftp-merge-welcome) {
+                        root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
+                    } else if (parent.combine-collapsed-tools && parent.ai-merge-welcome && parent.sftp-merge-welcome) {
+                        root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
+                    } else {
+                        root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
+                    }
+                    root.dock-layout-changed();
+                }
+                expand-fifth => {
+                    root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
                     root.dock-layout-changed();
                 }
             }
@@ -1593,10 +1723,20 @@ export component AppWindow inherits Window {
                     : 36px;
                 dock-edge: root.sidebar-dock;
                 glyph: "\u{E871}";   // dashboard — resource panel
-                show-second: dock-area.quick-merge-sidebar || dock-area.ai-merge-sidebar;
-                second-glyph: dock-area.quick-merge-sidebar ? "\u{E3E7}" : "\u{E8BD}";
-                show-third: dock-area.quick-merge-sidebar && dock-area.ai-merge-sidebar;
-                third-glyph: "\u{E8BD}";
+                show-second: dock-area.quick-merge-sidebar || dock-area.ai-merge-sidebar
+                    || dock-area.sftp-merge-sidebar;
+                second-glyph: dock-area.quick-merge-sidebar ? "\u{E3E7}"
+                    : dock-area.ai-merge-sidebar ? "\u{E8BD}" : "\u{E2C7}";
+                show-third: (dock-area.quick-merge-sidebar
+                            && (dock-area.ai-merge-sidebar || dock-area.sftp-merge-sidebar))
+                    || (dock-area.ai-merge-sidebar && dock-area.sftp-merge-sidebar);
+                third-glyph: (dock-area.quick-merge-sidebar && dock-area.ai-merge-sidebar)
+                    ? "\u{E8BD}"
+                    : (dock-area.quick-merge-sidebar && dock-area.sftp-merge-sidebar) ? "\u{E2C7}"
+                    : "\u{E2C7}";
+                show-fourth: dock-area.quick-merge-sidebar && dock-area.ai-merge-sidebar
+                    && dock-area.sftp-merge-sidebar;
+                fourth-glyph: "\u{E2C7}";
                 expand => {
                     root.sidebar-collapsed = false;
                     root.set-sidebar-collapsed(false);
@@ -1605,13 +1745,23 @@ export component AppWindow inherits Window {
                 expand-second => {
                     if (dock-area.quick-merge-sidebar) {
                         root.quick-panel-collapsed = false;
-                    } else {
+                    } else if (dock-area.ai-merge-sidebar) {
                         root.ai-panel-collapsed = false;
+                    } else {
+                        root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
                     }
                     root.dock-layout-changed();
                 }
                 expand-third => {
-                    root.ai-panel-collapsed = false;
+                    if (dock-area.quick-merge-sidebar && dock-area.ai-merge-sidebar) {
+                        root.ai-panel-collapsed = false;
+                    } else {
+                        root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
+                    }
+                    root.dock-layout-changed();
+                }
+                expand-fourth => {
+                    root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
                     root.dock-layout-changed();
                 }
             }
@@ -1629,10 +1779,18 @@ export component AppWindow inherits Window {
                     ? parent.height - parent.quick-top - parent.quick-bottom : parent.sidebar-outside-strip;
                 dock-edge: root.welcome-sidebar-dock;
                 glyph: "\u{E871}";
-                show-second: parent.quick-merge-sidebar || parent.ai-merge-sidebar;
-                second-glyph: parent.quick-merge-sidebar ? "\u{E3E7}" : "\u{E8BD}";
-                show-third: parent.quick-merge-sidebar && parent.ai-merge-sidebar;
-                third-glyph: "\u{E8BD}";
+                show-second: parent.quick-merge-sidebar || parent.ai-merge-sidebar
+                    || parent.sftp-merge-sidebar;
+                second-glyph: parent.quick-merge-sidebar ? "\u{E3E7}"
+                    : parent.ai-merge-sidebar ? "\u{E8BD}" : "\u{E2C7}";
+                show-third: (parent.quick-merge-sidebar
+                            && (parent.ai-merge-sidebar || parent.sftp-merge-sidebar))
+                    || (parent.ai-merge-sidebar && parent.sftp-merge-sidebar);
+                third-glyph: (parent.quick-merge-sidebar && parent.ai-merge-sidebar)
+                    ? "\u{E8BD}" : "\u{E2C7}";
+                show-fourth: parent.quick-merge-sidebar && parent.ai-merge-sidebar
+                    && parent.sftp-merge-sidebar;
+                fourth-glyph: "\u{E2C7}";
                 expand => {
                     root.sidebar-collapsed = false;
                     root.set-sidebar-collapsed(false);
@@ -1641,13 +1799,23 @@ export component AppWindow inherits Window {
                 expand-second => {
                     if (parent.quick-merge-sidebar) {
                         root.quick-panel-collapsed = false;
-                    } else {
+                    } else if (parent.ai-merge-sidebar) {
                         root.ai-panel-collapsed = false;
+                    } else {
+                        root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
                     }
                     root.dock-layout-changed();
                 }
                 expand-third => {
-                    root.ai-panel-collapsed = false;
+                    if (parent.quick-merge-sidebar && parent.ai-merge-sidebar) {
+                        root.ai-panel-collapsed = false;
+                    } else {
+                        root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
+                    }
+                    root.dock-layout-changed();
+                }
+                expand-fourth => {
+                    root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
                     root.dock-layout-changed();
                 }
             }
@@ -2139,37 +2307,6 @@ export component AppWindow inherits Window {
                         set-search-history-mode(v) => { root.set-search-history-mode(v); }
                         selection: term.selection;
                         has-selection: term.has-selection;
-                        sftp-panel-height: term.sftp-panel-height;
-                        set-sftp-panel-height(v) => { root.set-pane-sftp-height(term.id, v); }
-                        sftp-panel-width: term.sftp-panel-width;
-                        set-sftp-panel-width(v) => { root.set-pane-sftp-width(term.id, v); }
-                        sftp-dock <=> root.sftp-dock;
-                        sftp-collapsed: term.sftp-collapsed;
-                        set-sftp-collapsed(v) => { root.set-pane-sftp-collapsed(term.id, v); }
-                        sftp-saved-height: term.sftp-saved-height;
-                        set-sftp-saved-height(v) => { root.set-pane-sftp-saved-height(term.id, v); }
-                        sftp-tree-width: root.sftp-tree-width;
-                        persist-sftp-tree-width(v) => { root.persist-sftp-tree-width(v); }
-                        sftp-show-type: root.sftp-show-type;
-                        sftp-show-size: root.sftp-show-size;
-                        sftp-show-modified: root.sftp-show-modified;
-                        sftp-show-permissions: root.sftp-show-permissions;
-                        sftp-show-owner: root.sftp-show-owner;
-                        sftp-show-group: root.sftp-show-group;
-                        toggle-sftp-column(key) => { root.toggle-sftp-column(key); }
-                        sftp-path: term.sftp-path;
-                        sftp-entries: term.sftp-entries;
-                        sftp-status: term.sftp-status;
-                        sftp-status-kind: term.sftp-status-kind;
-                        sftp-loading: term.sftp-loading;
-                        sftp-tree-nodes: term.sftp-tree-nodes;
-                        sftp-transfer-targets: root.tabs;
-                        sftp-selected-count: term.sftp-selected-count;
-                        sftp-sort-key: term.sftp-sort-key;
-                        sftp-sort-dir: term.sftp-sort-dir;
-                        sftp-available: term.sftp-available;
-                        sftp-bookmarks: term.sftp-bookmarks;
-                        tunnels: term.tunnels;
                         quick-commands: root.quick-commands;
                         quick-sidebar-enabled: root.quick-commands-as-sidebar;
                         quick-panel-docked: root.quick-panel-open;
@@ -2225,70 +2362,6 @@ export component AppWindow inherits Window {
                         zen-key() => { root.toggle-zen-key(); }
                         term-font-size-px: term.font-size > 0 ? term.font-size * 1.0 : root.term-font-size / 1px;
                         terminal-resize(w, h) => { root.terminal-resize(term.id, w, h) }
-                        sftp-navigate(path) => { root.sftp-navigate(term.id, path); }
-                        sftp-bookmark-add() => { root.sftp-bookmark-add(term.id); }
-                        sftp-bookmark-jump(path) => { root.sftp-navigate(term.id, path); }
-                        sftp-bookmark-remove(path) => { root.sftp-bookmark-remove(term.id, path); }
-                        sftp-download(path) => { root.sftp-download(term.id, path); }
-                        sftp-upload-clicked(dir, folder) => { root.sftp-upload-clicked(term.id, dir, folder); }
-                        sftp-refresh(path) => { root.sftp-refresh(term.id, path); }
-                        sftp-tree-expand(path) => { root.sftp-tree-expand(term.id, path); }
-                        sftp-toggle-select(i) => { root.sftp-toggle-select(term.id, i); }
-                        sftp-download-selected() => { root.sftp-download-selected(term.id); }
-                        sftp-copy-to-target(path, target) => { root.sftp-copy-to-target(term.id, path, target); }
-                        sftp-copy-selected-to-target(target) => { root.sftp-copy-selected-to-target(term.id, target); }
-                        // Confirm before deleting the checked entries (#100), reusing
-                        // the delete-confirm dialog in batch mode.
-                        sftp-delete-selected() => {
-                            root.confirm-delete-tab = term.id;
-                            root.confirm-delete-batch = true;
-                            root.confirm-delete-path = root.lang-en ? "the selected items" : "选中的项目";
-                            root.confirm-delete-open = true;
-                        }
-                        // Gate delete behind an in-app confirmation (#28): stash the
-                        // target and open the modal; the real delete fires on confirm.
-                        sftp-delete(path) => {
-                            root.confirm-delete-tab = term.id;
-                            root.confirm-delete-path = path;
-                            root.confirm-delete-open = true;
-                        }
-                        sftp-view(path) => { root.sftp-view(term.id, path); }
-                        sftp-edit(path) => { root.sftp-edit(term.id, path); }
-                        sftp-open-external(path) => { root.sftp-open-external(term.id, path); }
-                        sftp-edit-external(path) => { root.sftp-edit-external(term.id, path); }
-                        sftp-sort-request(key) => { root.sftp-sort-request(term.id, key); }
-                        sftp-clear-sort() => { root.sftp-clear-sort(term.id); }
-                        sftp-type-ahead(prefix) => { return root.sftp-type-ahead(term.id, prefix); }
-                        tunnel-add(name, kind, bind, bind-port, host, host-port) => {
-                            root.tunnel-add(term.id, name, kind, bind, bind-port, host, host-port);
-                        }
-                        tunnel-stop(id) => { root.tunnel-stop(term.id, id); }
-                        // #69 context-menu extensions → shared prompt dialog.
-                        sftp-rename-request(path, name) => {
-                            root.sftp-prompt-kind = "rename";
-                            root.sftp-prompt-tab = term.id;
-                            root.sftp-prompt-target = path;
-                            root.sftp-prompt-value = name;
-                            root.sftp-prompt-open = true;
-                        }
-                        sftp-chmod-request(path, name, mode) => {
-                            root.sftp-chmod-open(term.id, path, name, mode);
-                        }
-                        sftp-copy-path(path) => { root.sftp-copy-path(path); }
-                        sftp-new-folder(dir) => {
-                            root.sftp-prompt-kind = "mkdir";
-                            root.sftp-prompt-tab = term.id;
-                            root.sftp-prompt-target = dir;
-                            root.sftp-prompt-value = "";
-                            root.sftp-prompt-open = true;
-                        }
-                        sftp-new-file(dir) => {
-                            root.sftp-prompt-kind = "touch";
-                            root.sftp-prompt-tab = term.id;
-                            root.sftp-prompt-target = dir;
-                            root.sftp-prompt-value = "";
-                            root.sftp-prompt-open = true;
-                        }
                         paste-from-clipboard() => { root.paste-from-clipboard(term.id); }
                         copy-terminal-text() => { root.copy-terminal-text(term.id); }
                         clear-terminal() => { root.clear-terminal(term.id); }
@@ -2714,6 +2787,119 @@ export component AppWindow inherits Window {
                             root.dock-layout-changed();
                         }
                         root.panel-dragging = false;
+                    }
+                }
+                // The docked SFTP panel renders globally from the ACTIVE tab's
+                // mirrored state (#dock-stack); models are shared by reference
+                // so remote listings stay live. The panel is only ever rendered
+                // expanded — collapsing swaps it for the tool strip below.
+                if gp.kind == "sftp" : SftpPanel {
+                    width: parent.width;
+                    height: parent.height;
+                    dock-edge: gp.edge;
+                    current-tab-id: root.sftp-current-tab-id;
+                    current-path: root.sftp-path;
+                    entries: root.sftp-entries;
+                    status: root.sftp-status;
+                    status-kind: root.sftp-status-kind;
+                    loading: root.sftp-loading;
+                    tree-nodes: root.sftp-tree-nodes;
+                    transfer-targets: root.tabs;
+                    selected-count: root.sftp-selected-count;
+                    sort-key: root.sftp-sort-key;
+                    sort-dir: root.sftp-sort-dir;
+                    show-type: root.sftp-show-type;
+                    show-size: root.sftp-show-size;
+                    show-modified: root.sftp-show-modified;
+                    show-permissions: root.sftp-show-permissions;
+                    show-owner: root.sftp-show-owner;
+                    show-group: root.sftp-show-group;
+                    toggle-column(key) => { root.toggle-sftp-column(key); }
+                    tree-width: root.sftp-tree-width;
+                    persist-tree-width(v) => { root.persist-sftp-tree-width(v); }
+                    bookmarks: root.sftp-bookmarks;
+                    tunnels: root.sftp-tunnels;
+                    collapsed: false;
+                    compact: false;
+                    // Side-docked (left/right): hide the tree like the old
+                    // per-terminal horizontal layout did.
+                    show-tree: !(gp.edge == "left" || gp.edge == "right");
+                    toggle-collapsed() => {
+                        // Minimise → dock strip. Goes through the per-tab
+                        // callback so the ACTIVE tab's collapse flag (the very
+                        // state that (un)docks the panel) is what flips.
+                        root.set-pane-sftp-collapsed(root.sftp-current-tab-id, true);
+                    }
+                    dock-drag-move(ax, ay) => {
+                        root.panel-dragging = true;
+                        root.drag-nx = (ax - dock-area.absolute-position.x) / dock-area.width;
+                        root.drag-ny = (ay - dock-area.absolute-position.y) / dock-area.height;
+                    }
+                    dock-drag-end => {
+                        if (root.dock-target != "") {
+                            root.sftp-dock = root.dock-target;
+                            root.dock-layout-changed();
+                        }
+                        root.panel-dragging = false;
+                    }
+                    navigate(path) => { root.sftp-navigate(root.sftp-current-tab-id, path); }
+                    bookmark-add() => { root.sftp-bookmark-add(root.sftp-current-tab-id); }
+                    bookmark-jump(path) => { root.sftp-navigate(root.sftp-current-tab-id, path); }
+                    bookmark-remove(path) => { root.sftp-bookmark-remove(root.sftp-current-tab-id, path); }
+                    download(path) => { root.sftp-download(root.sftp-current-tab-id, path); }
+                    upload-clicked(dir, folder) => { root.sftp-upload-clicked(root.sftp-current-tab-id, dir, folder); }
+                    refresh(path) => { root.sftp-refresh(root.sftp-current-tab-id, path); }
+                    tree-expand(path) => { root.sftp-tree-expand(root.sftp-current-tab-id, path); }
+                    toggle-select(i) => { root.sftp-toggle-select(root.sftp-current-tab-id, i); }
+                    download-selected() => { root.sftp-download-selected(root.sftp-current-tab-id); }
+                    copy-to-target(path, target) => { root.sftp-copy-to-target(root.sftp-current-tab-id, path, target); }
+                    copy-selected-to-target(target) => { root.sftp-copy-selected-to-target(root.sftp-current-tab-id, target); }
+                    delete-selected() => {
+                        root.confirm-delete-tab = root.sftp-current-tab-id;
+                        root.confirm-delete-batch = true;
+                        root.confirm-delete-path = root.lang-en ? "the selected items" : "选中的项目";
+                        root.confirm-delete-open = true;
+                    }
+                    delete(path) => {
+                        root.confirm-delete-tab = root.sftp-current-tab-id;
+                        root.confirm-delete-path = path;
+                        root.confirm-delete-open = true;
+                    }
+                    view(path) => { root.sftp-view(root.sftp-current-tab-id, path); }
+                    edit(path) => { root.sftp-edit(root.sftp-current-tab-id, path); }
+                    open-external(path) => { root.sftp-open-external(root.sftp-current-tab-id, path); }
+                    edit-external(path) => { root.sftp-edit-external(root.sftp-current-tab-id, path); }
+                    sort-request(key) => { root.sftp-sort-request(root.sftp-current-tab-id, key); }
+                    clear-sort() => { root.sftp-clear-sort(root.sftp-current-tab-id); }
+                    type-ahead(prefix) => { return root.sftp-type-ahead(root.sftp-current-tab-id, prefix); }
+                    tunnel-add(name, kind, bind, bind-port, host, host-port) => {
+                        root.tunnel-add(root.sftp-current-tab-id, name, kind, bind, bind-port, host, host-port);
+                    }
+                    tunnel-stop(id) => { root.tunnel-stop(root.sftp-current-tab-id, id); }
+                    rename-request(path, name) => {
+                        root.sftp-prompt-kind = "rename";
+                        root.sftp-prompt-tab = root.sftp-current-tab-id;
+                        root.sftp-prompt-target = path;
+                        root.sftp-prompt-value = name;
+                        root.sftp-prompt-open = true;
+                    }
+                    chmod-request(path, name, mode) => {
+                        root.sftp-chmod-open(root.sftp-current-tab-id, path, name, mode);
+                    }
+                    copy-path(path) => { root.sftp-copy-path(path); }
+                    new-folder(dir) => {
+                        root.sftp-prompt-kind = "mkdir";
+                        root.sftp-prompt-tab = root.sftp-current-tab-id;
+                        root.sftp-prompt-target = dir;
+                        root.sftp-prompt-value = "";
+                        root.sftp-prompt-open = true;
+                    }
+                    new-file(dir) => {
+                        root.sftp-prompt-kind = "touch";
+                        root.sftp-prompt-tab = root.sftp-current-tab-id;
+                        root.sftp-prompt-target = dir;
+                        root.sftp-prompt-value = "";
+                        root.sftp-prompt-open = true;
                     }
                 }
 
