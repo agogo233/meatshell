@@ -117,12 +117,17 @@ export struct EditorFindResult {
 export struct HlSeg {
     text: string,
     color: color,
+    // Bracket-match box: Rust re-renders the touched rows with the matched
+    // characters split into their own segment when this is set.
+    boxed: bool,
 }
 
 export struct HlLine {
     source: string,
-    // Rust-side diff token (open Python triple-quote state). Never rendered.
-    triple: int,
+    // Rust-side diff token: cross-line scanner state ("" = none, "py3dq" =
+    // open Python triple-quote …, "hd:EOF" = inside a shell heredoc).
+    // Never rendered.
+    carry: string,
     segments: [HlSeg],
 }
 
@@ -935,6 +940,11 @@ export component AppWindow inherits Window {
     in-out property <bool> editor-hl-enabled: true;
     in-out property <bool> editor-hl-active: false;
     in-out property <[HlLine]> editor-hl-lines;
+    // Bracket-match pair (byte offsets into editor-content, -1 = none).
+    // Rust owns both values: the check callback computes them and re-renders
+    // the affected overlay rows.
+    in-out property <int> editor-bracket-open: -1;
+    in-out property <int> editor-bracket-close: -1;
     in-out property <string> editor-find-query;
     in-out property <string> editor-replace-text;
     in-out property <int> editor-match-count: 0;
@@ -942,6 +952,7 @@ export component AppWindow inherits Window {
     callback save-file();                     // Ctrl+S / Save button (edit only)
     callback close-editor();                  // X / Esc; discard unsaved edits (#287)
     callback editor-recount(string);          // rebuild line numbers after an edit
+    callback editor-bracket-check(int /* caret byte offset */); // recompute the bracket-match box
     callback editor-count-matches(string /* content */, string /* query */) -> int;
     callback editor-find-step(string /* content */, string /* query */, int /* current */, bool /* reverse */) -> EditorFindResult;
     callback editor-replace-all(string /* query */, string /* replacement */);
@@ -3597,6 +3608,12 @@ if dock-area.quick-outer-strip > 0px : ToolStrip {
                                                     font-family: edit-input.font-family;
                                                     font-size: edit-input.font-size;
                                                 }
+                                                // Bracket-match box (VS Code's
+                                                // bracket-pair guide as a 1px outline).
+                                                if seg.boxed : Rectangle {
+                                                    border-width: 1px;
+                                                    border-color: root.dark-mode ? #ffd700 : #b1590b;
+                                                }
                                             }
                                         }
                                     }
@@ -3651,10 +3668,13 @@ if dock-area.quick-outer-strip > 0px : ToolStrip {
                                         font-size: Theme.fs-md;
                                         page-height: ed-scroll.visible-height;
                                         cursor-position-changed(position) => {
-                                            // Keep a keyboard/drag selection endpoint
-                                            // visible. During a pointer grab this also
-                                            // advances the viewport as the mouse moves
-                                            // beyond its top or bottom edge (#388).
+                                        // Bracket-match box: recompute against the
+                                        // fresh caret byte offset (Rust owns the pair).
+                                        root.editor-bracket-check(self.cursor-position_byte-offset);
+                                        // Keep a keyboard/drag selection endpoint
+                                        // visible. During a pointer grab this also
+                                        // advances the viewport as the mouse moves
+                                        // beyond its top or bottom edge (#388).
                                             let cursor-y = position.y + self.y + ed-scroll.viewport-y;
                                             if (cursor-y < 12px) {
                                                 ed-scroll.viewport-y = min(0px,
@@ -3683,6 +3703,12 @@ if dock-area.quick-outer-strip > 0px : ToolStrip {
                                         }
                                         edited => {
                                             root.editor-dirty = true;
+                                            // Text moved under a possibly stale
+                                            // caret pair: recompute now (also
+                                            // covers edits that leave the caret
+                                            // offset unchanged, where
+                                            // cursor-position-changed stays quiet).
+                                            root.editor-bracket-check(self.cursor-position_byte-offset);
                                             root.editor-recount(root.editor-content);
                                             root.editor-match-count = root.editor-count-matches(
                                                 root.editor-content, root.editor-find-query);

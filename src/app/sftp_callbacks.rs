@@ -881,6 +881,54 @@ pub(super) fn wire_sftp_callbacks(
         });
     }
 
+    // Bracket-match box: the TextInput reports the caret byte offset on every
+    // move/edit; we recompute the pair and repaint only the touched rows.
+    {
+        let weak = window.as_weak();
+        window.on_editor_bracket_check(move |offset| {
+            let Some(w) = weak.upgrade() else { return };
+            if !w.get_editor_hl_active() {
+                return;
+            }
+            let content = w.get_editor_content().to_string();
+            let lang = crate::editor::lang::detect(
+                w.get_editor_name().as_str(),
+                content.lines().next().unwrap_or(""),
+            );
+            let pair =
+                crate::editor::bracket::find_pair(&content, offset.max(0) as usize, lang);
+            let cur = match pair {
+                Some((o, c)) => (o as i32, c as i32),
+                None => (-1, -1),
+            };
+            let prev = (w.get_editor_bracket_open(), w.get_editor_bracket_close());
+            if cur == prev {
+                return;
+            }
+            w.set_editor_bracket_open(cur.0);
+            w.set_editor_bracket_close(cur.1);
+            if let Some(model) = w
+                .get_editor_hl_lines()
+                .as_any()
+                .downcast_ref::<VecModel<crate::ui::HlLine>>()
+            {
+                let old = if prev.0 >= 0 && prev.1 >= 0 {
+                    Some((prev.0 as usize, prev.1 as usize))
+                } else {
+                    None
+                };
+                crate::editor::highlight::apply_bracket(
+                    model,
+                    &content,
+                    lang,
+                    w.get_dark_mode(),
+                    old,
+                    pair,
+                );
+            }
+        });
+    }
+
     // Built-in editor: save (Ctrl+S / button) writes the text back to the
     // remote file (#70). Read-only (view) sessions never save.
     {
@@ -988,7 +1036,10 @@ pub(super) fn wire_sftp_callbacks(
             w.set_editor_dirty(true);
             w.set_editor_lines(editor_lines_for(&replaced));
             // Replace-all can touch every row; the sync helper diffs them but
-            // a full reset is simpler and equally fast at this size.
+            // a full reset is simpler and equally fast at this size. The old
+            // bracket pair's offsets are meaningless in the new text.
+            w.set_editor_bracket_open(-1);
+            w.set_editor_bracket_close(-1);
             sync_editor_highlight(&w, true);
             w.set_editor_match_count(0);
         });

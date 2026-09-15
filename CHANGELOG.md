@@ -5,6 +5,9 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ## [Unreleased]
 
+- **编辑器语法高亮升级 + 括号匹配。** 角色分色对齐 VS Code（控制流/变量/类型独立配色）；Shell heredoc、TOML 多行字符串跨行着色；函数定义名、点号装饰器、TOML 点号键、YAML 块标量等新规则；新增 Dockerfile、Makefile 与 nginx.conf 语法；光标停在括号上时配对括号显示方框标记。
+- **Editor highlighting upgrade + bracket matching.** VS Code-style role colours (separate control-flow / variable / type hues), cross-line Shell heredocs and TOML multi-line strings, new rules for function-definition names, dotted decorators, TOML dotted keys and YAML block scalars, fresh Dockerfile / Makefile / nginx.conf grammars, and a box outline on the bracket pair matching the caret.
+
 - **内置编辑器语法高亮。** SFTP 查看/编辑远端文本文件时按语法为关键字、字符串、数字、注释与内置标识着色（先支持 Shell / JSON / YAML / TOML / INI / Python，按扩展名或 shebang 识别）。高亮文件改为不折行 + 横向滚动（VS Code 风格），行号与内容恒定行高对齐；中文输入法组合期间自动切换原生渲染。超过 2000 行或未知格式的文件保持原有折行纯文本视图；可在设置 → SFTP 开关。
 - **Built-in editor syntax highlighting.** Viewing or editing remote text files over SFTP now colours keywords, strings, numbers, comments and builtins (initially Shell / JSON / YAML / TOML / INI / Python, detected by extension or shebang). Highlighted files switch to no-wrap with horizontal scrolling (VS Code-style); the gutter and body align on a constant row height. IME composition temporarily restores native rendering. Files over 2000 lines or with unknown formats keep the original wrapped plain-text view; toggle it in Settings → SFTP.
 

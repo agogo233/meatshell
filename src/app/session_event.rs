@@ -362,6 +362,8 @@ pub(super) fn apply_session_event_to_window(
                 win.set_editor_dirty(false);
                 // Fresh document: rebuild the highlight overlay from scratch
                 // (also re-detects the language from the new editor-name).
+                win.set_editor_bracket_open(-1);
+                win.set_editor_bracket_close(-1);
                 sync_editor_highlight(win, true);
                 win.set_editor_open(true);
             } else {

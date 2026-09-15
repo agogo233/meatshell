@@ -8210,24 +8210,45 @@ fn sync_editor_highlight(win: &AppWindow, reset: bool) {
         enabled && lang != editor::lang::Lang::Plain && line_count <= editor::highlight::MAX_EDITOR_HL_LINES;
     win.set_editor_hl_active(active);
     if !active {
+        win.set_editor_bracket_open(-1);
+        win.set_editor_bracket_close(-1);
         return;
     }
     if reset {
         win.set_editor_hl_lines(editor::highlight::model_rc(
             editor::highlight::build_lines(&content, lang, dark),
         ));
-        return;
+    } else {
+        match win
+            .get_editor_hl_lines()
+            .as_any()
+            .downcast_ref::<VecModel<crate::ui::HlLine>>()
+        {
+            Some(model) => editor::highlight::sync_model(model, &content, lang, dark),
+            None => {
+                win.set_editor_hl_lines(editor::highlight::model_rc(
+                    editor::highlight::build_lines(&content, lang, dark),
+                ));
+            }
+        }
     }
-    match win
-        .get_editor_hl_lines()
-        .as_any()
-        .downcast_ref::<VecModel<crate::ui::HlLine>>()
-    {
-        Some(model) => editor::highlight::sync_model(model, &content, lang, dark),
-        None => {
-            win.set_editor_hl_lines(editor::highlight::model_rc(
-                editor::highlight::build_lines(&content, lang, dark),
-            ));
+    // The rebuild above draws rows without boxes; re-apply the current
+    // bracket-match pair (owned by Rust, refreshed by editor-bracket-check).
+    let (bo, bc) = (win.get_editor_bracket_open(), win.get_editor_bracket_close());
+    if bo >= 0 && bc >= 0 {
+        if let Some(model) = win
+            .get_editor_hl_lines()
+            .as_any()
+            .downcast_ref::<VecModel<crate::ui::HlLine>>()
+        {
+            editor::highlight::apply_bracket(
+                model,
+                &content,
+                lang,
+                dark,
+                None,
+                Some((bo as usize, bc as usize)),
+            );
         }
     }
 }
