@@ -1,7 +1,7 @@
 //! Docked-panel edge stacks (#dock-stack).
 //!
-//! Window-level panels (sidebar / welcome / quick / ai) can share the same
-//! window edge at the same time, stacked along that edge. A `DockEdgeSer`
+//! Window-level panels (sidebar / welcome / quick / ai / sftp) can share the
+//! same window edge at the same time, stacked along that edge. A `DockEdgeSer`
 //! records, per edge, the ordered list of simultaneously-expanded panels and
 //! how that edge's secondary axis is divided between them. Legacy configs have
 //! an empty list → the old single-panel-per-edge layout keeps working.
@@ -35,7 +35,7 @@ pub(crate) fn valid_edge(edge: &str) -> bool {
 }
 
 pub(crate) fn valid_kind(kind: &str) -> bool {
-    matches!(kind, "sidebar" | "welcome" | "quick" | "ai")
+    matches!(kind, "sidebar" | "welcome" | "quick" | "ai" | "sftp")
 }
 
 /// Normalise one edge stack so it is safe to apply:

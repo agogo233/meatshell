@@ -4063,7 +4063,7 @@ fn terminal_wheel_hit(
     x: f32,
     y: f32,
 ) -> Option<TerminalWheelHit> {
-    let (active, term, term_state) = active_terminal_panel_rects(win)?;
+    let (active, term, _) = active_terminal_panel_rects(win)?;
     let mut term_x = term.x;
     let mut term_y = term.y;
     let mut term_w = term.w;
@@ -4076,22 +4076,9 @@ fn terminal_wheel_hit(
         term_h = (term_h - 24.0).max(0.0);
     }
 
-    let sftp_dock = win.get_sftp_dock().to_string();
-    let sftp_take = if term_state.sftp_collapsed {
-        36.0
-    } else if sftp_dock == "left" || sftp_dock == "right" {
-        term_state.sftp_panel_width + 4.0
-    } else {
-        term_state.sftp_panel_height + 4.0
-    };
-    shrink_edge(
-        &mut term_x,
-        &mut term_y,
-        &mut term_w,
-        &mut term_h,
-        &sftp_dock,
-        sftp_take,
-    );
+    // The SFTP panel is now a window-level docked panel (#dock-stack), no
+    // longer carved out of this pane's rect, so there is nothing to shrink
+    // here — the central pane already excludes every docked edge stack.
 
     // Leave the command bar to TextInput/history handling; wheel fallback is
     // for terminal output only. The bar is present in every mode unless the
@@ -4289,59 +4276,6 @@ fn active_terminal_panel_rects(win: &AppWindow) -> Option<(String, LogicalRect, 
         },
         term_state,
     ))
-}
-
-/// The SFTP file-list rectangle inside the active terminal panel. Kept for a
-/// future dedicated SFTP drop target; the shell-page drop currently accepts the
-/// whole terminal panel instead of just this region (#drag-onto-shell).
-#[allow(dead_code)]
-fn active_sftp_file_list_rect(win: &AppWindow) -> Option<LogicalRect> {
-    let (_active, term, term_state) = active_terminal_panel_rects(win)?;
-    if term_state.sftp_collapsed {
-        return None;
-    }
-
-    // TerminalView starts with a 24px connection-status line (hidden in zen
-    // mode); SFTP docks inside the remaining dock-region. This mirrors
-    // ui/terminal_view.slint.
-    let strip = if win.get_zen_mode() { 0.0 } else { 24.0 };
-    let dock_region = LogicalRect {
-        x: term.x,
-        y: term.y + strip,
-        w: term.w,
-        h: (term.h - strip).max(0.0),
-    };
-    let dock = win.get_sftp_dock().to_string();
-    let mut panel = LogicalRect {
-        x: dock_region.x,
-        y: dock_region.y,
-        w: if dock == "left" || dock == "right" {
-            term_state.sftp_panel_width
-        } else {
-            dock_region.w
-        },
-        h: if dock == "left" || dock == "right" {
-            dock_region.h
-        } else {
-            term_state.sftp_panel_height
-        },
-    };
-    if dock == "right" {
-        panel.x = dock_region.x + (dock_region.w - panel.w).max(0.0);
-    } else if dock == "bottom" {
-        panel.y = dock_region.y + (dock_region.h - panel.h).max(0.0);
-    }
-
-    // SftpPanel layout: toolbar 34, then file headers 20 + separator 1; when the
-    // tree is shown (top/bottom docks), the file list starts after tree 160 + sep.
-    let show_tree = dock != "left" && dock != "right";
-    panel.y += 34.0 + 20.0 + 1.0;
-    panel.h = (panel.h - 34.0 - 20.0 - 1.0).max(0.0);
-    if show_tree {
-        panel.x += 160.0 + 1.0;
-        panel.w = (panel.w - 160.0 - 1.0).max(0.0);
-    }
-    Some(panel)
 }
 
 /// Current mouse cursor position in physical screen pixels (Windows).

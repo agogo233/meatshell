@@ -1,8 +1,9 @@
 //! Runtime state of the docked-panel edge stacks (#dock-stack).
 //!
-//! Window-level panels (sidebar / welcome / quick / ai) can share one window
-//! edge: `DockStacks` keeps, per edge, the ordered list of simultaneously-
-//! expanded panels and how the edge's secondary axis is divided between them.
+//! Window-level panels (sidebar / welcome / quick / ai / sftp) can share one
+//! window edge: `DockStacks` keeps, per edge, the ordered list of
+//! simultaneously-expanded panels and how the edge's secondary axis is divided
+//! between them.
 //! Pure logic — no Slint — so it is unit-testable; `app.rs` pushes the stacks
 //! into the UI and persists them via `crate::config`.
 
