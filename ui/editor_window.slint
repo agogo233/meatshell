@@ -1,0 +1,351 @@
+import { Theme } from "theme.slint";
+import { ScrollView } from "std-widgets.slint";
+
+export struct EditorFindResult {
+    start: int,
+    end: int,
+    count: int,
+}
+
+export component EditorWindow inherits Window {
+    title: "meatshell — " + root.editor-name;
+    icon: @image-url("../assets/icon.png");
+
+    in-out property <bool> dark-mode <=> Theme.dark;
+    in-out property <float> ui-scale <=> Theme.ui-scale;
+    in-out property <string> ui-font-family <=> Theme.ui-font-family;
+    in-out property <image> wallpaper-img <=> Theme.wallpaper;
+    in-out property <bool> wallpaper-active <=> Theme.wallpaper-active;
+    in-out property <color> wp-accent <=> Theme.wp-accent;
+    in-out property <color> wp-tint <=> Theme.wp-tint;
+    default-font-family: Theme.ui-font-family;
+
+    in-out property <string> editor-name;
+    in-out property <string> editor-tab-id;
+    in-out property <string> editor-path;
+    in-out property <string> editor-content;
+    in-out property <bool> editor-readonly;
+    in-out property <bool> editor-dirty: false;
+    in-out property <bool> editor-open: false;
+    property <bool> editor-focus-pending: false;
+    in-out property <[string]> editor-lines;
+    in-out property <string> editor-find-query;
+    in-out property <string> editor-replace-text;
+    in-out property <int> editor-match-count: 0;
+    in-out property <int> editor-find-position: -1;
+
+    callback save-file();
+    callback close-editor();
+    callback editor-recount(string);
+    callback editor-count-matches(string, string) -> int;
+    callback editor-find-step(string, string, int, bool) -> EditorFindResult;
+    callback editor-replace-all(string, string);
+    callback win-drag();
+    callback win-resize-se();
+
+    no-frame: root.custom-titlebar;
+    in property <bool> custom-titlebar: true;
+    min-width: 420px;
+    min-height: 280px;
+    preferred-width: 760px;
+    preferred-height: 560px;
+    background: Theme.window-base;
+
+    if Theme.wallpaper-active : Image {
+        x: 0; y: 0;
+        width: parent.width;
+        height: parent.height;
+        source: Theme.wallpaper;
+        image-fit: cover;
+    }
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: Theme.bg-panel;
+    }
+
+    editor-scope := FocusScope {
+        width: parent.width;
+        height: parent.height;
+        focus-on-click: false;
+        focus-on-tab-navigation: false;
+        key-pressed(e) => {
+            if (e.modifiers.control && (e.text == "s" || e.text == "S" || e.text == "\u{0013}")) {
+                root.save-file();
+                return accept;
+            }
+            if (e.text == Key.Escape) {
+                root.close-editor();
+                return accept;
+            }
+            reject
+        }
+        VerticalLayout {
+        spacing: 0;
+
+        if root.custom-titlebar : Rectangle {
+            height: 36px;
+            background: Theme.bg-elevated;
+            title-drag := TouchArea {
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                        root.win-drag();
+                    }
+                }
+            }
+            HorizontalLayout {
+                padding-left: 12px;
+                spacing: 8px;
+                Image {
+                    source: @image-url("../assets/icon.png");
+                    width: 16px;
+                    height: 16px;
+                }
+                Text {
+                    text: root.editor-name
+                        + (root.editor-readonly
+                            ? "  ·  " + @tr("Read-only")
+                            : (root.editor-dirty ? "  ·  " + @tr("Modified") : ""));
+                    color: Theme.text-secondary;
+                    font-size: Theme.fs-sm;
+                    horizontal-stretch: 1;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                if !root.editor-readonly : Rectangle {
+                    width: 76px;
+                    height: 28px;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: Theme.radius-sm;
+                    background: save-ta.has-hover ? Theme.accent-hover : Theme.accent;
+                    save-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.save-file(); }
+                    }
+                    Text { text: @tr("Save"); color: #ffffff; font-size: Theme.fs-sm;
+                           horizontal-alignment: center; vertical-alignment: center; }
+                }
+                Rectangle {
+                    width: 46px; height: 36px;
+                    background: close-ta.has-hover ? #e81123 : transparent;
+                    close-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.close-editor(); }
+                    }
+                    Text { text: "\u{E5CD}"; font-family: "Material Icons";
+                           color: close-ta.has-hover ? white : Theme.text-secondary;
+                           font-size: 16px; horizontal-alignment: center; vertical-alignment: center; }
+                }
+            }
+        }
+        Rectangle { height: 1px; background: Theme.border-subtle; }
+        Rectangle {
+            height: 38px;
+            background: Theme.popup-bg;
+            HorizontalLayout {
+                padding-left: 8px; padding-right: 8px;
+                padding-top: 5px; padding-bottom: 5px; spacing: 6px;
+                Text { text: @tr("Find"); color: Theme.text-muted; vertical-alignment: center; }
+                TextInput {
+                    horizontal-stretch: 1;
+                    single-line: true;
+                    vertical-alignment: center;
+                    font-family: Theme.ui-font-family;
+                    font-size: Theme.fs-md;
+                    color: Theme.text-primary;
+                    text <=> root.editor-find-query;
+                    edited => {
+                        root.editor-find-position = -1;
+                        root.editor-match-count = root.editor-count-matches(
+                            root.editor-content, root.editor-find-query);
+                    }
+                }
+                Text {
+                    width: 42px;
+                    text: root.editor-find-query == "" ? "" : root.editor-match-count;
+                    color: Theme.text-muted;
+                    vertical-alignment: center;
+                    horizontal-alignment: center;
+                }
+                Rectangle {
+                    width: 28px;
+                    border-radius: Theme.radius-sm;
+                    background: find-prev-ta.has-hover ? Theme.bg-hover : Theme.bg-elevated;
+                    find-prev-ta := TouchArea {
+                        enabled: root.editor-match-count > 0;
+                        clicked => {
+                            let found = root.editor-find-step(root.editor-content,
+                                root.editor-find-query, root.editor-find-position, true);
+                            root.editor-find-position = found.start;
+                            root.editor-match-count = found.count;
+                            edit-input.set-selection-offsets(found.start, found.end);
+                            edit-input.focus();
+                        }
+                    }
+                    Text { text: "↑"; color: Theme.text-primary; horizontal-alignment: center; vertical-alignment: center; }
+                }
+                Rectangle {
+                    width: 28px;
+                    border-radius: Theme.radius-sm;
+                    background: find-next-ta.has-hover ? Theme.bg-hover : Theme.bg-elevated;
+                    find-next-ta := TouchArea {
+                        enabled: root.editor-match-count > 0;
+                        clicked => {
+                            let found = root.editor-find-step(root.editor-content,
+                                root.editor-find-query, root.editor-find-position, false);
+                            root.editor-find-position = found.start;
+                            root.editor-match-count = found.count;
+                            edit-input.set-selection-offsets(found.start, found.end);
+                            edit-input.focus();
+                        }
+                    }
+                    Text { text: "↓"; color: Theme.text-primary; horizontal-alignment: center; vertical-alignment: center; }
+                }
+                Text { text: @tr("Replace"); color: Theme.text-muted; vertical-alignment: center; }
+                TextInput {
+                    horizontal-stretch: 1;
+                    single-line: true;
+                    vertical-alignment: center;
+                    font-family: Theme.ui-font-family;
+                    font-size: Theme.fs-md;
+                    color: Theme.text-primary;
+                    text <=> root.editor-replace-text;
+                }
+                Rectangle {
+                    width: 88px;
+                    border-radius: Theme.radius-sm;
+                    background: replace-all-ta.has-hover ? Theme.bg-hover : Theme.bg-elevated;
+                    replace-all-ta := TouchArea {
+                        enabled: !root.editor-readonly && root.editor-find-query != "";
+                        clicked => {
+                            root.editor-replace-all(root.editor-find-query, root.editor-replace-text);
+                        }
+                    }
+                    Text { text: @tr("Replace all"); color: replace-all-ta.enabled ? Theme.text-primary : Theme.text-muted;
+                           font-size: Theme.fs-sm; horizontal-alignment: center; vertical-alignment: center; }
+                }
+            }
+        }
+        Rectangle { height: 1px; background: Theme.border-subtle; }
+        Rectangle {
+            vertical-stretch: 1;
+            background: Theme.bg-root;
+            HorizontalLayout {
+                spacing: 0;
+                Rectangle {
+                    width: 48px;
+                    background: Theme.bg-panel-alt;
+                    clip: true;
+                    VerticalLayout {
+                        y: ed-scroll.viewport-y + 8px;
+                        width: parent.width;
+                        height: self.preferred-height;
+                        spacing: 0px;
+                        padding: 0px;
+                        for line[index] in root.editor-lines: Rectangle {
+                            height: line-measure.preferred-height;
+                            line-measure := TextInput {
+                                x: parent.width;
+                                width: edit-input.width;
+                                height: self.preferred-height;
+                                text: line;
+                                read-only: true;
+                                single-line: false;
+                                wrap: char-wrap;
+                                font-family: edit-input.font-family;
+                                font-size: edit-input.font-size;
+                            }
+                            Text {
+                                width: parent.width - 6px;
+                                height: line-measure.preferred-height;
+                                text: "\{index + 1}";
+                                horizontal-alignment: right;
+                                vertical-alignment: top;
+                                font-family: edit-input.font-family;
+                                font-size: edit-input.font-size;
+                                color: Theme.text-muted;
+                            }
+                        }
+                    }
+                }
+                Rectangle { width: 1px; background: Theme.border-subtle; }
+                editor-viewport := Rectangle {
+                    horizontal-stretch: 1;
+                    clip: true;
+                    editor-wheel := TouchArea {
+                        scroll-event(event) => {
+                            ed-scroll.viewport-y = clamp(
+                                ed-scroll.viewport-y + event.delta-y,
+                                min(0px, ed-scroll.visible-height - ed-scroll.viewport-height),
+                                0px);
+                            accept
+                        }
+                    }
+                    ed-scroll := ScrollView {
+                        viewport-width: self.visible-width;
+                        viewport-height: max(self.visible-height, edit-input.preferred-height + 16px);
+                        edit-input := TextInput {
+                            x: 8px;
+                            y: 8px;
+                            width: max(1px, ed-scroll.visible-width - 16px);
+                            height: max(ed-scroll.visible-height - 16px, self.preferred-height);
+                            text <=> root.editor-content;
+                            read-only: root.editor-readonly;
+                            single-line: false;
+                            wrap: char-wrap;
+                            color: Theme.text-primary;
+                            font-family: Theme.ui-font-family;
+                            font-size: Theme.fs-md;
+                            page-height: ed-scroll.visible-height;
+                            cursor-position-changed(position) => {
+                                let cursor-y = position.y + self.y + ed-scroll.viewport-y;
+                                if (cursor-y < 12px) {
+                                    ed-scroll.viewport-y = min(0px,
+                                        ed-scroll.viewport-y + 12px - cursor-y);
+                                } else if (cursor-y > ed-scroll.visible-height - 12px) {
+                                    ed-scroll.viewport-y = max(
+                                        min(0px, ed-scroll.visible-height - ed-scroll.viewport-height),
+                                        ed-scroll.viewport-y
+                                            - (cursor-y - ed-scroll.visible-height + 12px));
+                                }
+                            }
+                            edited => {
+                                root.editor-dirty = true;
+                                root.editor-recount(root.editor-content);
+                                root.editor-match-count = root.editor-count-matches(
+                                    root.editor-content, root.editor-find-query);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Rectangle {
+        x: parent.width - 18px;
+        y: parent.height - 18px;
+        width: 18px;
+        height: 18px;
+        resize-ta := TouchArea {
+            mouse-cursor: nwse-resize;
+            pointer-event(e) => {
+                if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                    root.win-resize-se();
+                }
+            }
+        }
+        Text { text: "◢"; color: resize-ta.has-hover ? Theme.text-secondary : Theme.text-muted;
+               font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+    }
+
+    init => { root.editor-focus-pending = true; }
+    focus-timer := Timer {
+        interval: 0ms;
+        running: root.editor-focus-pending;
+        triggered => {
+            root.editor-focus-pending = false;
+            edit-input.focus();
+        }
+    }
+    }
+}
