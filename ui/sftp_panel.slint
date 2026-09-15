@@ -181,8 +181,8 @@ export component SftpPanel inherits Rectangle {
     property <bool> narrow-toolbar: !root.show-tree && root.width < 480px;
     // Below 280px the upload button moves into the "…" overflow menu so
     // bookmarks and parent navigation stay visible instead of being pushed out
-    // (#sftp-tight-toolbar). Every button keeps a min-width, so nothing crushes
-    // to zero when the row gets short.
+    // (#sftp-tight-toolbar). Each tier's row is sized to fit its width band, so
+    // no fixed-width button gets crushed or clipped at the panel edge.
     property <bool> tight-toolbar: root.narrow-toolbar && root.width < 280px;
     // Below 250px the compact row is too wide (it needs ~246px): the drag grip
     // and the tab gutter give way, the tabs shrink and the gutters tighten. The
@@ -371,7 +371,6 @@ export component SftpPanel inherits Rectangle {
 
                 Rectangle {
                     width: root.narrow-toolbar ? (root.x-tight-toolbar ? 24px : 28px) : 48px;
-                    min-width: 24px;
                     height: 22px;
                     border-radius: Theme.radius-sm;
                     background: root.panel-mode == "files" ? Theme.accent : (files-tab-ta.has-hover ? Theme.bg-hover : transparent);
@@ -390,7 +389,6 @@ export component SftpPanel inherits Rectangle {
                 }
                 Rectangle {
                     width: root.narrow-toolbar ? (root.x-tight-toolbar ? 24px : 28px) : 58px;
-                    min-width: 24px;
                     height: 22px;
                     border-radius: Theme.radius-sm;
                     background: root.panel-mode == "tunnels" ? Theme.accent : (tunnels-tab-ta.has-hover ? Theme.bg-hover : transparent);
@@ -416,7 +414,7 @@ export component SftpPanel inherits Rectangle {
                 // instead of hiding this primary action in the overflow menu
                 // (#322). It stays beside the other compact toolbar actions.
                 if root.narrow-toolbar && root.panel-mode == "files" : Rectangle {
-                    width: 24px; min-width: 24px; height: 22px;
+                    width: 24px; height: 22px;
                     border-radius: Theme.radius-sm;
                     background: compact-up-ta.has-hover ? Theme.bg-hover : transparent;
                     compact-up-ta := TouchArea {
@@ -513,7 +511,7 @@ export component SftpPanel inherits Rectangle {
                 // tints when the current server has bookmarks.
                 Rectangle {
                     visible: root.panel-mode == "files";
-                    width: 24px; min-width: 24px; height: 22px;
+                    width: 24px; height: 22px;
                     border-radius: Theme.radius-sm;
                     background: bm-ta.has-hover ? Theme.bg-hover : transparent;
                     bm-ta := TouchArea {
@@ -607,7 +605,7 @@ export component SftpPanel inherits Rectangle {
                     // The tight tiers fold upload into the "…" menu so bookmarks
                     // and parent navigation stay visible (#sftp-tight-toolbar).
                     visible: root.panel-mode == "files" && !root.tight-toolbar;
-                    width: root.narrow-toolbar ? 24px : 52px; min-width: 24px; height: 22px;
+                    width: root.narrow-toolbar ? 24px : 52px; height: 22px;
                     border-radius: Theme.radius-sm;
                     background: ul-ta.has-hover ? Theme.accent-hover : Theme.accent;
                     ul-ta := TouchArea {
@@ -649,7 +647,7 @@ export component SftpPanel inherits Rectangle {
                     // Leaves the row in the tightest tier: refresh and collapse
                     // take the path row instead, so the panel can always fold.
                     visible: root.narrow-toolbar && root.panel-mode == "files" && !root.x-tight-toolbar;
-                    width: 24px; min-width: 24px;
+                    width: 24px;
                     height: 22px;
                     border-radius: Theme.radius-sm;
                     background: compact-more-ta.has-hover ? Theme.bg-hover : transparent;
@@ -753,7 +751,7 @@ export component SftpPanel inherits Rectangle {
 
                 Rectangle {
                     visible: root.panel-mode == "files" && !root.narrow-toolbar;
-                    width: 24px; min-width: 24px; height: 22px;
+                    width: 24px; height: 22px;
                     border-radius: Theme.radius-sm;
                     background: ref-ta.has-hover ? Theme.bg-hover : transparent;
                     ref-ta := TouchArea {
@@ -770,7 +768,7 @@ export component SftpPanel inherits Rectangle {
                 // over — the panel must never become impossible to fold away.
                 Rectangle {
                     visible: !root.x-tight-toolbar;
-                    width: 24px; min-width: 24px; height: 22px;
+                    width: 24px; height: 22px;
                     border-radius: Theme.radius-sm;
                     background: min-ta.has-hover ? Theme.bg-hover : transparent;
                     min-ta := TouchArea {
@@ -797,6 +795,10 @@ export component SftpPanel inherits Rectangle {
                     spacing: 4px;
                     Rectangle {
                         visible: root.panel-mode == "files";
+                        // 100px keeps the wide tiers readable; the tightest tier
+                        // shares the row with refresh + collapse and floors the
+                        // field at what's left of a 120px panel.
+                        min-width: root.x-tight-toolbar ? 30px : 100px;
                         horizontal-stretch: 1;
                         height: 22px;
                         border-radius: Theme.radius-sm;
@@ -819,7 +821,7 @@ export component SftpPanel inherits Rectangle {
                     // The tightest tier's overflow menu leaves the row, so refresh
                     // and collapse live here instead (#sftp-tight-toolbar).
                     if root.x-tight-toolbar && root.panel-mode == "files" : Rectangle {
-                        width: 24px; min-width: 24px; height: 22px;
+                        width: 24px; height: 22px;
                         border-radius: Theme.radius-sm;
                         background: xref-ta.has-hover ? Theme.bg-hover : transparent;
                         xref-ta := TouchArea {
@@ -831,7 +833,7 @@ export component SftpPanel inherits Rectangle {
                                horizontal-alignment: center; vertical-alignment: center; }
                     }
                     if root.x-tight-toolbar : Rectangle {
-                        width: 24px; min-width: 24px; height: 22px;
+                        width: 24px; height: 22px;
                         border-radius: Theme.radius-sm;
                         background: xmin-ta.has-hover ? Theme.bg-hover : transparent;
                         xmin-ta := TouchArea {
