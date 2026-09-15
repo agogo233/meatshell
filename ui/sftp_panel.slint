@@ -107,17 +107,48 @@ export component SftpPanel inherits Rectangle {
     in property <bool> compact: false;     // side-docked + collapsed → render nothing but a clean strip (#dock)
     // Responsive columns: only when docked left/right (narrow, width-adjustable).
     // Docked top/bottom the panel is wide and can only be resized vertically, so
-    // always show every column there (show-tree is true exactly in that case).
-    // When narrow, drop Size then Modified the moment keeping them would squeeze
-    // the Name column below `name-min` (names start eliding to "…"). Reserved
-    // widths: checkbox+padding+spacing 36px, Size col 76px, Modified 120px.
+    // every column stays there (show-tree is true exactly in that case).
+    // Side-docked, the fixed columns claim their width in value order — Size,
+    // Modified, Permissions, Type, Owner, Group (not the visual column order) —
+    // and any that would push the Name column below `name-min` is dropped
+    // instead, so names stop eliding to "…" on a narrow panel. A column the
+    // user hid never claims space, so a smaller column behind it can take it.
+    // The budget is generous for the wide (tree-visible) case, so the cascade
+    // is a no-op there.
     in-out property <length> tree-width: 160px;
     callback persist-tree-width(length);
     property <bool> tree-resizing: false;
     property <length> list-w: root.show-tree ? root.width - root.tree-width - 5px : root.width;
-    property <length> name-min: 180px;     // narrower than this → start dropping columns
-    property <bool> show-size-col: root.show-size-col-user && (root.show-tree || (root.list-w - 36px - 76px - 120px > root.name-min));
-    property <bool> show-modified-col: root.show-modified-col-user && (root.show-tree || (root.list-w - 36px - 120px > root.name-min));
+    property <length> name-min: 120px;     // narrower than this → drop columns
+    // Fixed footprints: the header width plus the gutter before it.
+    property <length> col-chrome: 40px;    // row padding + checkbox + first gutter
+    property <length> col-gutter: 8px;
+    property <length> col-size-w: 72px + root.col-gutter;
+    property <length> col-modified-w: 116px + root.col-gutter;
+    property <length> col-permissions-w: 104px + root.col-gutter;
+    property <length> col-type-w: 100px + root.col-gutter;
+    property <length> col-owner-w: 84px + root.col-gutter;
+    property <length> col-group-w: 84px + root.col-gutter;
+    property <length> col-budget: root.show-tree ? 1200px
+        : root.list-w - root.col-chrome - root.name-min;
+    // What's left for the columns after each claimant, so the next one only
+    // claims when it actually fits.
+    property <bool> show-size-col: root.show-size-col-user && root.col-budget >= root.col-size-w;
+    property <length> col-rest-size: root.show-size-col
+        ? root.col-budget - root.col-size-w : root.col-budget;
+    property <bool> show-modified-col: root.show-modified-col-user && root.col-rest-size >= root.col-modified-w;
+    property <length> col-rest-modified: root.show-modified-col
+        ? root.col-rest-size - root.col-modified-w : root.col-rest-size;
+    property <bool> show-permissions-col: root.show-permissions-col-user && root.col-rest-modified >= root.col-permissions-w;
+    property <length> col-rest-permissions: root.show-permissions-col
+        ? root.col-rest-modified - root.col-permissions-w : root.col-rest-modified;
+    property <bool> show-type-col: root.show-type-col-user && root.col-rest-permissions >= root.col-type-w;
+    property <length> col-rest-type: root.show-type-col
+        ? root.col-rest-permissions - root.col-type-w : root.col-rest-permissions;
+    property <bool> show-owner-col: root.show-owner-col-user && root.col-rest-type >= root.col-owner-w;
+    property <length> col-rest-owner: root.show-owner-col
+        ? root.col-rest-type - root.col-owner-w : root.col-rest-type;
+    property <bool> show-group-col: root.show-group-col-user && root.col-rest-owner >= root.col-group-w;
     property <int> selected-row: -1;       // clicked/highlighted file-list row (#70)
     in property <int> selected-count;      // number of checked entries (#100)
     // Keyboard type-ahead (#sftp-typeahead): after clicking a row the panel grabs
@@ -148,12 +179,25 @@ export component SftpPanel inherits Rectangle {
     // Below that, switch deliberately to a two-row compact layout instead of
     // allowing fixed-size controls to squeeze the path and each other (#285).
     property <bool> narrow-toolbar: !root.show-tree && root.width < 480px;
-    property <bool> show-type-col: root.show-type;
+    // Below 280px the upload button moves into the "…" overflow menu so
+    // bookmarks and parent navigation stay visible instead of being pushed out
+    // (#sftp-tight-toolbar). Every button keeps a min-width, so nothing crushes
+    // to zero when the row gets short.
+    property <bool> tight-toolbar: root.narrow-toolbar && root.width < 280px;
+    // Below 250px the compact row is too wide (it needs ~246px): the drag grip
+    // and the tab gutter give way, the tabs shrink and the gutters tighten. The
+    // overflow menu leaves the row — refresh and collapse take the path row
+    // instead, so a user-shrunk panel can always be folded away again.
+    property <bool> x-tight-toolbar: root.narrow-toolbar && root.width < 250px;
+    // The user's own toggle (column menu). The effective `show-*-col` above may
+    // drop a column the panel's width can't hold, so the menu marks the
+    // preference — otherwise an auto-hidden column reads as "you turned it off".
+    property <bool> show-type-col-user: root.show-type;
     property <bool> show-size-col-user: root.show-size;
     property <bool> show-modified-col-user: root.show-modified;
-    property <bool> show-permissions-col: root.show-permissions;
-    property <bool> show-owner-col: root.show-owner;
-    property <bool> show-group-col: root.show-group;
+    property <bool> show-permissions-col-user: root.show-permissions;
+    property <bool> show-owner-col-user: root.show-owner;
+    property <bool> show-group-col-user: root.show-group;
     property <length> column-menu-x: 8px;
     property <length> column-menu-y: 22px;
 
@@ -259,7 +303,7 @@ export component SftpPanel inherits Rectangle {
 
         // --- Toolbar (full width) ------------------------------------------
         Rectangle {
-            height: root.narrow-toolbar && root.panel-mode == "files" ? 62px : 34px;
+            height: root.narrow-toolbar && (root.panel-mode == "files" || root.x-tight-toolbar) ? 62px : 34px;
             background: Theme.bg-panel-alt;
 
             VerticalLayout {
@@ -269,17 +313,21 @@ export component SftpPanel inherits Rectangle {
                 height: 34px;
                 // Pushed the left padding from 6px to 10px so the dock drag grip
                 // sits a bit further from the panel edge and the Files tab no longer
-                // feels crowded against it (#toolbar-shadow-overlap).
-                padding-left: 10px;
-                padding-right: 6px;
+                // feels crowded against it (#toolbar-shadow-overlap). The tightest
+                // tier trims both so the remaining buttons still fit.
+                padding-left: root.x-tight-toolbar ? 4px : 10px;
+                padding-right: root.x-tight-toolbar ? 4px : 6px;
                 padding-top: 6px;
                 padding-bottom: 6px;
-                spacing: 4px;
+                spacing: root.x-tight-toolbar ? 2px : 4px;
 
                 // Dedicated drag handle to re-dock the panel. The toolbar is full
                 // of controls, so dragging "empty space" is unreliable; this grip
                 // is always grabbable and reports window-space coords (#dock).
                 Rectangle {
+                    // The tightest tier drops the grip (the panel edge still
+                    // re-docks on a drag) so the file actions fit.
+                    visible: !root.x-tight-toolbar;
                     width: 16px;
                     y: (parent.height - self.height) / 2;
                     height: 22px;
@@ -315,13 +363,15 @@ export component SftpPanel inherits Rectangle {
                 // tab's background, making the two look like a single overlapping
                 // shape (#toolbar-shadow-overlap).
                 Rectangle {
+                    visible: !root.x-tight-toolbar;
                     width: 6px;
                     height: 22px;
                     background: transparent;
                 }
 
                 Rectangle {
-                    width: root.narrow-toolbar ? 28px : 48px;
+                    width: root.narrow-toolbar ? (root.x-tight-toolbar ? 24px : 28px) : 48px;
+                    min-width: 24px;
                     height: 22px;
                     border-radius: Theme.radius-sm;
                     background: root.panel-mode == "files" ? Theme.accent : (files-tab-ta.has-hover ? Theme.bg-hover : transparent);
@@ -339,7 +389,8 @@ export component SftpPanel inherits Rectangle {
                     }
                 }
                 Rectangle {
-                    width: root.narrow-toolbar ? 28px : 58px;
+                    width: root.narrow-toolbar ? (root.x-tight-toolbar ? 24px : 28px) : 58px;
+                    min-width: 24px;
                     height: 22px;
                     border-radius: Theme.radius-sm;
                     background: root.panel-mode == "tunnels" ? Theme.accent : (tunnels-tab-ta.has-hover ? Theme.bg-hover : transparent);
@@ -365,7 +416,7 @@ export component SftpPanel inherits Rectangle {
                 // instead of hiding this primary action in the overflow menu
                 // (#322). It stays beside the other compact toolbar actions.
                 if root.narrow-toolbar && root.panel-mode == "files" : Rectangle {
-                    width: 24px; height: 22px;
+                    width: 24px; min-width: 24px; height: 22px;
                     border-radius: Theme.radius-sm;
                     background: compact-up-ta.has-hover ? Theme.bg-hover : transparent;
                     compact-up-ta := TouchArea {
@@ -462,7 +513,7 @@ export component SftpPanel inherits Rectangle {
                 // tints when the current server has bookmarks.
                 Rectangle {
                     visible: root.panel-mode == "files";
-                    width: 24px; height: 22px;
+                    width: 24px; min-width: 24px; height: 22px;
                     border-radius: Theme.radius-sm;
                     background: bm-ta.has-hover ? Theme.bg-hover : transparent;
                     bm-ta := TouchArea {
@@ -472,11 +523,15 @@ export component SftpPanel inherits Rectangle {
                     Text { text: "\u{E866}"; font-family: "Material Icons";
                            color: root.bookmarks.length > 0 ? Theme.accent : Theme.text-secondary;
                            font-size: Theme.fs-sm;
-                           horizontal-alignment: center; vertical-alignment: center; }
+                           horizontal-alignment: center;
+                           vertical-alignment: center; }
                     bookmarks-menu := PopupWindow {
-                        x: parent.width - self.width;
+                        // Right-anchored on the button, but never pushed past the
+                        // panel's left edge — otherwise the 300px menu spills off
+                        // the window in a narrow side dock.
+                        x: max(parent.width - self.width, -(parent.absolute-position.x - root.absolute-position.x));
                         y: parent.height + 2px;
-                        width: 300px;
+                        width: min(300px, max(112px, root.width - 8px));
                         height: (root.bookmarks.length == 0 ? 2 : 1 + min(root.bookmarks.length, 8)) * 27px + 8px;
                         Rectangle {
                             background: Theme.popup-bg;
@@ -549,8 +604,10 @@ export component SftpPanel inherits Rectangle {
                 // Upload: a small menu offers file vs folder (#85). The remote
                 // SFTP upload handles both — only the local picker differs.
                 ul-btn := Rectangle {
-                    visible: root.panel-mode == "files";
-                    width: root.narrow-toolbar ? 24px : 52px; height: 22px;
+                    // The tight tiers fold upload into the "…" menu so bookmarks
+                    // and parent navigation stay visible (#sftp-tight-toolbar).
+                    visible: root.panel-mode == "files" && !root.tight-toolbar;
+                    width: root.narrow-toolbar ? 24px : 52px; min-width: 24px; height: 22px;
                     border-radius: Theme.radius-sm;
                     background: ul-ta.has-hover ? Theme.accent-hover : Theme.accent;
                     ul-ta := TouchArea {
@@ -589,8 +646,10 @@ export component SftpPanel inherits Rectangle {
                 // Secondary path actions move into an overflow menu in compact
                 // mode so they never compete with the path field for width.
                 compact-more-btn := Rectangle {
-                    visible: root.narrow-toolbar && root.panel-mode == "files";
-                    width: 24px;
+                    // Leaves the row in the tightest tier: refresh and collapse
+                    // take the path row instead, so the panel can always fold.
+                    visible: root.narrow-toolbar && root.panel-mode == "files" && !root.x-tight-toolbar;
+                    width: 24px; min-width: 24px;
                     height: 22px;
                     border-radius: Theme.radius-sm;
                     background: compact-more-ta.has-hover ? Theme.bg-hover : transparent;
@@ -607,10 +666,12 @@ export component SftpPanel inherits Rectangle {
                         vertical-alignment: center;
                     }
                     compact-more-menu := PopupWindow {
-                        x: parent.width - self.width;
+                        // Right-anchored on the button, but clamped to the panel's
+                        // left edge so it never spills off the window.
+                        x: max(parent.width - self.width, -(parent.absolute-position.x - root.absolute-position.x));
                         y: parent.height + 2px;
                         width: 142px;
-                        height: 3 * 27px + 8px;
+                        height: (3 + (root.tight-toolbar ? 2 : 0)) * 27px + 8px;
                         Rectangle {
                             background: Theme.popup-bg;
                             border-radius: Theme.radius-sm;
@@ -621,6 +682,15 @@ export component SftpPanel inherits Rectangle {
                             VerticalLayout {
                                 padding: 4px;
                                 spacing: 1px;
+                                // Upload folds in here in the tight tiers (#sftp-tight-toolbar).
+                                if root.tight-toolbar : SftpMenuItem {
+                                    label: @tr("Upload file");
+                                    clicked => { root.upload-clicked(root.current-path, false); }
+                                }
+                                if root.tight-toolbar : SftpMenuItem {
+                                    label: @tr("Upload folder");
+                                    clicked => { root.upload-clicked(root.current-path, true); }
+                                }
                                 SftpMenuItem {
                                     label: @tr("Copy path");
                                     clicked => {
@@ -683,7 +753,7 @@ export component SftpPanel inherits Rectangle {
 
                 Rectangle {
                     visible: root.panel-mode == "files" && !root.narrow-toolbar;
-                    width: 24px; height: 22px;
+                    width: 24px; min-width: 24px; height: 22px;
                     border-radius: Theme.radius-sm;
                     background: ref-ta.has-hover ? Theme.bg-hover : transparent;
                     ref-ta := TouchArea {
@@ -695,9 +765,12 @@ export component SftpPanel inherits Rectangle {
                            horizontal-alignment: center; vertical-alignment: center; }
                 }
 
-                // Minimise / restore the SFTP panel (#41).
+                // Minimise / restore the SFTP panel (#41). In the tightest tier
+                // the row above can't hold it, so the copy on the path row takes
+                // over — the panel must never become impossible to fold away.
                 Rectangle {
-                    width: 24px; height: 22px;
+                    visible: !root.x-tight-toolbar;
+                    width: 24px; min-width: 24px; height: 22px;
                     border-radius: Theme.radius-sm;
                     background: min-ta.has-hover ? Theme.bg-hover : transparent;
                     min-ta := TouchArea {
@@ -715,11 +788,15 @@ export component SftpPanel inherits Rectangle {
                 // moving it to a real second layout row. The layout spacing keeps
                 // a stable gutter regardless of first-row alignment/padding.
                 HorizontalLayout {
-                    visible: root.narrow-toolbar && root.panel-mode == "files";
+                    // Also visible in the tightest tier while in Tunnels mode, so
+                    // the collapse copy below stays reachable there.
+                    visible: root.narrow-toolbar && (root.panel-mode == "files" || root.x-tight-toolbar);
                     height: self.visible ? 22px : 0px;
                     padding-left: 6px;
                     padding-right: 6px;
+                    spacing: 4px;
                     Rectangle {
+                        visible: root.panel-mode == "files";
                         horizontal-stretch: 1;
                         height: 22px;
                         border-radius: Theme.radius-sm;
@@ -738,6 +815,32 @@ export component SftpPanel inherits Rectangle {
                             single-line: true;
                             accepted => { root.navigate(self.text); }
                         }
+                    }
+                    // The tightest tier's overflow menu leaves the row, so refresh
+                    // and collapse live here instead (#sftp-tight-toolbar).
+                    if root.x-tight-toolbar && root.panel-mode == "files" : Rectangle {
+                        width: 24px; min-width: 24px; height: 22px;
+                        border-radius: Theme.radius-sm;
+                        background: xref-ta.has-hover ? Theme.bg-hover : transparent;
+                        xref-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.refresh(root.current-path); }
+                        }
+                        Text { text: "\u{E5D5}"; font-family: "Material Icons";
+                               color: Theme.text-secondary; font-size: Theme.fs-sm;
+                               horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                    if root.x-tight-toolbar : Rectangle {
+                        width: 24px; min-width: 24px; height: 22px;
+                        border-radius: Theme.radius-sm;
+                        background: xmin-ta.has-hover ? Theme.bg-hover : transparent;
+                        xmin-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.toggle-collapsed(); }
+                        }
+                        Text { text: root.collapsed ? "\u{E5CE}" : "\u{E5CF}"; font-family: "Material Icons";
+                               color: Theme.text-secondary; font-size: Theme.fs-md;
+                               horizontal-alignment: center; vertical-alignment: center; }
                     }
                 }
             }
@@ -1009,12 +1112,12 @@ export component SftpPanel inherits Rectangle {
                             drop-shadow-color: #00000060;
                             VerticalLayout {
                                 padding: 4px; spacing: 1px;
-                                SftpMenuItem { icon: root.show-type-col ? "\u{E5CA}" : ""; label: @tr("Type"); clicked => { root.toggle-column("type"); } }
+                                SftpMenuItem { icon: root.show-type-col-user ? "\u{E5CA}" : ""; label: @tr("Type"); clicked => { root.toggle-column("type"); } }
                                 SftpMenuItem { icon: root.show-size-col-user ? "\u{E5CA}" : ""; label: @tr("Size"); clicked => { root.toggle-column("size"); } }
                                 SftpMenuItem { icon: root.show-modified-col-user ? "\u{E5CA}" : ""; label: @tr("Modified"); clicked => { root.toggle-column("modified"); } }
-                                SftpMenuItem { icon: root.show-permissions-col ? "\u{E5CA}" : ""; label: @tr("Permissions"); clicked => { root.toggle-column("permissions"); } }
-                                SftpMenuItem { icon: root.show-owner-col ? "\u{E5CA}" : ""; label: @tr("Owner"); clicked => { root.toggle-column("owner"); } }
-                                SftpMenuItem { icon: root.show-group-col ? "\u{E5CA}" : ""; label: @tr("Group"); clicked => { root.toggle-column("group"); } }
+                                SftpMenuItem { icon: root.show-permissions-col-user ? "\u{E5CA}" : ""; label: @tr("Permissions"); clicked => { root.toggle-column("permissions"); } }
+                                SftpMenuItem { icon: root.show-owner-col-user ? "\u{E5CA}" : ""; label: @tr("Owner"); clicked => { root.toggle-column("owner"); } }
+                                SftpMenuItem { icon: root.show-group-col-user ? "\u{E5CA}" : ""; label: @tr("Group"); clicked => { root.toggle-column("group"); } }
                                 SftpMenuItem { icon: "\u{E5CA}"; label: @tr("Name"); enabled: false; }
                             }
                         }

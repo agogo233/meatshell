@@ -1122,43 +1122,18 @@ fn open_window(
         let welcome_as_sidebar = s.welcome_as_sidebar();
         let quick_commands_as_sidebar = s.quick_commands_as_sidebar();
         let quick_panel_open = quick_commands_as_sidebar && s.quick_panel_open();
-        let mut quick_panel_collapsed = s.quick_panel_collapsed();
+        let quick_panel_collapsed = s.quick_panel_collapsed();
         let quick_panel_dock = s.quick_panel_dock();
         let welcome_sidebar_dock = s.welcome_sidebar_dock();
         let ai_panel_dock = s.ai_panel_dock();
         let ai_panel_open = s.ai_panel_open();
         let ai_panel_collapsed = s.ai_panel_collapsed();
-        let mut sidebar_collapsed = s.sidebar_collapsed().unwrap_or(collapse_sidebar);
-        let mut welcome_collapsed = s.welcome_collapsed().unwrap_or(false);
-        if welcome_as_sidebar
-            && sidebar_dock == welcome_sidebar_dock
-            && !sidebar_collapsed
-            && !welcome_collapsed
-        {
-            sidebar_collapsed = true;
-        }
-        if quick_panel_open && !quick_panel_collapsed {
-            if sidebar_dock == quick_panel_dock {
-                sidebar_collapsed = true;
-            }
-            if welcome_as_sidebar && welcome_sidebar_dock == quick_panel_dock {
-                welcome_collapsed = true;
-            }
-        }
-        // Same-edge squeeze for the AI panel (left-docked by default): at most
-        // one docked panel per edge after restore. A collapsed AI panel only
-        // shares an edge strip with the others, so it needs no squeezing.
-        if ai_panel_open && !ai_panel_collapsed {
-            if sidebar_dock == ai_panel_dock {
-                sidebar_collapsed = true;
-            }
-            if welcome_as_sidebar && welcome_sidebar_dock == ai_panel_dock {
-                welcome_collapsed = true;
-            }
-            if quick_panel_open && quick_panel_dock == ai_panel_dock {
-                quick_panel_collapsed = true;
-            }
-        }
+        let sidebar_collapsed = s.sidebar_collapsed().unwrap_or(collapse_sidebar);
+        let welcome_collapsed = s.welcome_collapsed().unwrap_or(false);
+        // Same-edge stacking (#dock-stack) replaces the old "one expanded panel
+        // per edge" squeeze: panels restored onto one edge are stacked and
+        // split there, exactly like a manual re-dock. A collapsed panel only
+        // shares that edge's strip band with the others.
         window.set_collapse_sidebar_default(collapse_sidebar);
         window.set_collapse_sftp_default(collapse_sftp);
         // Restore the persisted panel docking layout (#dock).
@@ -2297,33 +2272,31 @@ fn open_window(
             }
         });
         // Dragging a divider between two stacked panels updates their ratio.
+        // The divider passes its own split window: a top/bottom stack is laid
+        // out inside the x range the side stacks left behind, so the cursor
+        // position must be mapped against that window, not the dock area.
         let weak2 = window.as_weak();
         let ds2 = dock_stacks.clone();
         let pm2 = dock_panels_model.clone();
         let dm2 = dock_dividers_model.clone();
         let da2 = da_size.clone();
-        window.on_stack_split_drag(move |edge: SharedString, index: i32, pos: f32| {
-            let edge = edge.to_string();
-            // Slint reports divider drags in dock-area coordinates, so the
-            // axis must be the dock-area extent, not the window's.
-            let (w, h) = da2.get();
-            let axis = match edge.as_str() {
-                "left" | "right" => h,
-                _ => w,
-            };
-            let ratio = if axis > 0.0 {
-                (pos / axis).clamp(0.02, 0.98)
-            } else {
-                0.5
-            };
-            {
-                let mut lay = ds2.borrow_mut();
-                lay.set_ratio(&edge, index as usize, ratio);
-            }
-            if let Some(w) = weak2.upgrade() {
-                refresh_dock(&w, &ds2, &pm2, &dm2, da2.get());
-            }
-        });
+        window.on_stack_split_drag(
+            move |edge: SharedString, index: i32, pos: f32, axis_start: f32, axis_len: f32| {
+                let edge = edge.to_string();
+                let ratio = if axis_len > 0.0 {
+                    ((pos - axis_start) / axis_len).clamp(0.02, 0.98)
+                } else {
+                    0.5
+                };
+                {
+                    let mut lay = ds2.borrow_mut();
+                    lay.set_ratio(&edge, index as usize, ratio);
+                }
+                if let Some(w) = weak2.upgrade() {
+                    refresh_dock(&w, &ds2, &pm2, &dm2, da2.get());
+                }
+            },
+        );
         // Dragging a stacked panel's in-edge handle resizes it along the dock
         // normal and re-runs the geometry pass.
         let weak3 = window.as_weak();
@@ -2486,15 +2459,27 @@ fn open_window(
     {
         let terminals_model = terminals_model.clone();
         let weak = window.as_weak();
+        let store = store.clone();
         let ds = dock_stacks.clone();
         let pm = dock_panels_model.clone();
         let dm = dock_dividers_model.clone();
         let da = da_size.clone();
         window.on_set_pane_sftp_collapsed(move |tab_id: SharedString, v: bool| {
             update_terminal_row(&terminals_model, &tab_id, |r| r.sftp_collapsed = v);
+            // Every NEW session is seeded from this default, so remember the
+            // user's manual fold/unfold as the startup state: the next launch
+            // shows SFTP the way it was left, not the factory default.
+            {
+                let mut s = store.borrow_mut();
+                if s.collapse_sftp_default() != v {
+                    s.set_collapse_sftp_default(v);
+                    let _ = s.save();
+                }
+            }
             if let Some(w) = weak.upgrade() {
                 // The docked panel's (un)dock state is driven by the ACTIVE
                 // tab's collapse flag — mirror + recompute geometry (#dock-stack).
+                w.set_collapse_sftp_default(v);
                 sync_active_sftp_to_root(&w, &terminals_model);
                 refresh_dock(&w, &ds, &pm, &dm, da.get());
             }
@@ -3428,7 +3413,8 @@ fn open_window(
     window_timers.borrow_mut().push(timer);
 
     // OS file drag-and-drop → upload to the active session's SFTP directory,
-    // but only when the file is dropped over the file-list area.
+    // but only when the file is dropped over the terminal pane or the docked
+    // SFTP panel. Windows is the only backend with reliable DnD delivery.
     {
         use i_slint_backend_winit::winit::event::{
             MouseScrollDelta, TouchPhase, WindowEvent as WEvent,
@@ -3449,6 +3435,28 @@ fn open_window(
         let ev_ds = dock_stacks.clone();
         let ev_window_size_tracking_ready = window_size_tracking_ready.clone();
         let ev_pending_window_size_restore = pending_window_size_restore.clone();
+        // A file drag is in flight (Windows): the hover highlight re-hits the
+        // cursor on a timer because the OS swallows mouse motion mid-drag.
+        let ev_file_hover = Rc::new(std::cell::Cell::new(false));
+        {
+            let weak_hl = window.as_weak();
+            let ds_hl = dock_stacks.clone();
+            let hover = ev_file_hover.clone();
+            let hl_timer = slint::Timer::default();
+            hl_timer.start(
+                slint::TimerMode::Repeated,
+                std::time::Duration::from_millis(80),
+                move || {
+                    if !hover.get() {
+                        return;
+                    }
+                    if let Some(win) = weak_hl.upgrade() {
+                        update_file_drop_highlight(&win, &ds_hl);
+                    }
+                },
+            );
+            window_timers.borrow_mut().push(hl_timer);
+        }
         let mut last_cursor_logical: Option<(f32, f32)> = None;
         let mut macos_wheel_accum = 0.0_f32;
         // Track the inputs that make up WinActivity; recompute on each change.
@@ -3533,7 +3541,26 @@ fn open_window(
                     }
                     WEvent::DroppedFile(path) => {
                         if let Some(win) = weak.upgrade() {
-                            handle_file_drop(&win, &sh, path.clone());
+                            #[cfg(target_os = "windows")]
+                            {
+                                ev_file_hover.set(false);
+                                win.set_file_drop_hl(false);
+                            }
+                            handle_file_drop(&win, &sh, path.clone(), &ev_ds);
+                        }
+                    }
+                    #[cfg(target_os = "windows")]
+                    WEvent::HoveredFile(_path) => {
+                        ev_file_hover.set(true);
+                        if let Some(win) = weak.upgrade() {
+                            update_file_drop_highlight(&win, &ev_ds);
+                        }
+                    }
+                    #[cfg(target_os = "windows")]
+                    WEvent::HoveredFileCancelled => {
+                        ev_file_hover.set(false);
+                        if let Some(win) = weak.upgrade() {
+                            win.set_file_drop_hl(false);
                         }
                     }
                     WEvent::CursorMoved { position, .. } => {
@@ -4297,11 +4324,16 @@ fn cursor_pos() -> Option<(i32, i32)> {
     }
 }
 
-/// Handle an OS file drop: if it landed over the terminal panel (the shell page)
-/// of the active session tab, upload the file to that tab's current remote
-/// directory.
+/// Handle an OS file drop: if it landed over the active session's terminal
+/// pane or over the docked SFTP panel, upload the file to that session's
+/// current remote directory (#drag-onto-shell, #file-drop-sftp).
 #[cfg(windows)]
-fn handle_file_drop(win: &AppWindow, sftp_handles: &SftpHandles, path: std::path::PathBuf) {
+fn handle_file_drop(
+    win: &AppWindow,
+    sftp_handles: &SftpHandles,
+    path: std::path::PathBuf,
+    dock_stacks: &Rc<RefCell<DockStacks>>,
+) {
     let active = win.get_active_tab_id().to_string();
     if active == "welcome" {
         return;
@@ -4317,14 +4349,11 @@ fn handle_file_drop(win: &AppWindow, sftp_handles: &SftpHandles, path: std::path
     // Drop point in logical client coordinates.
     let client_x = (cx - inner.x) as f32 / scale;
     let client_y = (cy - inner.y) as f32 / scale;
-    // Accept drops anywhere over the whole terminal panel ("shell page"), so
-    // dragging a file onto the terminal uploads it to the session's current
-    // directory — not just onto the SFTP file list (#drag-onto-shell).
-    let Some((_active, term, _term_state)) = active_terminal_panel_rects(win) else {
-        return;
-    };
-    if !contains_logical(term, client_x, client_y) {
-        return; // dropped outside the terminal panel — ignore
+    // Accept drops anywhere over the whole terminal panel ("shell page") *and*
+    // over the docked SFTP panel, so dragging a file onto either uploads it to
+    // the session's current directory.
+    if file_drop_target(win, dock_stacks, client_x, client_y).is_none() {
+        return; // dropped outside both panels — ignore
     }
 
     let dir = active_sftp_path(win, &active);
@@ -4366,7 +4395,124 @@ fn handle_file_drop(win: &AppWindow, sftp_handles: &SftpHandles, path: std::path
 }
 
 #[cfg(not(windows))]
-fn handle_file_drop(_win: &AppWindow, _sftp_handles: &SftpHandles, _path: std::path::PathBuf) {}
+fn handle_file_drop(
+    _win: &AppWindow,
+    _sftp_handles: &SftpHandles,
+    _path: std::path::PathBuf,
+    _dock_stacks: &Rc<RefCell<DockStacks>>,
+) {}
+
+/// The dock area's frame in logical client coordinates (below the title bar).
+/// Sibling of `app_content_area`'s origin: panels are laid out inside it.
+#[cfg(windows)]
+fn dock_area_frame(win: &AppWindow) -> LogicalRect {
+    let size = win.window().size();
+    let scale = win.window().scale_factor().max(0.01) as f32;
+    let y = if win.get_custom_titlebar() {
+        38.0
+    } else if win.get_is_mac() {
+        28.0
+    } else {
+        0.0
+    };
+    LogicalRect {
+        x: 0.0,
+        y,
+        w: size.width as f32 / scale,
+        h: size.height as f32 / scale - y,
+    }
+}
+
+/// The docked SFTP panel's rect in logical client coordinates, when it is
+/// expanded for the active tab; `None` in zen mode (panels hidden there).
+#[cfg(windows)]
+fn sftp_panel_client_rect(
+    win: &AppWindow,
+    dock_stacks: &Rc<RefCell<DockStacks>>,
+) -> Option<LogicalRect> {
+    let frame = dock_area_frame(win);
+    if win.get_zen_mode() {
+        return None;
+    }
+    let geom = dock_stacks.borrow().compute_geom(
+        &|k| panel_extent(win, k),
+        &|edge| strip_on_edge(win, edge),
+        frame.w,
+        frame.h,
+    );
+    geom.panels
+        .into_iter()
+        .find(|p| p.kind == "sftp")
+        .map(|p| LogicalRect {
+            x: frame.x + p.rect.x,
+            y: frame.y + p.rect.y,
+            w: p.rect.w,
+            h: p.rect.h,
+        })
+}
+
+/// The file-drop target under a client-space point, returned in dock-area
+/// coordinates so the highlight overlay can draw it directly. Matches the
+/// active session's terminal pane or the docked SFTP panel.
+#[cfg(windows)]
+fn file_drop_target(
+    win: &AppWindow,
+    dock_stacks: &Rc<RefCell<DockStacks>>,
+    x: f32,
+    y: f32,
+) -> Option<LogicalRect> {
+    let frame = dock_area_frame(win);
+    if let Some((_active, term, _state)) = active_terminal_panel_rects(win) {
+        if contains_logical(term, x, y) {
+            return Some(LogicalRect {
+                x: term.x - frame.x,
+                y: term.y - frame.y,
+                w: term.w,
+                h: term.h,
+            });
+        }
+    }
+    let Some(sftp) = sftp_panel_client_rect(win, dock_stacks) else {
+        return None;
+    };
+    contains_logical(sftp, x, y).then(|| LogicalRect {
+        x: sftp.x - frame.x,
+        y: sftp.y - frame.y,
+        w: sftp.w,
+        h: sftp.h,
+    })
+}
+
+/// (Re)draw the file-drop highlight for the current cursor position. Windows
+/// stops delivering mouse motion while an OS drag is in flight, so this runs
+/// from a timer while the drag is alive (#file-drop-hl).
+#[cfg(windows)]
+fn update_file_drop_highlight(win: &AppWindow, dock_stacks: &Rc<RefCell<DockStacks>>) {
+    let Some((cx, cy)) = cursor_pos() else {
+        win.set_file_drop_hl(false);
+        return;
+    };
+    let w = win.window();
+    let scale = w.scale_factor().max(0.01);
+    let Some(inner) = w.with_winit_window(|ww| ww.inner_position().ok()).flatten() else {
+        return;
+    };
+    let x = (cx - inner.x) as f32 / scale;
+    let y = (cy - inner.y) as f32 / scale;
+    match file_drop_target(win, dock_stacks, x, y) {
+        Some(hit) => {
+            win.set_file_drop_hl(true);
+            win.set_file_drop_hl_x(hit.x);
+            win.set_file_drop_hl_y(hit.y);
+            win.set_file_drop_hl_w(hit.w);
+            win.set_file_drop_hl_h(hit.h);
+        }
+        None => win.set_file_drop_hl(false),
+    }
+}
+
+#[cfg(not(windows))]
+fn update_file_drop_highlight(_win: &AppWindow, _dock_stacks: &Rc<RefCell<DockStacks>>) {}
 
 // ---------------------------------------------------------------------------
 // Model helpers
@@ -6485,6 +6631,8 @@ fn refresh_dock_inner(
             w: d.rect.w,
             h: d.rect.h,
             vertical: d.vertical,
+            axis_start: d.axis_start,
+            axis_len: d.axis_len,
         })
         .collect();
     if dividers_model.row_count() == dividers.len() {
@@ -6497,6 +6645,8 @@ fn refresh_dock_inner(
                     && old.w == d.w
                     && old.h == d.h
                     && old.vertical == d.vertical
+                    && old.axis_start == d.axis_start
+                    && old.axis_len == d.axis_len
             });
             if !unchanged {
                 dividers_model.set_row_data(i, d);

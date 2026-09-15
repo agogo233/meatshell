@@ -77,6 +77,10 @@ pub struct PanelGeom {
 
 /// A draggable divider between two stacked panels; dragging updates the
 /// boundary via [`DockStacks::set_ratio`] with `index` = the slot before it.
+/// `axis_start`/`axis_len` are the stack's split window along its secondary
+/// axis (dock-area px): the drag handler maps a cursor position through them,
+/// which matters for top/bottom stacks laid out inside the x range the side
+/// stacks left behind.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DividerGeom {
     pub edge: &'static str,
@@ -84,6 +88,8 @@ pub struct DividerGeom {
     pub rect: RectGeom,
     /// True when the handle is vertical (left/right edge → drag up/down).
     pub vertical: bool,
+    pub axis_start: f32,
+    pub axis_len: f32,
 }
 
 /// Full layout output: the central content rect (after every edge stack is
@@ -327,6 +333,10 @@ impl DockStacks {
     /// 36px ToolStrip band: the band stays at the very edge and the whole
     /// stack is carved INSIDE it (the band spans the full edge, so the split
     /// axis and ratios are unaffected).
+    ///
+    /// Left/right stacks own the full edge height; the top/bottom stacks are
+    /// laid out inside the x range the side stacks left behind, so no two
+    /// edges ever overlap (#dock-cross-edge).
     pub fn compute_geom(
         &self,
         extent: &dyn Fn(&str) -> f32,
@@ -344,6 +354,18 @@ impl DockStacks {
             ..Default::default()
         };
         let (cw, ch) = (w.max(1.0), h.max(1.0));
+        // The x range a side edge claims: its band plus the stack it holds
+        // there (band alone when nothing is expanded on it).
+        let side_taken = |edge: &str| -> f32 {
+            let band = if has_strip(edge) { STRIP } else { 0.0 };
+            let Some(slots) = self.table(edge).filter(|t| !t.is_empty()) else {
+                return band;
+            };
+            band + Self::stack_thickness(slots, cw, band, extent)
+        };
+        let left_taken = side_taken("left");
+        let right_taken = side_taken("right");
+        let h_axis_len = (cw - left_taken - right_taken).max(0.0);
         for edge in ["left", "right", "top", "bottom"] {
             // A collapsed panel's ToolStrip band is reserved even when no
             // panel on this edge is expanded (the edge is strip-only).
@@ -378,44 +400,53 @@ impl DockStacks {
             // put the cap below MIN_THICK — f32::clamp panics when
             // min > max, so floor the cap at MIN_THICK; the next real
             // resize pass overwrites the transient geometry.
-            let cap = ((((if horizontal { cw } else { ch }) - band).max(0.0)) * MAX_THICK_FRAC)
-                .max(MIN_THICK);
-            let thickness = slots
-                .iter()
-                .map(|s| extent(s.kind))
-                .fold(0.0, f32::max)
-                .clamp(MIN_THICK, cap);
+            let thickness = Self::stack_thickness(
+                slots,
+                if horizontal { cw } else { ch },
+                band,
+                extent,
+            );
+            // The split axis: the full edge height for side stacks, or the
+            // central x range for top/bottom ones.
+            let (axis_start, axis_len) = if horizontal {
+                (0.0, ch)
+            } else {
+                (left_taken, h_axis_len)
+            };
             // The stack sits inside the band; the split axis spans the full
             // edge (the band runs along it), so only the normal offsets move.
-            let axis = if horizontal { ch } else { cw };
-            let mut pos = 0.0;
+            let mut offset = 0.0;
             for (i, s) in slots.iter().enumerate() {
-                let seg = if i == slots.len() - 1 {
-                    (axis - pos).max(0.0)
+                let seg = if i + 1 == slots.len() {
+                    (axis_len - offset).max(0.0)
                 } else {
-                    (s.ratio * axis).max(0.0)
+                    (s.ratio * axis_len).max(0.0)
                 };
+                let at = axis_start + offset;
                 let rect = match edge {
-                    "left" => RectGeom { x: band, y: pos, w: thickness, h: seg },
-                    "right" => RectGeom { x: cw - band - thickness, y: pos, w: thickness, h: seg },
-                    "top" => RectGeom { x: pos, y: band, w: seg, h: thickness },
-                    _ => RectGeom { x: pos, y: ch - band - thickness, w: seg, h: thickness },
+                    "left" => RectGeom { x: band, y: at, w: thickness, h: seg },
+                    "right" => RectGeom { x: cw - band - thickness, y: at, w: thickness, h: seg },
+                    "top" => RectGeom { x: at, y: band, w: seg, h: thickness },
+                    _ => RectGeom { x: at, y: ch - band - thickness, w: seg, h: thickness },
                 };
                 g.panels.push(PanelGeom { kind: s.kind, edge, rect });
-                if i < slots.len() - 1 {
+                if i + 1 < slots.len() {
+                    let boundary = at + seg;
                     let drect = if horizontal {
-                        RectGeom { x: rect.x, y: pos + seg, w: thickness, h: DIVIDER }
+                        RectGeom { x: rect.x, y: boundary, w: thickness, h: DIVIDER }
                     } else {
-                        RectGeom { x: pos + seg, y: rect.y, w: DIVIDER, h: thickness }
+                        RectGeom { x: boundary, y: rect.y, w: DIVIDER, h: thickness }
                     };
                     g.dividers.push(DividerGeom {
                         edge,
                         index: i,
                         rect: drect,
                         vertical: horizontal,
+                        axis_start,
+                        axis_len,
                     });
                 }
-                pos += seg;
+                offset += seg;
             }
             // Carve this edge's band + stack off the central content rect.
             let taken = band + thickness;
@@ -443,6 +474,27 @@ impl DockStacks {
         g.central.w = g.central.w.max(0.0);
         g.central.h = g.central.h.max(0.0);
         g
+    }
+
+    /// A stack's shared thickness: the largest preferred extent of its panels,
+    /// clamped to `MIN_THICK..=MAX_THICK_FRAC` of the edge's normal axis so
+    /// the central area keeps at least half of the dock-area. `band` is the
+    /// collapsed-panel band carved off that axis first.
+    fn stack_thickness(
+        slots: &[DockSlotInfo],
+        normal: f32,
+        band: f32,
+        extent: &dyn Fn(&str) -> f32,
+    ) -> f32 {
+        // Floor the cap at MIN_THICK: a tiny dock-area (the pre-show 0×0 pass
+        // or a user-shrunk window) puts it below MIN_THICK, and f32::clamp
+        // panics when min > max. The next real resize overwrites the transient.
+        let cap = (((normal - band).max(0.0)) * MAX_THICK_FRAC).max(MIN_THICK);
+        slots
+            .iter()
+            .map(|s| extent(s.kind))
+            .fold(0.0, f32::max)
+            .clamp(MIN_THICK, cap)
     }
 }
 
@@ -847,6 +899,66 @@ mod tests {
         assert_eq!(g.panels[1].rect.y, 300.0);
         assert_eq!(g.central.x, 256.0);
         assert_eq!(g.central.w, 800.0 - 256.0 - 36.0);
+    }
+
+    #[test]
+    fn geom_side_stack_owns_full_height_and_bottom_stays_clear() {
+        // A left-docked panel keeps the whole edge height; a bottom-docked
+        // stack lays out inside the x range the left panel left behind, so
+        // the two never overlap (#dock-cross-edge).
+        let mut s = DockStacks::default();
+        s.dock_to("left", "sidebar");
+        s.dock_to("bottom", "sftp");
+        s.dock_to("bottom", "quick");
+        let extent = |k: &str| if k == "sidebar" { 200.0 } else { 180.0 };
+        let g = s.compute_geom(&extent, &no_strip, 1000.0, 600.0);
+        let left = g.panels.iter().find(|p| p.kind == "sidebar").unwrap();
+        assert_eq!(left.rect, RectGeom { x: 0.0, y: 0.0, w: 200.0, h: 600.0 });
+        let bottom: Vec<&PanelGeom> = g.panels.iter().filter(|p| p.edge == "bottom").collect();
+        assert_eq!(bottom.len(), 2);
+        // Both sit right of the left panel, tiled edge to edge without overlap.
+        assert_eq!(bottom[0].rect.x, 200.0);
+        assert_eq!(bottom[1].rect.x, bottom[0].rect.x + bottom[0].rect.w);
+        for p in &bottom {
+            assert!(p.rect.w > 0.0);
+            assert!(p.rect.y + p.rect.h <= 600.0);
+        }
+        let last = bottom.last().unwrap();
+        assert_eq!(last.rect.x + last.rect.w, 1000.0);
+    }
+
+    #[test]
+    fn geom_bottom_divider_reports_clipped_axis_window() {
+        let mut s = DockStacks::default();
+        s.dock_to("left", "sidebar");
+        s.dock_to("right", "ai");
+        s.dock_to("bottom", "sftp");
+        s.dock_to("bottom", "quick");
+        let extent = |k: &str| if k == "sidebar" { 200.0 } else { 160.0 };
+        let g = s.compute_geom(&extent, &no_strip, 1000.0, 600.0);
+        let d = g.dividers.iter().find(|d| d.edge == "bottom").unwrap();
+        // The bottom stack splits the range between the two side stacks, so
+        // the divider's drag window must be reported with that same offset.
+        assert!(!d.vertical);
+        assert_eq!(d.axis_start, 200.0);
+        assert_eq!(d.axis_len, 1000.0 - 200.0 - 160.0);
+        assert_eq!(d.rect.x, 200.0 + d.axis_len / 2.0);
+    }
+
+    #[test]
+    fn geom_top_bottom_stacks_cleave_from_side_strip_bands() {
+        // No panel expanded on the sides, only collapsed strips: the top/bottom
+        // stack still starts behind the left band, and its divider window spans
+        // from that band to the right one.
+        let mut s = DockStacks::default();
+        s.dock_to("bottom", "sftp");
+        s.dock_to("bottom", "quick");
+        let strip = |_edge: &str| true;
+        let g = s.compute_geom(&extent_220, &strip, 800.0, 600.0);
+        let bottom = g.panels.iter().find(|p| p.edge == "bottom").unwrap();
+        assert_eq!(bottom.rect.x, STRIP);
+        assert_eq!(g.dividers[0].axis_start, STRIP);
+        assert_eq!(g.dividers[0].axis_len, 800.0 - 2.0 * STRIP);
     }
 
     fn expanded_left_sidebar_ai(k: &str) -> Option<&'static str> {

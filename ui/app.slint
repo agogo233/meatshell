@@ -156,7 +156,10 @@ export struct PanelGeomInfo {
 // A draggable divider between two stacked docked panels (#dock-stack).
 // `edge` + `index` identify the boundary so Rust can update the ratio;
 // `edge` is the dock edge ("left|right|top|bottom") and `index` is the slot
-// *before* the boundary.
+// *before* the boundary. `axis-start`/`axis-len` are the stack's split window
+// along its secondary axis — top/bottom stacks start where the side stacks
+// end, so the drag position must be mapped through that window, not the
+// whole dock area (#dock-cross-edge).
 export struct DividerGeomInfo {
     edge: string,
     index: int,
@@ -165,6 +168,8 @@ export struct DividerGeomInfo {
     w: length,
     h: length,
     vertical: bool,   // true = vertical handle (drag up/down)
+    axis-start: length,
+    axis-len: length,
 }
 
 // A 26×26 top-bar icon button with a hover tooltip (right-aligned so it never
@@ -1002,8 +1007,17 @@ export component AppWindow inherits Window {
     property <length> dock-right-gap: root.width - root.dock-central-x - root.dock-central-w;
     property <length> dock-top-gap: root.dock-central-y;
     property <length> dock-bottom-gap: root.height - root.dock-central-y - root.dock-central-h;
-    callback stack-split-drag(string /* edge */, int /* index */, float /* pos */);
+    callback stack-split-drag(string /* edge */, int /* index */, float /* pos */,
+                              float /* axis-start */, float /* axis-len */);
     callback stack-split-done();
+    // OS file drag-in target highlight (Windows): Rust reports the hovered
+    // drop target in dock-area coordinates while a file drag is in flight,
+    // and clears it when the drop lands or the drag leaves the window.
+    in property <bool> file-drop-hl: false;
+    in property <length> file-drop-hl-x: 0px;
+    in property <length> file-drop-hl-y: 0px;
+    in property <length> file-drop-hl-w: 0px;
+    in property <length> file-drop-hl-h: 0px;
     // Reports the real dock-area size (window minus title bar): the Rust dock
     // engine must measure in THIS frame, not the window frame, or every panel
     // sits ~43px too low at the bottom edge (#dock-stack).
@@ -1549,12 +1563,21 @@ export component AppWindow inherits Window {
             property <length> sftp-bottom:
                 root.sftp-dock == "bottom" ? dock-area.sftp-outer-strip : 0px;
 
+            // Top/bottom docks lay out inside the x range the side stacks leave
+            // behind (Rust reserves it in compute_geom, #dock-cross-edge), so
+            // their collapsed strips must match — a full-width strip here would
+            // sit on top of the side panel again.
+            property <length> h-dock-x: root.dock-central-x;
+            property <length> h-dock-w: root.dock-central-w;
+
             // Standalone collapsed SFTP panel — nothing else is collapsed on
             // its edge, so it takes the outermost 36px slot alone.
             if dock-area.sftp-outer-strip > 0px : ToolStrip {
-                x: root.sftp-dock == "right" ? parent.width - parent.sftp-outer-strip : 0px;
+                x: parent.sftp-outer-horizontal
+                    ? (root.sftp-dock == "right" ? parent.width - parent.sftp-outer-strip : 0px)
+                    : parent.h-dock-x;
                 y: root.sftp-dock == "bottom" ? parent.height - parent.sftp-outer-strip : 0px;
-                width: parent.sftp-outer-horizontal ? parent.sftp-outer-strip : parent.width;
+                width: parent.sftp-outer-horizontal ? parent.sftp-outer-strip : parent.h-dock-w;
                 height: parent.sftp-outer-horizontal ? parent.height : parent.sftp-outer-strip;
                 dock-edge: root.sftp-dock;
                 glyph: "\u{E2C7}";   // folder — SFTP
@@ -1564,42 +1587,47 @@ export component AppWindow inherits Window {
                 }
             }
 
-if dock-area.quick-outer-strip > 0px : ToolStrip {
-                 x: root.quick-panel-dock == "right" ? parent.width - parent.quick-outer-strip : 0px;
-                 y: root.quick-panel-dock == "bottom" ? parent.height - parent.quick-outer-strip : 0px;
-                 width: parent.quick-outer-horizontal ? parent.quick-outer-strip : parent.width;
-                 height: parent.quick-outer-horizontal ? parent.height : parent.quick-outer-strip;
-                 dock-edge: root.quick-panel-dock;
-                 glyph: "\u{E3E7}";
-                 tooltip: @tr("Quick commands");
-                 show-second: parent.ai-merge-quick || parent.sftp-merge-quick;
-                 second-glyph: parent.ai-merge-quick ? "\u{E8BD}" : "\u{E2C7}";
-                 show-third: parent.ai-merge-quick && parent.sftp-merge-quick;
-                 third-glyph: "\u{E2C7}";
-                 expand => {
-                     root.quick-panel-collapsed = false;
-                     root.dock-layout-changed();
-                 }
-                 expand-second => {
-                     if (parent.ai-merge-quick) {
-                         root.ai-panel-collapsed = false;
-                     } else {
-                         root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
-                     }
-                     root.dock-layout-changed();
-                 }
-                 expand-third => {
-                     root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
-                     root.dock-layout-changed();
-                 }
-             }
+            if dock-area.quick-outer-strip > 0px : ToolStrip {
+                x: parent.quick-outer-horizontal
+                    ? (root.quick-panel-dock == "right"
+                        ? parent.width - parent.quick-outer-strip : 0px)
+                    : parent.h-dock-x;
+                y: root.quick-panel-dock == "bottom" ? parent.height - parent.quick-outer-strip : 0px;
+                width: parent.quick-outer-horizontal ? parent.quick-outer-strip : parent.h-dock-w;
+                height: parent.quick-outer-horizontal ? parent.height : parent.quick-outer-strip;
+                dock-edge: root.quick-panel-dock;
+                glyph: "\u{E3E7}";
+                tooltip: @tr("Quick commands");
+                show-second: parent.ai-merge-quick || parent.sftp-merge-quick;
+                second-glyph: parent.ai-merge-quick ? "\u{E8BD}" : "\u{E2C7}";
+                show-third: parent.ai-merge-quick && parent.sftp-merge-quick;
+                third-glyph: "\u{E2C7}";
+                expand => {
+                    root.quick-panel-collapsed = false;
+                    root.dock-layout-changed();
+                }
+                expand-second => {
+                    if (parent.ai-merge-quick) {
+                        root.ai-panel-collapsed = false;
+                    } else {
+                        root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
+                    }
+                    root.dock-layout-changed();
+                }
+                expand-third => {
+                    root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
+                    root.dock-layout-changed();
+                }
+            }
 
             // Standalone collapsed AI panel — nothing else is collapsed on its
             // edge, so it takes the outermost 36px slot.
             if dock-area.ai-outer-strip > 0px : ToolStrip {
-                x: root.ai-panel-dock == "right" ? parent.width - parent.ai-outer-strip : 0px;
+                x: parent.ai-outer-horizontal
+                    ? (root.ai-panel-dock == "right" ? parent.width - parent.ai-outer-strip : 0px)
+                    : parent.h-dock-x;
                 y: root.ai-panel-dock == "bottom" ? parent.height - parent.ai-outer-strip : 0px;
-                width: parent.ai-outer-horizontal ? parent.ai-outer-strip : parent.width;
+                width: parent.ai-outer-horizontal ? parent.ai-outer-strip : parent.h-dock-w;
                 height: parent.ai-outer-horizontal ? parent.height : parent.ai-outer-strip;
                 dock-edge: root.ai-panel-dock;
                 glyph: "\u{E8BD}";
@@ -1618,14 +1646,15 @@ if dock-area.quick-outer-strip > 0px : ToolStrip {
 
             // Collapsed welcome → a thin left icon strip (click the icon to re-open).
             if root.welcome-as-sidebar && root.welcome-collapsed : ToolStrip {
-                x: root.welcome-sidebar-dock == "right"
-                    ? parent.width - parent.quick-right - parent.welcome-strip
-                    : root.welcome-sidebar-dock == "left" ? parent.quick-left : parent.quick-left;
+                x: parent.welcome-horizontal
+                    ? (root.welcome-sidebar-dock == "right"
+                        ? parent.width - parent.quick-right - parent.welcome-strip
+                        : parent.quick-left)
+                    : parent.h-dock-x;
                 y: root.welcome-sidebar-dock == "bottom"
                     ? parent.height - parent.quick-bottom - parent.welcome-strip
                     : root.welcome-sidebar-dock == "top" ? parent.quick-top : parent.quick-top;
-                width: parent.welcome-horizontal ? parent.welcome-strip
-                    : parent.width - parent.quick-left - parent.quick-right;
+                width: parent.welcome-horizontal ? parent.welcome-strip : parent.h-dock-w;
                 height: parent.welcome-horizontal
                     ? parent.height - parent.quick-top - parent.quick-bottom : parent.welcome-strip;
                 dock-edge: root.welcome-sidebar-dock;
@@ -1719,15 +1748,15 @@ if dock-area.quick-outer-strip > 0px : ToolStrip {
             // edge (M5), anchored to the OUTER edge of dock-area so it lines up
             // with the 36px band the Rust dock engine reserves for it (#dock-stack).
             if !root.zen-mode && root.sidebar-collapsed && !dock-area.combine-collapsed-tools && !dock-area.sidebar-strip-outside : ToolStrip {
-                x: root.sidebar-dock == "right"
-                    ? parent.width - 36px - (parent.quick-right + parent.ai-right)
-                    : parent.quick-left + parent.ai-left;
+                x: root.sidebar-horizontal
+                    ? (root.sidebar-dock == "right"
+                        ? parent.width - 36px - (parent.quick-right + parent.ai-right)
+                        : parent.quick-left + parent.ai-left)
+                    : parent.h-dock-x;
                 y: root.sidebar-dock == "bottom"
                     ? parent.height - 36px - (parent.quick-bottom + parent.ai-bottom)
                     : parent.quick-top + parent.ai-top;
-                width: root.sidebar-horizontal
-                    ? 36px : parent.width - (parent.quick-left + parent.ai-left)
-                        - (parent.quick-right + parent.ai-right);
+                width: root.sidebar-horizontal ? 36px : parent.h-dock-w;
                 height: root.sidebar-horizontal
                     ? parent.height - (parent.quick-top + parent.ai-top)
                         - (parent.quick-bottom + parent.ai-bottom)
@@ -1778,14 +1807,15 @@ if dock-area.quick-outer-strip > 0px : ToolStrip {
             }
 
             if dock-area.sidebar-strip-outside : ToolStrip {
-                x: root.welcome-sidebar-dock == "right"
-                    ? parent.width - parent.quick-right - parent.sidebar-outside-strip
-                    : root.welcome-sidebar-dock == "left" ? parent.quick-left : parent.quick-left;
+                x: parent.welcome-horizontal
+                    ? (root.welcome-sidebar-dock == "right"
+                        ? parent.width - parent.quick-right - parent.sidebar-outside-strip
+                        : parent.quick-left)
+                    : parent.h-dock-x;
                 y: root.welcome-sidebar-dock == "bottom"
                     ? parent.height - parent.quick-bottom - parent.sidebar-outside-strip
                     : root.welcome-sidebar-dock == "top" ? parent.quick-top : parent.quick-top;
-                width: parent.welcome-horizontal ? parent.sidebar-outside-strip
-                    : parent.width - parent.quick-left - parent.quick-right;
+                width: parent.welcome-horizontal ? parent.sidebar-outside-strip : parent.h-dock-w;
                 height: parent.welcome-horizontal
                     ? parent.height - parent.quick-top - parent.quick-bottom : parent.sidebar-outside-strip;
                 dock-edge: root.welcome-sidebar-dock;
@@ -2984,6 +3014,8 @@ if dock-area.quick-outer-strip > 0px : ToolStrip {
             }
 
             // Dividers between stacked panels on the same edge (#dock-stack).
+            // The painted bar is 4px wide; the TouchArea overhangs ±5px along
+            // the drag axis so the handle is easy to grab with the finger.
             for dd[di] in root.dock-dividers : Rectangle {
                 x: dd.x;
                 y: dd.y;
@@ -2992,6 +3024,10 @@ if dock-area.quick-outer-strip > 0px : ToolStrip {
                 background: dd-ta.pressed ? Theme.accent : Theme.border-strong;
                 animate background { duration: 100ms; }
                 dd-ta := TouchArea {
+                    x: dd.vertical ? 0px : -5px;
+                    y: dd.vertical ? -5px : 0px;
+                    width: dd.vertical ? parent.width : parent.width + 10px;
+                    height: dd.vertical ? parent.height + 10px : parent.height;
                     mouse-cursor: dd.vertical ? ns-resize : ew-resize;
                     moved => {
                         if (self.pressed) {
@@ -3000,10 +3036,24 @@ if dock-area.quick-outer-strip > 0px : ToolStrip {
                                     ? ((self.absolute-position.y + self.mouse-y)
                                         - dock-area.absolute-position.y) / 1px
                                     : ((self.absolute-position.x + self.mouse-x)
-                                        - dock-area.absolute-position.x) / 1px);
+                                        - dock-area.absolute-position.x) / 1px,
+                                dd.axis-start / 1px, dd.axis-len / 1px);
                         }
                     }
                 }
+            }
+
+            // File drag-in target highlight (Windows): outlines the drop target
+            // — the terminal pane or the docked SFTP panel — while a file is
+            // held over it. Purely visual; Rust clears it on drop/leave.
+            if root.file-drop-hl : Rectangle {
+                x: root.file-drop-hl-x;
+                y: root.file-drop-hl-y;
+                width: root.file-drop-hl-w;
+                height: root.file-drop-hl-h;
+                border-width: 2px;
+                border-color: Theme.accent;
+                background: Theme.accent.with-alpha(0.12);
             }
 
             // Drag-to-dock snap overlay — four edge zones; the one under the cursor
