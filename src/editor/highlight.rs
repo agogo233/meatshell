@@ -193,6 +193,28 @@ fn take_number(line: &[char], start: usize) -> usize {
     i - start
 }
 
+/// Whether the number token at `[i, i + n)` stands on its own, or is buried
+/// in a longer Yaml/Shell scalar (`nemotron-3.5`, `30b` in model ids, dates
+/// like `2026-08-24`): buried ones stay plain, only standalone numbers earn
+/// the band. A `-` on the left counts as joins unless it reads as a sign —
+/// itself preceded by start-of-line, whitespace, or `[`/`{`/`,`/`:`/`=` — so
+/// `timeout: -1` and Shell `KEY=-1` still colour while `nemotron-3.5` stays
+/// plain.
+fn number_is_standalone(chars: &[char], i: usize, n: usize) -> bool {
+    let joins = |c: char| c.is_alphanumeric() || matches!(c, '-' | '_' | '/' | '.');
+    let prev_ok = if i == 0 {
+        true
+    } else if chars[i - 1] == '-' {
+        i - 1 == 0
+            || chars[i - 2].is_whitespace()
+            || matches!(chars[i - 2], '[' | '{' | ',' | ':' | '=')
+    } else {
+        !joins(chars[i - 1])
+    };
+    let next_ok = i + n >= chars.len() || !joins(chars[i + n]);
+    prev_ok && next_ok
+}
+
 fn classify_word(word: &str, keywords: &[&str], builtins: &[&str]) -> Role {
     if keywords.contains(&word) {
         Role::Keyword
@@ -258,6 +280,24 @@ fn tokenize(lang: Lang, line: &str, triple_in: TripleState) -> BuiltLine {
 
     while i < chars.len() {
         let c = chars[i];
+        // Yaml mapping key: the whole bare run (`a-b_c/d`) up to the `:`
+        // that opens a block-style mapping (`:` followed by whitespace or
+        // end of line) is one keyword, not just the last word — model ids
+        // and version fragments inside keys keep their shape.
+        if lang == Lang::Yaml && (is_word_start(c) || c.is_ascii_digit()) {
+            let mut j = i;
+            while j < chars.len() && !chars[j].is_whitespace() && chars[j] != ':' {
+                j += 1;
+            }
+            if j < chars.len()
+                && chars[j] == ':'
+                && (j + 1 == chars.len() || chars[j + 1].is_whitespace())
+            {
+                segs.push(&line[b(i)..b(j + 1)], Role::Keyword);
+                i = j + 1;
+                continue;
+            }
+        }
         if c.is_whitespace() {
             let n = take_while(&chars, i, char::is_whitespace);
             segs.word(&line[b(i)..b(i + n)]);
@@ -314,6 +354,9 @@ fn tokenize(lang: Lang, line: &str, triple_in: TripleState) -> BuiltLine {
         }
         if lang == Lang::Shell && c == '$' {
             // $VAR ${VAR} $1 $? — colour the whole reference as builtin.
+            // `$(...)` / `$(( ... ))` / `$[...]` command & arithmetic
+            // substitutions leave the `$` plain: colouring it alone looked
+            // like a stray variable marker before the parens.
             let mut n = 1usize;
             if i + n < chars.len() && chars[i + n] == '{' {
                 if let Some(pos) = find_char(&chars, i + n, '}') {
@@ -321,8 +364,20 @@ fn tokenize(lang: Lang, line: &str, triple_in: TripleState) -> BuiltLine {
                 } else {
                     n = chars.len() - i;
                 }
+            } else if i + n < chars.len() && (chars[i + n] == '(' || chars[i + n] == '[') {
+                segs.push(&line[b(i)..b(i + n)], Role::Default);
+                i += n;
+                continue;
             } else {
                 n += take_while(&chars, i + 1, |c| c.is_alphanumeric() || c == '_');
+                // $# $? $$ $! $* $@ $- — one-char special parameters (the
+                // comment promised them; digits were already covered above).
+                if n == 1
+                    && i + 1 < chars.len()
+                    && matches!(chars[i + 1], '#' | '?' | '$' | '!' | '*' | '@' | '-')
+                {
+                    n = 2;
+                }
             }
             segs.push(&line[b(i)..b(i + n)], Role::Builtin);
             i += n;
@@ -344,6 +399,22 @@ fn tokenize(lang: Lang, line: &str, triple_in: TripleState) -> BuiltLine {
         if is_word_start(c) {
             let n = take_while(&chars, i, is_word);
             let word: String = chars[i..i + n].iter().collect();
+            // A bare URL `word://…` (unquoted is legal only in Yaml) would
+            // otherwise scatter number/keyword bands across the host, port
+            // and path; keep the whole address plain up to the next space
+            // so a trailing `# comment` is still recognised.
+            let scheme_end = i + n;
+            if lang == Lang::Yaml
+                && scheme_end + 2 < chars.len()
+                && chars[scheme_end] == ':'
+                && chars[scheme_end + 1] == '/'
+                && chars[scheme_end + 2] == '/'
+            {
+                let m = take_while(&chars, i, |ch| !ch.is_whitespace());
+                segs.push(&line[b(i)..b(i + m)], Role::Default);
+                i += m;
+                continue;
+            }
             let role = match lang {
                 Lang::Shell => classify_word(&word, SHELL_KEYWORDS, SHELL_BUILTINS),
                 Lang::Python => classify_word(&word, PYTHON_KEYWORDS, PYTHON_BUILTINS),
@@ -359,9 +430,11 @@ fn tokenize(lang: Lang, line: &str, triple_in: TripleState) -> BuiltLine {
                 Lang::Plain => Role::Default,
             };
             let mut total = n;
-            // Key detection: "key:" (Yaml, also Json) and "key =" after blanks
-            // (Toml/Ini) colour the whole `key`(+separator) as a keyword.
-            let is_colon_key = matches!(lang, Lang::Json | Lang::Yaml)
+            // Key detection: "key:" (Json) and "key =" after blanks (Toml/Ini)
+            // colour the whole `key`(+separator) as a keyword. Yaml keys are
+            // claimed by the bare-key scan above, which requires the colon to
+            // be followed by whitespace so `http://` fragments do not match.
+            let is_colon_key = matches!(lang, Lang::Json)
                 && i + total < chars.len()
                 && chars[i + total] == ':';
             let is_eq_key = matches!(lang, Lang::Toml | Lang::Ini) && {
@@ -385,7 +458,17 @@ fn tokenize(lang: Lang, line: &str, triple_in: TripleState) -> BuiltLine {
         }
         if c.is_ascii_digit() {
             let n = take_number(&chars, i);
-            segs.push(&line[b(i)..b(i + n)], Role::Number);
+            // Numbers buried in a longer Yaml/Shell scalar (model ids like
+            // `nemotron-3.5`, dates like `2026-08-24`) stay plain; only a
+            // standalone number earns the band.
+            let role = if matches!(lang, Lang::Yaml | Lang::Shell)
+                && !number_is_standalone(&chars, i, n)
+            {
+                Role::Default
+            } else {
+                Role::Number
+            };
+            segs.push(&line[b(i)..b(i + n)], role);
             i += n;
             continue;
         }
@@ -556,6 +639,78 @@ mod tests {
     }
 
     #[test]
+    fn shell_special_parameters() {
+        let built = tokenize(
+            Lang::Shell,
+            "if [ $# -eq 0 ] || [ $? -ne 1 ] || [ $$ = $! ] || [ $* $@ $- ]; then",
+            0,
+        );
+        for p in ["$#", "$?", "$$", "$!", "$*", "$@", "$-"] {
+            assert!(
+                built.segments.iter().any(|(t, r)| t == p && *r == Role::Builtin),
+                "missing {p}"
+            );
+        }
+        // No standalone `$` leaks out as a builtin band.
+        assert!(!built.segments.iter().any(|(t, r)| t == "$" && *r == Role::Builtin));
+    }
+
+    #[test]
+    fn shell_command_substitution_plain() {
+        let src = "monday=$(date -d \"@$monday_epoch\" +%Y-%m-%d)";
+        let built = tokenize(Lang::Shell, src, 0);
+        assert_eq!(
+            built.segments.iter().map(|(t, _)| t.as_str()).collect::<String>(),
+            src
+        );
+        // `$(` must not render as a lone builtin dollar.
+        assert!(!built.segments.iter().any(|(t, r)| t == "$" && *r == Role::Builtin));
+        assert!(built.segments.iter().any(|(t, r)| t == "date" && *r == Role::Builtin));
+        assert!(built
+            .segments
+            .iter()
+            .any(|(t, r)| t == "\"@$monday_epoch\"" && *r == Role::Str));
+    }
+
+    #[test]
+    fn shell_arithmetic_plain_but_numbers_kept() {
+        let built = tokenize(Lang::Shell, "i=$((i + 1))\necho $(( days / 7 + 1 ))", 0);
+        assert!(!built.segments.iter().any(|(t, r)| t == "$" && *r == Role::Builtin));
+        assert!(built.segments.iter().any(|(t, r)| t == "1" && *r == Role::Number));
+        assert!(built.segments.iter().any(|(t, r)| t == "7" && *r == Role::Number));
+        assert!(built.segments.iter().any(|(t, r)| t == "echo" && *r == Role::Builtin));
+    }
+
+    #[test]
+    fn shell_date_value_stays_plain() {
+        let built = tokenize(Lang::Shell, "START_DATE=2026-08-24", 0);
+        assert!(!built.segments.iter().any(|(_, r)| *r == Role::Number));
+    }
+
+    #[test]
+    fn shell_assignment_negative_kept_number() {
+        // A `-` after `=` reads as a sign, not a hyphen: `OFFSET=-7` keeps
+        // its number band while the date above stays plain.
+        let built = tokenize(Lang::Shell, "OFFSET=-7", 0);
+        assert!(built.segments.iter().any(|(t, r)| t == "7" && *r == Role::Number));
+    }
+
+    #[test]
+    fn shell_substitution_line_roundtrip() {
+        let src = "monday_epoch=$(( $(date -d \"$START_DATE\" +%s) + (w - 1) * 7 * 86400 ))";
+        let built = tokenize(Lang::Shell, src, 0);
+        assert_eq!(
+            built.segments.iter().map(|(t, _)| t.as_str()).collect::<String>(),
+            src
+        );
+        assert!(!built.segments.iter().any(|(t, r)| t == "$" && *r == Role::Builtin));
+        assert!(built.segments.iter().any(|(t, r)| t == "date" && *r == Role::Builtin));
+        assert!(built.segments.iter().any(|(t, r)| t == "\"$START_DATE\"" && *r == Role::Str));
+        assert!(built.segments.iter().any(|(t, r)| t == "86400" && *r == Role::Number));
+        assert!(built.segments.iter().any(|(t, r)| t == "7" && *r == Role::Number));
+    }
+
+    #[test]
     fn json_keys_strings_numbers() {
         let built = tokenize(Lang::Json, r#"{"name": "meatshell", "n": 42, "ok": true}"#, 0);
         let joined: String = built.segments.iter().map(|(t, _)| t.as_str()).collect();
@@ -584,6 +739,84 @@ mod tests {
         // a comment — e.g. an anchor-less URL fragment.
         let built = tokenize(Lang::Yaml, "url: http://x#a", 0);
         assert!(!built.segments.iter().any(|(_, r)| *r == Role::Comment));
+    }
+
+    #[test]
+    fn yaml_url_value_stays_plain_and_comment_kept() {
+        // The scheme must not read as a key and the IP/port must not scatter
+        // number bands; a comment after the URL still wins.
+        let built = tokenize(Lang::Yaml, "base_url: http://192.168.31.25:13000/v1", 0);
+        let segs: Vec<(&str, Role)> = built.segments.iter().map(|(t, r)| (t.as_str(), *r)).collect();
+        assert!(segs.iter().any(|(t, r)| t == "base_url:" && *r == Role::Keyword));
+        assert!(!segs.iter().any(|(_, r)| *r == Role::Number));
+        assert!(!segs.iter().any(|(t, r)| *r == Role::Keyword && t.starts_with("http")));
+        assert_eq!(
+            built.segments.iter().map(|(t, _)| t.as_str()).collect::<String>(),
+            "base_url: http://192.168.31.25:13000/v1"
+        );
+        let with_comment = tokenize(Lang::Yaml, "url: https://example.com # note", 0);
+        let last = with_comment.segments.last().unwrap();
+        assert_eq!(last.1, Role::Comment);
+        assert!(!with_comment
+            .segments
+            .iter()
+            .any(|(t, r)| *r == Role::Number && t.contains("168")));
+    }
+
+    #[test]
+    fn yaml_hyphenated_key_is_one_keyword() {
+        // Bare keys keep hyphens/slashes/version fragments: the whole run up
+        // to `:` (whitespace or EOL) is one keyword, not just the last word.
+        let built = tokenize(Lang::Yaml, "DeepSeek-V4-Flash-0731-Event: {}", 0);
+        let segs: Vec<(&str, Role)> = built.segments.iter().map(|(t, r)| (t.as_str(), *r)).collect();
+        assert!(segs
+            .iter()
+            .any(|(t, r)| t == "DeepSeek-V4-Flash-0731-Event:" && *r == Role::Keyword));
+        assert!(!segs.iter().any(|(_, r)| *r == Role::Number));
+        assert_eq!(
+            built.segments.iter().map(|(t, _)| t.as_str()).collect::<String>(),
+            "DeepSeek-V4-Flash-0731-Event: {}"
+        );
+    }
+
+    #[test]
+    fn yaml_model_value_has_no_number_fragments() {
+        let built = tokenize(Lang::Yaml, "model: nvidia/nemotron-3.5-lightning-30b-a3b", 0);
+        let segs: Vec<(&str, Role)> = built.segments.iter().map(|(t, r)| (t.as_str(), *r)).collect();
+        assert!(segs.iter().any(|(t, r)| t == "model:" && *r == Role::Keyword));
+        assert!(!segs.iter().any(|(_, r)| *r == Role::Number));
+    }
+
+    #[test]
+    fn yaml_standalone_numbers_still_coloured() {
+        let built = tokenize(Lang::Yaml, "port: 8080\nlist: [1, 2]\npi: 3.14", 0);
+        let segs: Vec<(&str, Role)> = built.segments.iter().map(|(t, r)| (t.as_str(), *r)).collect();
+        assert!(segs.iter().any(|(t, r)| t == "8080" && *r == Role::Number));
+        assert!(segs.iter().any(|(t, r)| t == "1" && *r == Role::Number));
+        assert!(segs.iter().any(|(t, r)| t == "2" && *r == Role::Number));
+        assert!(segs.iter().any(|(t, r)| t == "3.14" && *r == Role::Number));
+        // Multi-dot version-like scalars stay plain (no fragments).
+        let v = tokenize(Lang::Yaml, "version: 1.2.3", 0);
+        assert!(!v.segments.iter().any(|(_, r)| *r == Role::Number));
+        // A minus sign reads as a sign, not a hyphen: `-1` still colours.
+        let neg = tokenize(Lang::Yaml, "timeout: -1", 0);
+        assert!(neg.segments.iter().any(|(t, r)| t == "1" && *r == Role::Number));
+    }
+
+    #[test]
+    fn yaml_compact_flow_key_not_coloured() {
+        // Accepted trade: a colon without a following space is no longer a key,
+        // so `{a:1}` stays plain while `{a: 1}` and `b: 2` still colour.
+        let spaced = tokenize(Lang::Yaml, "labels: {a: 1}", 0);
+        let segs: Vec<(&str, Role)> =
+            spaced.segments.iter().map(|(t, r)| (t.as_str(), *r)).collect();
+        assert!(segs.iter().any(|(t, r)| t == "labels:" && *r == Role::Keyword));
+        assert!(segs.iter().any(|(t, r)| t == "a:" && *r == Role::Keyword));
+        let compact = tokenize(Lang::Yaml, "labels: {a:1}", 0);
+        assert!(!compact
+            .segments
+            .iter()
+            .any(|(t, r)| *r == Role::Keyword && t.starts_with('{')));
     }
 
     #[test]
