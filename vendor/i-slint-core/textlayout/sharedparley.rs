@@ -371,10 +371,12 @@ fn create_text_paragraphs(
             // Laying out a zero-width space gives the paragraph a real
             // cluster for caret placement; `range` still covers zero bytes,
             // so the document and every byte mapping are untouched (clicks
-            // clamp in `byte_offset_from_point`, and the caret rect is
-            // rebuilt from the paragraph's own line box in
-            // `cursor_rect_for_byte_offset`). Drop when upgrading Slint to a
-            // release with empty-line caret geometry fixed upstream.
+            // clamp in `byte_offset_from_point`, and the caret rect takes its
+            // vertical extent from a real sibling line box —
+            // `Layout::caret_fallback` — in `cursor_rect_for_byte_offset`,
+            // since parley's own extent for the stand-in is unreliable).
+            // Drop when upgrading Slint to a release with empty-line caret
+            // geometry fixed upstream.
             let text = if text.is_empty() { "\u{200b}" } else { text };
             let layout =
                 layout_builder.build(font_context, text, selection, formatting, Some(link_color));
@@ -518,7 +520,32 @@ fn layout(
         (None, _) | (Some(_), TextVerticalAlignment::Top) => PhysicalLength::new(0.0),
     };
 
-    Layout { paragraphs, y_offset, elision_info, max_width, height, max_physical_height }
+    // Meatshell vendor patch: an empty line is laid out from a zero-width
+    // space (see `create_text_paragraphs`), but parley's vertical extent for
+    // that stand-in is unreliable — observed as a zero-height phantom line
+    // (caret collapses to a barely visible ~1px mark glued to the left edge)
+    // as well as a full-height bar. Capture a real line box from the first
+    // paragraph that shapes into one (any font in this app is uniform across
+    // lines, so a sibling line's metrics describe the caret the empty line
+    // would have if it held text); fall back to the font pixel size when the
+    // whole document is empty lines.
+    let caret_fallback = paragraphs
+        .iter()
+        .filter(|p| p.range.len() > 0)
+        .filter_map(|p| Some(*p.layout.lines().next()?.metrics()))
+        .find(|m| m.max_coord > m.min_coord)
+        .map(|m| (m.min_coord, PhysicalLength::new(m.max_coord - m.min_coord)))
+        .unwrap_or((0.0, layout_builder.pixel_size * scale_factor));
+
+    Layout {
+        paragraphs,
+        y_offset,
+        elision_info,
+        max_width,
+        height,
+        max_physical_height,
+        caret_fallback,
+    }
 }
 
 /// RAII guard: takes Vec out of the cache on creation, puts it back on drop.
@@ -826,6 +853,13 @@ struct Layout {
     height: PhysicalLength,
     max_physical_height: Option<PhysicalLength>,
     elision_info: Option<ElisionInfo>,
+    /// Meatshell vendor patch: a representative real line box (top offset and
+    /// height, both physical px) taken from the first non-empty paragraph. An
+    /// empty line is laid out from a zero-width space whose own metrics parley
+    /// reports unreliably — observed both as a zero-height phantom line (caret
+    /// collapses to ~1px) and as a full-height bar — so the empty-line caret is
+    /// sized from this instead, matching the carets on normal lines.
+    caret_fallback: (f32, PhysicalLength),
 }
 
 impl Layout {
@@ -932,23 +966,25 @@ impl Layout {
         );
         let rect = cursor.geometry(&paragraph.layout, cursor_width.get());
 
-        // Meatshell vendor patch: for the zero-width-space paragraph that
-        // stands in for an empty line (see `create_text_paragraphs`), the
-        // vertical extent parley reports for the caret does not match the
-        // line box that is actually drawn (observed: a full-height bar at
-        // the left edge instead of a one-line caret). Rebuild the rect from
-        // the paragraph's own height — the very value that stacks and
-        // renders the lines — while keeping parley's horizontal placement
-        // so alignment offsets survive. Non-empty paragraphs are unaffected;
-        // only Plain paragraphs reach this function (TextInput), so a zero
-        // range always marks a zero-width-space stand-in line.
+        // Meatshell vendor patch: the empty line is laid out from a
+        // zero-width space (see `create_text_paragraphs`), but parley's
+        // vertical extent for that stand-in — both the caret geometry and the
+        // paragraph's own line box — is unreliable (observed collapsing to a
+        // ~1px phantom mark at the left edge, and as a full-height bar).
+        // Draw the empty-line caret like the carets on normal lines instead:
+        // take the vertical placement from a real sibling line box captured
+        // in `caret_fallback`, and keep parley's horizontal placement so
+        // alignment offsets survive. Non-empty paragraphs are unaffected;
+        // only Plain paragraphs reach here (TextInput), so a zero range
+        // always marks a zero-width-space stand-in line.
         if paragraph.range.len() == 0 {
+            let (line_top, line_height) = self.caret_fallback;
             return PhysicalRect::new(
                 PhysicalPoint::from_lengths(
                     PhysicalLength::new(rect.x0 as _),
-                    self.y_offset + paragraph.y,
+                    self.y_offset + paragraph.y + PhysicalLength::new(line_top),
                 ),
-                PhysicalSize::new(cursor_width.get(), paragraph.layout.height().max(1.0)),
+                PhysicalSize::new(cursor_width.get(), line_height.get()),
             );
         }
 
