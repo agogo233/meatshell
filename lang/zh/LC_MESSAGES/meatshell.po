@@ -255,9 +255,6 @@ msgstr "八进制权限,例如 755"
 msgid "Read-only"
 msgstr "只读"
 
-msgid "Modified"
-msgstr "已修改"
-
 msgid "View"
 msgstr "查看"
 
@@ -611,3 +608,105 @@ msgstr "收藏当前路径"
 
 msgid "No bookmarks for this server"
 msgstr "此服务器暂无书签"
+
+msgid "Files"
+msgstr "文件"
+
+msgid "Tunnels"
+msgstr "隧道"
+
+msgid "SFTP"
+msgstr "SFTP"
+
+msgid "Paste and go"
+msgstr "粘贴并跳转"
+
+msgid "No tunnels"
+msgstr "暂无隧道"
+
+msgid "Stop"
+msgstr "停止"
+
+msgid "No match"
+msgstr "无匹配项"
+
+msgid "Merge panes"
+msgstr "取消拆分"
+
+msgid "Replace"
+msgstr "替换"
+
+msgid "Replace all"
+msgstr "全部替换"
+
+msgid "System information"
+msgstr "系统信息"
+
+msgid "No data"
+msgstr "暂无数据"
+
+msgid "Overview"
+msgstr "概览"
+
+msgid "Cores"
+msgstr "核心数"
+
+msgid "Frequency"
+msgstr "主频"
+
+msgid "Cache"
+msgstr "缓存"
+
+msgid "Vendor"
+msgstr "厂商"
+
+msgid "Driver"
+msgstr "驱动"
+
+msgid "CPU usage"
+msgstr "CPU 占用"
+
+msgid "System"
+msgstr "系统"
+
+msgid "Idle"
+msgstr "空闲"
+
+msgid "Total"
+msgstr "总量"
+
+msgid "Used"
+msgstr "已用"
+
+msgid "Free"
+msgstr "空闲"
+
+msgid "Usage"
+msgstr "使用率"
+
+msgid "Network interfaces"
+msgstr "网络接口"
+
+msgid "Sent"
+msgstr "已发送"
+
+msgid "Received"
+msgstr "已接收"
+
+msgid "Send speed"
+msgstr "发送速率"
+
+msgid "Receive speed"
+msgstr "接收速率"
+
+msgid "Filesystems"
+msgstr "文件系统"
+
+msgid "Mount point"
+msgstr "挂载点"
+
+msgid "Available"
+msgstr "可用空间"
+
+msgid "-L: local port → target reached from the server; -R: server port → target reached from here; -D: local SOCKS5 proxy"
+msgstr "-L：本地端口 → 由服务器侧访问的目标；-R：服务器端口 → 由本机访问的目标；-D：本地 SOCKS5 代理"
