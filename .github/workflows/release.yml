@@ -1,10 +1,13 @@
 name: Build (Windows x86_64)
 
-# Single Windows build entry point, artifact only — never publishes a release:
-# every push (any branch/tag) rebuilds the Windows x64 portable build and
-# uploads it as a plain artifact (contents: read only); the artifact ships the
-# bare directory under a timestamped name, so the downloaded zip is
-# single-layer and unique per build.
+# Two parallel Windows x86_64 build entry points, artifact only — never
+# publishes a release: every push (any branch/tag) rebuilds the Windows x64
+# portable build under the standard `release` profile (the compile gate) and,
+# in parallel, under the size-optimised `release-size` profile (opt-level = "s"
+# + fat LTO, see Cargo.toml) to track how much smaller the binary can get;
+# each uploads its result as a plain artifact (contents: read only); the
+# artifact ships the bare directory under a timestamped name, so the
+# downloaded zip is single-layer and unique per build.
 
 on:
   # Rebuild on every push to any branch/tag — used as the CI gate: a push
@@ -38,6 +41,15 @@ jobs:
       - name: Build (release)
         run: cargo build --release --target x86_64-pc-windows-msvc --locked
 
+      - name: Report binary size
+        shell: bash
+        run: |
+          set -eu
+          EXE="target/x86_64-pc-windows-msvc/release/meatshell.exe"
+          test -f "$EXE"
+          printf '%s\n' "## Binary size report" "| build | bytes |" "|---|---|" \
+            "| standard (opt-level=3, lto=thin) | $(wc -c < "$EXE") |" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Stage portable build
         id: package
         shell: bash
@@ -59,6 +71,61 @@ jobs:
         with:
           name: ${{ steps.package.outputs.artifact-name }}
           path: meatshell-windows-x86_64-portable
+          retention-days: 7
+          if-no-files-found: error
+
+  # Parallel size-optimised build: same code, but the `release-size` profile
+  # (opt-level = "s", fat LTO — see Cargo.toml) so we can track how much the
+  # binary shrinks and compare it against the standard build above. Fails the
+  # run if the profile misbehaves (deliberate: we want red until it's stable,
+  # then consider switching the shipped build to it).
+  windows-x86_64-size:
+    name: windows-x86_64-size
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-pc-windows-msvc-portable-size
+
+      - name: Build (release-size)
+        run: cargo build --profile release-size --target x86_64-pc-windows-msvc --locked
+
+      - name: Report binary size
+        shell: bash
+        run: |
+          set -eu
+          EXE="target/x86_64-pc-windows-msvc/release-size/meatshell.exe"
+          test -f "$EXE"
+          printf '%s\n' "## Binary size report" "| build | bytes |" "|---|---|" \
+            "| release-size (opt-level=s, lto=fat) | $(wc -c < "$EXE") |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Stage portable build
+        id: package
+        shell: bash
+        run: |
+          set -eu
+          STAGE="meatshell-windows-x86_64-portable-size"
+          TS="$(date -u +%Y%m%d-%H%M%S)"
+          rm -rf "$STAGE"
+          mkdir "$STAGE"
+          cp "target/x86_64-pc-windows-msvc/release-size/meatshell.exe" "$STAGE/"
+          echo "artifact-name=${STAGE}-${TS}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.artifact-name }}
+          path: meatshell-windows-x86_64-portable-size
           retention-days: 7
           if-no-files-found: error
 

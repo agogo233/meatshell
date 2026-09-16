@@ -167,6 +167,16 @@ codegen-units = 1
 strip = "symbols"
 panic = "abort"
 
+# Size-optimised CI variant: job `windows-x86_64-size` in
+# .github/workflows/release.yml builds with `--profile release-size` to produce
+# a smaller Windows artifact. Inherits the release settings above
+# (codegen-units=1, strip, panic=abort); `s` trades a little speed for size and
+# fat LTO removes cross-crate dead code that thin LTO misses.
+[profile.release-size]
+inherits = "release"
+opt-level = "s"
+lto = "fat"
+
 [profile.dev]
 opt-level = 0
 debug = 1
