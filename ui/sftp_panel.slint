@@ -246,8 +246,9 @@ export component SftpPanel inherits Rectangle {
     // Keep the editable path bar in sync when the directory changes elsewhere
     // (tree click, file double-click, terminal cd) (#54).
     changed current-path => {
-        path-input.text = root.current-path;
-        compact-path-input.text = root.current-path;
+        // The path fields stay in sync via their own `text` binding (see
+        // path-input / compact-path-input below), so here we only reset the list
+        // selection and type-ahead state when the directory changes (#54).
         root.selected-row = -1;
         root.jump-prefix = "";
         root.jump-target = -1;
@@ -324,10 +325,9 @@ export component SftpPanel inherits Rectangle {
                 // Dedicated drag handle to re-dock the panel. The toolbar is full
                 // of controls, so dragging "empty space" is unreliable; this grip
                 // is always grabbable and reports window-space coords (#dock).
-                Rectangle {
+                if !root.x-tight-toolbar : Rectangle {
                     // The tightest tier drops the grip (the panel edge still
                     // re-docks on a drag) so the file actions fit.
-                    visible: !root.x-tight-toolbar;
                     width: 16px;
                     y: (parent.height - self.height) / 2;
                     height: 22px;
@@ -362,8 +362,7 @@ export component SftpPanel inherits Rectangle {
                 // tab. Without it the grip's hover state visually bleeds into the
                 // tab's background, making the two look like a single overlapping
                 // shape (#toolbar-shadow-overlap).
-                Rectangle {
-                    visible: !root.x-tight-toolbar;
+                if !root.x-tight-toolbar : Rectangle {
                     width: 6px;
                     height: 22px;
                     background: transparent;
@@ -425,92 +424,93 @@ export component SftpPanel inherits Rectangle {
                            horizontal-alignment: center; vertical-alignment: center; }
                 }
 
-                // Editable path bar: type or paste a path and press Enter to
-                // jump there; copy / paste-jump buttons sit right after it (#54).
-                Rectangle {
-                    visible: root.panel-mode == "files" && !root.narrow-toolbar;
+                // Editable path bar + copy / paste-jump / parent buttons. In wide
+                // (non-narrow) Files mode they share the first row beside the path.
+                // Wrapped in a single `if` instead of four `visible:` flags: a hidden
+                // toolbar tier must drop the whole group as one slot-free unit. A
+                // `visible:false` element still occupies a layout cell (and its
+                // spacing) in Slint, and those orphaned gaps are what pushed the
+                // bookmark icon off the 120px panel (#sftp-narrow-dock).
+                if root.panel-mode == "files" && !root.narrow-toolbar : HorizontalLayout {
+                    spacing: 4px;
+                    horizontal-stretch: 1;
                     // Floor the path field at 100px so switching to Files mode
                     // (which reveals copy/paste/up/upload next to it) doesn't
                     // squeeze the input down to an unreadable strip in
                     // mid-width panels (~380–480px) (#toolbar-input-shrink).
-                    min-width: 100px;
-                    horizontal-stretch: 1;
-                    height: 22px;
-                    border-radius: Theme.radius-sm;
-                    background: Theme.bg-root;
-                    border-width: 1px;
-                    border-color: path-input.has-focus ? Theme.accent : Theme.border-subtle;
-                    path-input := TextInput {
-                        x: 6px;
-                        width: parent.width - 12px;
-                        height: parent.height;
-                        text: root.current-path;
-                        color: Theme.text-primary;
-                        // CJK-capable font so typed Chinese isn't tofu (#54).
-                        font-family: Theme.ui-font-family;
-                        font-size: Theme.fs-sm;
-                        vertical-alignment: center;
-                        single-line: true;
-                        accepted => { root.navigate(self.text); }
-                    }
-                }
-
-                // Copy the current path to the clipboard.
-                Rectangle {
-                    visible: root.panel-mode == "files" && !root.narrow-toolbar;
-                    width: 24px; height: 22px;
-                    border-radius: Theme.radius-sm;
-                    background: copy-ta.has-hover ? Theme.bg-hover : transparent;
-                    copy-ta := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => {
-                            path-input.select-all();
-                            path-input.copy();
-                            path-input.clear-selection();
+                    Rectangle {
+                        min-width: 100px;
+                        horizontal-stretch: 1;
+                        height: 22px;
+                        border-radius: Theme.radius-sm;
+                        background: Theme.bg-root;
+                        border-width: 1px;
+                        border-color: path-input.has-focus ? Theme.accent : Theme.border-subtle;
+                        path-input := TextInput {
+                            x: 6px;
+                            width: parent.width - 12px;
+                            height: parent.height;
+                            text: root.current-path;
+                            color: Theme.text-primary;
+                            // CJK-capable font so typed Chinese isn't tofu (#54).
+                            font-family: Theme.ui-font-family;
+                            font-size: Theme.fs-sm;
+                            vertical-alignment: center;
+                            single-line: true;
+                            accepted => { root.navigate(self.text); }
                         }
                     }
-                    Text { text: "\u{E14D}"; font-family: "Material Icons";
-                           color: Theme.text-secondary; font-size: Theme.fs-sm;
-                           horizontal-alignment: center; vertical-alignment: center; }
-                }
-
-                // Paste a path from the clipboard and jump straight to it.
-                Rectangle {
-                    visible: root.panel-mode == "files" && !root.narrow-toolbar;
-                    width: 24px; height: 22px;
-                    border-radius: Theme.radius-sm;
-                    background: pj-ta.has-hover ? Theme.bg-hover : transparent;
-                    pj-ta := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => {
-                            path-input.select-all();
-                            path-input.paste();
-                            root.navigate(path-input.text);
+                    // Copy the current path to the clipboard.
+                    Rectangle {
+                        width: 24px; height: 22px;
+                        border-radius: Theme.radius-sm;
+                        background: copy-ta.has-hover ? Theme.bg-hover : transparent;
+                        copy-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                path-input.select-all();
+                                path-input.copy();
+                                path-input.clear-selection();
+                            }
                         }
+                        Text { text: "\u{E14D}"; font-family: "Material Icons";
+                               color: Theme.text-secondary; font-size: Theme.fs-sm;
+                               horizontal-alignment: center; vertical-alignment: center; }
                     }
-                    Text { text: "\u{E14F}"; font-family: "Material Icons";
-                           color: Theme.text-secondary; font-size: Theme.fs-sm;
-                           horizontal-alignment: center; vertical-alignment: center; }
-                }
-
-                up-btn := Rectangle {
-                    visible: root.panel-mode == "files" && !root.narrow-toolbar;
-                    width: 24px; height: 22px;
-                    border-radius: Theme.radius-sm;
-                    background: up-ta.has-hover ? Theme.bg-hover : transparent;
-                    up-ta := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.navigate(".."); }
+                    // Paste a path from the clipboard and jump straight to it.
+                    Rectangle {
+                        width: 24px; height: 22px;
+                        border-radius: Theme.radius-sm;
+                        background: pj-ta.has-hover ? Theme.bg-hover : transparent;
+                        pj-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                path-input.select-all();
+                                path-input.paste();
+                                root.navigate(path-input.text);
+                            }
+                        }
+                        Text { text: "\u{E14F}"; font-family: "Material Icons";
+                               color: Theme.text-secondary; font-size: Theme.fs-sm;
+                               horizontal-alignment: center; vertical-alignment: center; }
                     }
-                    Text { text: "↑"; color: Theme.text-secondary; font-size: Theme.fs-md;
-                           horizontal-alignment: center; vertical-alignment: center; }
+                    up-btn := Rectangle {
+                        width: 24px; height: 22px;
+                        border-radius: Theme.radius-sm;
+                        background: up-ta.has-hover ? Theme.bg-hover : transparent;
+                        up-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.navigate(".."); }
+                        }
+                        Text { text: "↑"; color: Theme.text-secondary; font-size: Theme.fs-md;
+                               horizontal-alignment: center; vertical-alignment: center; }
+                    }
                 }
 
                 // Bookmarks: per-server saved paths. Stays a plain 24px icon in
                 // the compact toolbar (the path row moved down anyway). The icon
                 // tints when the current server has bookmarks.
-                Rectangle {
-                    visible: root.panel-mode == "files";
+                if root.panel-mode == "files" : Rectangle {
                     width: 24px; height: 22px;
                     border-radius: Theme.radius-sm;
                     background: bm-ta.has-hover ? Theme.bg-hover : transparent;
@@ -601,10 +601,9 @@ export component SftpPanel inherits Rectangle {
 
                 // Upload: a small menu offers file vs folder (#85). The remote
                 // SFTP upload handles both — only the local picker differs.
-                ul-btn := Rectangle {
+                if root.panel-mode == "files" && !root.tight-toolbar : Rectangle {
                     // The tight tiers fold upload into the "…" menu so bookmarks
                     // and parent navigation stay visible (#sftp-tight-toolbar).
-                    visible: root.panel-mode == "files" && !root.tight-toolbar;
                     width: root.narrow-toolbar ? 24px : 52px; height: 22px;
                     border-radius: Theme.radius-sm;
                     background: ul-ta.has-hover ? Theme.accent-hover : Theme.accent;
@@ -643,10 +642,9 @@ export component SftpPanel inherits Rectangle {
 
                 // Secondary path actions move into an overflow menu in compact
                 // mode so they never compete with the path field for width.
-                compact-more-btn := Rectangle {
+                if root.narrow-toolbar && root.panel-mode == "files" && !root.x-tight-toolbar : Rectangle {
                     // Leaves the row in the tightest tier: refresh and collapse
                     // take the path row instead, so the panel can always fold.
-                    visible: root.narrow-toolbar && root.panel-mode == "files" && !root.x-tight-toolbar;
                     width: 24px;
                     height: 22px;
                     border-radius: Theme.radius-sm;
@@ -749,8 +747,7 @@ export component SftpPanel inherits Rectangle {
                            font-size: Theme.fs-md; horizontal-alignment: center; vertical-alignment: center; }
                 }
 
-                Rectangle {
-                    visible: root.panel-mode == "files" && !root.narrow-toolbar;
+                if root.panel-mode == "files" && !root.narrow-toolbar : Rectangle {
                     width: 24px; height: 22px;
                     border-radius: Theme.radius-sm;
                     background: ref-ta.has-hover ? Theme.bg-hover : transparent;
@@ -766,8 +763,7 @@ export component SftpPanel inherits Rectangle {
                 // Minimise / restore the SFTP panel (#41). In the tightest tier
                 // the row above can't hold it, so the copy on the path row takes
                 // over — the panel must never become impossible to fold away.
-                Rectangle {
-                    visible: !root.x-tight-toolbar;
+                if !root.x-tight-toolbar : Rectangle {
                     width: 24px; height: 22px;
                     border-radius: Theme.radius-sm;
                     background: min-ta.has-hover ? Theme.bg-hover : transparent;
