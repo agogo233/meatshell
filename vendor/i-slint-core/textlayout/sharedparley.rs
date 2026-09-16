@@ -15,7 +15,7 @@ use crate::{
     Color,
     graphics::FontRequest,
     item_rendering::PlainOrStyledText,
-    items::TextStrokeStyle,
+    items::{InputType, TextStrokeStyle},
     lengths::{
         LogicalBorderRadius, LogicalLength, LogicalPoint, LogicalRect, LogicalSize, PhysicalPx,
         PointLengths, ScaleFactor, SizeLengths,
@@ -634,6 +634,62 @@ struct ElisionInfo {
     elipsis_glyph: parley::layout::Glyph,
     font_for_elipsis_glyph: parley::FontData,
     max_physical_width: PhysicalLength,
+}
+
+// Meatshell vendor patch: slint's TextInput path has no layout cache — every
+// hit test and every redraw reshapes the whole document from scratch, which
+// makes drag-selection in the editor feel sluggish. Reuse the Text-element
+// cache, but shape from content properties only: reading the cursor and
+// selection properties (as `visual_representation` does) inside the cache
+// closure would register them as dependencies, and they change on every
+// mouse move, defeating the cache.
+fn can_cache_text_input_paragraphs(text_input: Pin<&crate::items::TextInput>) -> bool {
+    // Preedit text and password fields display a different (substituted or
+    // inserted) string than the raw `text` property; keep those on the
+    // exact, uncached path.
+    text_input.preedit_text().is_empty()
+        && !matches!(text_input.input_type(), InputType::Password)
+        // The cached paragraphs are shaped without baking the selection
+        // foreground into the run brushes, so they are only visually
+        // equivalent when the selection foreground matches a solid text
+        // color (a gradient would be flattened to its first stop for the
+        // fill but not for the baked selection brush).
+        && match text_input.color() {
+            crate::graphics::Brush::SolidColor(color) => {
+                color == text_input.selection_foreground_color()
+            }
+            _ => false,
+        }
+}
+
+fn get_or_create_text_input_paragraphs<'a>(
+    cache: Option<&'a TextLayoutCache>,
+    item_rc: &crate::item_tree::ItemRc,
+    text_input: Pin<&crate::items::TextInput>,
+    scale_factor: ScaleFactor,
+    font_context: &mut parley::FontContext,
+) -> CachedParagraphsGuard<'a> {
+    if let Some(cache) = cache {
+        let mut entry = cache.inner.get_or_update_cache_entry_ref(item_rc, || {
+            let builder = LayoutWithoutLineBreaksBuilder::new(
+                Some(text_input.font_request(item_rc)),
+                text_input.wrap(),
+                None,
+                scale_factor,
+            );
+            create_text_paragraphs(
+                &builder,
+                font_context,
+                PlainOrStyledText::Plain(text_input.text()),
+                None,
+                Color::default(),
+            )
+        });
+        let paragraphs = std::mem::take(&mut *entry);
+        CachedParagraphsGuard { paragraphs: Some(paragraphs), container: Some(entry) }
+    } else {
+        CachedParagraphsGuard { paragraphs: None, container: None }
+    }
 }
 
 struct TextParagraph {
@@ -1349,6 +1405,7 @@ pub fn draw_text_input(
     item_rc: &crate::item_tree::ItemRc,
     size: LogicalSize,
     password_character: Option<fn() -> char>,
+    cache: Option<&TextLayoutCache>,
 ) {
     let width = size.width_length();
     let height = size.height_length();
@@ -1392,18 +1449,29 @@ pub fn draw_text_input(
 
     let mut font_ctx = item_renderer.window().context().font_context().borrow_mut();
 
-    let paragraphs_without_linebreaks = create_text_paragraphs(
-        &layout_builder,
-        &mut font_ctx,
-        PlainOrStyledText::Plain(text),
-        selection_and_color,
-        Color::default(),
-    );
+    // Meatshell vendor patch: cache the shaped paragraphs keyed on the
+    // content properties only, so a drag-selection (which only moves the
+    // cursor and selection) reuses them instead of reshaping the whole
+    // document on every event.
+    let mut guard = if cache.is_some() && can_cache_text_input_paragraphs(text_input) {
+        get_or_create_text_input_paragraphs(cache, item_rc, text_input, scale_factor, &mut font_ctx)
+    } else {
+        CachedParagraphsGuard {
+            paragraphs: Some(create_text_paragraphs(
+                &layout_builder,
+                &mut font_ctx,
+                PlainOrStyledText::Plain(text),
+                selection_and_color,
+                Color::default(),
+            )),
+            container: None,
+        }
+    };
 
     let layout = layout(
         &layout_builder,
         &mut font_ctx,
-        paragraphs_without_linebreaks,
+        guard.paragraphs.take().unwrap_or_default(),
         scale_factor,
         text_input.wrap(),
         LayoutOptions::new_from_textinput(text_input, Some(width), Some(height)),
@@ -1459,6 +1527,10 @@ pub fn draw_text_input(
     }
 
     item_renderer.restore_state();
+
+    // Meatshell vendor patch: put the (re-broken) paragraphs back into the
+    // cache so the next hit test or redraw reshapes nothing.
+    guard.paragraphs = Some(layout.paragraphs);
 }
 
 pub fn text_size(
@@ -1573,6 +1645,7 @@ pub fn text_input_byte_offset_for_position(
     text_input: Pin<&crate::items::TextInput>,
     item_rc: &crate::item_tree::ItemRc,
     pos: LogicalPoint,
+    cache: Option<&TextLayoutCache>,
 ) -> usize {
     let Some(scale_factor) = renderer.scale_factor() else {
         return 0;
@@ -1598,23 +1671,31 @@ pub fn text_input_byte_offset_for_position(
     );
 
     let visual_representation = text_input.visual_representation(None);
-    let paragraphs_without_linebreaks = create_text_paragraphs(
-        &layout_builder,
-        &mut font_ctx,
-        PlainOrStyledText::Plain(visual_representation.text.clone()),
-        None,
-        Color::default(),
-    );
+    let mut guard = if cache.is_some() && can_cache_text_input_paragraphs(text_input) {
+        get_or_create_text_input_paragraphs(cache, item_rc, text_input, scale_factor, &mut font_ctx)
+    } else {
+        CachedParagraphsGuard {
+            paragraphs: Some(create_text_paragraphs(
+                &layout_builder,
+                &mut font_ctx,
+                PlainOrStyledText::Plain(visual_representation.text.clone()),
+                None,
+                Color::default(),
+            )),
+            container: None,
+        }
+    };
 
     let layout = layout(
         &layout_builder,
         &mut font_ctx,
-        paragraphs_without_linebreaks,
+        guard.paragraphs.take().unwrap_or_default(),
         scale_factor,
         text_input.wrap(),
         LayoutOptions::new_from_textinput(text_input, Some(width), Some(height)),
     );
     let byte_offset = layout.byte_offset_from_point(pos);
+    guard.paragraphs = Some(layout.paragraphs);
     visual_representation.map_byte_offset_from_visual_text_to_actual_text(byte_offset)
 }
 
@@ -1623,6 +1704,7 @@ pub fn text_input_cursor_rect_for_byte_offset(
     text_input: Pin<&crate::items::TextInput>,
     item_rc: &crate::item_tree::ItemRc,
     byte_offset: usize,
+    cache: Option<&TextLayoutCache>,
 ) -> LogicalRect {
     let Some(scale_factor) = renderer.scale_factor() else {
         return LogicalRect::default();
@@ -1653,23 +1735,31 @@ pub fn text_input_cursor_rect_for_byte_offset(
     let visual_representation = text_input.visual_representation(None);
     let byte_offset = visual_representation.map_byte_offset_from_actual_to_visual_text(byte_offset);
 
-    let paragraphs_without_linebreaks = create_text_paragraphs(
-        &layout_builder,
-        &mut font_ctx,
-        PlainOrStyledText::Plain(visual_representation.text),
-        None,
-        Color::default(),
-    );
+    let mut guard = if cache.is_some() && can_cache_text_input_paragraphs(text_input) {
+        get_or_create_text_input_paragraphs(cache, item_rc, text_input, scale_factor, &mut font_ctx)
+    } else {
+        CachedParagraphsGuard {
+            paragraphs: Some(create_text_paragraphs(
+                &layout_builder,
+                &mut font_ctx,
+                PlainOrStyledText::Plain(visual_representation.text),
+                None,
+                Color::default(),
+            )),
+            container: None,
+        }
+    };
 
     let layout = layout(
         &layout_builder,
         &mut font_ctx,
-        paragraphs_without_linebreaks,
+        guard.paragraphs.take().unwrap_or_default(),
         scale_factor,
         text_input.wrap(),
         LayoutOptions::new_from_textinput(text_input, Some(width), Some(height)),
     );
     let cursor_rect = layout
         .cursor_rect_for_byte_offset(byte_offset, text_input.text_cursor_width() * scale_factor);
+    guard.paragraphs = Some(layout.paragraphs);
     cursor_rect / scale_factor
 }
