@@ -945,14 +945,9 @@ export component AppWindow inherits Window {
     in-out property <bool> editor-hl-enabled: true;
     in-out property <bool> editor-hl-active: false;
     in-out property <[HlLine]> editor-hl-lines;
-    // Plain-branch gutter pitch: 2048 non-empty "M" lines measured with the
-    // editor's own font. Each row's preferred-height is ceiled per row
-    // (items/text.rs) while the body stacks paragraphs at fractional offsets
-    // (sharedparley.rs), so per-row ceil error drifts line over line.
-    // Re-deriving the pitch from one ceiled total divides that error down
-    // to 1/2048 px per line. Rust sets the text once at init.
+    // 2048 "M" lines feeding the root-level pitch probe (`ed-pitch`);
+    // Rust sets it once at window init.
     in-out property <string> editor-probe-text;
-    property <length> ed-pitch: max(1px, probe.preferred-height) / 2048;
     // Bracket-match pair (byte offsets into editor-content, -1 = none).
     // Rust owns both values: the check callback computes them and re-renders
     // the affected overlay rows.
@@ -1320,6 +1315,25 @@ export component AppWindow inherits Window {
     // other widget. A focused terminal accepts ⌘⇧N / Ctrl+Shift+N on its own
     // (terminal_view.slint), which stops propagation, so the two never
     // double-fire.
+    // Hidden line-pitch probe for the plain-branch gutter: root.editor-probe-text
+    // holds 2048 non-empty "M" lines in the editor's font. Its ceiled
+    // preferred-height / 2048 recovers the fractional line pitch that a single
+    // ceiled per-row measurement cannot (one ceil over 2048 lines instead of
+    // one per row). Must stay a direct child of this component: ids inside
+    // repeated elements are invisible to root-scope references (lookup.rs).
+    probe := Text {
+        x: 0px;
+        y: -1000px;
+        width: 0px;
+        height: 0px;
+        opacity: 0;
+        single-line: false;
+        wrap: no-wrap;
+        text: root.editor-probe-text;
+        font-family: Theme.ui-font-family;
+        font-size: Theme.fs-md;
+    }
+    property <length> ed-pitch: max(1px, probe.preferred-height) / 2048;
     shortcut-scope := FocusScope {
         focus-on-click: false;
         focus-on-tab-navigation: false;
@@ -3581,22 +3595,6 @@ export component AppWindow inherits Window {
                                             color: Theme.text-muted;
                                         }
                                     }
-                                }
-                                // Hidden pitch probe: 2048 "M" lines (root.editor-probe-text),
-                                // parked outside the 48px clip like line-measure. Measures
-                                // the font's ceiled total height for ed-pitch; explicit x/y
-                                // keeps it out of every layout's aggregation.
-                                probe := TextInput {
-                                    x: parent.width;
-                                    y: parent.height;
-                                    width: 1px;
-                                    height: 1px;
-                                    read-only: true;
-                                    single-line: false;
-                                    wrap: no-wrap;
-                                    text: root.editor-probe-text;
-                                    font-family: edit-input.font-family;
-                                    font-size: edit-input.font-size;
                                 }
                             }
                             Rectangle { width: 1px; background: Theme.border-subtle; }
