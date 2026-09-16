@@ -899,6 +899,10 @@ fn open_window(
         }
         window.set_output_highlight_enabled(s.output_highlight_enabled());
         window.set_editor_hl_enabled(s.editor_highlight_enabled());
+        // Editor gutter pitch probe (app.slint `ed-pitch`): 2048 non-empty "M"
+        // lines; the .slint side measures their ceiled total and divides out
+        // the per-row ceil error of the wrapped-line gutter.
+        window.set_editor_probe_text(("M\n".repeat(2047) + "M").into());
         window.set_json_format_output(s.json_format_output());
         window.set_output_highlight_preset(s.output_highlight_preset().into());
         window.set_output_highlight_rules(output_highlight_rule_model(&s));

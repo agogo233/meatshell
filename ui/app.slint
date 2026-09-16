@@ -945,6 +945,14 @@ export component AppWindow inherits Window {
     in-out property <bool> editor-hl-enabled: true;
     in-out property <bool> editor-hl-active: false;
     in-out property <[HlLine]> editor-hl-lines;
+    // Plain-branch gutter pitch: 2048 non-empty "M" lines measured with the
+    // editor's own font. Each row's preferred-height is ceiled per row
+    // (items/text.rs) while the body stacks paragraphs at fractional offsets
+    // (sharedparley.rs), so per-row ceil error drifts line over line.
+    // Re-deriving the pitch from one ceiled total divides that error down
+    // to 1/2048 px per line. Rust sets the text once at init.
+    in-out property <string> editor-probe-text;
+    property <length> ed-pitch: max(1px, probe.preferred-height) / 2048;
     // Bracket-match pair (byte offsets into editor-content, -1 = none).
     // Rust owns both values: the check callback computes them and re-renders
     // the affected overlay rows.
@@ -3507,7 +3515,13 @@ export component AppWindow inherits Window {
                                     spacing: 0px;
                                     padding: 0px;
                                     for line[index] in root.editor-lines: Rectangle {
-                                        height: line-measure.preferred-height;
+                                        // k_i * pitch instead of ceil(k_i * pitch): the
+                                        // body stacks wrapped paragraphs at fractional
+                                        // offsets, so per-row ceiled heights drift line
+                                        // over line (gutter lagged the text as it grew).
+                                        height: max(1px,
+                                            round(line-measure.preferred-height / root.ed-pitch)
+                                            * root.ed-pitch);
                                         // Use TextInput for identical font fallback,
                                         // wrapping and empty-line metrics. The clipped
                                         // measurement sits outside the visible gutter.
@@ -3524,7 +3538,9 @@ export component AppWindow inherits Window {
                                         }
                                         Text {
                                             width: parent.width - 6px;
-                                            height: line-measure.preferred-height;
+                                            height: max(1px,
+                                                round(line-measure.preferred-height / root.ed-pitch)
+                                                * root.ed-pitch);
                                             text: "\{index + 1}";
                                             horizontal-alignment: right;
                                             vertical-alignment: top;
@@ -3565,6 +3581,22 @@ export component AppWindow inherits Window {
                                             color: Theme.text-muted;
                                         }
                                     }
+                                }
+                                // Hidden pitch probe: 2048 "M" lines (root.editor-probe-text),
+                                // parked outside the 48px clip like line-measure. Measures
+                                // the font's ceiled total height for ed-pitch; explicit x/y
+                                // keeps it out of every layout's aggregation.
+                                probe := TextInput {
+                                    x: parent.width;
+                                    y: parent.height;
+                                    width: 1px;
+                                    height: 1px;
+                                    read-only: true;
+                                    single-line: false;
+                                    wrap: no-wrap;
+                                    text: root.editor-probe-text;
+                                    font-family: edit-input.font-family;
+                                    font-size: edit-input.font-size;
                                 }
                             }
                             Rectangle { width: 1px; background: Theme.border-subtle; }
