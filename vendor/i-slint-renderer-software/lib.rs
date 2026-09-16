@@ -972,7 +972,7 @@ impl RendererSealed for SoftwareRenderer {
             #[cfg(feature = "systemfonts")]
             (fonts::Font::VectorFont(_), false) => {
                 drop(font_ctx);
-                sharedparley::text_input_byte_offset_for_position(
+                sharedparley::text_input_byte_offset_for_position_with_cache(
                     self,
                     text_input,
                     item_rc,
@@ -1067,7 +1067,7 @@ impl RendererSealed for SoftwareRenderer {
             #[cfg(feature = "systemfonts")]
             (fonts::Font::VectorFont(_), false) => {
                 drop(font_ctx);
-                sharedparley::text_input_cursor_rect_for_byte_offset(
+                sharedparley::text_input_cursor_rect_for_byte_offset_with_cache(
                     self,
                     text_input,
                     item_rc,
@@ -2793,7 +2793,7 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
             #[cfg(feature = "systemfonts")]
             (fonts::Font::VectorFont(_), false) => {
                 drop(font_ctx);
-                sharedparley::draw_text_input(
+                sharedparley::draw_text_input_with_cache(
                     self,
                     text_input,
                     self_rc,

@@ -1399,7 +1399,24 @@ pub fn link_under_cursor(
     result
 }
 
+// Meatshell vendor patch: external renderers (femtovg, skia, ...) are
+// compiled against this crate and call `draw_text_input` with the original
+// five-argument signature, so that signature must stay stable. Renderers
+// that own a `TextLayoutCache` use the `_with_cache` variant instead, which
+// skips reshaping the document on every hit test and redraw.
 pub fn draw_text_input(
+    item_renderer: &mut impl GlyphRenderer,
+    text_input: Pin<&crate::items::TextInput>,
+    item_rc: &crate::item_tree::ItemRc,
+    size: LogicalSize,
+    password_character: Option<fn() -> char>,
+) {
+    draw_text_input_with_cache(
+        item_renderer, text_input, item_rc, size, password_character, None,
+    )
+}
+
+pub fn draw_text_input_with_cache(
     item_renderer: &mut impl GlyphRenderer,
     text_input: Pin<&crate::items::TextInput>,
     item_rc: &crate::item_tree::ItemRc,
@@ -1640,7 +1657,18 @@ pub fn font_metrics(
     }
 }
 
+// Meatshell vendor patch: keep the original four-argument signature stable
+// for external renderers; see `draw_text_input` above.
 pub fn text_input_byte_offset_for_position(
+    renderer: &dyn RendererSealed,
+    text_input: Pin<&crate::items::TextInput>,
+    item_rc: &crate::item_tree::ItemRc,
+    pos: LogicalPoint,
+) -> usize {
+    text_input_byte_offset_for_position_with_cache(renderer, text_input, item_rc, pos, None)
+}
+
+pub fn text_input_byte_offset_for_position_with_cache(
     renderer: &dyn RendererSealed,
     text_input: Pin<&crate::items::TextInput>,
     item_rc: &crate::item_tree::ItemRc,
@@ -1699,7 +1727,24 @@ pub fn text_input_byte_offset_for_position(
     visual_representation.map_byte_offset_from_visual_text_to_actual_text(byte_offset)
 }
 
+// Meatshell vendor patch: keep the original four-argument signature stable
+// for external renderers; see `draw_text_input` above.
 pub fn text_input_cursor_rect_for_byte_offset(
+    renderer: &dyn RendererSealed,
+    text_input: Pin<&crate::items::TextInput>,
+    item_rc: &crate::item_tree::ItemRc,
+    byte_offset: usize,
+) -> LogicalRect {
+    text_input_cursor_rect_for_byte_offset_with_cache(
+        renderer,
+        text_input,
+        item_rc,
+        byte_offset,
+        None,
+    )
+}
+
+pub fn text_input_cursor_rect_for_byte_offset_with_cache(
     renderer: &dyn RendererSealed,
     text_input: Pin<&crate::items::TextInput>,
     item_rc: &crate::item_tree::ItemRc,
