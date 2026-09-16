@@ -435,6 +435,22 @@ fn create_text_paragraphs(
     paragraphs
 }
 
+/// Meatshell vendor patch: the height a paragraph occupies in the stack. An
+/// empty line is laid out from a zero-width space whose own vertical extent
+/// parley reports as zero (see `create_text_paragraphs`), so it is given the
+/// height of a real line instead — otherwise it collapses onto its neighbour:
+/// the following line overlaps it, a click on the empty line resolves to the
+/// neighbour's text, and the empty line keeps no slot of its own. Non-empty
+/// paragraphs are never affected, since real text always shapes into a line
+/// with a positive extent.
+fn stacked_height(para: &TextParagraph, empty_line_height: f32) -> f32 {
+    if para.range.len() == 0 && para.layout.height() <= 0.0 {
+        empty_line_height
+    } else {
+        para.layout.height()
+    }
+}
+
 /// `text_wrap` is passed separately from the shaped paragraphs because
 /// `text_layout_info()` calls `text_size()` with `NoWrap` for horizontal sizing.
 /// Note: parley currently uses `WordBreak` while shaping via `analyze_text()`,
@@ -477,7 +493,10 @@ fn layout(
             None
         };
 
-    let mut para_y = 0.0;
+    // Meatshell vendor patch: two passes. The empty-line reference box comes
+    // from the first real sibling line, which only exists once every
+    // paragraph has been broken into lines, so it is captured before the
+    // paragraphs are stacked.
     for para in paragraphs.iter_mut() {
         para.layout.break_all_lines(
             max_physical_width.filter(|_| text_wrap != TextWrap::NoWrap).map(|width| width.get()),
@@ -495,9 +514,32 @@ fn layout(
             },
             parley::AlignmentOptions::default(),
         );
+    }
 
+    // Meatshell vendor patch: an empty line is laid out from a zero-width
+    // space (see `create_text_paragraphs`), but parley's vertical extent for
+    // that stand-in is unreliable — observed as a zero-height phantom line
+    // (caret collapses to a barely visible ~1px mark glued to the left edge)
+    // as well as a full-height bar. Capture a real line box from the first
+    // paragraph that shapes into one (any font in this app is uniform across
+    // lines, so a sibling line's metrics describe the box the empty line
+    // would have if it held text); fall back to the font pixel size when the
+    // whole document is empty lines. Stacking, click-to-cursor placement and
+    // selection geometry all use this box for empty lines via `stacked_height`
+    // and `caret_fallback`, so the empty line keeps a slot of its own instead
+    // of collapsing onto its neighbour.
+    let caret_fallback = paragraphs
+        .iter()
+        .filter(|p| p.range.len() > 0)
+        .filter_map(|p| Some(*p.layout.lines().next()?.metrics()))
+        .find(|m| m.max_coord > m.min_coord)
+        .map(|m| (m.min_coord, PhysicalLength::new(m.max_coord - m.min_coord)))
+        .unwrap_or((0.0, layout_builder.pixel_size * scale_factor));
+
+    let mut para_y = 0.0;
+    for para in paragraphs.iter_mut() {
         para.y = PhysicalLength::new(para_y);
-        para_y += para.layout.height();
+        para_y += stacked_height(para, caret_fallback.1.get());
     }
 
     let max_width = paragraphs
@@ -512,30 +554,15 @@ fn layout(
         .fold(PhysicalLength::zero(), PhysicalLength::max);
     let height = paragraphs
         .last()
-        .map_or(PhysicalLength::zero(), |p| p.y + PhysicalLength::new(p.layout.height()));
+        .map_or(PhysicalLength::zero(), |p| {
+            p.y + PhysicalLength::new(stacked_height(p, caret_fallback.1.get()))
+        });
 
     let y_offset = match (max_physical_height, options.vertical_align) {
         (Some(max_height), TextVerticalAlignment::Center) => (max_height - height) / 2.0,
         (Some(max_height), TextVerticalAlignment::Bottom) => max_height - height,
         (None, _) | (Some(_), TextVerticalAlignment::Top) => PhysicalLength::new(0.0),
     };
-
-    // Meatshell vendor patch: an empty line is laid out from a zero-width
-    // space (see `create_text_paragraphs`), but parley's vertical extent for
-    // that stand-in is unreliable — observed as a zero-height phantom line
-    // (caret collapses to a barely visible ~1px mark glued to the left edge)
-    // as well as a full-height bar. Capture a real line box from the first
-    // paragraph that shapes into one (any font in this app is uniform across
-    // lines, so a sibling line's metrics describe the caret the empty line
-    // would have if it held text); fall back to the font pixel size when the
-    // whole document is empty lines.
-    let caret_fallback = paragraphs
-        .iter()
-        .filter(|p| p.range.len() > 0)
-        .filter_map(|p| Some(*p.layout.lines().next()?.metrics()))
-        .find(|m| m.max_coord > m.min_coord)
-        .map(|m| (m.min_coord, PhysicalLength::new(m.max_coord - m.min_coord)))
-        .unwrap_or((0.0, layout_builder.pixel_size * scale_factor));
 
     Layout {
         paragraphs,
@@ -544,6 +571,7 @@ fn layout(
         max_width,
         height,
         max_physical_height,
+        max_physical_width,
         caret_fallback,
     }
 }
@@ -852,6 +880,10 @@ struct Layout {
     max_width: PhysicalLength,
     height: PhysicalLength,
     max_physical_height: Option<PhysicalLength>,
+    /// Meatshell vendor patch: the width the text can expand to, kept so an
+    /// empty line can be painted across it when it is part of a selection
+    /// (an empty line holds no glyphs, so it has no width of its own).
+    max_physical_width: Option<PhysicalLength>,
     elision_info: Option<ElisionInfo>,
     /// Meatshell vendor patch: a representative real line box (top offset and
     /// height, both physical px) taken from the first non-empty paragraph. An
@@ -876,9 +908,17 @@ impl Layout {
         }
 
         let idx = self.paragraphs.binary_search_by(|paragraph| {
+            // Meatshell vendor patch: the empty line's own stand-in reports a
+            // zero extent, which would collapse its slot here and make a click
+            // on the empty line resolve to the neighbour's text. Test against
+            // the height the empty line actually occupies in the stack.
+            let height = PhysicalLength::new(stacked_height(
+                paragraph,
+                self.caret_fallback.1.get(),
+            ));
             if y < paragraph.y {
                 core::cmp::Ordering::Greater
-            } else if y >= paragraph.y + PhysicalLength::new(paragraph.layout.height()) {
+            } else if y >= paragraph.y + height {
                 core::cmp::Ordering::Less
             } else {
                 core::cmp::Ordering::Equal
@@ -897,6 +937,31 @@ impl Layout {
         mut callback: impl FnMut(PhysicalRect),
     ) {
         for paragraph in &self.paragraphs {
+            // Meatshell vendor patch: an empty line holds no bytes (its
+            // `range` is zero-length), so `selection_start < selection_end`
+            // below can never hold for it and it never painted selection
+            // background — a selection crossing an empty line left a gap in
+            // the highlight. Paint the whole line, using the same reference
+            // box the caret uses, so the empty line reads as selected like
+            // its neighbours. Half-open: the empty line's byte position must
+            // be strictly inside the selection, so selecting exactly up to
+            // the empty line (without entering it) leaves it unhighlighted.
+            if paragraph.range.len() == 0
+                && selection_range.start <= paragraph.range.start
+                && selection_range.end > paragraph.range.start
+            {
+                let (line_top, line_height) = self.caret_fallback;
+                let width = self.max_physical_width.unwrap_or(self.max_width);
+                callback(PhysicalRect::new(
+                    PhysicalPoint::from_lengths(
+                        PhysicalLength::zero(),
+                        self.y_offset + paragraph.y + PhysicalLength::new(line_top),
+                    ),
+                    PhysicalSize::new(width.get(), line_height.get()),
+                ));
+                continue;
+            }
+
             let selection_start = selection_range.start.max(paragraph.range.start);
             let selection_end = selection_range.end.min(paragraph.range.end);
 
