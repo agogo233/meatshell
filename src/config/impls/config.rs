@@ -2461,17 +2461,50 @@ impl ConfigStore {
     /// Import sessions from a MeatShell, FinalShell or MobaXterm export file.
     pub fn import_from(&mut self, path: &Path) -> Result<(usize, usize)> {
         let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-        // MobaXterm `.mxtsessions` files are Windows-1252; MeatShell / FinalShell
-        // exports are UTF-8. Decode UTF-8 first, falling back to CP1252 so a
-        // non-ASCII session name survives the import instead of failing the read.
+        // MobaXterm writes `.mxtsessions` in the system ANSI code page —
+        // Windows-1252 on Western locales, GBK (a superset of GB2312, CP936)
+        // on Simplified-Chinese ones; MeatShell / FinalShell exports are
+        // UTF-8. Decode UTF-8 first, then a byte-pattern-gated GBK pass so
+        // Chinese session names, folder names and key paths survive the
+        // import, and only then fall back to CP1252. Known limitation: a
+        // file whose only non-ASCII content is a single two-byte character
+        // still decodes as CP1252; pairing is required to keep Western
+        // accents safe.
         let raw = match String::from_utf8(bytes) {
             Ok(raw) => raw,
-            Err(err) => encoding_rs::WINDOWS_1252
-                .decode_without_bom_handling_and_without_replacement(err.as_bytes())
-                .map(|value| value.into_owned())
-                .with_context(|| format!("failed to decode {}", path.display()))?,
+            Err(err) => {
+                let bytes = err.into_bytes();
+                Self::decode_gbk(&bytes)
+                    .or_else(|| {
+                        encoding_rs::WINDOWS_1252
+                            .decode_without_bom_handling_and_without_replacement(&bytes)
+                            .map(|value| value.into_owned())
+                    })
+                    .with_context(|| format!("failed to decode {}", path.display()))?
+            }
         };
         self.import_json(&raw)
+    }
+
+    /// Decode a GBK/GB2312 byte stream only when the bytes actually look
+    /// like Chinese text: every character is a pair of high bytes, so an
+    /// ANSI export containing CJK has several adjacent ≥0x80 pairs, while
+    /// CP1252 text has only isolated accents (é, ß, …) between ASCII. The
+    /// clean-decode requirement rejects the remaining Western byte
+    /// sequences, which end up dangling or hitting invalid trail bytes
+    /// (`%`, `#`, `=`, CR — the very separators MobaXterm writes).
+    fn decode_gbk(bytes: &[u8]) -> Option<String> {
+        let high = bytes.iter().filter(|b| **b >= 0x80).count();
+        let pairs = bytes
+            .windows(2)
+            .filter(|w| w[0] >= 0x80 && w[1] >= 0x80)
+            .count();
+        if pairs < 2 || pairs * 5 < high * 2 {
+            return None;
+        }
+        encoding_rs::GBK
+            .decode_without_bom_handling_and_without_replacement(bytes)
+            .map(|value| value.into_owned())
     }
 
     // ── Passphrase-encrypted portable bundle (#P3-I) ──────────────────────
@@ -3448,6 +3481,48 @@ old-switch=#98#7%10.0.0.1%23%cisco%0%0#15%80%24#0# #-1\r\n";
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&store.path);
+    }
+
+    #[test]
+    fn imports_mobaxterm_gbk_file() {
+        // A Simplified-Chinese Windows MobaXterm export is GBK (CP936):
+        // Chinese session names, folder names and a key path with a Chinese
+        // user directory must survive the import instead of turning into
+        // CP1252 mojibake.
+        let text = "\
+[Bookmarks]\r\n\
+SubRep=上海机房\r\n\
+生产服务器=#109#0%192.0.2.70%22%root%%1%1%%%%%%0%%_CurrentDrive_\\Users\\张三\\.ssh\\id.ppk%%1%1%%2%proxy.example.com%8080%me#MobaFont%10%0%0%1%15%236,236,236%30,30,30#0# 备注#-1\r\n";
+        let data = encoding_rs::GBK.encode(text).0;
+        let path = std::env::temp_dir().join(format!("ms-mxt-gbk-{}.mxtsessions", Uuid::new_v4()));
+        std::fs::write(&path, &data[..]).unwrap();
+
+        let mut store = temp_store();
+        assert_eq!(store.import_from(&path).unwrap(), (1, 0));
+        let session = &store.cache.sessions[0];
+        assert_eq!(session.name, "生产服务器");
+        assert_eq!(session.group, "上海机房");
+        assert_eq!(session.host, "192.0.2.70");
+        assert_eq!(session.user, "root");
+        assert_eq!(session.private_key_path, "C:\\Users\\张三\\.ssh\\id.ppk");
+        assert_eq!(session.note, "备注");
+        assert!(matches!(session.auth, AuthMethod::Key));
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&store.path);
+    }
+
+    #[test]
+    fn decode_gbk_rejects_western_and_accepts_chinese() {
+        // CP1252 "café" + separators never form two adjacent high bytes.
+        let western = b"caf\xe9=#109#0%h%22%root%0#15#0# #-1\r\n";
+        assert!(ConfigStore::decode_gbk(western).is_none());
+        // Real Chinese text: paired high bytes decoding cleanly as GBK.
+        let chinese = encoding_rs::GBK.encode("名称=生产").0;
+        assert_eq!(
+            ConfigStore::decode_gbk(&chinese).as_deref(),
+            Some("名称=生产")
+        );
     }
 
     #[test]

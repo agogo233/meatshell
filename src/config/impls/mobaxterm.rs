@@ -1,7 +1,10 @@
 //! MobaXterm `.mxtsessions` export compatibility.
 //!
-//! MobaXterm exports sessions as a Windows-1252 INI file (see the community
-//! reverse-engineering notes, e.g. Ruzgfpegk's ".mxtsessions file format"):
+//! MobaXterm exports sessions as an ANSI INI file — Windows-1252 on
+//! Western locales, GBK/GB2312 (CP936) on Simplified-Chinese ones;
+//! `ConfigStore::import_from` decodes both before this parser sees a
+//! `&str` (see the community reverse-engineering notes, e.g.
+//! Ruzgfpegk's ".mxtsessions file format"):
 //!
 //! ```text
 //! [Bookmarks]              ; root folder, `SubRep` is the folder name
