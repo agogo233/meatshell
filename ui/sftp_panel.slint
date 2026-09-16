@@ -181,14 +181,24 @@ export component SftpPanel inherits Rectangle {
     property <bool> narrow-toolbar: !root.show-tree && root.width < 480px;
     // Below 280px the upload button moves into the "…" overflow menu so
     // bookmarks and parent navigation stay visible instead of being pushed out
-    // (#sftp-tight-toolbar). Each tier's row is sized to fit its width band, so
-    // no fixed-width button gets crushed or clipped at the panel edge.
+    // (#sftp-tight-toolbar). The overflow menu itself surfaces from ~168px; in
+    // the narrowest band (<168px) the path row still carries refresh + collapse
+    // copies, so the panel is always foldable. Each tier's row is sized to fit
+    // its width band, so no fixed-width button gets crushed or clipped.
     property <bool> tight-toolbar: root.narrow-toolbar && root.width < 280px;
     // Below 250px the compact row is too wide (it needs ~246px): the drag grip
     // and the tab gutter give way, the tabs shrink and the gutters tighten. The
     // overflow menu leaves the row — refresh and collapse take the path row
     // instead, so a user-shrunk panel can always be folded away again.
     property <bool> x-tight-toolbar: root.narrow-toolbar && root.width < 250px;
+    // Progressive disclosure on the 120px-side dock: each extra 24px button needs
+    // ~26px (its width + a 2px gutter) of row space, so surface it on the first
+    // row only once the panel is wide enough to hold it (#sftp-narrow-dock). The
+    // path row keeps copies of refresh / collapse for the very narrowest band so
+    // those actions stay reachable.
+    property <bool> row1-refresh: root.narrow-toolbar && root.width >= 142px;
+    property <bool> row1-more: root.narrow-toolbar && root.width >= 168px;
+    property <bool> row1-min: root.narrow-toolbar && root.width >= 194px;
     // The user's own toggle (column menu). The effective `show-*-col` above may
     // drop a column the panel's width can't hold, so the menu marks the
     // preference — otherwise an auto-hidden column reads as "you turned it off".
@@ -642,9 +652,10 @@ export component SftpPanel inherits Rectangle {
 
                 // Secondary path actions move into an overflow menu in compact
                 // mode so they never compete with the path field for width.
-                if root.narrow-toolbar && root.panel-mode == "files" && !root.x-tight-toolbar : Rectangle {
-                    // Leaves the row in the tightest tier: refresh and collapse
-                    // take the path row instead, so the panel can always fold.
+                if root.panel-mode == "files" && root.row1-more : Rectangle {
+                    // On a wide-enough panel the overflow menu moves up to the first
+                    // row, so refresh and collapse take the path row only in the
+                    // narrowest band (see row1-refresh / row1-min below).
                     width: 24px;
                     height: 22px;
                     border-radius: Theme.radius-sm;
@@ -703,7 +714,7 @@ export component SftpPanel inherits Rectangle {
                                         root.navigate(compact-path-input.text);
                                     }
                                 }
-                                SftpMenuItem {
+                                if !root.row1-refresh : SftpMenuItem {
                                     label: @tr("Refresh");
                                     clicked => { root.refresh(root.current-path); }
                                 }
@@ -747,7 +758,7 @@ export component SftpPanel inherits Rectangle {
                            font-size: Theme.fs-md; horizontal-alignment: center; vertical-alignment: center; }
                 }
 
-                if root.panel-mode == "files" && !root.narrow-toolbar : Rectangle {
+                if root.panel-mode == "files" && (root.row1-refresh || !root.narrow-toolbar) : Rectangle {
                     width: 24px; height: 22px;
                     border-radius: Theme.radius-sm;
                     background: ref-ta.has-hover ? Theme.bg-hover : transparent;
@@ -760,10 +771,12 @@ export component SftpPanel inherits Rectangle {
                            horizontal-alignment: center; vertical-alignment: center; }
                 }
 
-                // Minimise / restore the SFTP panel (#41). In the tightest tier
-                // the row above can't hold it, so the copy on the path row takes
-                // over — the panel must never become impossible to fold away.
-                if !root.x-tight-toolbar : Rectangle {
+                // Minimise / restore the SFTP panel (#41). In wide mode it always
+                // rides the first row; in the narrow tiers it surfaces once the
+                // band is wide enough (row1-min), and below that the path-row copy
+                // (xmin) keeps the panel foldable — it must never become impossible
+                // to dismiss.
+                if root.row1-min || !root.narrow-toolbar : Rectangle {
                     width: 24px; height: 22px;
                     border-radius: Theme.radius-sm;
                     background: min-ta.has-hover ? Theme.bg-hover : transparent;
@@ -782,9 +795,9 @@ export component SftpPanel inherits Rectangle {
                 // moving it to a real second layout row. The layout spacing keeps
                 // a stable gutter regardless of first-row alignment/padding.
                 HorizontalLayout {
-                    // Also visible in the tightest tier while in Tunnels mode, so
-                    // the collapse copy below stays reachable there.
-                    visible: root.narrow-toolbar && (root.panel-mode == "files" || root.x-tight-toolbar);
+                    // Also visible in Tunnels mode while the collapse copy below
+                    // isn't surfaced on the first row yet, so the panel stays foldable.
+                    visible: root.narrow-toolbar && (root.panel-mode == "files" || !root.row1-min);
                     height: self.visible ? 22px : 0px;
                     padding-left: 6px;
                     padding-right: 6px;
@@ -814,9 +827,9 @@ export component SftpPanel inherits Rectangle {
                             accepted => { root.navigate(self.text); }
                         }
                     }
-                    // The tightest tier's overflow menu leaves the row, so refresh
-                    // and collapse live here instead (#sftp-tight-toolbar).
-                    if root.x-tight-toolbar && root.panel-mode == "files" : Rectangle {
+                    // The first row surfaces refresh once wide enough (row1-refresh);
+                    // until then keep a copy here so it stays reachable (#sftp-tight-toolbar).
+                    if root.narrow-toolbar && root.panel-mode == "files" && !root.row1-refresh : Rectangle {
                         width: 24px; height: 22px;
                         border-radius: Theme.radius-sm;
                         background: xref-ta.has-hover ? Theme.bg-hover : transparent;
@@ -828,7 +841,7 @@ export component SftpPanel inherits Rectangle {
                                color: Theme.text-secondary; font-size: Theme.fs-sm;
                                horizontal-alignment: center; vertical-alignment: center; }
                     }
-                    if root.x-tight-toolbar : Rectangle {
+                    if root.narrow-toolbar && !root.row1-min : Rectangle {
                         width: 24px; height: 22px;
                         border-radius: Theme.radius-sm;
                         background: xmin-ta.has-hover ? Theme.bg-hover : transparent;
