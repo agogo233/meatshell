@@ -456,10 +456,16 @@ impl ConfigStore {
     /// and later used as a literal password. A foreign `enc:exp:v1:` blob
     /// (stored verbatim by an older version's cross-machine import) is
     /// recovered with the built-in export key; only a corrupted one is cleared.
-    fn open_secret(key: &[u8; 32], value: &mut Secret, lost: &mut usize) {
+    fn open_secret(key: &[u8; 32], value: &mut Secret, lost: &mut usize, recovered: &mut usize) {
         if value.as_str().starts_with(Self::EXPORT_PREFIX) {
             match Self::decrypt_export(value.as_str()) {
-                Some(plain) => *value = Secret::new(plain),
+                Some(plain) => {
+                    *value = Secret::new(plain);
+                    // Clear text in the cache, so the caller reseals this field
+                    // with the local key instead of persisting the fixed-key
+                    // blob again.
+                    *recovered += 1;
+                }
                 None => {
                     *value = Secret::new(String::new());
                     *lost += 1;
@@ -479,10 +485,38 @@ impl ConfigStore {
         }
     }
 
+    /// Open every stored secret of a whole config in place. Fixed-key blobs
+    /// come back as plain text here, so the caller has to re-seal them with
+    /// this machine's key at the next save — the recovered count is what
+    /// decides whether that extra save is worth it.
+    fn open_config_secrets(
+        key: &[u8; 32],
+        cfg: &mut ConfigFile,
+        lost: &mut usize,
+        recovered: &mut usize,
+    ) {
+        for session in &mut cfg.sessions {
+            Self::open_secret(key, &mut session.password, lost, recovered);
+            Self::open_secret(key, &mut session.private_key_inline, lost, recovered);
+            Self::open_secret(key, &mut session.proxy, lost, recovered);
+            for trigger in &mut session.triggers {
+                Self::open_secret(key, &mut trigger.response, lost, recovered);
+            }
+        }
+        Self::open_secret(key, &mut cfg.webdav_password, lost, recovered);
+        Self::open_secret(key, &mut cfg.ai_api_key, lost, recovered);
+    }
+
     /// Take the number of secrets that could not be decrypted at load, so the
     /// UI warns exactly once per process run.
     pub fn take_lost_secrets(&mut self) -> usize {
         std::mem::take(&mut self.lost_secrets)
+    }
+
+    /// Take the number of fixed-key (`enc:exp:v1:`) blobs recovered at load, so
+    /// the UI announces the one-time re-encryption exactly once per run.
+    pub fn take_recovered_secrets(&mut self) -> usize {
+        std::mem::take(&mut self.recovered_secrets)
     }
 
     /// Clear a value that still carries one of our encryption prefixes after
@@ -605,6 +639,10 @@ impl ConfigStore {
         // with the current key (a regenerated `secret.key`); surfaced once to
         // the user instead of silently becoming literal passwords.
         let mut lost_secrets = 0usize;
+        // Fixed-key blobs recovered at load: they come back as plain text, so
+        // they must be re-sealed under the local key or the file keeps holding
+        // the public export key's format.
+        let mut recovered_secrets = 0usize;
         let cache = if path.exists() {
             let raw = fs::read_to_string(&path)
                 .with_context(|| format!("failed to read {}", path.display()))?;
@@ -612,16 +650,12 @@ impl ConfigStore {
                 Ok(mut cfg) => {
                     // Decrypt any encrypted passwords; leave legacy plaintext
                     // values untouched (they will be encrypted on next save).
-                    for session in &mut cfg.sessions {
-                        Self::open_secret(&key, &mut session.password, &mut lost_secrets);
-                        Self::open_secret(&key, &mut session.private_key_inline, &mut lost_secrets);
-                        Self::open_secret(&key, &mut session.proxy, &mut lost_secrets);
-                        for trigger in &mut session.triggers {
-                            Self::open_secret(&key, &mut trigger.response, &mut lost_secrets);
-                        }
-                    }
-                    Self::open_secret(&key, &mut cfg.webdav_password, &mut lost_secrets);
-                    Self::open_secret(&key, &mut cfg.ai_api_key, &mut lost_secrets);
+                    Self::open_config_secrets(
+                        &key,
+                        &mut cfg,
+                        &mut lost_secrets,
+                        &mut recovered_secrets,
+                    );
                     // Clean up any duplicate history accumulated before #113,
                     // keeping the last (most recent) occurrence of each command.
                     dedup_keep_last(&mut cfg.command_history);
@@ -654,12 +688,16 @@ impl ConfigStore {
             cache,
             key,
             lost_secrets,
+            recovered_secrets,
         };
         // Persist the migration so it runs exactly once (and so a later opt-out —
         // e.g. turning the welcome sidebar back off — isn't reverted next launch).
-        if migrated {
+        // The recovered fixed-key blobs ride along: the cache now holds plain
+        // text, and the file still holds the old format. Best effort — if the
+        // write fails they are re-opened and re-counted at the next launch.
+        if migrated || store.recovered_secrets > 0 {
             if let Err(e) = store.save() {
-                tracing::warn!("failed to persist default-layout migration: {e:#}");
+                tracing::warn!("failed to persist config migration: {e:#}");
             }
         }
         Ok(store)
@@ -2378,8 +2416,10 @@ impl ConfigStore {
     /// Import sessions from a MeatShell portable export, a FinalShell connection
     /// export, or a MobaXterm `.mxtsessions` export. New sessions get fresh ids;
     /// duplicates (same host+user+port+kind) are skipped.
-    /// Returns `(added, skipped)`. The store is saved if anything was added.
-    pub fn import_json(&mut self, raw: &str) -> Result<(usize, usize)> {
+    /// Returns `(added, skipped, fixed-key secrets recovered)`. The store is
+    /// saved if anything was added, which also re-seals those secrets with this
+    /// machine's key.
+    pub fn import_json(&mut self, raw: &str) -> Result<(usize, usize, usize)> {
         let (sessions, decrypt_meatshell_secrets) =
             match serde_json::from_str::<ExportFile>(raw) {
                 Ok(file) => (file.sessions, true),
@@ -2398,35 +2438,46 @@ impl ConfigStore {
 
         let mut added = 0usize;
         let mut skipped = 0usize;
+        // A fixed-key blob (`enc:exp:v1:`) decrypts with a key that ships in
+        // the source, so it is reported to the UI: until the store is saved
+        // the imported value only sits plain in the cache.
+        let mut recovered = 0usize;
+        let key = self.key;
+        let open_imported = |value: &str| -> Option<String> {
+            match Self::decrypt_export(value) {
+                Some(plain) => {
+                    recovered += 1;
+                    Some(plain)
+                }
+                None => Self::try_decrypt(&key, value),
+            }
+        };
         for mut s in sessions {
+            // Dedupe first, so the fixed-key count below only covers sessions
+            // that actually land in this store and get resealed on save.
+            let dup = self.cache.sessions.iter().any(|x| {
+                x.host == s.host && x.user == s.user && x.port == s.port && x.kind == s.kind
+            });
+            if dup {
+                skipped += 1;
+                continue;
+            }
             // Recover the plaintext password (cache stores plaintext). Accept an
             // export blob, our local enc:v1 blob, or a legacy plaintext value.
             // FinalShell's parser has already decrypted its DES password, so avoid
             // interpreting a coincidental `enc:*` plaintext prefix as ours.
             if decrypt_meatshell_secrets {
-                if let Some(plain) = Self::decrypt_export(s.password.as_str()) {
-                    s.password = Secret::new(plain);
-                } else if let Some(plain) = Self::try_decrypt(&self.key, s.password.as_str()) {
+                if let Some(plain) = open_imported(s.password.as_str()) {
                     s.password = Secret::new(plain);
                 }
-                if let Some(plain) = Self::decrypt_export(s.private_key_inline.as_str()) {
-                    s.private_key_inline = Secret::new(plain);
-                } else if let Some(plain) =
-                    Self::try_decrypt(&self.key, s.private_key_inline.as_str())
-                {
+                if let Some(plain) = open_imported(s.private_key_inline.as_str()) {
                     s.private_key_inline = Secret::new(plain);
                 }
-                if let Some(plain) = Self::decrypt_export(s.proxy.as_str()) {
-                    s.proxy = Secret::new(plain);
-                } else if let Some(plain) = Self::try_decrypt(&self.key, s.proxy.as_str()) {
+                if let Some(plain) = open_imported(s.proxy.as_str()) {
                     s.proxy = Secret::new(plain);
                 }
                 for trigger in &mut s.triggers {
-                    if let Some(plain) = Self::decrypt_export(trigger.response.as_str()) {
-                        trigger.response = Secret::new(plain);
-                    } else if let Some(plain) =
-                        Self::try_decrypt(&self.key, trigger.response.as_str())
-                    {
+                    if let Some(plain) = open_imported(trigger.response.as_str()) {
                         trigger.response = Secret::new(plain);
                     }
                 }
@@ -2441,13 +2492,6 @@ impl ConfigStore {
                     Self::strip_undecryptable(&mut trigger.response);
                 }
             }
-            let dup = self.cache.sessions.iter().any(|x| {
-                x.host == s.host && x.user == s.user && x.port == s.port && x.kind == s.kind
-            });
-            if dup {
-                skipped += 1;
-                continue;
-            }
             s.id = Uuid::new_v4().to_string();
             self.upsert(s);
             added += 1;
@@ -2455,11 +2499,12 @@ impl ConfigStore {
         if added > 0 {
             self.save()?;
         }
-        Ok((added, skipped))
+        Ok((added, skipped, recovered))
     }
 
     /// Import sessions from a MeatShell, FinalShell or MobaXterm export file.
-    pub fn import_from(&mut self, path: &Path) -> Result<(usize, usize)> {
+    /// Returns `(added, skipped, fixed-key secrets recovered)`.
+    pub fn import_from(&mut self, path: &Path) -> Result<(usize, usize, usize)> {
         let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
         // MobaXterm writes `.mxtsessions` in the system ANSI code page —
         // Windows-1252 on Western locales, GBK (a superset of GB2312, CP936)
@@ -2712,6 +2757,7 @@ mod tests {
             cache: ConfigFile::default(),
             key: [7u8; 32],
             lost_secrets: 0,
+            recovered_secrets: 0,
         }
     }
 
@@ -2726,6 +2772,7 @@ mod tests {
             cache: fresh_config(),
             key: [7u8; 32],
             lost_secrets: 0,
+            recovered_secrets: 0,
         }
     }
 
@@ -3117,6 +3164,7 @@ mod tests {
             },
             key: [7u8; 32],
             lost_secrets: 0,
+            recovered_secrets: 0,
         };
         std::fs::write(primary.join("secret.key"), [7u8; 32]).unwrap();
         store.save().unwrap();
@@ -3357,19 +3405,56 @@ mod tests {
         assert!(!raw.contains("p4ss"));
 
         // Importing into a fresh store recovers the plaintext password and proxy.
+        // Both came from a fixed-key blob, so they are reported as recovered.
         let mut b = temp_store();
-        assert_eq!(b.import_from(&export_path).unwrap(), (1, 0));
+        assert_eq!(b.import_from(&export_path).unwrap(), (1, 0, 2));
         assert_eq!(b.cache.sessions.len(), 1);
         assert_eq!(b.cache.sessions[0].password.as_str(), "s3cr3t");
         assert_eq!(b.cache.sessions[0].proxy.as_str(), "socks5://me:p4ss@proxy.corp:1080");
         assert_eq!(b.cache.sessions[0].host, "192.168.100.2");
 
-        // Re-importing the same file skips the duplicate.
-        assert_eq!(b.import_from(&export_path).unwrap(), (0, 1));
+        // Re-importing the same file skips the duplicate, and a skipped row
+        // does not inflate the recovered count.
+        assert_eq!(b.import_from(&export_path).unwrap(), (0, 1, 0));
 
         let _ = std::fs::remove_file(&export_path);
         let _ = std::fs::remove_file(&a.path);
         let _ = std::fs::remove_file(&b.path);
+    }
+
+    #[test]
+    fn open_config_secrets_counts_fixed_key_recoveries() {
+        let key = [7u8; 32];
+        let mut cfg = ConfigFile::default();
+        cfg.sessions.push(Session {
+            name: "legacy".into(),
+            host: "192.168.100.3".into(),
+            user: "ops".into(),
+            password: Secret::new(ConfigStore::encrypt_export("exported-secret").unwrap()),
+            ..Session::new_empty()
+        });
+        cfg.webdav_password = Secret::new(ConfigStore::encrypt(&key, "dav-secret").unwrap());
+
+        let mut lost = 0usize;
+        let mut recovered = 0usize;
+        ConfigStore::open_config_secrets(&key, &mut cfg, &mut lost, &mut recovered);
+        // One fixed-key blob; the blob sealed with the local key is not.
+        assert_eq!(recovered, 1);
+        assert_eq!(lost, 0);
+        assert_eq!(cfg.sessions[0].password.as_str(), "exported-secret");
+        assert_eq!(cfg.webdav_password.as_str(), "dav-secret");
+
+        // A truncated fixed-key blob is unreadable, so it is cleared and
+        // counted as lost instead.
+        cfg.sessions.push(Session {
+            password: Secret::new(format!("{}truncated", ConfigStore::EXPORT_PREFIX)),
+            ..Session::new_empty()
+        });
+        lost = 0;
+        recovered = 0;
+        ConfigStore::open_config_secrets(&key, &mut cfg, &mut lost, &mut recovered);
+        assert_eq!(recovered, 0);
+        assert_eq!(lost, 1);
     }
 
     #[test]
@@ -3419,7 +3504,7 @@ mod tests {
             "terminal_encoding": "UTF-8"
         }"#;
 
-        assert_eq!(store.import_json(raw).unwrap(), (1, 0));
+        assert_eq!(store.import_json(raw).unwrap(), (1, 0, 0));
         let session = &store.cache.sessions[0];
         assert_eq!(session.host, "192.0.2.20");
         assert_eq!(session.user, "operator");
@@ -3450,7 +3535,7 @@ SubRep=Network\r\n\
 ImgNum=41\r\n\
 old-switch=#98#7%10.0.0.1%23%cisco%0%0#15%80%24#0# #-1\r\n";
 
-        assert_eq!(store.import_json(raw).unwrap(), (2, 0));
+        assert_eq!(store.import_json(raw).unwrap(), (2, 0, 0));
         let ssh = &store.cache.sessions[0];
         assert_eq!(ssh.name, "prod-server");
         assert_eq!(ssh.host, "192.0.2.10");
@@ -3475,7 +3560,7 @@ old-switch=#98#7%10.0.0.1%23%cisco%0%0#15%80%24#0# #-1\r\n";
         std::fs::write(&path, &data).unwrap();
 
         let mut store = temp_store();
-        assert_eq!(store.import_from(&path).unwrap(), (1, 0));
+        assert_eq!(store.import_from(&path).unwrap(), (1, 0, 0));
         assert_eq!(store.cache.sessions[0].name, "caf\u{e9}");
         assert_eq!(store.cache.sessions[0].host, "192.0.2.60");
 
@@ -3498,7 +3583,7 @@ SubRep=上海机房\r\n\
         std::fs::write(&path, &data[..]).unwrap();
 
         let mut store = temp_store();
-        assert_eq!(store.import_from(&path).unwrap(), (1, 0));
+        assert_eq!(store.import_from(&path).unwrap(), (1, 0, 0));
         let session = &store.cache.sessions[0];
         assert_eq!(session.name, "生产服务器");
         assert_eq!(session.group, "上海机房");

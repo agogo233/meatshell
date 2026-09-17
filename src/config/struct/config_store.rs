@@ -14,4 +14,9 @@ pub struct ConfigStore {
     /// load; counted so the UI can warn once instead of silently using the
     /// undecryptable blob as a literal password.
     pub(crate) lost_secrets: usize,
+    /// Secrets that were still sealed with the old fixed export key and could
+    /// be recovered at load. They are plain in the cache now, so a save is
+    /// forced to reseal them under this machine's key; counted so the UI can
+    /// tell the user the migration happened instead of it staying silent.
+    pub(crate) recovered_secrets: usize,
 }
