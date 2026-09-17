@@ -109,7 +109,10 @@ fn fuzzy_score(text: &str, q: &str) -> Option<i64> {
         let mut score = 1000i64;
         if pos == 0 {
             score += 400;
-        } else if chars.get(pos - 1).is_some_and(|c| *c == ' ' || *c == '\t') {
+        } else if chars
+            .get(text[..pos].chars().count() - 1)
+            .is_some_and(|c| *c == ' ' || *c == '\t')
+        {
             score += 200;
         }
         // Earlier occurrences rank slightly higher.
@@ -161,13 +164,26 @@ pub(super) fn compute_find_matches(rows: &[String], query: &str) -> Vec<TermMatc
     if query.is_empty() {
         return out;
     }
-    let q: Vec<char> = query.chars().map(|c| c.to_ascii_lowercase()).collect();
+    // Unicode folding, to match the history-mode index: a plain
+    // `to_ascii_lowercase` counted "É" as a hit without painting a highlight
+    // for it. Folding must stay one char in, one char out — `İ` and `ß` fold
+    // to two or more chars, and the grid-column offsets below index into a
+    // prefix built from the unfolded characters, so a multi-char fold would
+    // run past the end and panic. Those few glyphs keep their original shape.
+    fn fold_char(c: char) -> char {
+        let mut chars = c.to_lowercase();
+        match (chars.next(), chars.next()) {
+            (Some(f), None) => f,
+            _ => c,
+        }
+    }
+    let q: Vec<char> = query.chars().map(fold_char).collect();
     if q.is_empty() {
         return out;
     }
     for (r, line) in rows.iter().enumerate() {
         let chars: Vec<char> = line.chars().collect();
-        let lower: Vec<char> = chars.iter().map(|c| c.to_ascii_lowercase()).collect();
+        let lower: Vec<char> = chars.iter().map(|c| fold_char(*c)).collect();
         let prefix = cell_prefix(&chars);
         let mut i = 0usize;
         while i + q.len() <= lower.len() {

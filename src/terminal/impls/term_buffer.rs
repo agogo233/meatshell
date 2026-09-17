@@ -5,6 +5,14 @@ use crate::terminal::{
 };
 use crate::ui::TermMatch;
 
+/// History-mode match cap. A single letter can hit millions of times across a
+/// 100k-line scrollback, and each hit is an owned (usize, usize, usize)
+/// collected behind the UI-thread lock — enough to allocate hundreds of MB
+/// and stall the output pump for the whole scan. Scanning stops at the first
+/// `MAX_FIND_POSITIONS` hits, which is far beyond any navigation a person
+/// reaches; the counter then reports that ceiling instead of the true total.
+const MAX_FIND_POSITIONS: usize = 50_000;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TerminalQuery {
     Status,
@@ -44,7 +52,7 @@ fn collect_ci_matches(
             return;
         }
         let mut i = 0usize;
-        while i + qb.len() <= bytes.len() {
+        while i + qb.len() <= bytes.len() && out.len() < MAX_FIND_POSITIONS {
             if bytes[i..i + qb.len()]
                 .iter()
                 .zip(qb)
@@ -60,7 +68,8 @@ fn collect_ci_matches(
     }
     let lower = text.to_lowercase();
     let mut search_from = 0usize;
-    while let Some(byte_pos) = lower[search_from..].find(q) {
+    while out.len() < MAX_FIND_POSITIONS {
+        let Some(byte_pos) = lower[search_from..].find(q) else { break };
         let abs_byte = search_from + byte_pos;
         let char_start = lower[..abs_byte].chars().count();
         out.push((abs_row, char_start, q_chars));
@@ -630,6 +639,12 @@ impl TermBuffer {
             self.sel_anchor = None;
             self.sel_focus = None;
             self.sel_ranges.clear();
+            // Stored positions are absolute scrollback rows: with the history
+            // gone they point at lines that no longer exist, so the index is
+            // dropped too (a stale count would show on screen for one frame).
+            self.find_positions.clear();
+            self.find_active = -1;
+            self.find_dirty = true;
         }
         self.cap_raw();
         self.feed_batched(bytes);
