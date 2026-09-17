@@ -1053,7 +1053,7 @@ async fn run_sftp(
                             format!("{}/{}", remote_dir.trim_end_matches('/'), filename);
                         // Resolve the duplicate-target policy against the live
                         // server state before anything is truncated.
-                        let remote_path = match resolve_upload_target(
+                        let (remote_path, no_clobber) = match resolve_upload_target(
                             &sftp,
                             requested,
                             decision,
@@ -1063,7 +1063,7 @@ async fn run_sftp(
                         )
                         .await
                         {
-                            Some(path) => path,
+                            Some((path, no_clobber)) => (path, no_clobber),
                             None => {
                                 if let Some(path) = cleanup_after.as_deref() {
                                     cleanup_import_path(path).await;
@@ -1081,6 +1081,7 @@ async fn run_sftp(
                         )));
                         match upload_pipelined(
                             &handle,
+                            &sftp,
                             &local,
                             &remote_path,
                             &filename,
@@ -1089,6 +1090,7 @@ async fn run_sftp(
                             &cancel,
                             rate_kbps,
                             preserve_mtime,
+                            no_clobber,
                         )
                         .await
                         {
@@ -1164,6 +1166,7 @@ async fn run_sftp(
                     let no_cancel = Arc::new(AtomicBool::new(false));
                     let result = upload_pipelined(
                         &handle,
+                        &sftp,
                         &local,
                         &remote,
                         &filename,
@@ -1172,6 +1175,7 @@ async fn run_sftp(
                         &no_cancel,
                         rate_kbps,
                         preserve_mtime,
+                        false,
                     )
                     .await;
                     match result {
@@ -1910,6 +1914,10 @@ fn skipped_upload_status(events: &UnboundedSender<SessionEvent>, name: &str) {
 /// prompt) wins; when the UI saw no conflict the worker still applies the
 /// configured policy, because the displayed listing can be stale and the file
 /// picker round trip gives the remote time to change.
+///
+/// Returns the resolved path plus whether the create must be atomic
+/// (`no_clobber`): every target we are returning because it looked free must
+/// not be silently replaced if it appears while the transfer is being queued.
 async fn resolve_upload_target(
     sftp: &SftpSession,
     requested: String,
@@ -1917,15 +1925,15 @@ async fn resolve_upload_target(
     policy: DedupPolicy,
     events: &UnboundedSender<SessionEvent>,
     name: &str,
-) -> Option<String> {
+) -> Option<(String, bool)> {
     let effective = match decision {
         UploadDecision::Proceed => {
             if sftp.metadata(&requested).await.is_err() {
-                return Some(requested);
+                return Some((requested, true));
             }
             policy
         }
-        UploadDecision::Overwrite => return Some(requested),
+        UploadDecision::Overwrite => return Some((requested, false)),
         UploadDecision::KeepBoth => DedupPolicy::Rename,
         UploadDecision::Skip => {
             skipped_upload_status(events, name);
@@ -1937,7 +1945,7 @@ async fn resolve_upload_target(
             skipped_upload_status(events, name);
             None
         }
-        DedupPolicy::Overwrite => Some(requested),
+        DedupPolicy::Overwrite => Some((requested, false)),
         // Rename, and Ask where the UI showed no conflict: the worker cannot
         // prompt, so a target that appeared after the click is kept alongside
         // (matching the download side) rather than silently replacing a file
@@ -1950,7 +1958,7 @@ async fn resolve_upload_target(
                 name,
                 base_name(&path)
             )));
-            Some(path)
+            Some((path, true))
         }
     }
 }
@@ -2605,6 +2613,7 @@ async fn upload_dir(
                 let id = Uuid::new_v4().to_string();
                 upload_pipelined(
                     handle,
+                    sftp,
                     &lpath,
                     &rchild,
                     &name,
@@ -2613,12 +2622,66 @@ async fn upload_dir(
                     &no_cancel,
                     rate_kbps,
                     preserve_mtime,
+                    false,
                 )
                 .await?;
             }
         }
     }
     Ok(())
+}
+
+/// Create the remote end of an upload and return its handle.
+///
+/// With `no_clobber` the create carries `EXCLUDE` (SSH_FXF_EXCL) so the server
+/// decides "target is free" atomically: the duplicate probe ran earlier in the
+/// worker, so another client could still have created the file in the meantime
+/// and a plain `CREATE|WRITE|TRUNCATE` would have silently overwritten it.
+/// Servers that do not honour `EXCLUDE` fail in the same way, so after an
+/// error a stat on the target separates "someone else created it" (renumber
+/// and retry) from "not supported" (one truncating create) instead of trusting
+/// a status code.
+async fn open_upload_target(
+    raw: &RawSftpSession,
+    sftp: &SftpSession,
+    remote: &str,
+    no_clobber: bool,
+) -> anyhow::Result<String> {
+    const MAX_RENUMBER: u32 = 10;
+
+    let mut target = remote.to_string();
+    let mut exclusive = no_clobber;
+    let mut renumbered = 0u32;
+    loop {
+        let flags = if exclusive {
+            OpenFlags::CREATE | OpenFlags::WRITE | OpenFlags::EXCLUDE
+        } else {
+            OpenFlags::CREATE | OpenFlags::WRITE | OpenFlags::TRUNCATE
+        };
+        match raw.open(&target, flags, FileAttributes::default()).await {
+            Ok(h) => return Ok(h.handle),
+            Err(open_error) if exclusive => {
+                if raw.stat(&target).await.is_err() {
+                    // Still absent: the server refused the flag itself. One
+                    // plain create is then as safe as the probe said.
+                    tracing::warn!(
+                        "sftp server rejected SSH_FXF_EXCL for {target}; \
+                         falling back to a truncating create"
+                    );
+                    exclusive = false;
+                    continue;
+                }
+                renumbered += 1;
+                if renumbered > MAX_RENUMBER {
+                    return Err(anyhow::anyhow!(
+                        "keep-both target {target} was re-created {MAX_RENUMBER} times: {open_error}"
+                    ));
+                }
+                target = available_remote_path(sftp, &target).await;
+            }
+            Err(e) => return Err(anyhow::anyhow!("{e}")),
+        }
+    }
 }
 
 /// Pipelined SFTP upload (#16).
@@ -2632,6 +2695,7 @@ async fn upload_dir(
 /// native scp.
 async fn upload_pipelined(
     handle: &client::Handle<SftpClientHandler>,
+    sftp: &SftpSession,
     local: &Path,
     remote: &str,
     name: &str,
@@ -2640,6 +2704,7 @@ async fn upload_pipelined(
     cancel: &Arc<AtomicBool>,
     rate_kbps: u32,
     preserve_mtime: bool,
+    no_clobber: bool,
 ) -> Result<bool> {
     use tokio::io::AsyncReadExt;
 
@@ -2672,15 +2737,9 @@ async fn upload_pipelined(
     let raw = Arc::new(RawSftpSession::new(channel.into_stream()));
     raw.init().await.context("sftp upload handshake")?;
 
-    let fhandle = raw
-        .open(
-            remote,
-            OpenFlags::CREATE | OpenFlags::WRITE | OpenFlags::TRUNCATE,
-            FileAttributes::default(),
-        )
+    let fhandle = open_upload_target(raw.as_ref(), sftp, remote, no_clobber)
         .await
-        .with_context(|| format!("create remote {remote}"))?
-        .handle;
+        .with_context(|| format!("create remote {remote}"))?;
 
     emit_transfer(events, id, name, true, 0, total, 0, "");
 
