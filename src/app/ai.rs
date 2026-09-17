@@ -613,6 +613,10 @@ pub(super) fn wire_ai_callbacks(
             // conversation exactly as the comment above promises it won't.
             generation.fetch_add(1, Ordering::Relaxed);
             let Some(w) = weak.upgrade() else { return };
+            // Clear was allowed mid-stream, so the retired stream's finish hop
+            // will skip its own busy reset (finish_stream bails on a generation
+            // mismatch) — release it here or the next send is rejected forever.
+            w.set_ai_busy(false);
             with_ai_model(&w, |vm| vm.set_vec(Vec::new()));
         });
     }
