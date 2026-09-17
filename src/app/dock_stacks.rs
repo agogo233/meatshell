@@ -553,6 +553,69 @@ fn rebalance(t: &mut [DockSlotInfo]) {
             rem -= share;
         }
     }
+    // The clamps above keep every panel visible at the cost of the two
+    // invariants the rest of the module relies on, so repair them here.
+    enforce_ratio_invariant(t);
+}
+
+/// Guarantee `ratio >= MIN_RATIO` for every slot and shares summing to 1.0.
+///
+/// The clamping normalisation inside [`rebalance`] can clamp several small
+/// shares up to `MIN_RATIO` at once (a fresh panel on an already busy edge),
+/// which leaves the tail loop with nothing left to hand out: a middle slot
+/// ends up at 0.0 and the total drifts above 1.0. A 0.0 share is the "just
+/// joined" sentinel, so `to_saved` persists it and the config sanitiser drops
+/// that panel on the next load — losing the user's stacked layout for good.
+///
+/// Correction is taken from (or given back to) the slots with room to move,
+/// in proportion to that room, so a split the user just dragged — which
+/// already satisfies both invariants — is left exactly where it was.
+fn enforce_ratio_invariant(t: &mut [DockSlotInfo]) {
+    let n = t.len();
+    match n {
+        0 => return,
+        1 => t[0].ratio = 1.0,
+        _ => {}
+    }
+
+    // Lift every starved slot to the floor; the total drift that costs is
+    // corrected below against the same floor.
+    for s in t.iter_mut() {
+        if s.ratio < MIN_RATIO {
+            s.ratio = MIN_RATIO;
+        }
+    }
+
+    let diff = 1.0 - t.iter().map(|s| s.ratio).sum::<f32>();
+    if diff.abs() < 1e-6 {
+        return;
+    }
+    if diff > 0.0 {
+        // Under 1.0: hand the remainder back out, never past 1 - MIN_RATIO.
+        let room: f32 = t.iter().map(|s| (1.0 - MIN_RATIO - s.ratio).max(0.0)).sum();
+        if room <= 0.0 {
+            return;
+        }
+        for s in t.iter_mut() {
+            s.ratio += diff * ((1.0 - MIN_RATIO - s.ratio).max(0.0) / room);
+        }
+        return;
+    }
+
+    // Over 1.0: take it back from whoever can spare.
+    let room: f32 = t.iter().map(|s| (s.ratio - MIN_RATIO).max(0.0)).sum();
+    if room <= 0.0 {
+        // Nobody is above the floor, i.e. n > 1/MIN_RATIO. Even shares keep
+        // every panel visible rather than persisting zeros.
+        let each = (1.0 / n as f32).max(MIN_RATIO);
+        for s in t.iter_mut() {
+            s.ratio = each;
+        }
+        return;
+    }
+    for s in t.iter_mut() {
+        s.ratio = (s.ratio - diff.abs() * ((s.ratio - MIN_RATIO).max(0.0) / room)).max(MIN_RATIO);
+    }
 }
 
 #[cfg(test)]
@@ -674,6 +737,113 @@ mod tests {
         let before = s.left.clone();
         s.set_ratio("left", 99, 0.5);
         assert_eq!(s.left, before);
+    }
+
+    #[test]
+    fn rebalance_never_starves_a_middle_slot() {
+        // Four newcomers on a nearly occupied edge: each takes far less than
+        // MIN_RATIO, the clamps push the total over 1.0, and the tail pass
+        // used to leave a middle slot at 0.0 — the "just joined" sentinel,
+        // which `to_saved` persists and the config layer then drops.
+        let mut t = [
+            DockSlotInfo {
+                kind: "sidebar",
+                ratio: 0.91,
+            },
+            DockSlotInfo {
+                kind: "quick",
+                ratio: 0.0225,
+            },
+            DockSlotInfo {
+                kind: "ai",
+                ratio: 0.0225,
+            },
+            DockSlotInfo {
+                kind: "welcome",
+                ratio: 0.0225,
+            },
+            DockSlotInfo {
+                kind: "sftp",
+                ratio: 0.0225,
+            },
+        ];
+        rebalance(&mut t);
+        let sum: f32 = t.iter().map(|s| s.ratio).sum();
+        assert!((sum - 1.0).abs() < 1e-5, "shares must sum to 1.0, got {sum:?}");
+        for s in &t {
+            assert!(
+                s.ratio > 0.0,
+                "{} starved to {s:?}: a zero share is dropped on the next load",
+                s.kind
+            );
+            assert!(s.ratio >= MIN_RATIO, "{} below the floor: {s:?}", s.kind);
+        }
+    }
+
+    #[test]
+    fn rebalance_repairs_a_clamped_total_overflow() {
+        let mut t = [
+            DockSlotInfo {
+                kind: "sidebar",
+                ratio: 0.95,
+            },
+            DockSlotInfo {
+                kind: "quick",
+                ratio: 0.03,
+            },
+            DockSlotInfo {
+                kind: "ai",
+                ratio: 0.02,
+            },
+        ];
+        rebalance(&mut t);
+        let sum: f32 = t.iter().map(|s| s.ratio).sum();
+        assert!((sum - 1.0).abs() < 1e-5, "shares must sum to 1.0, got {sum:?}");
+        for s in &t {
+            assert!(s.ratio >= MIN_RATIO, "{} below the floor: {s:?}", s.kind);
+        }
+    }
+
+    #[test]
+    fn rebalance_leaves_a_dragged_split_alone() {
+        // The repair must not touch an already-consistent split, or every
+        // divider drag would snap back to a differently-shaped split.
+        let mut t = [
+            DockSlotInfo {
+                kind: "sidebar",
+                ratio: 0.92,
+            },
+            DockSlotInfo {
+                kind: "quick",
+                ratio: 0.08,
+            },
+        ];
+        rebalance(&mut t);
+        assert!((t[0].ratio - 0.92).abs() < 1e-6);
+        assert!((t[1].ratio - 0.08).abs() < 1e-6);
+    }
+
+    #[test]
+    fn crowded_edge_survives_a_save_reload() {
+        let mut saved = DockStacks::default();
+        saved.left.push(DockSlotInfo {
+            kind: "sidebar",
+            ratio: 0.91,
+        });
+        let expanded = |k: &str| {
+            matches!(k, "sidebar" | "quick" | "ai" | "welcome" | "sftp").then_some("left")
+        };
+        let mut cur = DockStacks::default();
+        cur.rebuild_from(&saved, &expanded);
+        let saved = cur.to_saved();
+        assert!(saved[0].slots.iter().all(|s| s.ratio > 0.0));
+        let mut t = DockStacks::default();
+        t.from_saved(&saved);
+        assert_eq!(t.left.len(), 5, "a panel was lost across the round trip");
+        assert_eq!(
+            t.left.iter().map(|s| s.kind).collect::<Vec<_>>(),
+            ["sidebar", "welcome", "quick", "ai", "sftp"]
+        );
     }
 
     #[test]
