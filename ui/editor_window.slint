@@ -95,11 +95,17 @@ export component EditorWindow inherits Window {
             }
             HorizontalLayout {
                 padding-left: 12px;
-                spacing: 8px;
-                Image {
-                    source: @image-url("../assets/icon.png");
-                    width: 16px;
-                    height: 16px;
+                spacing: 4px;
+                Rectangle {
+                    width: 20px;
+                    height: 36px;
+                    Image {
+                        x: 2px;
+                        y: (parent.height - self.height) / 2;
+                        width: 16px;
+                        height: 16px;
+                        source: @image-url("../assets/icon.png");
+                    }
                 }
                 Text {
                     text: root.editor-name
@@ -268,6 +274,9 @@ export component EditorWindow inherits Window {
                         }
                     }
                 }
+                        color: Theme.text-muted;
+                    }
+                }
                 Rectangle { width: 1px; background: Theme.border-subtle; }
                 editor-viewport := Rectangle {
                     horizontal-stretch: 1;
@@ -334,8 +343,24 @@ export component EditorWindow inherits Window {
                 }
             }
         }
-        Text { text: "◢"; color: resize-ta.has-hover ? Theme.text-secondary : Theme.text-muted;
-               font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+        // Draw the resize grip with rectangles instead of a Unicode glyph. The
+        // latter renders as a tofu box on systems without that character.
+        Rectangle {
+            x: 3px; y: 12px; width: 3px; height: 1px;
+            background: resize-ta.has-hover ? Theme.text-secondary : Theme.text-muted;
+        }
+        Rectangle {
+            x: 6px; y: 10px; width: 3px; height: 1px;
+            background: resize-ta.has-hover ? Theme.text-secondary : Theme.text-muted;
+        }
+        Rectangle {
+            x: 9px; y: 8px; width: 3px; height: 1px;
+            background: resize-ta.has-hover ? Theme.text-secondary : Theme.text-muted;
+        }
+        Rectangle {
+            x: 12px; y: 5px; width: 3px; height: 1px;
+            background: resize-ta.has-hover ? Theme.text-secondary : Theme.text-muted;
+        }
     }
 
     init => { root.editor-focus-pending = true; }

@@ -868,8 +868,8 @@ pub(super) fn wire_sftp_callbacks(
         });
     }
 
-    // Rebuild the editor's line-number gutter after each edit (#81). The text
-    // comes straight from the TextInput so we don't re-read the property.
+    // Refresh editor syntax after edits. The debounced callback keeps typing
+    // responsive while the native TextInput owns selection and IME handling.
     {
         let weak = window.as_weak();
         window.on_editor_recount(move |text: SharedString| {

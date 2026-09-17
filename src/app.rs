@@ -6277,11 +6277,10 @@ fn save_layout(
         .window()
         .with_winit_window(|ww| ww.is_maximized())
         .unwrap_or_else(|| win.get_window_maximized());
-    let (saved_w, saved_h) = s.window_size();
-    if !native_maximized && (saved_w <= 0.0 || saved_h <= 0.0) && w > 200.0 && h > 200.0 {
-        // Normal resize events keep this cache current. Only fall back to the
-        // close-time geometry for a first run where no valid resize was seen;
-        // do not issue a new native resize while the window is shutting down.
+    if !native_maximized && w > 200.0 && h > 200.0 {
+        // Resize events normally keep this cache current. Persist the final
+        // valid native geometry as well, because a close can arrive before the
+        // last resize callback has reached the UI store.
         s.set_window_size(w, h);
     }
     let _ = s.save();

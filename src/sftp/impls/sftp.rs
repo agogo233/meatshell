@@ -1537,7 +1537,7 @@ async fn run_sftp(
 }
 
 const MAX_BUILTIN_EDITOR_BYTES: usize = 512 * 1024;
-const MAX_BUILTIN_EDITOR_LINES: usize = 20_000;
+const MAX_BUILTIN_EDITOR_LINES: usize = 10_000;
 const MAX_BUILTIN_EDITOR_LINE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1589,8 +1589,8 @@ fn editor_rejection_message(rejection: EditorTextRejection) -> String {
             "Too large for the built-in editor (512 KB limit); open/edit externally or download it instead",
         ),
         EditorTextRejection::TooManyLines => t(
-            "文件行数过多,无法在内置编辑器中安全打开,请使用外部打开/编辑或下载",
-            "Too many lines for the built-in editor; open/edit externally or download it instead",
+            "文本过大(超过 10,000 行),无法在内置编辑器中打开,请使用外部打开/编辑或下载",
+            "Text too large (over 10,000 lines) for the built-in editor; open/edit externally or download it instead",
         ),
         EditorTextRejection::LineTooLong => t(
             "文件包含过长的单行,无法在内置编辑器中安全打开,请使用外部打开/编辑或下载",
@@ -1631,10 +1631,21 @@ async fn read_text_guarded(
     // Metadata may be missing or stale. Read at most one byte past the limit so
     // an untrusted remote file can never make this path allocate without bound.
     let mut bytes = Vec::with_capacity((size as usize).min(MAX_BUILTIN_EDITOR_BYTES));
-    f.take(MAX_BUILTIN_EDITOR_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .await
-        .map_err(|e| format!("{}: {e}", t("读取失败", "Read failed")))?;
+    let mut reader = f.take(MAX_BUILTIN_EDITOR_BYTES as u64 + 1);
+    let mut chunk = [0u8; 8192];
+    let mut lines = 1usize;
+    loop {
+        let count = reader.read(&mut chunk).await
+            .map_err(|e| format!("{}: {e}", t("读取失败", "Read failed")))?;
+        if count == 0 {
+            break;
+        }
+        lines += chunk[..count].iter().filter(|&&byte| byte == b'\n').count();
+        if lines > MAX_BUILTIN_EDITOR_LINES {
+            return Err(editor_rejection_message(EditorTextRejection::TooManyLines));
+        }
+        bytes.extend_from_slice(&chunk[..count]);
+    }
     validate_editor_text(bytes).map_err(editor_rejection_message)
 }
 
@@ -2987,6 +2998,17 @@ mod sanitize_tests {
             validate_editor_text(line),
             Err(EditorTextRejection::LineTooLong)
         );
+    }
+
+    #[test]
+    fn editor_line_limit_is_ten_thousand_including_trailing_empty_line() {
+        for newline in ["\n", "\r\n"] {
+            let exact = newline.repeat(9_999);
+            assert_eq!(validate_editor_text(exact.as_bytes().to_vec()), Ok(exact.clone()));
+            let over = format!("{exact}{newline}");
+            assert_eq!(validate_editor_text(over.into_bytes()),
+                Err(EditorTextRejection::TooManyLines));
+        }
     }
 
     #[test]

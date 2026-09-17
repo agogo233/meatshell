@@ -2584,8 +2584,6 @@ dependencies = [
 [[package]]
 name = "i-slint-compiler"
 version = "1.16.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7b7f9834faf2a62cc36f01decc7c683e66bb0861b53511723c3da9ad914d9bb"
 dependencies = [
  "annotate-snippets",
  "by_address",
