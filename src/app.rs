@@ -1303,13 +1303,7 @@ fn open_window(
     // WebDAV config sync (#185): manual upload/download of the portable session
     // export JSON. It is intentionally not automatic on startup.
     {
-        let s = store.borrow();
-        window.set_webdav_enabled(s.webdav_enabled());
-        window.set_webdav_url(s.webdav_url().into());
-        window.set_webdav_username(s.webdav_username().into());
-        window.set_webdav_password(s.webdav_password().into());
-        window.set_webdav_remote_path(s.webdav_remote_path().into());
-        window.set_webdav_accept_invalid_certs(s.webdav_accept_invalid_certs());
+        sync_settings_for_window(&window.as_weak(), &store.borrow());
         window.set_webdav_status(String::new().into());
     }
     // Bundle work (Argon2 KDF + WebDAV round trips) runs on worker threads so
@@ -2047,7 +2041,7 @@ fn open_window(
             if pass.is_empty() {
                 // Without a passphrase only the legacy plaintext file can be
                 // tried, and that import is fast (no KDF), so it stays inline.
-                let res: Result<(usize, usize), anyhow::Error> = webdav_get_json(
+                let res: Result<(usize, usize, usize), anyhow::Error> = webdav_get_json(
                     &url,
                     &remote_path,
                     &username,
@@ -2067,15 +2061,16 @@ fn open_window(
                     )
                 });
                 let msg = match res {
-                    Ok((added, skipped)) => {
+                    Ok((added, skipped, recovered)) => {
                         sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
                         registry.broadcast_config_changed();
                         format!(
-                            "{} {}, {} {}{}",
+                            "{} {}, {} {}{}{}",
                             t("已导入", "imported"),
                             added,
                             t("跳过", "skipped"),
                             skipped,
+                            recovered_secrets_note(recovered),
                             webdav_status_suffix(accept_invalid_certs)
                         )
                     }
@@ -2635,15 +2630,16 @@ fn open_window(
                         )
                         .and_then(|json| store.borrow_mut().import_json(&json));
                         let msg = match res {
-                            Ok((added, skipped)) => {
+                            Ok((added, skipped, recovered)) => {
                                 sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
                                 registry.broadcast_config_changed();
                                 format!(
-                                    "{} {}, {} {}{}",
+                                    "{} {}, {} {}{}{}",
                                     t("已导入", "imported"),
                                     added,
                                     t("跳过", "skipped"),
                                     skipped,
+                                    recovered_secrets_note(recovered),
                                     webdav_status_suffix(fb.accept_invalid_certs)
                                 )
                             }
@@ -2656,6 +2652,11 @@ fn open_window(
                         Ok(cfg) => match store.borrow_mut().apply_bundle(cfg) {
                             Ok(n) => {
                                 sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
+                                // Imported settings now live in the store but the
+                                // fields above still show the old values; refresh
+                                // them or the next upload/download would write
+                                // them back on top of the imported config.
+                                sync_settings_for_window(&weak, &store.borrow());
                                 registry.broadcast_config_changed();
                                 format!("{} {}", t("已导入便携包", "bundle imported"), n)
                             }
@@ -2708,6 +2709,30 @@ fn open_window(
                     .set_title(t("部分已保存凭据失效", "some saved credentials lost"))
                     .set_description(msg)
                     .set_level(rfd::MessageLevel::Warning)
+                    .show();
+            });
+        }
+    }
+
+    // Credentials an older build stored under the fixed cross-machine import
+    // key: they decrypted fine, but they had to be resealed under this
+    // machine's key — say so, once, instead of letting it happen silently.
+    {
+        let recovered = store.borrow_mut().take_recovered_secrets();
+        if recovered > 0 {
+            slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+                let msg = format!(
+                    "{} {}",
+                    t(
+                        "检测到旧版跨机导入写入的凭据，已改用本机密钥重新加密：",
+                        "found credentials written by an older cross-machine import; re-encrypted with the local key:"
+                    ),
+                    recovered
+                );
+                let _ = rfd::MessageDialog::new()
+                    .set_title(t("已升级凭据加密", "saved credentials re-encrypted"))
+                    .set_description(msg)
+                    .set_level(rfd::MessageLevel::Info)
                     .show();
             });
         }
@@ -4518,6 +4543,46 @@ fn update_file_drop_highlight(win: &AppWindow, dock_stacks: &Rc<RefCell<DockStac
 #[cfg(not(windows))]
 fn update_file_drop_highlight(_win: &AppWindow, _dock_stacks: &Rc<RefCell<DockStacks>>) {}
 
+/// Message fragment for fixed-key (`enc:exp:v1:`) secrets recovered from a
+/// legacy-format export: they are decrypted at import time and only resealed
+/// under this machine's key when the store is saved, so the user should see
+/// that it happened. Empty when the file used the current encryption.
+fn recovered_secrets_note(recovered: usize) -> String {
+    if recovered == 0 {
+        return String::new();
+    }
+    format!(
+        "{} {}",
+        t(
+            "；旧版跨机导入写入的凭据已改用本机密钥重新加密：",
+            "; credentials written by an older cross-machine import were re-encrypted with the local key:"
+        ),
+        recovered
+    )
+}
+
+/// Re-push every setting the UI still displays into the live window.
+///
+/// `apply_bundle` replaces the whole store in one go, and the upload/download
+/// and settings-save callbacks read these window fields back into the store
+/// before doing work. Without this, the first click after a bundle import
+/// would silently restore the pre-import settings and upload to the old
+/// server. Called once at startup and again right after a successful import.
+fn sync_settings_for_window(window: &slint::Weak<AppWindow>, store: &ConfigStore) {
+    let Some(window) = window.upgrade() else { return };
+    window.set_webdav_enabled(store.webdav_enabled());
+    window.set_webdav_url(store.webdav_url().into());
+    window.set_webdav_username(store.webdav_username().into());
+    window.set_webdav_password(store.webdav_password().into());
+    window.set_webdav_remote_path(store.webdav_remote_path().into());
+    window.set_webdav_accept_invalid_certs(store.webdav_accept_invalid_certs());
+    window.set_ai_base_url(store.ai_base_url().into());
+    window.set_ai_api_key(store.ai_api_key().into());
+    window.set_ai_model(store.ai_model().into());
+    window.set_download_dir(store.download_dir().to_string().into());
+    window.set_sync_upload_enabled(store.sync_upload());
+}
+
 // ---------------------------------------------------------------------------
 // Model helpers
 // ---------------------------------------------------------------------------
@@ -4842,15 +4907,16 @@ fn wire_session_callbacks(
                 let res = store.borrow_mut().import_from(&path);
                 if let Some(w) = weak.upgrade() {
                     let hint = match res {
-                        Ok((added, skipped)) => {
+                        Ok((added, skipped, recovered)) => {
                             sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
                             registry.broadcast_config_changed();
                             format!(
-                                "{} {} / {} {}",
+                                "{} {} / {} {}{}",
                                 t("已导入", "imported"),
                                 added,
                                 t("跳过重复", "skipped"),
-                                skipped
+                                skipped,
+                                recovered_secrets_note(recovered)
                             )
                         }
                         Err(e) => format!("{}: {}", t("导入失败", "import failed"), e),
@@ -7734,6 +7800,13 @@ fn wire_key_input(
                     row.find_matches = ModelRc::from(Rc::new(VecModel::<TermMatch>::default()));
                     row.link_matches = ModelRc::from(Rc::new(VecModel::<TermMatch>::default()));
                     row.selection = ModelRc::from(Rc::new(VecModel::<TermMatch>::default()));
+                    // The scrollback just went away with the buffer, so the
+                    // history-mode counters and the output-protection banner
+                    // would otherwise keep advertising stale matches (the find
+                    // bar stays on screen until the next render rebuilds it).
+                    row.find_active = -1;
+                    row.find_total = 0;
+                    row.backpressure = false;
                     row.has_selection = false;
                     row.cursor_row = 0;
                     row.cursor_col = 0;
