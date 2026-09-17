@@ -599,7 +599,6 @@ export component AppWindow inherits Window {
     init => { Palette.color-scheme = root.dark-mode ? ColorScheme.dark : ColorScheme.light; }
     changed dark-mode => {
         Palette.color-scheme = root.dark-mode ? ColorScheme.dark : ColorScheme.light;
-        if root.editor-open { root.editor-highlight-pending = true; }
     }
     in-out property <string> term-font-family <=> Theme.term-font-family;
     in-out property <length> term-font-size <=> Theme.term-font-size;
@@ -3369,7 +3368,7 @@ export component AppWindow inherits Window {
                             padding-bottom: 6px;
                             spacing: 8px;
                             Text {
-                                text: root.editor-name + "  ·  " + root.editor-language
+                                text: root.editor-name
                                     + (root.editor-readonly
                                         ? "  ·  " + @tr("Read-only")
                                         : (root.editor-dirty ? "  ·  " + @tr("Modified") : ""));
@@ -3735,8 +3734,6 @@ export component AppWindow inherits Window {
                                             : max(1px, ed-scroll.visible-width - 16px);
                                         height: max(ed-scroll.visible-height - 16px, self.preferred-height);
                                         text <=> root.editor-content;
-                                        syntax-source: root.editor-syntax-source;
-                                        syntax-spans: root.editor-syntax-spans;
                                         read-only: root.editor-readonly;
                                         single-line: false;
                                         wrap: root.editor-hl-active ? TextWrap.no-wrap : TextWrap.char-wrap;
