@@ -2443,7 +2443,7 @@ impl ConfigStore {
         // the imported value only sits plain in the cache.
         let mut recovered = 0usize;
         let key = self.key;
-        let open_imported = |value: &str| -> Option<String> {
+        let mut open_imported = |value: &str| -> Option<String> {
             match Self::decrypt_export(value) {
                 Some(plain) => {
                     recovered += 1;
