@@ -941,8 +941,12 @@ mod tests {
         let mut saved = DockStacks::default();
         saved.dock_to("right", "sidebar");
         saved.dock_to("right", "sftp");
-        // SFTP folded (local tab): it leaves the stack; the sidebar survives.
-        let expanded = |k: &str| if k == "sftp" { None } else { Some("right") };
+        // SFTP folded (local tab): it leaves the stack; only the sidebar is
+        // still expanded, so the rebuild keeps exactly that one slot.
+        let expanded = |k: &str| match k {
+            "sidebar" => Some("right"),
+            _ => None,
+        };
         let mut cur = DockStacks::default();
         cur.rebuild_from(&saved, &expanded);
         assert_eq!(cur.right.len(), 1);
