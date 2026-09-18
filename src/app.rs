@@ -5799,7 +5799,10 @@ fn wire_session_callbacks(
         let weak = window.as_weak();
         window.on_session_dialog_generate_key(move || {
             let weak = weak.clone();
-            let algo = match window.get_dialog_key_algo().to_string().as_str() {
+            // The callback must be 'static; reach for the window through the
+            // Weak handle instead of capturing the &AppWindow reference.
+            let Some(w) = weak.upgrade() else { return };
+            let algo = match w.get_dialog_key_algo().to_string().as_str() {
                 "rsa" => crate::ssh::keygen::KeyAlgorithm::Rsa,
                 _ => crate::ssh::keygen::KeyAlgorithm::Ed25519,
             };
@@ -5814,7 +5817,7 @@ fn wire_session_callbacks(
                 let (pem, fp, path, status) = match outcome {
                     Ok((p, f, path)) => (
                         p,
-                        f,
+                        f.clone(),
                         path.clone(),
                         format!("{} · {} · {}", t("已生成", "generated"), path, f),
                     ),
@@ -5907,10 +5910,14 @@ fn wire_session_callbacks(
             // so it must own its Weak handle. The outer task keeps `weak_done`
             // for the final status line.
             let weak_inner = weak_done.clone();
+            // Clone the runtime handle for the inner relay task: the outer
+            // async block consumes `runtime`, so the nested spawn would move
+            // it twice.
+            let runtime_inner = runtime.clone();
             runtime.spawn(async move {
                 // Relay host-key / credential / MFA prompts to the same UI the
                 // "Test connection" button uses, then push the public key.
-                runtime.spawn(async move {
+                runtime_inner.spawn(async move {
                     while let Some(event) = events_rx.recv().await {
                         if matches!(
                             event,
