@@ -1559,6 +1559,98 @@ pub async fn execute_command(
     Ok(result)
 }
 
+/// Push a freshly generated public key line onto the remote server's
+/// `~/.ssh/authorized_keys` so the matching private key can log in without a
+/// password. Connects with the session's *current* credentials (password or
+/// keyboard-interactive), so the user only confirms the existing login once.
+/// Idempotent: a second run does not append a duplicate line.
+///
+/// The caller relays `events` to the UI exactly as `test_session_auth` does,
+/// so host-key, credential and MFA prompts keep working from this path too.
+pub(crate) async fn push_authorized_keys(
+    session: Session,
+    jump: Option<Session>,
+    public_key_line: String,
+    events: UnboundedSender<SessionEvent>,
+) -> Result<()> {
+    let config = ssh_client_config();
+    let (mut handle, mut jump_handle) =
+        connect_ssh(&session, jump.as_ref(), config.clone(), &events).await?;
+
+    match authenticate_session(
+        &mut handle,
+        &mut jump_handle,
+        &session,
+        jump.as_ref(),
+        config,
+        &events,
+    )
+    .await?
+    {
+        AuthResult::Success => {}
+        AuthResult::Cancelled => return Err(anyhow!("login cancelled")),
+        AuthResult::Failed => return Err(anyhow!("authentication failed")),
+    }
+
+    // Append the public key idempotently. The line travels as `$0` of the
+    // `sh -c` script — a single argv element because it is wrapped in single
+    // quotes (with any literal `'` in the comment escaped) — so no shell
+    // quoting of the base64 body is needed. `grep -qF` skips the append on a
+    // repeat; `chmod 600` keeps the file owner-only even when it pre-existed.
+    let escaped = public_key_line.replace('\'', "'\\''");
+    let command = format!(
+        "sh -c 'mkdir -p ~/.ssh && chmod 700 ~/.ssh && grep -qF \"$0\" ~/.ssh/authorized_keys 2>/dev/null || printf \"%s\\n\" \"$0\" >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys' '{}'",
+        escaped
+    );
+
+    let mut channel = handle
+        .channel_open_session()
+        .await
+        .context("open command channel")?;
+    channel
+        .exec(true, command.as_bytes())
+        .await
+        .context("execute remote command")?;
+
+    let collect = async {
+        let mut exit_code = None;
+        while let Some(message) = channel.wait().await {
+            match message {
+                ChannelMsg::ExitStatus { exit_status } => exit_code = Some(exit_status),
+                ChannelMsg::Close => break,
+                _ => {}
+            }
+        }
+        exit_code
+    };
+
+    let exit_code = tokio::time::timeout(std::time::Duration::from_secs(30), collect)
+        .await
+        .map_err(|_| anyhow!("{}", t("推送超时", "push timed out")))?
+        // No ExitStatus before Close means the server never reported a result;
+        // treat it as a failure rather than a success.
+        .unwrap_or(1);
+
+    let _ = handle
+        .disconnect(Disconnect::ByApplication, "push complete", "")
+        .await;
+    if let Some(jump_handle) = jump_handle {
+        let _ = jump_handle
+            .disconnect(Disconnect::ByApplication, "push complete", "")
+            .await;
+    }
+
+    if exit_code != 0 {
+        return Err(anyhow!(
+            "{} (exit {})",
+            t("推送公钥失败", "failed to push public key"),
+            exit_code
+        ));
+    }
+
+    Ok(())
+}
+
 fn append_bounded(target: &mut Vec<u8>, data: &[u8], limit: usize, truncated: &mut bool) {
     let remaining = limit.saturating_sub(target.len());
     let take = remaining.min(data.len());

@@ -2137,7 +2137,9 @@ impl ConfigStore {
             self.cache.collapsed_session_groups = Some(groups);
         }
 
-        let groups = self.cache.collapsed_session_groups.as_mut().unwrap();
+        // The `is_none()` branch above guarantees Some here; keep the expect
+        // explicit so a future refactor that drops the guard fails loudly.
+        let groups = self.cache.collapsed_session_groups.as_mut().expect("collapsed_session_groups initialised above");
         groups.retain(|group| group != name);
         if collapsed {
             groups.push(name.to_string());

@@ -8,6 +8,8 @@ pub(crate) mod ppk;
 pub(crate) mod proxy;
 #[path = "impls/ssh.rs"]
 mod ssh;
+#[path = "impls/keygen.rs"]
+pub(crate) mod keygen;
 #[path = "impls/ssh_config.rs"]
 pub(crate) mod ssh_config;
 

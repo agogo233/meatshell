@@ -210,8 +210,8 @@ use crate::sftp::{
     UploadDecision,
 };
 use crate::ssh::{
-    format_mtime, format_size, spawn_session, test_session_auth, ProcInfo, SessionCommand,
-    SessionEvent, SessionHandle, SystemDetails,
+    format_mtime, format_size, push_authorized_keys, spawn_session, test_session_auth,
+    ProcInfo, SessionCommand, SessionEvent, SessionHandle, SystemDetails,
 };
 #[cfg(windows)]
 use crate::terminal::c0_letter_key_down;
@@ -5204,7 +5204,7 @@ fn wire_session_callbacks(
                 if let Some(orig) = s.get(&id.to_string()).cloned() {
                     let mut copy = orig;
                     copy.id = uuid::Uuid::new_v4().to_string();
-                    copy.name = format!("{} (copy)", copy.name);
+                    copy.name = format!("{} {}", copy.name, t("副本", "(copy)"));
                     copy.last_used = None;
                     s.upsert(copy);
                     if let Err(err) = s.save() {
@@ -5788,6 +5788,186 @@ fn wire_session_callbacks(
                     w.set_dialog_key_path(path.into());
                 }
             }
+        });
+    }
+
+    // In-app SSH keypair generator. The (potentially slow) RSA/Ed25519
+    // generation runs off the UI thread; the pair is written to ~/.ssh with
+    // 0600 and the private key is pasted into the inline field so the session
+    // can use it immediately.
+    {
+        let weak = window.as_weak();
+        window.on_session_dialog_generate_key(move || {
+            let weak = weak.clone();
+            let algo = match window.get_draft_key_algo().to_string().as_str() {
+                "rsa" => crate::ssh::keygen::KeyAlgorithm::Rsa,
+                _ => crate::ssh::keygen::KeyAlgorithm::Ed25519,
+            };
+            std::thread::spawn(move || {
+                let outcome = (|| -> Result<(String, String, String), String> {
+                    let key = crate::ssh::keygen::generate_keypair(algo).map_err(|e| e.to_string())?;
+                    let fp = key.fingerprint.clone();
+                    let pem = key.private_key_pem.clone();
+                    let key = crate::ssh::keygen::write_key_files(key, algo).map_err(|e| e.to_string())?;
+                    Ok((pem, fp, key.private_key_path.display().to_string()))
+                })();
+                let (pem, fp, path, status) = match outcome {
+                    Ok((p, f, path)) => (
+                        p,
+                        f,
+                        path.clone(),
+                        format!("{} · {} · {}", t("已生成", "generated"), path, f),
+                    ),
+                    Err(e) => (
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                        format!("{}: {e}", t("生成失败", "generation failed")),
+                    ),
+                };
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(w) = weak.upgrade() else { return };
+                    w.set_draft_key_inline(pem.into());
+                    w.set_draft_key_inline_mode(true);
+                    w.set_draft_key_generated(true);
+                    w.set_draft_key_status(status.into());
+                });
+            });
+        });
+    }
+
+    // Push the freshly generated public key to the server's authorized_keys so
+    // the matching private key can log in without a password. Connects with the
+    // session's current credentials (the same host-key / credential / MFA
+    // prompt plumbing as "Test connection"), then runs an idempotent append
+    // over an SSH exec channel.
+    {
+        let weak = window.as_weak();
+        let runtime = runtime.clone();
+        let store = store.clone();
+        let edit_forwards = edit_forwards.clone();
+        let edit_triggers = edit_triggers.clone();
+        let edit_trigger_secrets = edit_trigger_secrets.clone();
+        window.on_session_dialog_upload_key(move |draft: SessionDraft| {
+            if draft.kind.to_string() != "ssh" {
+                if let Some(w) = weak.upgrade() {
+                    w.set_draft_key_status(
+                        t("只有 SSH 会话才能上传公钥", "only SSH sessions can receive a public key").into(),
+                    );
+                }
+                return;
+            }
+            let weak_done = weak.clone();
+            let existing = store.borrow().get(draft.id.as_str()).cloned();
+            let forwards = match validated_port_forwards(&edit_forwards.borrow()) {
+                Ok(forwards) => forwards,
+                Err(message) => {
+                    if let Some(w) = weak.upgrade() {
+                        w.set_draft_key_status(message.into());
+                    }
+                    return;
+                }
+            };
+            let triggers = match validated_triggers(&edit_triggers.borrow(), &edit_trigger_secrets.borrow()) {
+                Ok(triggers) => triggers,
+                Err(message) => {
+                    if let Some(w) = weak.upgrade() {
+                        w.set_draft_key_status(message.into());
+                    }
+                    return;
+                }
+            };
+            let session = session_from_draft(&draft, existing.as_ref(), forwards, triggers);
+            if session.host.is_empty() {
+                if let Some(w) = weak.upgrade() {
+                    w.set_draft_key_status(t("请先填写主机地址", "enter a host address first").into());
+                }
+                return;
+            }
+            // The generated private key lives in the draft's inline field; turn it
+            // back into a public key line for the server.
+            let pem = draft.private_key_inline.as_str().trim().to_string();
+            let public_key_line = match (|| -> Result<String> {
+                let key = ssh_key::PrivateKey::from_openssh(&pem).context("parse generated private key")?;
+                Ok(key.public_key().to_openssh().context("serialise public key")?)
+            })() {
+                Ok(line) => line,
+                Err(e) => {
+                    if let Some(w) = weak.upgrade() {
+                        w.set_draft_key_status(format!("{}: {e}", t("公钥无效", "invalid public key")).into());
+                    }
+                    return;
+                }
+            };
+            let jump = resolve_jump(&store, &session);
+            let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+            let session_for_task = session.clone();
+            let events_tx_for_task = events_tx.clone();
+            // Clone for the inner relay task: it is spawned as a 'static task,
+            // so it must own its Weak handle. The outer task keeps `weak_done`
+            // for the final status line.
+            let weak_inner = weak_done.clone();
+            runtime.spawn(async move {
+                // Relay host-key / credential / MFA prompts to the same UI the
+                // "Test connection" button uses, then push the public key.
+                runtime.spawn(async move {
+                    while let Some(event) = events_rx.recv().await {
+                        if matches!(
+                            event,
+                            SessionEvent::HostKeyPrompt { .. }
+                                | SessionEvent::CredentialPrompt { .. }
+                                | SessionEvent::MfaPrompt { .. }
+                        ) {
+                            let weak_prompt = weak_inner.clone();
+                            let _ = slint::invoke_from_event_loop(move || {
+                                let Some(w) = weak_prompt.upgrade() else { return };
+                                match event {
+                                    SessionEvent::HostKeyPrompt {
+                                        host,
+                                        port,
+                                        key_type,
+                                        fingerprint,
+                                        changed,
+                                        responder,
+                                    } => enqueue_hostkey_prompt(
+                                        &w, window_id, host, port, key_type, fingerprint, changed, responder,
+                                    ),
+                                    SessionEvent::CredentialPrompt {
+                                        session_id,
+                                        host,
+                                        user,
+                                        need_user,
+                                        need_password,
+                                        responder,
+                                    } => enqueue_cred_prompt(
+                                        &w, window_id, session_id, host, user, need_user, need_password, responder,
+                                    ),
+                                    SessionEvent::MfaPrompt {
+                                        session_id,
+                                        host,
+                                        prompt,
+                                        echo,
+                                        responder,
+                                    } => enqueue_mfa_prompt(
+                                        &w, window_id, session_id, host, prompt, echo, responder,
+                                    ),
+                                    _ => {}
+                                }
+                            });
+                        }
+                    }
+                });
+                let result = push_authorized_keys(session_for_task, jump, public_key_line, events_tx_for_task).await;
+                let message = match result {
+                    Ok(()) => t("公钥已上传，现在可用密钥登录", "public key uploaded; key login now works").to_string(),
+                    Err(e) => format!("{}: {e:#}", t("上传失败", "upload failed")),
+                };
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(w) = weak_done.upgrade() {
+                        w.set_draft_key_status(message.into());
+                    }
+                });
+            });
         });
     }
 

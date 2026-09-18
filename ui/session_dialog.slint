@@ -498,6 +498,12 @@ export component SessionDialog inherits Rectangle {
     in-out property <bool> draft-disable-shell-integration: false;
     in-out property <string> draft-note;
     in-out property <string> test-status;
+    // In-app SSH keypair generator. Transient UI state — the generated private
+    // key reaches the session through `draft-key-inline` like any pasted key,
+    // so these three are deliberately NOT part of SessionDraft.
+    in-out property <string> draft-key-algo: "ed25519";  // "ed25519" | "rsa"
+    in-out property <string> draft-key-status;
+    in-out property <bool> draft-key-generated: false;
 
     // Port forwards / tunnels (#56). Every row is an editable form (#277).
     in property <[PortFwd]> forwards;
@@ -514,6 +520,8 @@ export component SessionDialog inherits Rectangle {
     callback update-trigger(int /* index */, TriggerDraft);
     callback delete-trigger(int /* index */);
     callback pick-key-file();   // open a native file picker for the private key
+    callback generate-key();   // generate a keypair and fill the inline field
+    callback upload-key(SessionDraft);  // push the generated public key to the server
 
     visible: is-open;
     background: #00000080;
@@ -778,6 +786,65 @@ export component SessionDialog inherits Rectangle {
                         active: root.draft-key-inline-mode;
                         clicked => { root.draft-key-inline-mode = true; }
                     }
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    SegOption {
+                        label: @tr("Ed25519");
+                        active: root.draft-key-algo == "ed25519";
+                        clicked => { root.draft-key-algo = "ed25519"; }
+                    }
+                    SegOption {
+                        label: @tr("RSA");
+                        active: root.draft-key-algo == "rsa";
+                        clicked => { root.draft-key-algo = "rsa"; }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    if root.draft-key-generated : Rectangle {
+                        width: 72px; height: 30px;
+                        border-radius: Theme.radius-sm;
+                        border-width: 1px;
+                        border-color: up-ta.has-hover ? Theme.accent : Theme.border-strong;
+                        background: up-ta.has-hover ? Theme.bg-hover : Theme.bg-elevated;
+                        Text {
+                            text: @tr("上传…", "Upload…");
+                            color: Theme.text-primary;
+                            font-size: Theme.fs-sm;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        up-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.upload-key({ id: root.draft-id, name: root.draft-name, kind: root.draft-kind, host: root.draft-host, port: root.draft-port.to-float(), user: root.draft-user, auth: root.draft-auth, password: root.draft-password, private-key-path: root.draft-key-path, private-key-inline: root.draft-key-inline, private-key-inline-mode: root.draft-key-inline-mode, proxy: (root.draft-proxy-type == "none" || root.draft-proxy-hostport == "") ? "" : root.draft-proxy-type == "http" ? "http://" + root.draft-proxy-hostport : "socks5://" + root.draft-proxy-hostport, group: root.draft-group, serial-port: root.draft-serial-port, baud-rate: root.draft-baud.to-float(), data-bits: root.draft-data-bits.to-float(), stop-bits: root.draft-stop-bits.to-float(), parity: root.draft-parity, flow-control: root.draft-flow, encoding: root.draft-encoding, vt100-drawing: root.draft-vt100-drawing, disable-shell-integration: root.draft-disable-shell-integration, note: root.draft-note, jump-session-id: (root.draft-jump-index > 0 && root.draft-jump-index < root.jump-ids.length) ? root.jump-ids[root.draft-jump-index] : "" }); }
+                        }
+                    }
+                    Rectangle { width: 4px; height: 1px; }
+                    Rectangle {
+                        width: 96px; height: 30px;
+                        border-radius: Theme.radius-sm;
+                        border-width: 1px;
+                        border-color: gen-ta.has-hover ? Theme.accent : Theme.border-strong;
+                        background: gen-ta.has-hover ? Theme.bg-hover : Theme.bg-elevated;
+                        Text {
+                            text: @tr("生成密钥对…", "Generate keypair…");
+                            color: Theme.text-primary;
+                            font-size: Theme.fs-sm;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        gen-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.generate-key(); }
+                        }
+                    }
+                }
+                if root.draft-key-status != "" : Text {
+                    text: root.draft-key-status;
+                    color: Theme.text-secondary;
+                    font-size: Theme.fs-xs;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
                 }
                 if !root.draft-key-inline-mode : VerticalLayout {
                     spacing: 4px;
