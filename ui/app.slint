@@ -1050,6 +1050,12 @@ export component AppWindow inherits Window {
     in-out property <string> dialog-key-path;
     in-out property <string> dialog-key-inline;
     in-out property <bool> dialog-key-inline-mode: false;
+    // Mirrors of the SessionDialog's `draft-key-*` generator state (#222),
+    // bound below so Rust can drive them from AppWindow without touching the
+    // dialog instance directly.
+    in-out property <string> dialog-key-algo: "ed25519";  // "ed25519" | "rsa"
+    in-out property <string> dialog-key-status;
+    in-out property <bool> dialog-key-generated: false;
     in-out property <string> dialog-proxy-type: "none";  // "none" | "socks5" | "http"
     in-out property <string> dialog-proxy-hostport;
     in-out property <string> dialog-group;
@@ -1109,6 +1115,8 @@ export component AppWindow inherits Window {
     callback session-dialog-test(SessionDraft);
     callback session-dialog-cancel();
     callback session-dialog-pick-key();
+    callback session-dialog-generate-key();
+    callback session-dialog-upload-key(SessionDraft);
     // Port forwards for the session being edited (#56).
     in-out property <[PortFwd]> dialog-forwards;
     in-out property <[TriggerDraft]> dialog-triggers;
@@ -5501,6 +5509,9 @@ export component AppWindow inherits Window {
         draft-key-path <=> root.dialog-key-path;
         draft-key-inline <=> root.dialog-key-inline;
         draft-key-inline-mode <=> root.dialog-key-inline-mode;
+        draft-key-algo <=> root.dialog-key-algo;
+        draft-key-status <=> root.dialog-key-status;
+        draft-key-generated <=> root.dialog-key-generated;
         draft-proxy-type <=> root.dialog-proxy-type;
         draft-proxy-hostport <=> root.dialog-proxy-hostport;
         draft-group <=> root.dialog-group;
@@ -5526,6 +5537,8 @@ export component AppWindow inherits Window {
         test-connection(draft) => { root.session-dialog-test(draft); }
         cancel => { root.session-dialog-cancel(); }
         pick-key-file => { root.session-dialog-pick-key(); }
+        generate-key => { root.session-dialog-generate-key(); }
+        upload-key(draft) => { root.session-dialog-upload-key(draft); }
         add-forward => { root.add-forward(); }
         update-forward(i, f) => { root.update-forward(i, f); }
         delete-forward(i) => { root.delete-forward(i); }

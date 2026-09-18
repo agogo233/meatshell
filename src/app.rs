@@ -5799,7 +5799,7 @@ fn wire_session_callbacks(
         let weak = window.as_weak();
         window.on_session_dialog_generate_key(move || {
             let weak = weak.clone();
-            let algo = match window.get_draft_key_algo().to_string().as_str() {
+            let algo = match window.get_dialog_key_algo().to_string().as_str() {
                 "rsa" => crate::ssh::keygen::KeyAlgorithm::Rsa,
                 _ => crate::ssh::keygen::KeyAlgorithm::Ed25519,
             };
@@ -5827,10 +5827,10 @@ fn wire_session_callbacks(
                 };
                 let _ = slint::invoke_from_event_loop(move || {
                     let Some(w) = weak.upgrade() else { return };
-                    w.set_draft_key_inline(pem.into());
-                    w.set_draft_key_inline_mode(true);
-                    w.set_draft_key_generated(true);
-                    w.set_draft_key_status(status.into());
+                    w.set_dialog_key_inline(pem.into());
+                    w.set_dialog_key_inline_mode(true);
+                    w.set_dialog_key_generated(true);
+                    w.set_dialog_key_status(status.into());
                 });
             });
         });
@@ -5851,7 +5851,7 @@ fn wire_session_callbacks(
         window.on_session_dialog_upload_key(move |draft: SessionDraft| {
             if draft.kind.to_string() != "ssh" {
                 if let Some(w) = weak.upgrade() {
-                    w.set_draft_key_status(
+                    w.set_dialog_key_status(
                         t("只有 SSH 会话才能上传公钥", "only SSH sessions can receive a public key").into(),
                     );
                 }
@@ -5863,7 +5863,7 @@ fn wire_session_callbacks(
                 Ok(forwards) => forwards,
                 Err(message) => {
                     if let Some(w) = weak.upgrade() {
-                        w.set_draft_key_status(message.into());
+                        w.set_dialog_key_status(message.into());
                     }
                     return;
                 }
@@ -5872,7 +5872,7 @@ fn wire_session_callbacks(
                 Ok(triggers) => triggers,
                 Err(message) => {
                     if let Some(w) = weak.upgrade() {
-                        w.set_draft_key_status(message.into());
+                        w.set_dialog_key_status(message.into());
                     }
                     return;
                 }
@@ -5880,7 +5880,7 @@ fn wire_session_callbacks(
             let session = session_from_draft(&draft, existing.as_ref(), forwards, triggers);
             if session.host.is_empty() {
                 if let Some(w) = weak.upgrade() {
-                    w.set_draft_key_status(t("请先填写主机地址", "enter a host address first").into());
+                    w.set_dialog_key_status(t("请先填写主机地址", "enter a host address first").into());
                 }
                 return;
             }
@@ -5894,7 +5894,7 @@ fn wire_session_callbacks(
                 Ok(line) => line,
                 Err(e) => {
                     if let Some(w) = weak.upgrade() {
-                        w.set_draft_key_status(format!("{}: {e}", t("公钥无效", "invalid public key")).into());
+                        w.set_dialog_key_status(format!("{}: {e}", t("公钥无效", "invalid public key")).into());
                     }
                     return;
                 }
@@ -5964,7 +5964,7 @@ fn wire_session_callbacks(
                 };
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(w) = weak_done.upgrade() {
-                        w.set_draft_key_status(message.into());
+                        w.set_dialog_key_status(message.into());
                     }
                 });
             });
