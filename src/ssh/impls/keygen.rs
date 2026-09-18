@@ -13,7 +13,7 @@ use std::{fs, io};
 
 use anyhow::{anyhow, Context, Result};
 use rand::rngs::OsRng;
-use ssh_key::{Algorithm, HashAlg, LineEnding, PrivateKey, PublicKey};
+use ssh_key::{Algorithm, HashAlg, LineEnding, PrivateKey};
 use uuid::Uuid;
 
 use crate::i18n::t;
