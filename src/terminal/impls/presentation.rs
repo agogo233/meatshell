@@ -397,6 +397,27 @@ pub(crate) fn render_term_span(span: &HistSpan, row: i32, is_dark: bool) -> Vec<
     use unicode_segmentation::UnicodeSegmentation as _;
     use unicode_width::UnicodeWidthStr as _;
 
+    // Pure-ASCII runs cannot contain emoji (every Twemoji glyph is non-ASCII),
+    // are never wide (2-cell) or CJK, and have no combining sequences, so the
+    // grapheme split, per-glyph emoji lookup and CJK scan below reduce to a
+    // single plain span. Most terminal output is ASCII, making this the
+    // per-frame fast path for full-screen fills (htop/btop redraws).
+    if span.text.is_ascii() && !span.text.is_empty() {
+        let (fg, bg) = vt_span_colors(span.fg, span.bg, span.bold, span.inverse, is_dark);
+        return vec![TermSpan {
+            text: span.text.clone().into(),
+            fg,
+            bg,
+            bold: span.bold,
+            row,
+            col: span.col,
+            cells: span.cells,
+            cjk: false,
+            emoji: false,
+            emoji_image: slint::Image::default(),
+        }];
+    }
+
     let graphemes: Vec<&str> = span.text.graphemes(true).collect();
     if graphemes.is_empty() {
         return Vec::new();

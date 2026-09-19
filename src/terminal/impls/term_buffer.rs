@@ -145,8 +145,7 @@ impl TermBuffer {
 
     /// Map a visible row (0..rows) to its absolute combined-row index.
     pub(crate) fn vis_to_abs(&self, vis_row: u16) -> usize {
-        let (_, live_used) = self.live_rows();
-        self.view_top_abs(live_used) + vis_row as usize
+        self.view_top_abs(0) + vis_row as usize
     }
 
     /// Highlight rectangles for the current selection, clipped to the visible
@@ -163,8 +162,7 @@ impl TermBuffer {
         if ranges.is_empty() {
             return Vec::new();
         }
-        let (_, live_used) = self.live_rows();
-        let top = self.view_top_abs(live_used);
+        let top = self.view_top_abs(0);
         let rows = self.parser.screen().size().0;
         let mut out = Vec::new();
         for ((ar, ac), (fr, fc)) in ranges {
@@ -294,8 +292,7 @@ impl TermBuffer {
     /// Scroll so `abs_row` sits near the vertical centre of the viewport.
     pub(crate) fn scroll_to_abs_row(&mut self, abs_row: usize) -> bool {
         let rows = self.parser.screen().size().0 as usize;
-        let (live, _) = self.live_rows();
-        let combined_len = self.history.len() + live.len();
+        let combined_len = self.history.len() + rows;
         if combined_len <= rows {
             let changed = self.view_offset != 0;
             self.view_offset = 0;
