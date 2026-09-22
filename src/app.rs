@@ -3443,7 +3443,9 @@ fn open_window(
 
     // OS file drag-and-drop → upload to the active session's SFTP directory,
     // but only when the file is dropped over the terminal pane or the docked
-    // SFTP panel. Windows is the only backend with reliable DnD delivery.
+    // SFTP panel. Windows queries the OS cursor directly (OLE suppresses
+    // WM_MOUSEMOVE mid-drag); macOS/X11/Wayland reuse the last CursorMoved
+    // position delivered during drag-hover (#356).
     {
         use i_slint_backend_winit::winit::event::{
             MouseScrollDelta, TouchPhase, WindowEvent as WEvent,
@@ -3575,7 +3577,20 @@ fn open_window(
                                 ev_file_hover.set(false);
                                 win.set_file_drop_hl(false);
                             }
-                            handle_file_drop(&win, &sh, path.clone(), &ev_ds);
+                            // On Windows the handler queries the OS cursor
+                            // position itself (see `cursor_pos`), since OLE
+                            // drag-and-drop hover suppresses WM_MOUSEMOVE.
+                            // On macOS/X11/Wayland the compositor delivers
+                            // pointer motion during drag-hover as ordinary
+                            // CursorMoved events, so the last one we saw is
+                            // the drop point (#356).
+                            handle_file_drop(
+                                &win,
+                                &sh,
+                                path.clone(),
+                                &ev_ds,
+                                last_cursor_logical,
+                            );
                         }
                     }
                     #[cfg(target_os = "windows")]
@@ -4356,12 +4371,23 @@ fn cursor_pos() -> Option<(i32, i32)> {
 /// Handle an OS file drop: if it landed over the active session's terminal
 /// pane or over the docked SFTP panel, upload the file to that session's
 /// current remote directory (#drag-onto-shell, #file-drop-sftp).
+///
+/// `hovered_pos` is the caller's best guess at the drop point in logical
+/// window-client coordinates, taken from the most recent `CursorMoved` event
+/// (see the `WEvent::DroppedFile` handler). Windows ignores it and queries
+/// the OS cursor directly instead: Win32 suppresses `WM_MOUSEMOVE` for the
+/// window while an OLE drag-and-drop is in progress, so `CursorMoved` can be
+/// stale by the time the drop lands. macOS and X11/Wayland do deliver real
+/// pointer motion during drag-hover as ordinary `CursorMoved` events, so the
+/// last one seen is accurate there — this is what previously left
+/// drag-and-drop upload a no-op on every non-Windows platform (#356).
 #[cfg(windows)]
 fn handle_file_drop(
     win: &AppWindow,
     sftp_handles: &SftpHandles,
     path: std::path::PathBuf,
     dock_stacks: &Rc<RefCell<DockStacks>>,
+    _hovered_pos: Option<(f32, f32)>,
 ) {
     let active = win.get_active_tab_id().to_string();
     if active == "welcome" {
@@ -4384,8 +4410,44 @@ fn handle_file_drop(
     if file_drop_target(win, dock_stacks, client_x, client_y).is_none() {
         return; // dropped outside both panels — ignore
     }
+    upload_dropped_file(win, sftp_handles, path, &active);
+}
 
-    let dir = active_sftp_path(win, &active);
+#[cfg(not(windows))]
+fn handle_file_drop(
+    win: &AppWindow,
+    sftp_handles: &SftpHandles,
+    path: std::path::PathBuf,
+    dock_stacks: &Rc<RefCell<DockStacks>>,
+    hovered_pos: Option<(f32, f32)>,
+) {
+    let active = win.get_active_tab_id().to_string();
+    if active == "welcome" {
+        return;
+    }
+    let Some((client_x, client_y)) = hovered_pos else {
+        // No CursorMoved was ever observed for this drag (e.g. the file was
+        // dropped the instant it entered the window). Without a position we
+        // cannot tell which panel it landed on, so do nothing rather than
+        // guess — matches the previous no-op rather than uploading to the
+        // wrong place.
+        return;
+    };
+    // Same target rule as Windows: terminal panel or docked SFTP panel.
+    if file_drop_target(win, dock_stacks, client_x, client_y).is_none() {
+        return; // dropped outside both panels — ignore
+    }
+    upload_dropped_file(win, sftp_handles, path, &active);
+}
+
+/// Shared drop-upload body for both platform front-ends above.
+fn upload_dropped_file(
+    win: &AppWindow,
+    sftp_handles: &SftpHandles,
+    path: std::path::PathBuf,
+    active: &str,
+) {
+    let dir = active_sftp_path(win, active);
     if dir.is_empty() {
         return;
     }
@@ -4401,10 +4463,10 @@ fn handle_file_drop(
     // The duplicate prompt mirrors the upload button's behaviour; a dropped
     // folder merges on the worker side, so it never prompts.
     let dedup = configured_dedup_policy(&win.as_weak());
-    let known = terminal_sftp_entry_names(win, &active);
+    let known = terminal_sftp_entry_names(win, active);
     let decision = upload_decision(&path, &known, dedup, path.is_dir());
     if let Ok(handles) = sftp_handles.lock() {
-        if let Some(h) = handles.get(&active) {
+        if let Some(h) = handles.get(active) {
             win.set_download_open(true);
             h.upload(path.clone(), dir, decision);
         }
@@ -4412,7 +4474,7 @@ fn handle_file_drop(
             // The decision was made against the active tab's listing; mirrors
             // get their own live check in the worker instead.
             for (id, h) in handles.iter() {
-                if id == &active {
+                if id.as_str() == active {
                     continue;
                 }
                 if let Some(d) = other_dirs.get(id).filter(|d| !d.is_empty()) {
@@ -4423,17 +4485,8 @@ fn handle_file_drop(
     }
 }
 
-#[cfg(not(windows))]
-fn handle_file_drop(
-    _win: &AppWindow,
-    _sftp_handles: &SftpHandles,
-    _path: std::path::PathBuf,
-    _dock_stacks: &Rc<RefCell<DockStacks>>,
-) {}
-
 /// The dock area's frame in logical client coordinates (below the title bar).
 /// Sibling of `app_content_area`'s origin: panels are laid out inside it.
-#[cfg(windows)]
 fn dock_area_frame(win: &AppWindow) -> LogicalRect {
     let size = win.window().size();
     let scale = win.window().scale_factor().max(0.01) as f32;
@@ -4454,7 +4507,6 @@ fn dock_area_frame(win: &AppWindow) -> LogicalRect {
 
 /// The docked SFTP panel's rect in logical client coordinates, when it is
 /// expanded for the active tab; `None` in zen mode (panels hidden there).
-#[cfg(windows)]
 fn sftp_panel_client_rect(
     win: &AppWindow,
     dock_stacks: &Rc<RefCell<DockStacks>>,
@@ -4483,7 +4535,6 @@ fn sftp_panel_client_rect(
 /// The file-drop target under a client-space point, returned in dock-area
 /// coordinates so the highlight overlay can draw it directly. Matches the
 /// active session's terminal pane or the docked SFTP panel.
-#[cfg(windows)]
 fn file_drop_target(
     win: &AppWindow,
     dock_stacks: &Rc<RefCell<DockStacks>>,
@@ -4715,6 +4766,10 @@ fn wire_session_callbacks(
             w.set_dialog_stop_bits("1".into());
             w.set_dialog_parity("none".into());
             w.set_dialog_flow("none".into());
+            w.set_dialog_rdp_domain("".into());
+            w.set_dialog_rdp_resolution(RDP_RESOLUTION_DEFAULT.into());
+            w.set_dialog_rdp_width("1280".into());
+            w.set_dialog_rdp_height("720".into());
             w.set_dialog_encoding("UTF-8".into());
             w.set_dialog_vt100_drawing(false);
             w.set_dialog_disable_shell_integration(false);
@@ -5158,6 +5213,17 @@ fn wire_session_callbacks(
                 w.set_dialog_stop_bits(session.stop_bits.to_string().into());
                 w.set_dialog_parity(session.parity.clone().into());
                 w.set_dialog_flow(session.flow_control.clone().into());
+                w.set_dialog_rdp_domain(session.rdp_domain.clone().into());
+                w.set_dialog_rdp_resolution(
+                    rdp_resolution_choice(
+                        session.rdp_fullscreen,
+                        session.rdp_width,
+                        session.rdp_height,
+                    )
+                    .into(),
+                );
+                w.set_dialog_rdp_width(session.rdp_width.to_string().into());
+                w.set_dialog_rdp_height(session.rdp_height.to_string().into());
                 w.set_dialog_encoding(session.encoding.clone().into());
                 w.set_dialog_vt100_drawing(session.vt100_drawing);
                 w.set_dialog_disable_shell_integration(session.disable_shell_integration);
@@ -5519,12 +5585,18 @@ fn wire_session_callbacks(
                 _ if draft.user.trim().is_empty() => draft.host.to_string(),
                 _ => format!("{}@{}", draft.user, draft.host),
             };
-            // Telnet defaults to port 23, SSH to 22; serial ignores port.
-            let default_port = if kind == crate::config::SessionKind::Telnet {
-                23
-            } else {
-                22
+            // Telnet defaults to port 23, RDP to 3389, SSH to 22; serial ignores
+            // the port entirely.
+            let default_port = match kind {
+                crate::config::SessionKind::Telnet => 23,
+                crate::config::SessionKind::Rdp => 3389,
+                _ => 22,
             };
+            let (rdp_fullscreen, rdp_width, rdp_height) = rdp_display_settings(
+                &draft.rdp_resolution.to_string(),
+                draft.rdp_width,
+                draft.rdp_height,
+            );
             let new_session = Session {
                 id,
                 name: if draft.name.is_empty() {
@@ -5567,6 +5639,10 @@ fn wire_session_callbacks(
                 disable_shell_integration: draft.disable_shell_integration,
                 note: draft.note.to_string(),
                 jump_session_id: draft.jump_session_id.to_string(),
+                rdp_domain: draft.rdp_domain.to_string(),
+                rdp_fullscreen,
+                rdp_width,
+                rdp_height,
             };
             {
                 let mut s = store.borrow_mut();
@@ -6099,6 +6175,26 @@ fn wire_session_callbacks(
                     None => return,
                 }
             };
+            // ── RDP: hand the saved account to the system client, open no tab ──
+            // FinalShell does the same thing: meatshell stores host / port /
+            // user / password and starts the operating system's own remote
+            // desktop client (mstsc on Windows), so the session lives in a
+            // native window rather than in one of our tabs.
+            if session.kind == SessionKind::Rdp {
+                let message = match crate::rdp::launch(&session) {
+                    Ok(started) => format!(
+                        "{} {}",
+                        t("已用系统远程桌面打开", "Opened with the system remote desktop client"),
+                        started
+                    ),
+                    Err(err) => format!("{}: {err}", t("RDP 启动失败", "Failed to start RDP")),
+                };
+                tracing::info!("{message}");
+                if let Some(w) = weak.upgrade() {
+                    w.set_ssh_import_hint(message.into());
+                }
+                return;
+            }
             let tab_id = format!("term-{}", uuid::Uuid::new_v4());
             let tab_title = session.name.clone();
 
@@ -6110,6 +6206,9 @@ fn wire_session_callbacks(
                 }
                 SessionKind::Telnet => format!("telnet {}:{}", session.host, session.port),
                 SessionKind::Local => format!("local {}", session.name),
+                // RDP opens in the system client instead of a tab (see the
+                // early return above); this label only exists for completeness.
+                SessionKind::Rdp => format!("rdp {}:{}", session.host, session.port),
             };
             // Compatibility mode also suppresses the SFTP side-channel so
             // bastions that only permit one proxied PTY connection stay alive.
@@ -7734,6 +7833,7 @@ fn wire_key_input(
             }
         });
     }
+
 
     // Propagate PTY resize to the SSH worker and vt100 parser. Pixel
     // dimensions come from Slint; we approximate col/row counts using

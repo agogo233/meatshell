@@ -178,7 +178,7 @@ export component SftpPanel inherits Rectangle {
     // The full toolbar needs roughly 480px once a useful path field is included.
     // Below that, switch deliberately to a two-row compact layout instead of
     // allowing fixed-size controls to squeeze the path and each other (#285).
-    property <bool> narrow-toolbar: !root.show-tree && root.width < 480px;
+    property <bool> narrow-toolbar: root.width < (480px + (root.show-tree ? root.tree-width + 5px : 0px));
     // Below 280px the upload button moves into the "…" overflow menu so
     // bookmarks and parent navigation stay visible instead of being pushed out
     // (#sftp-tight-toolbar). The overflow menu itself surfaces from ~168px; in
@@ -422,7 +422,7 @@ export component SftpPanel inherits Rectangle {
                 // Keep parent navigation discoverable in the narrow layout
                 // instead of hiding this primary action in the overflow menu
                 // (#322). It stays beside the other compact toolbar actions.
-                if root.narrow-toolbar && root.panel-mode == "files" : Rectangle {
+                if root.narrow-toolbar && !root.show-tree && root.panel-mode == "files" : Rectangle {
                     width: 24px; height: 22px;
                     border-radius: Theme.radius-sm;
                     background: compact-up-ta.has-hover ? Theme.bg-hover : transparent;
@@ -663,6 +663,7 @@ export component SftpPanel inherits Rectangle {
                     // On a wide-enough panel the overflow menu moves up to the first
                     // row, so refresh and collapse take the path row only in the
                     // narrowest band (see row1-refresh / row1-min below).
+
                     width: 24px;
                     height: 22px;
                     border-radius: Theme.radius-sm;

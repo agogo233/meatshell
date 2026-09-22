@@ -67,6 +67,13 @@ pub(super) fn start_session_in_tab(tab_id: &str, session: Session, ctx: &Connect
             initial_cols,
             initial_rows,
         ),
+        SessionKind::Rdp => {
+            // RDP sessions are handed to the system remote desktop client and
+            // never get a tab (see `on_connect_session`), so this arm is only a
+            // safety net for a saved session edited into another kind.
+            tracing::warn!("RDP session cannot be hosted in a tab; not starting");
+            return;
+        }
     };
     let terminal_reply_tx = handle.commands.clone();
     let monitoring_enabled = ctx
@@ -207,7 +214,7 @@ pub(super) fn start_session_in_tab(tab_id: &str, session: Session, ctx: &Connect
                 // from this batch so stale scrollback is released immediately.
                 if let Some(closed) = take_closed_event(&mut drained) {
                     if let Some(h) = crate::app::term_buf(&rt.bufs, &tab_id_pump) {
-                        lock_or_recover(&h).release_scrollback();
+                        lock_or_recover(&h).release_history_keep_screen();
                     }
                     let rt_evt = rt.clone();
                     let tid = tab_id_pump.clone();

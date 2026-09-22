@@ -602,3 +602,27 @@ msgstr "Bookmark current path"
 
 msgid "No bookmarks for this server"
 msgstr "No bookmarks for this server"
+
+msgid "DOMAIN\\user or user@domain"
+msgstr "DOMAIN\\user or user@domain"
+
+msgid "Domain (optional)"
+msgstr "Domain (optional)"
+
+msgid "Resolution"
+msgstr "Resolution"
+
+msgid "Full screen"
+msgstr "Full screen"
+
+msgid "Custom"
+msgstr "Custom"
+
+msgid "Width"
+msgstr "Width"
+
+msgid "Height"
+msgstr "Height"
+
+msgid "Remote desktop size. In full screen, Ctrl+Alt+Enter switches back to a window."
+msgstr "Remote desktop size. In full screen, Ctrl+Alt+Enter switches back to a window."

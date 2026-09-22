@@ -105,10 +105,11 @@ pub(super) fn apply_session_event_to_window(
         SessionEvent::Closed(reason) => {
             // A disconnected tab remains open for Enter-to-reconnect, but it
             // must not retain the old firehose scrollback while idle. Keep the
-            // tab and its status, release the heavy terminal state, then paint
-            // only the reconnect hint below.
+            // tab, its status, and the currently visible screen; only release
+            // the raw replay stream and deep history, then append the
+            // reconnect hint below onto what was already on screen (#451).
             if let Some(h) = crate::app::term_buf(bufs, tab_id) {
-                lock_or_recover(&h).release_scrollback();
+                lock_or_recover(&h).release_history_keep_screen();
             }
             // Print the hint into the terminal itself (FinalShell-style), via a
             // synthetic Output event so it reuses the normal render path (#79).

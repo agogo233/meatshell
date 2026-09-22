@@ -710,3 +710,27 @@ msgstr "可用空间"
 
 msgid "-L: local port → target reached from the server; -R: server port → target reached from here; -D: local SOCKS5 proxy"
 msgstr "-L：本地端口 → 由服务器侧访问的目标；-R：服务器端口 → 由本机访问的目标；-D：本地 SOCKS5 代理"
+
+msgid "DOMAIN\\user or user@domain"
+msgstr "域名\\用户名 或 user@domain"
+
+msgid "Domain (optional)"
+msgstr "域（可选）"
+
+msgid "Resolution"
+msgstr "分辨率"
+
+msgid "Full screen"
+msgstr "全屏"
+
+msgid "Custom"
+msgstr "自定义"
+
+msgid "Width"
+msgstr "宽度"
+
+msgid "Height"
+msgstr "高度"
+
+msgid "Remote desktop size. In full screen, Ctrl+Alt+Enter switches back to a window."
+msgstr "远端桌面的分辨率；全屏连接后按 Ctrl+Alt+Enter 可切回窗口。"

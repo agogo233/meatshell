@@ -3,7 +3,19 @@
 All notable changes are documented here. 本文件记录所有重要变更。
 中英对照（中文在前，English after）.
 
-## [Unreleased]
+## [0.7.4] - 2026-09-21
+
+- **修复会话断开（`exit` 或网络中断）后终端内容被清空的问题（#451）。** 断开连接时，释放缓存曾会新建一个空白的 vt100 解析器，导致"连接已断开，按 Enter 重新连接"提示打印在一块空屏幕上，而不是追加在断开前的原有内容后面。现在断开时只释放体积较大且无上限的原始重放缓冲区与历史滚动记录，当前可见屏幕内容保持不变；重新连接和手动"清空缓存"两个场景仍会像之前一样得到全新空白屏幕。
+- **Fix terminal content being wiped after a session disconnects (`exit` or network loss) (#451).** On disconnect, releasing the buffer used to create a brand-new, blank vt100 parser, so the "Disconnected — press Enter to reconnect" hint printed onto an empty screen instead of appending to whatever was on screen before the drop. Disconnect now only releases the large, unbounded raw replay buffer and scrollback history; the currently visible screen is left untouched. Reconnecting and the manual "Clear cache" action still get a fresh blank screen as before.
+
+- **修复 SFTP 面板拖拽上传文件/文件夹在 Windows 以外平台完全无效的问题（#356）。** 此前非 Windows 平台的拖放处理函数是空实现，拖入的文件不会上传，也没有任何提示。现在 macOS 与 Linux（X11、Wayland）会使用拖放悬停期间系统正常投递的指针位置来判断文件放在了哪个终端面板上，并复用与 Windows 相同的上传逻辑（含上传进度提示与会话同步镜像）。
+- **Fix SFTP drag-and-drop upload being a complete no-op on every platform except Windows (#356).** The non-Windows drop handler was an empty stub, so dropped files silently did nothing. macOS and Linux (X11, Wayland) now use the pointer position the OS normally delivers during drag-hover to determine which terminal panel the file was dropped on, and share the same upload path as Windows (including the upload-progress indicator and session-sync mirroring).
+
+- **修复拖拽选择文本时蓝色选区溢出编辑器边界的问题（#440）。** 内置编辑器渲染补丁中，选区背景色块曾在裁剪区域生效之前绘制，因此在拖拽选择并触发自动滚动时，选区高亮可能画到编辑器自身边界之外。现在选区背景与文字、光标一样，统一在裁剪之后绘制。
+- **Fix the blue selection highlight painting past the editor's boundary while drag-selecting (#440).** In the native editor rendering patch, the selection background was filled before this input's own clip was applied, so during a drag-select that triggers auto-scroll the highlight could paint outside the editor's visible area. The selection background is now drawn inside the same clip as the glyphs and cursor.
+
+- **修复窗口收窄时终端换行错位、全屏交互程序（如 menuconfig）显示错乱，以及 SFTP 面板工具栏按钮被裁剪的问题（#433）。** 终端列数计算预留一列安全边距，避免因取整误差把最后几列内容推出可视区域——这既修复了长行不能自动换行的问题，也修复了全屏字符界面程序（如 menuconfig）出现的乱码、错位和偶发卡顿。同时修正了显示目录树时 SFTP 面板判断"是否需要紧凑工具栏"的宽度阈值，使其正确扣除目录树占用的空间，工具栏按钮不再在收窄面板或拖动目录树分隔条时被裁剪或消失。
+- **Fix terminal line-wrap misalignment on narrow windows, display corruption in full-screen interactive programs (e.g. menuconfig), and clipped SFTP toolbar buttons (#433).** The terminal column count now reserves a one-column safety margin so rounding error can no longer push the last cell(s) past the visible grid — this fixes both long lines failing to wrap and full-screen TUI programs like menuconfig rendering garbled or occasionally freezing. Also corrected the SFTP panel's narrow-toolbar width threshold to account for the directory tree's width, so toolbar buttons no longer get clipped or disappear when the panel is narrow or the tree divider is dragged.
 
 - **编辑器语法高亮升级 + 括号匹配。** 角色分色对齐 VS Code（控制流/变量/类型独立配色）；Shell heredoc、TOML 多行字符串跨行着色；函数定义名、点号装饰器、TOML 点号键、YAML 块标量等新规则；新增 Dockerfile、Makefile 与 nginx.conf 语法；光标停在括号上时配对括号显示方框标记。
 - **Editor highlighting upgrade + bracket matching.** VS Code-style role colours (separate control-flow / variable / type hues), cross-line Shell heredocs and TOML multi-line strings, new rules for function-definition names, dotted decorators, TOML dotted keys and YAML block scalars, fresh Dockerfile / Makefile / nginx.conf grammars, and a box outline on the bracket pair matching the caret.
@@ -61,6 +73,18 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 - **窗口从最小化恢复不再闪烁。** 恢复瞬间 1~2px 的尺寸取整噪声与瞬态极小值不再触发四边面板整体重排，面板改为逐行就地更新，消除「背景先出、面板后弹」的滞后；终端恢复遮罩（#183）揭开时改为 160ms 渐隐而非瞬时弹回。
 - **Restoring a minimized window no longer flickers.** 1-2px DPI-rounding noise and transient tiny sizes from the restore resize now skip dock relayout, and panels refresh row-by-row in place instead of being destroyed and re-created a frame later; the terminal restore cover (#183) fades out over 160ms rather than popping the terminal back in.
+
+- **内置编辑器支持实时基础语法染色并优化大文本显示。** 按扩展名识别 Rust、Python、Shell、JSON、YAML、TOML、JavaScript/TypeScript 和 C/C++，区分关键字、字符串、注释、数字和配置键，并适配深浅主题。行号复用原生排版，仅绘制可见行号；滚动和光标闪烁复用排版缓存。超过 10,000 行的文本停止读取并提示文本过大，保留现有字节大小限制。
+- **Add live lexical highlighting and improve large-text display in the built-in editor.** Detect Rust, Python, Shell, JSON, YAML, TOML, JavaScript/TypeScript, and C/C++ by extension, with theme-aware colors for keywords, strings, comments, numbers, and configuration keys. Draw only visible gutter numbers using native text layout, and reuse layouts when scrolling or blinking the cursor. Stop reading files over 10,000 lines with a text-too-large message, retaining the existing byte limit.
+- **修复停靠面板与面板间分隔条无法拖动缩放。** 停靠面板的几何现在逐行就地更新，不再在每次缩放时整体重建面板列表——此前拖拽中的手柄会在第一个事件后失去指针抓取（表现为光标变成双向箭头、但面板拖不动），分隔条也会因条目重编号而错位；只有面板数量变化（停靠 / 折叠 / 禅模式）才重建。同时把左侧、上侧的面板内侧手柄完全收进面板内，避免被面板裁剪掉一半只剩 2px 命中区。
+- **Fix docked-panel and divider resizing.** Panel geometry now updates in place instead of rebuilding the whole panel list on every size change: the handle being dragged used to lose its pointer grab after the first event (the cursor changed shape but the panel would not follow), and the renumbered items also stranded divider drags. Only a changed panel count (dock / collapse / zen) rebuilds the list. The left and top in-edge handles also sit fully inside their panel now, so the panel's clipping cannot cut their grab area down to 2px.
+
+
+- **新增 RDP 远程桌面会话类型（参考 FinalShell）。** 新建 / 编辑会话时可在 SSH、串口、Telnet 之外选择 RDP，填写主机、端口（默认 3389）、用户名、密码、可选域，以及分辨率——全屏（使用本机屏幕分辨率）、常见分辨率（1280×720、1366×768、1440×900、1600×900、1920×1080、2560×1440、3840×2160）或自定义宽高，窗口模式下窗口缩放时画面自动等比缩放；meatshell 只保存这些账号信息，连接时调用系统自带远程桌面客户端——Windows 用 `mstsc`（生成的临时 `.rdp` 文件把密码按 DPAPI 当前用户加密写入，因此不会弹凭据框），Linux / macOS 用 FreeRDP 的 `xfreerdp`（凭据经 stdin 传入，不出现在进程列表里）。会话在系统客户端自己的窗口中打开，不占用标签页。
+- **Add an RDP remote-desktop session type (modeled on FinalShell).** When creating or editing a session you can now pick RDP alongside SSH, serial, and Telnet, filling in host, port (3389 by default), user, password, an optional domain, and the resolution — full screen (using the local screen resolution), a common size (1280×720, 1366×768, 1440×900, 1600×900, 1920×1080, 2560×1440, 3840×2160), or a custom width/height, with the picture scaling along when a windowed session is resized. MeatShell only stores those account details: connecting launches the system remote desktop client — `mstsc` on Windows (a temporary `.rdp` file carries the password DPAPI-encrypted for the current user, so no credential prompt appears), FreeRDP's `xfreerdp` on Linux / macOS (credentials go through stdin and never show up in the process list). The session opens in the client's own window instead of a tab.
+
+- **Flatpak 版内置 FreeRDP，RDP 会话开箱可用。** 沙箱内既没有 FreeRDP 也访问不到宿主机安装的客户端，因此 Flatpak 清单把 FreeRDP 3 作为模块编译进 `/app`（与 GNOME Connections 同做法），并放开 X11 显示（`xfreerdp3` 是 X11 客户端，Wayland 会话下走 XWayland）与 PulseAudio 音频重定向。
+- **Bundle FreeRDP in the Flatpak so RDP works out of the box.** A sandbox has neither FreeRDP nor access to a client installed on the host, so the Flatpak manifest now builds FreeRDP 3 into `/app` as a module (the approach GNOME Connections takes) and grants an X11 display (`xfreerdp3` is an X11 client, so Wayland sessions go through XWayland) plus PulseAudio for audio redirection.
 
 ## [0.7.3] - 2026-09-07
 

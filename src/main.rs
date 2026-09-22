@@ -16,6 +16,7 @@ mod i18n;
 mod layout;
 mod logging;
 mod mcp;
+mod rdp;
 mod resource;
 mod session;
 mod sftp;
