@@ -3441,19 +3441,29 @@ export component AppWindow inherits Window {
                         HorizontalLayout {
                             padding-left: 8px; padding-right: 8px;
                             padding-top: 5px; padding-bottom: 5px; spacing: 6px;
-                            Text { text: @tr("Find"); color: Theme.text-muted; vertical-alignment: center; }
-                            TextInput {
+                            Text { text: "\u{E8B6}"; font-family: "Material Icons";
+                                   color: Theme.text-secondary; font-size: Theme.fs-sm;
+                                   vertical-alignment: center; }
+                            Text { text: @tr("Find"); color: Theme.text-secondary; vertical-alignment: center; }
+                            Rectangle {
                                 horizontal-stretch: 1;
-                                single-line: true;
-                                vertical-alignment: center;
-                                font-family: Theme.ui-font-family;
-                                font-size: Theme.fs-md;
-                                color: Theme.text-primary;
-                                text <=> root.editor-find-query;
-                                edited => {
-                                    root.editor-find-position = -1;
-                                    root.editor-match-count = root.editor-count-matches(
-                                        root.editor-content, root.editor-find-query);
+                                background: Theme.bg-root;
+                                border-radius: 3px;
+                                TextInput {
+                                    x: 6px;
+                                    width: parent.width - 12px;
+                                    height: parent.height;
+                                    single-line: true;
+                                    vertical-alignment: center;
+                                    font-family: Theme.ui-font-family;
+                                    font-size: Theme.fs-md;
+                                    color: Theme.text-primary;
+                                    text <=> root.editor-find-query;
+                                    edited => {
+                                        root.editor-find-position = -1;
+                                        root.editor-match-count = root.editor-count-matches(
+                                            root.editor-content, root.editor-find-query);
+                                    }
                                 }
                             }
                             Text {
@@ -3466,6 +3476,8 @@ export component AppWindow inherits Window {
                             Rectangle {
                                 width: 28px;
                                 border-radius: Theme.radius-sm;
+                                border-width: 1px;
+                                border-color: Theme.border-subtle;
                                 background: find-prev-ta.has-hover ? Theme.bg-hover : Theme.bg-elevated;
                                 find-prev-ta := TouchArea {
                                     enabled: root.editor-match-count > 0;
@@ -3483,6 +3495,8 @@ export component AppWindow inherits Window {
                             Rectangle {
                                 width: 28px;
                                 border-radius: Theme.radius-sm;
+                                border-width: 1px;
+                                border-color: Theme.border-subtle;
                                 background: find-next-ta.has-hover ? Theme.bg-hover : Theme.bg-elevated;
                                 find-next-ta := TouchArea {
                                     enabled: root.editor-match-count > 0;
@@ -3497,19 +3511,28 @@ export component AppWindow inherits Window {
                                 }
                                 Text { text: "↓"; color: Theme.text-primary; horizontal-alignment: center; vertical-alignment: center; }
                             }
-                            Text { text: @tr("Replace"); color: Theme.text-muted; vertical-alignment: center; }
-                            TextInput {
+                            Text { text: @tr("Replace"); color: Theme.text-secondary; vertical-alignment: center; }
+                            Rectangle {
                                 horizontal-stretch: 1;
-                                single-line: true;
-                                vertical-alignment: center;
-                                font-family: Theme.ui-font-family;
-                                font-size: Theme.fs-md;
-                                color: Theme.text-primary;
-                                text <=> root.editor-replace-text;
+                                background: Theme.bg-root;
+                                border-radius: 3px;
+                                TextInput {
+                                    x: 6px;
+                                    width: parent.width - 12px;
+                                    height: parent.height;
+                                    single-line: true;
+                                    vertical-alignment: center;
+                                    font-family: Theme.ui-font-family;
+                                    font-size: Theme.fs-md;
+                                    color: Theme.text-primary;
+                                    text <=> root.editor-replace-text;
+                                }
                             }
                             Rectangle {
                                 width: 88px;
                                 border-radius: Theme.radius-sm;
+                                border-width: 1px;
+                                border-color: Theme.border-subtle;
                                 background: replace-all-ta.has-hover ? Theme.bg-hover : Theme.bg-elevated;
                                 replace-all-ta := TouchArea {
                                     enabled: !root.editor-readonly && root.editor-find-query != "";
