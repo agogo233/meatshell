@@ -147,7 +147,9 @@ pub enum SessionEvent {
     /// Result of saving the built-in editor's text back to the remote file
     /// (#70). `path` lets the UI ignore a stale failure after the user has
     /// switched files; `ok == false` re-marks the editor dirty because nothing
-    /// was written. `message` is the localised status-bar text.
+    /// was written. `message` is the localised status-bar text, and the result
+    /// also drives the transient success/failure pill beside the editor's Save
+    /// button (`editor-save-ack`) so the confirmation is obvious at the action.
     SftpSaveResult {
         path: String,
         ok: bool,

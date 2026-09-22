@@ -940,9 +940,34 @@ export component AppWindow inherits Window {
         if (!root.editor-open) {
             root.editor-ctx-open = false;
             root.editor-ctx-pending = 0;
+            // Drop any in-flight save badge and stop its auto-dismiss so a stale
+            // result can't reappear on the next open.
+            root.editor-save-ack = 0;
+            ed-save-ack-timer.running = false;
         }
     }
     in-out property <bool> editor-dirty: false; // edited since load
+    // Transient save result surfaced as a pill in the editor title bar (#70):
+    // 0 none / 1 saved / 2 failed. Rust sets it on each SftpSaveResult for the
+    // open file; the auto-dismiss timer below clears it so a stale badge can't
+    // leak into the next open.
+    in-out property <int> editor-save-ack: 0;
+    // Re-arm on every non-zero set so back-to-back saves restart the timer
+    // instead of the first one clearing the second early.
+    changed editor-save-ack => {
+        if (root.editor-save-ack != 0) {
+            ed-save-ack-timer.running = false;
+            ed-save-ack-timer.running = true;
+        }
+    }
+    ed-save-ack-timer := Timer {
+        interval: 1800ms;
+        running: false;
+        triggered => {
+            root.editor-save-ack = 0;
+            self.running = false;
+        }
+    }
     // Opening the dynamic editor and focusing its TextInput in the same event
     // can re-enter Windows AccessKit while it is registering the new item tree.
     property <bool> editor-focus-pending: false;
@@ -3416,6 +3441,36 @@ export component AppWindow inherits Window {
                                 }
                                 Text { text: @tr("Save"); color: #ffffff; font-size: Theme.fs-sm;
                                        horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                            // Transient save-result pill (#70): a coloured chip right next
+                            // to the Save button makes the confirmation obvious without
+                            // relying on the distant SFTP status bar. Auto-dismisses via
+                            // ed-save-ack-timer.
+                            if !root.editor-readonly && root.editor-save-ack != 0 : Rectangle {
+                                width: root.editor-save-ack == 1 ? 72px : 98px;
+                                height: 28px;
+                                border-radius: Theme.radius-sm;
+                                background: root.editor-save-ack == 1
+                                    ? Theme.success.with-alpha(0.18)
+                                    : Theme.danger.with-alpha(0.18);
+                                HorizontalLayout {
+                                    padding-left: 6px; padding-right: 6px; spacing: 4px;
+                                    Text {
+                                        text: root.editor-save-ack == 1 ? "\u{E876}" : "\u{E5CD}";
+                                        font-family: "Material Icons";
+                                        color: root.editor-save-ack == 1 ? Theme.success : Theme.danger;
+                                        font-size: Theme.fs-sm;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: root.editor-save-ack == 1 ? @tr("Saved") : @tr("Save failed");
+                                        color: root.editor-save-ack == 1 ? Theme.success : Theme.danger;
+                                        font-size: Theme.fs-sm;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+                                }
                             }
                             Rectangle {
                                 width: 28px; height: 28px;

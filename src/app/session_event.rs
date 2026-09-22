@@ -333,11 +333,15 @@ pub(super) fn apply_session_event_to_window(
                 t.sftp_status = message.clone().into();
                 t.sftp_status_kind = kind;
             });
-            if !ok
-                && win.get_editor_open()
-                && win.get_editor_path().as_str() == path.as_str()
-            {
-                win.set_editor_dirty(true);
+            // Mirror the outcome as a transient pill in the editor title bar so the
+            // confirmation is obvious at the point of action; a failure also
+            // re-marks the editor dirty (nothing was written). Both fire only for
+            // the file that is still open.
+            if win.get_editor_open() && win.get_editor_path().as_str() == path.as_str() {
+                win.set_editor_save_ack(kind);
+                if !ok {
+                    win.set_editor_dirty(true);
+                }
             }
         }
         SessionEvent::SftpFileText {
@@ -361,6 +365,10 @@ pub(super) fn apply_session_event_to_window(
                 win.set_editor_content(content.into());
                 win.set_editor_readonly(!edit);
                 win.set_editor_dirty(false);
+                // A freshly loaded file has no pending save result, so clear any
+                // lingering success/failure pill from the previously open file
+                // (switching files does not re-fire `changed editor-open`).
+                win.set_editor_save_ack(0);
                 // Fresh document: rebuild the highlight overlay from scratch
                 // (also re-detects the language from the new editor-name).
                 win.set_editor_bracket_open(-1);

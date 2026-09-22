@@ -162,6 +162,12 @@ msgstr "取消"
 msgid "Save"
 msgstr "保存"
 
+msgid "Saved"
+msgstr "已保存"
+
+msgid "Save failed"
+msgstr "保存失败"
+
 msgid "Create"
 msgstr "创建"
 

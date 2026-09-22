@@ -162,6 +162,12 @@ msgstr "Cancel"
 msgid "Save"
 msgstr "Save"
 
+msgid "Saved"
+msgstr "Saved"
+
+msgid "Save failed"
+msgstr "Save failed"
+
 msgid "Create"
 msgstr "Create"
 
