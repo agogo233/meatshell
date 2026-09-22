@@ -930,8 +930,17 @@ export component AppWindow inherits Window {
     // this stale; worst case one extra Esc press, and it resets whenever
     // the editor closes.
     property <bool> editor-ctx-open: false;
+    // Context-menu action requested but not yet run (deferred one tick; see
+    // editor-ctx-timer). 0 = none, 1 = copy, 2 = cut, 3 = paste, 4 = select-all.
+    property <int> editor-ctx-pending: 0;
     changed editor-open => {
-        if (!root.editor-open) { root.editor-ctx-open = false; }
+        // Both reset here: the timers live inside the editor, so a request made
+        // just before the editor closes would otherwise fire on the next open
+        // and apply a stale cut/paste to a freshly loaded file.
+        if (!root.editor-open) {
+            root.editor-ctx-open = false;
+            root.editor-ctx-pending = 0;
+        }
     }
     in-out property <bool> editor-dirty: false; // edited since load
     // Opening the dynamic editor and focusing its TextInput in the same event
@@ -3823,8 +3832,19 @@ export component AppWindow inherits Window {
                 // the TextInput's own interface (core clipboard path with
                 // the transient-lock retry). The default close-policy is
                 // CloseOnClick, which already auto-closes on an in-menu
-                // click/release; the explicit close() additionally pins
-                // the popup away before refocusing the body.
+                // click/release; the explicit close() additionally pins the
+                // popup away.
+                // The action itself is NOT run here — only requested (the
+                // editor-ctx-pending flag, fired by editor-ctx-timer). Cut and
+                // Paste mutate the text, so the edited-callback would swap in
+                // fresh editor-lines / editor-hl-lines models from inside the
+                // popup's click dispatch, and the gutter / highlight repeaters
+                // would then be rebuilt in the very same layout refresh —
+                // creating and destroying a batch of elements (each gutter row
+                // is a read-only TextInput) mid-event re-enters Slint and
+                // panics. Copy and Select-all leave the models alone, which is
+                // why only Cut/Paste crashed. The refocus hop is deferred with
+                // the action for the same reason (#343-style).
                 ed-ctx-menu := PopupWindow {
                     x: ed-panel.ctx-x;
                     y: ed-panel.ctx-y;
@@ -3839,21 +3859,21 @@ export component AppWindow inherits Window {
                             Rectangle { height: 28px; border-radius: Theme.radius-sm;
                                 background: ecopy-ta.has-hover ? Theme.bg-hover : transparent;
                                 ecopy-ta := TouchArea { mouse-cursor: pointer;
-                                    clicked => { edit-input.copy(); root.editor-ctx-open = false; ed-ctx-menu.close(); edit-input.focus(); } }
+                                    clicked => { root.editor-ctx-pending = 1; root.editor-ctx-open = false; ed-ctx-menu.close(); } }
                                 HorizontalLayout { padding-left: 10px; spacing: 8px;
                                     Text { text: "\u{E14D}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: Theme.fs-sm; vertical-alignment: center; }
                                     Text { text: root.lang-en ? "Copy" : "复制"; color: Theme.text-primary; font-size: Theme.fs-md; vertical-alignment: center; horizontal-stretch: 1; } } }
                             if !root.editor-readonly : Rectangle { height: 28px; border-radius: Theme.radius-sm;
                                 background: ecut-ta.has-hover ? Theme.bg-hover : transparent;
                                 ecut-ta := TouchArea { mouse-cursor: pointer;
-                                    clicked => { edit-input.cut(); root.editor-ctx-open = false; ed-ctx-menu.close(); edit-input.focus(); } }
+                                    clicked => { root.editor-ctx-pending = 2; root.editor-ctx-open = false; ed-ctx-menu.close(); } }
                                 HorizontalLayout { padding-left: 10px; spacing: 8px;
                                     Text { text: "\u{E14E}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: Theme.fs-sm; vertical-alignment: center; }
                                     Text { text: root.lang-en ? "Cut" : "剪切"; color: Theme.text-primary; font-size: Theme.fs-md; vertical-alignment: center; horizontal-stretch: 1; } } }
                             if !root.editor-readonly : Rectangle { height: 28px; border-radius: Theme.radius-sm;
                                 background: epaste-ta.has-hover ? Theme.bg-hover : transparent;
                                 epaste-ta := TouchArea { mouse-cursor: pointer;
-                                    clicked => { edit-input.paste(); root.editor-ctx-open = false; ed-ctx-menu.close(); edit-input.focus(); } }
+                                    clicked => { root.editor-ctx-pending = 3; root.editor-ctx-open = false; ed-ctx-menu.close(); } }
                                 HorizontalLayout { padding-left: 10px; spacing: 8px;
                                     Text { text: "\u{E14F}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: Theme.fs-sm; vertical-alignment: center; }
                                     Text { text: root.lang-en ? "Paste" : "粘贴"; color: Theme.text-primary; font-size: Theme.fs-md; vertical-alignment: center; horizontal-stretch: 1; } } }
@@ -3861,7 +3881,7 @@ export component AppWindow inherits Window {
                             Rectangle { height: 28px; border-radius: Theme.radius-sm;
                                 background: esel-ta.has-hover ? Theme.bg-hover : transparent;
                                 esel-ta := TouchArea { mouse-cursor: pointer;
-                                    clicked => { edit-input.select-all(); root.editor-ctx-open = false; ed-ctx-menu.close(); edit-input.focus(); } }
+                                    clicked => { root.editor-ctx-pending = 4; root.editor-ctx-open = false; ed-ctx-menu.close(); } }
                                 HorizontalLayout { padding-left: 10px; spacing: 8px;
                                     Text { text: "\u{E162}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: Theme.fs-sm; vertical-alignment: center; }
                                     Text { text: root.lang-en ? "Select All" : "全选"; color: Theme.text-primary; font-size: Theme.fs-md; vertical-alignment: center; horizontal-stretch: 1; } } }
@@ -3914,6 +3934,20 @@ export component AppWindow inherits Window {
                 triggered => {
                     root.editor-focus-pending = false;
                     edit-input.focus();
+                }
+            }
+            // Run the requested right-click action only after the popup's click
+            // dispatch and teardown have finished; see the note above.
+            editor-ctx-timer := Timer {
+                interval: 0ms;
+                running: root.editor-ctx-pending != 0;
+                triggered => {
+                    if (root.editor-ctx-pending == 1) { edit-input.copy(); }
+                    else if (root.editor-ctx-pending == 2) { edit-input.cut(); }
+                    else if (root.editor-ctx-pending == 3) { edit-input.paste(); }
+                    else if (root.editor-ctx-pending == 4) { edit-input.select-all(); }
+                    root.editor-ctx-pending = 0;
+                    root.editor-focus-pending = true;
                 }
             }
         }
