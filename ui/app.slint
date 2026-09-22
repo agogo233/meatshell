@@ -3504,7 +3504,10 @@ export component AppWindow inherits Window {
                                 horizontal-stretch: 1;
                                 background: Theme.bg-root;
                                 border-radius: 3px;
-                                TextInput {
+                                border-width: 1px;
+                                border-color: find-q-input.has-focus
+                                    ? Theme.accent : Theme.border-strong;
+                                find-q-input := TextInput {
                                     x: 6px;
                                     width: parent.width - 12px;
                                     height: parent.height;
@@ -3571,7 +3574,10 @@ export component AppWindow inherits Window {
                                 horizontal-stretch: 1;
                                 background: Theme.bg-root;
                                 border-radius: 3px;
-                                TextInput {
+                                border-width: 1px;
+                                border-color: replace-q-input.has-focus
+                                    ? Theme.accent : Theme.border-strong;
+                                replace-q-input := TextInput {
                                     x: 6px;
                                     width: parent.width - 12px;
                                     height: parent.height;
