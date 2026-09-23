@@ -800,8 +800,13 @@ fn tokenize(lang: Lang, line: &str, carry_in: &str) -> BuiltLine {
             i += n;
             continue;
         }
-        // [section] / [[array of tables]] header for Toml/Ini.
-        if (lang == Lang::Toml || lang == Lang::Ini) && c == '[' {
+        // [section] / [[array of tables]] header for Toml/Ini. The bracket must
+        // open the line (blanks only before it), so an inline array value like
+        // `arr = [1, 2]` never reads as a header.
+        if (lang == Lang::Toml || lang == Lang::Ini)
+            && c == '['
+            && line[..b(i)].trim().is_empty()
+        {
             if let Some(pos) = find_char(&chars, i, ']') {
                 let mut end = pos + 1;
                 if lang == Lang::Toml
@@ -1405,6 +1410,26 @@ mod tests {
     fn toml_array_of_tables_brackets() {
         let built = tokenize(Lang::Toml, "[[bin.hosts]]", "");
         assert!(built.segments.iter().any(|(t, r)| t == "[[bin.hosts]]" && *r == Role::Keyword));
+    }
+
+    #[test]
+    fn toml_ini_inline_arrays_are_not_section_headers() {
+        let arr = tokenize(Lang::Toml, "arr = [1, 2, 3]", "");
+        let segs: Vec<(&str, Role)> =
+            arr.segments.iter().map(|(t, r)| (t.as_str(), *r)).collect();
+        // The mid-line `[` must not open a header run; items keep their colour.
+        assert!(!segs.iter().any(|(t, r)| *r == Role::Keyword && t.starts_with('[')));
+        assert!(segs.iter().any(|(t, r)| *t == "1" && *r == Role::Number));
+        assert!(segs.iter().any(|(t, r)| *t == "3" && *r == Role::Number));
+        let strs = tokenize(Lang::Toml, "urls = [\"a\", \"b\"]", "");
+        assert!(strs.segments.iter().any(|(t, r)| t == "\"a\"" && *r == Role::Str));
+        assert!(!strs.segments
+            .iter()
+            .any(|(t, r)| *r == Role::Keyword && t.starts_with('[')));
+        let ini = tokenize(Lang::Ini, "arr = [1, 2]", "");
+        assert!(!ini.segments
+            .iter()
+            .any(|(t, r)| *r == Role::Keyword && t.starts_with('[')));
     }
 
     #[test]
