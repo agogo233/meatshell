@@ -640,6 +640,9 @@ export component TerminalView inherits Rectangle {
     // arrow keys (alternate-scroll).
     callback terminal-wheel(int /* dir */, int /* col */, int /* row */);
     callback terminal-scroll-to(int);       // jump to an absolute scrollback offset (#103)
+    // Handle Home/End/PageUp/PageDown locally only while the normal terminal
+    // is scrolled through history. Returns false when the PTY must receive it.
+    callback terminal-scrollback-key(string /* key */) -> bool;
     // Forward a mouse button event to the PTY for mouse-tracking TUI apps
     // (btop/htop/mc). kind: 0=press 1=release 2=drag-motion; button: 0=left
     // 1=middle 2=right; col/row are grid cells. Returns true when the event was
@@ -692,6 +695,16 @@ export component TerminalView inherits Rectangle {
 
     changed focus-sequence => {
         if (root.active) {
+            root.focus-pending = true;
+        }
+    }
+
+    // Entering local scrollback hides the live cursor and parks ime-input
+    // off-screen. Keep that anchor focused so all non-navigation keys still
+    // reach the remote PTY; focus-defer-timer performs this asynchronously to
+    // avoid re-entering Slint's IME/accessibility plumbing.
+    changed cursor-row => {
+        if (root.cursor-row < 0) {
             root.focus-pending = true;
         }
     }
@@ -1365,23 +1378,19 @@ export component TerminalView inherits Rectangle {
                 // Following the VT cursor also places native IME candidate UI near
                 // the actual insertion point.
                 // While scrolled back through history the live cursor is hidden
-                // (cursor-row < 0): park the anchor far off-window then, never
-                // clamp it with max(0, …). Clamping pinned this focused TextInput
-                // onto the terminal's top-left cell, and since a hovered TextInput
-                // forces the I-beam pointer (i-slint-core items/text.rs), wheel-
-                // scrolling flickered the mouse cursor between arrow and text as
-                // frames re-hit-tested under it. The park offset must dwarf any
-                // parent origin: key-capture sits ~24-48px from the window top, so
-                // a small offset like -32px still landed on the visible terminal's
-                // top-left corner.
+                // (cursor-row < 0), but this keyboard anchor must remain inside
+                // the clipped view. Slint clears keyboard focus before dispatching
+                // a key when the focused item is outside its visible clip. A 0×0
+                // anchor at the origin remains visible to that check while never
+                // participating in mouse hit-testing or painting a second caret.
                 x: root.cursor-row >= 0
                     ? 10px + max(0, root.cursor-col) * root.cell-w
-                    : -1000px;
+                    : 0px;
                 y: root.cursor-row >= 0
                     ? 8px + root.cursor-row * root.cell-h
-                    : -1000px;
-                width: 1px;
-                height: 1px;
+                    : 0px;
+                width: 0px;
+                height: 0px;
                 opacity: 0;
                 // Opacity does not suppress Slint's focused TextInput caret on
                 // every renderer. This input exists only as a keyboard/IME
@@ -1476,8 +1485,20 @@ export component TerminalView inherits Rectangle {
                                 || event.text == "\u{0003}")) {
                         root.copy-terminal-text();
                         accept
-                    // ── Paste: ⌘V / Ctrl+V (Ctrl+Shift+V also accepted) ──
-                    } else if (event.modifiers.control
+                    // ── Paste: Ctrl+Shift+V / ⌘Shift+V ──
+                    } else if (event.modifiers.control && event.modifiers.shift
+                            && (event.text == "v" || event.text == "V"
+                                || event.text == "\u{0016}")) {
+                        root.paste-from-clipboard();
+                        // Clipboard access on Windows can deliver WM_KILLFOCUS.
+                        // Restore focus explicitly so the cursor keeps blinking.
+                        ime-input.focus();
+                        accept
+                    // ── Paste: ⌘V / Ctrl+V on the normal screen ──
+                    // On macOS `control` represents Cmd; preserve Cmd+V even
+                    // in Vim, while physical Ctrl (`meta`) falls through to PTY.
+                    } else if (event.modifiers.control && !event.modifiers.shift
+                            && (Theme.is-mac || !root.is-alt-screen)
                             && (event.text == "v" || event.text == "V"
                                 || event.text == "\u{0016}")) {
                         root.paste-from-clipboard();
@@ -1494,6 +1515,14 @@ export component TerminalView inherits Rectangle {
                     // ── macOS: swallow any other ⌘ combo (control == Cmd here) so it
                     // isn't typed into the shell as a literal character. ──
                     } else if (Theme.is-mac && event.modifiers.control) {
+                        accept
+                    // ── Local history navigation ────────────────────────────
+                    // Only Rust can authoritatively tell whether this normal
+                    // terminal is scrolled back. When it declines, preserve the
+                    // regular PTY route so less/vim/tmux own these keys.
+                    } else if ((event.text == Key.Home || event.text == Key.End
+                                || event.text == Key.PageUp || event.text == Key.PageDown)
+                            && root.terminal-scrollback-key(event.text)) {
                         accept
                     // ── All other keys (printable, Ctrl+X, arrows, …) → the shell.
                     // The control flag is the *physical* Ctrl key: `meta` on macOS,
@@ -1536,6 +1565,12 @@ export component TerminalView inherits Rectangle {
                     }
                     pointer-event(e) => {
                         if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                            // The scrollbar is not focusable, but its pointer
+                            // interaction can leave the off-screen IME anchor
+                            // without keyboard focus. Restore it on the next
+                            // UI turn so scrollback keys and remote input work
+                            // immediately after a click or drag.
+                            root.focus-pending = true;
                             root.terminal-scroll-to(clamp(round(root.scroll-max * (1 - self.mouse-y / self.height)), 0, root.scroll-max));
                         }
                     }

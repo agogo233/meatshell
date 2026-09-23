@@ -146,6 +146,36 @@ fn with_term_buf<R>(
     Some(f(&mut guard))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScrollbackKey {
+    Home,
+    End,
+    PageUp,
+    PageDown,
+}
+
+/// Handle a local scrollback-navigation key.
+///
+/// Only a normal terminal that is already scrolled away from the live bottom
+/// owns these keys. Alternate-screen programs (less, vim, tmux, …) and the
+/// live terminal must receive them through the existing PTY input path.
+fn handle_scrollback_key(buf: &mut TermBuffer, key: ScrollbackKey) -> bool {
+    if buf.view_offset == 0 || buf.parser.screen().alternate_screen() {
+        return false;
+    }
+
+    let max_offset = buf.history.len();
+    let page_rows = usize::from(buf.parser.screen().size().0).max(1);
+    buf.scroll_accum = 0.0;
+    buf.view_offset = match key {
+        ScrollbackKey::Home => max_offset,
+        ScrollbackKey::End => 0,
+        ScrollbackKey::PageUp => buf.view_offset.saturating_add(page_rows).min(max_offset),
+        ScrollbackKey::PageDown => buf.view_offset.saturating_sub(page_rows),
+    };
+    true
+}
+
 fn ingest_terminal_output(bufs: &TermBuffers, tab_id: &str, chunk: &[u8]) -> Vec<u8> {
     if let Some(h) = term_buf(bufs, tab_id) {
         lock_or_recover(&h).ingest(chunk)
@@ -8219,6 +8249,34 @@ fn wire_key_input(
                 }
             }
             true
+        });
+    }
+
+    // Home / End / PageUp / PageDown while viewing normal-screen history.
+    // Return false unless the buffer is already scrolled back; Slint then
+    // forwards the original key to the PTY for live terminals and TUI apps.
+    {
+        let bufs_scrollback_key = bufs.clone();
+        let weak = window.as_weak();
+        window.on_terminal_scrollback_key(move |tab_id: SharedString, key: SharedString| {
+            let key = match key.as_str() {
+                "\u{F729}" => ScrollbackKey::Home,
+                "\u{F72B}" => ScrollbackKey::End,
+                "\u{F72C}" => ScrollbackKey::PageUp,
+                "\u{F72D}" => ScrollbackKey::PageDown,
+                _ => return false,
+            };
+            let tid = tab_id.to_string();
+            let handled = with_term_buf(&bufs_scrollback_key, &tid, |buf| {
+                handle_scrollback_key(buf, key)
+            })
+            .unwrap_or(false);
+            if handled {
+                if let Some(win) = weak.upgrade() {
+                    rebuild_tab_display(&win, &bufs_scrollback_key, &tid);
+                }
+            }
+            handled
         });
     }
 

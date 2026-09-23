@@ -1246,6 +1246,7 @@ export component AppWindow inherits Window {
 
     // Raw keystroke forwarding: Rust converts key+modifiers to PTY bytes.
     callback send-key(string /* tab-id */, string /* key */, bool /* ctrl */, bool /* alt */, bool /* shift */);
+    callback terminal-scrollback-key(string /* tab-id */, string /* key */) -> bool;
     callback diagnose-key-event(string /* tab-id */, string /* key */, bool /* raw control */, bool /* raw meta */, bool /* alt */, bool /* shift */);
     // Notifies Rust of a PTY resize (pixel dimensions; Rust converts to cols/rows).
     callback terminal-resize(string /* tab-id */, float /* width-px */, float /* height-px */);
@@ -2465,6 +2466,7 @@ export component AppWindow inherits Window {
                         rename-quick-group(g) => { root.qcg-orig = g; root.qcg-name = g; root.qcg-open = true; }
                         delete-quick-group(g) => { root.delete-quick-group(g); }
                         send-key(key, ctrl, alt, shift) => { root.send-key(term.id, key, ctrl, alt, shift) }
+                        terminal-scrollback-key(key) => { root.terminal-scrollback-key(term.id, key) }
                         diagnose-key-event(key, control, meta, alt, shift) => {
                             root.diagnose-key-event(term.id, key, control, meta, alt, shift);
                         }

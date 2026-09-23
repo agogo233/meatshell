@@ -124,6 +124,33 @@ fn history_search_empty_query_clears_positions() {
     assert_eq!(buffer.find_active, -1);
 }
 
+#[test]
+fn scrollback_navigation_keys_only_handle_a_scrolled_normal_screen() {
+    let mut buffer = make_buf(
+        3,
+        20,
+        &["old-1", "old-2", "old-3", "old-4", "old-5"],
+        &["live"],
+        2,
+    );
+
+    assert!(handle_scrollback_key(&mut buffer, ScrollbackKey::PageUp));
+    assert_eq!(buffer.view_offset, 5);
+    assert!(handle_scrollback_key(&mut buffer, ScrollbackKey::PageDown));
+    assert_eq!(buffer.view_offset, 2);
+    assert!(handle_scrollback_key(&mut buffer, ScrollbackKey::Home));
+    assert_eq!(buffer.view_offset, 5);
+    assert!(handle_scrollback_key(&mut buffer, ScrollbackKey::End));
+    assert_eq!(buffer.view_offset, 0);
+
+    assert!(!handle_scrollback_key(&mut buffer, ScrollbackKey::PageUp));
+
+    buffer.parser.process(b"\x1b[?1049h");
+    buffer.view_offset = 1;
+    assert!(!handle_scrollback_key(&mut buffer, ScrollbackKey::PageDown));
+    assert_eq!(buffer.view_offset, 1);
+}
+
 mod charset;
 mod colors;
 mod protocol;
