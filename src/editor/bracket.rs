@@ -43,9 +43,20 @@ pub fn find_pair(content: &str, offset: usize, lang: Lang) -> Option<(usize, usi
                 if OPEN.contains(&ch) {
                     stack.push((ch, pos));
                 } else if CLOSE.contains(&ch) {
+                    // A closer at the target with nothing open can never pair:
+                    // stop instead of scanning the rest of the document.
+                    if pos == t && stack.is_empty() {
+                        return None;
+                    }
                     if let Some((ob, opos)) = stack.pop() {
                         if matching(ob, ch) && (opos == t || pos == t) {
                             return Some((opos.min(pos), opos.max(pos)));
+                        }
+                        // The target just lost its only partner (a popped
+                        // opener is never pushed again): no later scan can
+                        // pair it, so stop early.
+                        if !matching(ob, ch) && (opos == t || pos == t) {
+                            return None;
                         }
                     }
                 }
@@ -131,5 +142,17 @@ mod tests {
     #[test]
     fn plain_language_never_matches() {
         assert_eq!(find_pair("a(b)", 1, Lang::Plain), None);
+    }
+
+    #[test]
+    fn unmatched_brackets_take_the_pruned_paths() {
+        // Closer at the target with an empty stack stops the scan in place
+        // (the later opener `(` cannot pair it — same result as the old
+        // full-document scan, reached faster).
+        assert_eq!(pair("a) b(", 1), None);
+        // Opener popped by a non-matching closer: no partner possible.
+        assert_eq!(find_pair("([)]", 0, Lang::Shell), None);
+        // Caret right of the `)` that kills the opener (left char wins).
+        assert_eq!(find_pair("([)]", 3, Lang::Shell), None);
     }
 }
