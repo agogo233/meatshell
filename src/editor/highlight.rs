@@ -817,9 +817,22 @@ fn tokenize(lang: Lang, line: &str, carry_in: &str) -> BuiltLine {
                 {
                     end += 1;
                 }
-                segs.push(&line[b(i)..b(end)], Role::Keyword);
-                i = end;
-                continue;
+                // A real section header has no value-like content inside its
+                // brackets and ends the line (or continues only in a comment):
+                // a multi-line array continuation such as `  [1, 2],` still
+                // has elements after its `[` and is not a header.
+                let inner = &line[b(i + 1)..b(pos)];
+                let rest = &line[b(end)..];
+                if !inner.contains(',')
+                    && !inner.contains('=')
+                    && (rest.trim().is_empty()
+                        || rest.trim_start().starts_with('#')
+                        || rest.trim_start().starts_with(';'))
+                {
+                    segs.push(&line[b(i)..b(end)], Role::Keyword);
+                    i = end;
+                    continue;
+                }
             }
         }
         // Yaml block-scalar indicator (`|`, `>`, `|-`, `>+2`, …): marks the
@@ -1430,6 +1443,40 @@ mod tests {
         assert!(!ini.segments
             .iter()
             .any(|(t, r)| *r == Role::Keyword && t.starts_with('[')));
+        // Multi-line array continuations: the line opens with `[` but still
+        // has array content inside / after the brackets, so it must not read
+        // as a section header.
+        let cont = tokenize(Lang::Toml, "  [1, 2],", "");
+        assert!(!cont.segments
+            .iter()
+            .any(|(t, r)| *r == Role::Keyword && t.starts_with('[')));
+        let cont2 = tokenize(Lang::Toml, "  [1, 2]", "");
+        assert!(!cont2.segments
+            .iter()
+            .any(|(t, r)| *r == Role::Keyword && t.starts_with('[')));
+    }
+
+    #[test]
+    fn section_headers_still_colour_after_tightening() {
+        // Plain header.
+        let h = tokenize(Lang::Toml, "[section]", "");
+        assert!(h.segments.iter().any(|(t, r)| t == "[section]" && *r == Role::Keyword));
+        // Header with a trailing comment (TOML `#`, INI `;`).
+        let h2 = tokenize(Lang::Toml, "[section] # note", "");
+        assert!(h2.segments
+            .iter()
+            .any(|(t, r)| t == "[section]" && *r == Role::Keyword));
+        let h3 = tokenize(Lang::Ini, "[section] ; note", "");
+        assert!(h3.segments
+            .iter()
+            .any(|(t, r)| t == "[section]" && *r == Role::Keyword));
+        // Dotted table + array of tables.
+        let h4 = tokenize(Lang::Toml, "[a.b]", "");
+        assert!(h4.segments.iter().any(|(t, r)| t == "[a.b]" && *r == Role::Keyword));
+        let h5 = tokenize(Lang::Toml, "[[a.b]] # note", "");
+        assert!(h5.segments
+            .iter()
+            .any(|(t, r)| t == "[[a.b]]" && *r == Role::Keyword));
     }
 
     #[test]
