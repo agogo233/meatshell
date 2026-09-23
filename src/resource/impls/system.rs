@@ -54,9 +54,9 @@ impl SystemSampler {
             0.0
         };
 
-        // RX / TX bytes/sec from the delta across the physical iface list;
-        // virtual adapters would double-count the same frames (see
-        // `should_count_interface`).
+        // RX / TX bytes/sec from the delta across the physical iface list
+        // (all adapters when no physical one exists); virtual adapters would
+        // otherwise double-count the same frames (see `should_count_interface`).
         let (rx_total, tx_total) = net_totals(&self.nets);
         let now = std::time::Instant::now();
         let elapsed = now
@@ -104,11 +104,12 @@ impl SystemSampler {
 
 /// Which adapters count toward the aggregated local network rate.
 ///
-/// A docker bridge, a WSL/Hyper-V `vEthernet` switch, a bond or the loopback
-/// re-delivers frames that are already counted on the physical NIC, so summing
-/// every adapter inflates the total (usually the receive side). Keep only the
-/// physical adapters; if a machine carried traffic solely on a tunnel, the
-/// local panel intentionally shows zero.
+ /// A docker bridge, a WSL/Hyper-V `vEthernet` switch, a bond or the loopback
+ /// re-delivers frames that are already counted on the physical NIC, so summing
+ /// every adapter inflates the total (usually the receive side). Keep only the
+ /// physical adapters here; when *no* adapter is physical (tunnel-only or
+ /// fully virtualised box) `net_totals` falls back to counting all of them so
+ /// the panel shows real traffic instead of a permanent zero.
 fn should_count_interface(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
     // Loopback ("lo", "lo0", …) — but not Windows "Local Area Connection".
@@ -148,22 +149,40 @@ fn should_count_interface(name: &str) -> bool {
 /// Sum the cumulative receive/transmit counters of the physical adapters only
 /// (see [`should_count_interface`]).
 ///
+/// When no adapter counts as physical — a tunnel-only or fully virtualised
+/// machine whose traffic rides entirely on `tun`/`vEthernet`/bridge devices —
+/// fall back to counting *all* adapters instead of reporting a permanent
+/// zero, since nothing else on the box carries the real traffic.
+///
 /// An adapter that disappears and reappears (e.g. a Wi‑Fi reconnect) is
 /// re‑baselined on the next sample, so its since‑boot counter isn't replayed;
 /// at most one one‑second spike shows up in the graph.
 fn net_totals(nets: &Networks) -> (u64, u64) {
     let mut rx = 0u64;
     let mut tx = 0u64;
+    let mut all_rx = 0u64;
+    let mut all_tx = 0u64;
     let mut counted = Vec::new();
     let mut skipped = Vec::new();
     for (name, data) in nets.iter() {
+        let r = data.total_received();
+        let t = data.total_transmitted();
+        all_rx = all_rx.saturating_add(r);
+        all_tx = all_tx.saturating_add(t);
         if should_count_interface(name) {
-            rx = rx.saturating_add(data.total_received());
-            tx = tx.saturating_add(data.total_transmitted());
+            rx = rx.saturating_add(r);
+            tx = tx.saturating_add(t);
             counted.push(name.as_str());
         } else {
             skipped.push(name.as_str());
         }
+    }
+    if counted.is_empty() {
+        tracing::debug!(
+            skipped = ?skipped,
+            "local net counters: no physical adapter matched, counting all"
+        );
+        return (all_rx, all_tx);
     }
     tracing::debug!(
         counted = ?counted,
