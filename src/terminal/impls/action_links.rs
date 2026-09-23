@@ -12,8 +12,9 @@
 //!     every other scheme are deliberately excluded, and the scheme is checked
 //!     with a hand-written RFC-3986 parser (no `url` crate) so a malformed or
 //!     hostile token can never reach the OS opener.
-//!   - `host:port` rejects things that look like `file.ext:line` source
-//!     locations (a common false positive in build/log output).
+//!   - `host:port` rejects things that look like `file.ext:line` — source
+//!     locations, build artifacts, archives and media files (a common false
+//!     positive in build/log output).
 //!   - Higher-priority matchers win on overlap: URL > host:port > IPv4, so an
 //!     IP embedded in a URL is not separately linkified.
 
@@ -73,16 +74,28 @@ fn url_re() -> &'static Regex {
     })
 }
 
-/// Extensions that mark the left side of `x:y` as a source location rather than
-/// a network host (e.g. `main.rs:42`, `app.py:10`).
+/// Extensions that mark the left side of `x:y` as a local file rather than a
+/// network host (e.g. `main.rs:42`, `vendor.bin:80`, `archive.zip:5`).
 fn looks_like_file_host(host: &str) -> bool {
-    const SOURCE_EXTS: &[&str] = &[
+    const FILE_EXTS: &[&str] = &[
+        // source / config / data
         "py", "js", "jsx", "ts", "tsx", "mjs", "cjs", "java", "kt", "kts", "go", "rs", "rb",
         "php", "c", "cc", "cpp", "cxx", "h", "hpp", "cs", "sh", "bash", "zsh", "fish", "ps1",
         "bat", "cmd", "log", "txt", "md", "json", "yaml", "yml", "xml", "toml", "ini", "lock",
+        "csv", "tsv", "parquet", "db", "sqlite",
+        // build artifacts / packages / binaries
+        "bin", "a", "o", "so", "dylib", "dll", "exe", "pkg", "deb", "rpm", "whl", "jar",
+        "wasm", "apk",
+        // archives
+        "zip", "tar", "gz", "bz2", "xz", "zst", "7z", "rar",
+        // images / media
+        "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "tiff", "mp3", "mp4", "mkv", "avi",
+        "mov", "wav", "flac", "ogg", "webm",
+        // model / dataset files
+        "pth", "onnx", "safetensors", "npy", "npz", "iso", "img",
     ];
     match host.rsplit('.').next() {
-        Some(ext) => SOURCE_EXTS.contains(&ext.to_ascii_lowercase().as_str()),
+        Some(ext) => FILE_EXTS.contains(&ext.to_ascii_lowercase().as_str()),
         None => false,
     }
 }
@@ -356,6 +369,16 @@ mod tests {
     fn host_port_rejects_source_locations() {
         assert!(scan("error at main.rs:42").is_empty());
         assert!(scan("panic app.py:10").is_empty());
+    }
+
+    #[test]
+    fn host_port_rejects_build_and_data_artifacts() {
+        // `x.y:port` whose `y` is a file extension must not read as a network
+        // host.
+        assert!(scan("copied vendor.bin:80 to disk").is_empty());
+        assert!(scan("wrote data.whl:1 bytes").is_empty());
+        assert!(scan("extract archive.zip:5 now").is_empty());
+        assert!(scan("model.pth:12 loaded").is_empty());
     }
 
     #[test]
