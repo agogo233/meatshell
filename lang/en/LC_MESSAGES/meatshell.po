@@ -261,9 +261,6 @@ msgstr "Octal mode, e.g. 755"
 msgid "Read-only"
 msgstr "Read-only"
 
-msgid "Modified"
-msgstr "Modified"
-
 msgid "View"
 msgstr "View"
 
@@ -567,9 +564,6 @@ msgstr "No matching sessions"
 msgid "Clear search"
 msgstr "Clear search"
 
-msgid "新建窗口"
-msgstr "New Window"
-
 msgid "Session name"
 msgstr "Session name"
 
@@ -632,3 +626,117 @@ msgstr "Height"
 
 msgid "Remote desktop size. In full screen, Ctrl+Alt+Enter switches back to a window."
 msgstr "Remote desktop size. In full screen, Ctrl+Alt+Enter switches back to a window."
+
+msgid "Send to AI"
+msgstr "Send to AI"
+
+msgid "AI assistant"
+msgstr "AI assistant"
+
+msgid "Ask about terminal output, errors, or commands"
+msgstr "Ask about terminal output, errors, or commands"
+
+msgid "Ask the AI… (terminal selections arrive here)"
+msgstr "Ask the AI… (terminal selections arrive here)"
+
+msgid "Files"
+msgstr "Files"
+
+msgid "Tunnels"
+msgstr "Tunnels"
+
+msgid "SFTP"
+msgstr "SFTP"
+
+msgid "Paste and go"
+msgstr "Paste and go"
+
+msgid "No tunnels"
+msgstr "No tunnels"
+
+msgid "Stop"
+msgstr "Stop"
+
+msgid "No match"
+msgstr "No match"
+
+msgid "Merge panes"
+msgstr "Merge panes"
+
+msgid "Replace"
+msgstr "Replace"
+
+msgid "Replace all"
+msgstr "Replace all"
+
+msgid "System information"
+msgstr "System information"
+
+msgid "No data"
+msgstr "No data"
+
+msgid "Overview"
+msgstr "Overview"
+
+msgid "Cores"
+msgstr "Cores"
+
+msgid "Frequency"
+msgstr "Frequency"
+
+msgid "Cache"
+msgstr "Cache"
+
+msgid "Vendor"
+msgstr "Vendor"
+
+msgid "Driver"
+msgstr "Driver"
+
+msgid "CPU usage"
+msgstr "CPU usage"
+
+msgid "System"
+msgstr "System"
+
+msgid "Idle"
+msgstr "Idle"
+
+msgid "Total"
+msgstr "Total"
+
+msgid "Used"
+msgstr "Used"
+
+msgid "Free"
+msgstr "Free"
+
+msgid "Usage"
+msgstr "Usage"
+
+msgid "Network interfaces"
+msgstr "Network interfaces"
+
+msgid "Sent"
+msgstr "Sent"
+
+msgid "Received"
+msgstr "Received"
+
+msgid "Send speed"
+msgstr "Send speed"
+
+msgid "Receive speed"
+msgstr "Receive speed"
+
+msgid "Filesystems"
+msgstr "Filesystems"
+
+msgid "Mount point"
+msgstr "Mount point"
+
+msgid "Available"
+msgstr "Available"
+
+msgid "-L: local port → target reached from the server; -R: server port → target reached from here; -D: local SOCKS5 proxy"
+msgstr "-L: local port → target reached from the server; -R: server port → target reached from here; -D: local SOCKS5 proxy"
