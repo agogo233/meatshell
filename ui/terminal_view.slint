@@ -1109,7 +1109,11 @@ export component TerminalView inherits Rectangle {
                         }
 
                         // Drag-selection highlights (under the text, blue tint).
+                        // Hidden on the alternate screen: the top-level overlay
+                        // after the cursor owns that layer, and painting both
+                        // would stack 0.40+0.40 over transparent-bg cells.
                         for s in root.selection : Rectangle {
+                            visible: !root.is-alt-screen;
                             x: s.col * root.cell-w;
                             y: s.row * root.cell-h;
                             width: s.len * root.cell-w;
@@ -1203,6 +1207,23 @@ export component TerminalView inherits Rectangle {
                             visible: root.cursor-row >= 0
                                 && ime-input.has-focus
                                 && (key-capture.cursor-blink || !Theme.window-focused);
+                        }
+
+                        // Alt-screen (TUI) top-level selection overlay. The base
+                        // selection rects sit under the spans, where an opaque
+                        // SGR cell background (OpenCode/vim/btop panels) hides
+                        // them entirely — drag-select then copies correctly but
+                        // shows no highlight. Re-paint the same rects above the
+                        // spans only while an alternate screen is active; the
+                        // normal-screen path keeps the original under-span layer
+                        // untouched so bash output looks exactly as before.
+                        for s in root.selection : Rectangle {
+                            visible: root.is-alt-screen;
+                            x: s.col * root.cell-w;
+                            y: s.row * root.cell-h;
+                            width: s.len * root.cell-w;
+                            height: root.cell-h;
+                            background: Theme.accent.with-alpha(0.40);
                         }
 
                         // Top-most transparent interaction layer. On macOS,
