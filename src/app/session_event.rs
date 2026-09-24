@@ -109,7 +109,11 @@ pub(super) fn apply_session_event_to_window(
             // the raw replay stream and deep history, then append the
             // reconnect hint below onto what was already on screen (#451).
             if let Some(h) = crate::app::term_buf(bufs, tab_id) {
-                lock_or_recover(&h).release_history_keep_screen();
+                let mut b = lock_or_recover(&h);
+                b.release_history_keep_screen();
+                if let Some(log) = b.session_log.as_mut() {
+                    log.note(&format!("disconnected: {reason}"));
+                }
             }
             // Print the hint into the terminal itself (FinalShell-style), via a
             // synthetic Output event so it reuses the normal render path (#79).

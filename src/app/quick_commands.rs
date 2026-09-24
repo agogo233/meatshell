@@ -79,6 +79,7 @@ pub(super) fn quick_cmd_model(
                 collapsed: is_collapsed,
                 orig_index: -1,
                 send_enter: true,
+                command_preview: "".into(),
             });
         } else {
             for (i, (orig_idx, c)) in members.iter().enumerate() {
@@ -94,6 +95,7 @@ pub(super) fn quick_cmd_model(
                     collapsed: is_collapsed,
                     orig_index: *orig_idx as i32,
                     send_enter: c.send_enter,
+                    command_preview: command_preview(&c.command).into(),
                 });
             }
         }
@@ -101,13 +103,71 @@ pub(super) fn quick_cmd_model(
     ModelRc::from(Rc::new(VecModel::from(rows)))
 }
 
+/// One-line rendering of a quick command for lists and chips (#419).
+///
+/// Multi-line commands (scripts, `for` loops pasted from a .bat) used to be
+/// drawn with their real line breaks inside a fixed-height row and spilled
+/// over the neighbouring entries. Line breaks become a visible ` ⏎ ` marker,
+/// runs of whitespace collapse to one space, and very long commands are cut
+/// so the UI never lays out kilobytes of text for an elided label.
+pub(super) fn command_preview(command: &str) -> String {
+    const MAX_CHARS: usize = 240;
+    let mut out = String::new();
+    for (i, line) in command
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|line| !line.is_empty())
+        .enumerate()
+    {
+        if i > 0 {
+            out.push_str(" \u{23CE} ");
+        }
+        out.push_str(&line);
+        if out.chars().count() > MAX_CHARS {
+            break;
+        }
+    }
+    if out.chars().count() > MAX_CHARS {
+        out = out.chars().take(MAX_CHARS).collect();
+        out.push('…');
+    }
+    out
+}
+
+/// Where the entry being edited ends up after deleting `deleted` (#419):
+/// `-1` (form reset) if it was the deleted one, shifted down if it was after it.
+pub(super) fn edit_index_after_delete(edit_index: i32, deleted: i32) -> i32 {
+    if edit_index < 0 || deleted < 0 {
+        edit_index
+    } else if edit_index == deleted {
+        -1
+    } else if edit_index > deleted {
+        edit_index - 1
+    } else {
+        edit_index
+    }
+}
+
+/// Where the entry being edited ends up after `a` and `b` swap places.
+pub(super) fn edit_index_after_swap(edit_index: i32, a: usize, b: usize) -> i32 {
+    if edit_index == a as i32 {
+        b as i32
+    } else if edit_index == b as i32 {
+        a as i32
+    } else {
+        edit_index
+    }
+}
+
+/// Move entry `index` one step within its group. Returns the index it was
+/// swapped with, or `None` if it was already at the edge of its group.
 pub(super) fn reorder_quick_command(
     commands: &mut [crate::config::QuickCommand],
     index: usize,
     move_up: bool,
-) -> bool {
+) -> Option<usize> {
     let Some(current) = commands.get(index) else {
-        return false;
+        return None;
     };
     let group = current.group.trim().to_string();
     let target = if move_up {
@@ -120,10 +180,8 @@ pub(super) fn reorder_quick_command(
     };
     if let Some(target) = target {
         commands.swap(index, target);
-        true
-    } else {
-        false
     }
+    target
 }
 
 #[cfg(test)]
@@ -147,11 +205,72 @@ mod reorder_tests {
             command("x", "other"),
             command("b", "ops"),
         ];
-        assert!(reorder_quick_command(&mut commands, 2, true));
+        assert_eq!(reorder_quick_command(&mut commands, 2, true), Some(0));
         assert_eq!(
             commands.iter().map(|item| item.name.as_str()).collect::<Vec<_>>(),
             vec!["b", "x", "a"]
         );
-        assert!(!reorder_quick_command(&mut commands, 0, true));
+        assert_eq!(reorder_quick_command(&mut commands, 0, true), None);
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::command_preview;
+
+    #[test]
+    fn single_line_command_is_unchanged() {
+        assert_eq!(command_preview("docker exec -it goose-cli bash"), "docker exec -it goose-cli bash");
+    }
+
+    #[test]
+    fn multi_line_command_becomes_one_line() {
+        let cmd = "(for /f \"tokens=5\" %a in ('netstat -ano') do (\r\n    taskkill /F /PID %a\r\n))\r\n";
+        let preview = command_preview(cmd);
+        assert!(!preview.contains('\n') && !preview.contains('\r'));
+        assert_eq!(
+            preview,
+            "(for /f \"tokens=5\" %a in ('netstat -ano') do ( \u{23CE} taskkill /F /PID %a \u{23CE} ))"
+        );
+    }
+
+    #[test]
+    fn blank_lines_and_tabs_collapse() {
+        assert_eq!(command_preview("\n\tls   -la\n\n\tpwd\n"), "ls -la \u{23CE} pwd");
+    }
+
+    #[test]
+    fn pasted_top_output_renders_as_one_line() {
+        let pasted = "7 root       0 -20       0      0      0 I   0.0   0.0   0:00.00 kworker/R-netns\n      9 root       0 -20       0      0      0 I   0.0   0.0   0:00.00 kworker/0:0H-events_hig+\n     12 root       0 -20       0      0      0 I   0.0   0.0   0:00.00 kworker/R-mm_pe\n";
+        let preview = command_preview(pasted);
+        assert!(!preview.contains('\n'));
+        assert!(preview.starts_with("7 root 0 -20 0 0 0 I 0.0 0.0 0:00.00 kworker/R-netns \u{23CE} 9 root"));
+    }
+
+    #[test]
+    fn very_long_command_is_truncated() {
+        let preview = command_preview(&"x".repeat(1000));
+        assert_eq!(preview.chars().count(), 241);
+        assert!(preview.ends_with('…'));
+    }
+}
+
+#[cfg(test)]
+mod edit_index_tests {
+    use super::{edit_index_after_delete, edit_index_after_swap};
+
+    #[test]
+    fn delete_keeps_the_edited_entry_selected() {
+        assert_eq!(edit_index_after_delete(3, 1), 2);
+        assert_eq!(edit_index_after_delete(3, 5), 3);
+        assert_eq!(edit_index_after_delete(3, 3), -1);
+        assert_eq!(edit_index_after_delete(-1, 0), -1);
+    }
+
+    #[test]
+    fn swap_follows_the_edited_entry() {
+        assert_eq!(edit_index_after_swap(2, 2, 0), 0);
+        assert_eq!(edit_index_after_swap(0, 2, 0), 2);
+        assert_eq!(edit_index_after_swap(1, 2, 0), 1);
     }
 }

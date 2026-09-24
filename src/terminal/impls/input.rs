@@ -286,6 +286,19 @@ pub(crate) fn bare_ctrl_marker_workaround_enabled() -> bool {
     false
 }
 
+/// Shift+Tab must reach the PTY as CBT / back-tab (`ESC [ Z`), which is what
+/// xterm sends and what TUIs (Pi Agent, vim, fzf, readline menus…) bind.
+/// Slint delivers it either as `Key.Backtab` (U+0019) or as a plain `"\t"`
+/// with the shift flag set. Without this, the former was dropped by the IME
+/// C0-marker filter and the latter was sent as a bare Tab, losing Shift.
+/// Ctrl+Shift+Tab is handled earlier (tab cycling), and Ctrl+Y (U+0019 with
+/// ctrl=true) must keep producing 0x19, so `ctrl` excludes this path.
+pub(crate) fn is_back_tab(key: &str, ctrl: bool, alt: bool, shift: bool) -> bool {
+    !ctrl && !alt && shift && (key == "\u{0019}" || key == "\t")
+}
+
+pub(crate) const BACK_TAB_BYTES: &[u8] = b"\x1b[Z";
+
 pub(crate) fn key_to_pty_bytes(key: &str, ctrl: bool, alt: bool, app_cursor: bool) -> Vec<u8> {
     let special: Option<&[u8]> = match key {
         "\u{F700}" => Some(if app_cursor { b"\x1bOA" } else { b"\x1b[A" }),
@@ -384,6 +397,39 @@ pub(crate) fn c0_letter_key_down(codepoint: u32) -> bool {
         fn GetKeyState(nVirtKey: i32) -> i16;
     }
     unsafe { (GetKeyState(virtual_key) as u16) & 0x8000 != 0 }
+}
+
+#[cfg(test)]
+mod back_tab_tests {
+    use super::*;
+
+    #[test]
+    fn slint_backtab_key_is_back_tab() {
+        assert!(is_back_tab("\u{0019}", false, false, true));
+    }
+
+    #[test]
+    fn shift_tab_text_is_back_tab() {
+        assert!(is_back_tab("\t", false, false, true));
+    }
+
+    #[test]
+    fn plain_tab_is_not_back_tab() {
+        assert!(!is_back_tab("\t", false, false, false));
+        assert_eq!(key_to_pty_bytes("\t", false, false, false), vec![0x09]);
+    }
+
+    #[test]
+    fn ctrl_y_still_sends_em() {
+        assert!(!is_back_tab("\u{0019}", true, false, false));
+        assert!(!is_back_tab("\u{0019}", true, false, true));
+        assert_eq!(key_to_pty_bytes("\u{0019}", true, false, false), vec![0x19]);
+    }
+
+    #[test]
+    fn back_tab_sequence_is_cbt() {
+        assert_eq!(BACK_TAB_BYTES, b"\x1b[Z");
+    }
 }
 
 #[cfg(test)]

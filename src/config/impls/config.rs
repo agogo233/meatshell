@@ -1061,6 +1061,35 @@ impl ConfigStore {
         self.cache.editor_highlight_disabled = !enabled;
     }
 
+    /// Global default for session logging (#265).
+    pub fn session_log_enabled(&self) -> bool {
+        self.cache.session_log_enabled
+    }
+
+    pub fn set_session_log_enabled(&mut self, enabled: bool) {
+        self.cache.session_log_enabled = enabled;
+    }
+
+    /// Custom session-log folder as configured ("" = default location).
+    pub fn session_log_dir_setting(&self) -> &str {
+        &self.cache.session_log_dir
+    }
+
+    pub fn set_session_log_dir(&mut self, dir: String) {
+        self.cache.session_log_dir = dir.trim().to_string();
+    }
+
+    /// Folder session logs are written to: the custom folder, or
+    /// `<log dir>/sessions` beside `error.log`.
+    pub fn session_log_dir(&self) -> PathBuf {
+        let custom = self.cache.session_log_dir.trim();
+        if custom.is_empty() {
+            log_dir().join("sessions")
+        } else {
+            PathBuf::from(custom)
+        }
+    }
+
     /// Selected built-in rule set. Unknown values safely fall back to the
     /// conservative log-level preset for forward/backward compatibility.
     pub fn output_highlight_preset(&self) -> &str {

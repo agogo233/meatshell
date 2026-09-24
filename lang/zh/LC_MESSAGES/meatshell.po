@@ -740,3 +740,18 @@ msgstr "高度"
 
 msgid "Remote desktop size. In full screen, Ctrl+Alt+Enter switches back to a window."
 msgstr "远端桌面的分辨率；全屏连接后按 Ctrl+Alt+Enter 可切回窗口。"
+
+msgid "Session log"
+msgstr "会话日志"
+
+msgid "Follow global"
+msgstr "跟随全局"
+
+msgid "Always record"
+msgstr "始终记录"
+
+msgid "Never record"
+msgstr "从不记录"
+
+msgid "Saves this session's terminal output as timestamped plain text. Keystrokes are not recorded. The folder is set in Settings → Session log."
+msgstr "将此会话的终端输出保存为带时间戳的纯文本，不记录按键。日志目录在「设置 → 会话日志」中设置。"

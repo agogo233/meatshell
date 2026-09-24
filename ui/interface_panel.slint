@@ -418,6 +418,9 @@ export component InterfacePanel inherits Rectangle {
     in property <string> ai-discover-state;   // "" | "busy" | "ok" | "error"
     in property <string> ai-discover-error;
     in-out property <bool> download-always-ask;
+    in-out property <bool> session-log-enabled;
+    in property <string> session-log-dir;
+    in property <bool> session-log-dir-custom;
     in-out property <bool> paste-confirm-enabled: true;
     in-out property <bool> extra-paste-shortcuts-enabled: true;
     in-out property <bool> zen-mode: false;
@@ -489,6 +492,10 @@ export component InterfacePanel inherits Rectangle {
     callback discover-ai-models(string /* base-url */, string /* api-key */);
     callback set-ai-panel-enabled(bool);
     callback set-download-always-ask(bool);
+    callback set-session-log-enabled(bool);
+    callback pick-session-log-dir();
+    callback reset-session-log-dir();
+    callback open-session-log-dir();
     callback set-paste-confirm-enabled(bool);
     callback set-extra-paste-shortcuts-enabled(bool);
     callback set-zen-mode(bool);
@@ -565,11 +572,6 @@ export component InterfacePanel inherits Rectangle {
                     clicked => { root.ifd-page = "sidebar"; }
                 }
                 NavItem {
-                    icon: "\u{E88A}"; label: root.lang-en ? "Welcome page" : "欢迎页";
-                    active: root.ifd-page == "welcome";
-                    clicked => { root.ifd-page = "welcome"; }
-                }
-                NavItem {
                     icon: "\u{E627}"; label: root.lang-en ? "Session sync" : "会话同步";
                     active: root.ifd-page == "sync";
                     clicked => { root.ifd-page = "sync"; }
@@ -588,6 +590,11 @@ export component InterfacePanel inherits Rectangle {
                     icon: "\u{E2C4}"; label: root.lang-en ? "Download" : "下载";
                     active: root.ifd-page == "download";
                     clicked => { root.ifd-page = "download"; }
+                }
+                NavItem {
+                    icon: "\u{E873}"; label: root.lang-en ? "Session log" : "会话日志";
+                    active: root.ifd-page == "session-log";
+                    clicked => { root.ifd-page = "session-log"; }
                 }
                 NavItem {
                     icon: "\u{E335}"; label: "MCP";
@@ -1633,6 +1640,21 @@ export component InterfacePanel inherits Rectangle {
                         toggled(v) => { root.collapse-sftp-default = v; root.set-collapse-sftp-default(v); }
                     }
                 }
+                // Welcome page as a sidebar — lived on its own "Welcome page"
+                // settings page before; it is a sidebar option like the rest.
+                SettingRow {
+                    label: root.lang-en ? "Show the welcome page as a sidebar" : "欢迎页设为侧栏";
+                    desc: root.lang-en
+                        ? "Dock the session list on the left instead of a \"New tab\" tab; opened sessions fill the center."
+                        : "把会话列表停靠在左侧,不再用「新标签页」标签;打开的会话占据中央区域。";
+                    Switch {
+                        on: root.welcome-as-sidebar;
+                        // Applying this binding destroys/recreates the Welcome
+                        // subtree. Rust defers that work until this Switch
+                        // callback has returned, so do not mutate it here (#323).
+                        toggled(v) => { root.set-welcome-as-sidebar(v); }
+                    }
+                }
                 SettingRow {
                     label: root.lang-en ? "Quick commands as a sidebar" : "快捷命令作为侧栏";
                     desc: root.lang-en
@@ -1645,30 +1667,6 @@ export component InterfacePanel inherits Rectangle {
                             root.quick-commands-as-sidebar = v;
                             root.set-quick-commands-as-sidebar(v);
                         }
-                    }
-                }
-            }
-
-            // --- Welcome page ------------------------------------------
-            if root.ifd-page == "welcome" : VerticalLayout {
-                padding-left: 20px;
-                padding-right: 20px;
-                padding-top: 14px;
-                spacing: 0;
-                alignment: start;
-                SectionHeader { text: root.lang-en ? "WELCOME PAGE" : "欢迎页"; height: 24px; }
-                SettingRow {
-                    label: root.lang-en ? "Show the welcome page as a sidebar" : "欢迎页设为侧栏";
-                    desc: root.lang-en
-                        ? "Dock the session list on the left instead of a \"New tab\" tab; opened sessions fill the center."
-                        : "把会话列表停靠在左侧,不再用「新标签页」标签;打开的会话占据中央区域。";
-                    show-divider: false;
-                    Switch {
-                        on: root.welcome-as-sidebar;
-                        // Applying this binding destroys/recreates the Welcome
-                        // subtree. Rust defers that work until this Switch
-                        // callback has returned, so do not mutate it here (#323).
-                        toggled(v) => { root.set-welcome-as-sidebar(v); }
                     }
                 }
             }
@@ -1965,6 +1963,54 @@ export component InterfacePanel inherits Rectangle {
                         on: root.download-always-ask;
                         toggled(v) => { root.download-always-ask = v; root.set-download-always-ask(v); }
                     }
+                }
+            }
+
+            // --- Session log page (#265) -------------------------------
+            if root.ifd-page == "session-log" : VerticalLayout {
+                padding-left: 20px;
+                padding-right: 20px;
+                padding-top: 14px;
+                spacing: 0;
+                alignment: start;
+                SectionHeader { text: root.lang-en ? "SESSION LOG" : "会话日志"; height: 24px; }
+                SettingRow {
+                    label: root.lang-en ? "Record session logs" : "记录会话日志";
+                    desc: root.lang-en
+                        ? "Save each new terminal tab's output as timestamped plain text. Keystrokes are not recorded, so passwords typed at hidden prompts stay out of the log. A saved session can override this in its advanced options."
+                        : "将每个新终端标签页的输出保存为带时间戳的纯文本。不记录按键,在隐藏输入的提示处键入的密码不会进入日志。已保存会话可在高级选项中单独覆盖此设置。";
+                    Switch {
+                        on: root.session-log-enabled;
+                        toggled(v) => { root.session-log-enabled = v; root.set-session-log-enabled(v); }
+                    }
+                }
+                SettingRow {
+                    label: root.lang-en ? "Log folder" : "日志目录";
+                    desc: root.session-log-dir;
+                    show-divider: false;
+                    HorizontalLayout {
+                        spacing: 6px;
+                        if root.session-log-dir-custom : GhostButton {
+                            text: root.lang-en ? "Default" : "恢复默认";
+                            clicked => { root.reset-session-log-dir(); }
+                        }
+                        GhostButton {
+                            text: root.lang-en ? "Change…" : "更改…";
+                            clicked => { root.pick-session-log-dir(); }
+                        }
+                        GhostButton {
+                            text: root.lang-en ? "Open" : "打开";
+                            clicked => { root.open-session-log-dir(); }
+                        }
+                    }
+                }
+                Text {
+                    text: root.lang-en
+                        ? "One file per tab: <session>_<date-time>.log. Changes apply to tabs opened afterwards."
+                        : "每个标签页一个文件:<会话名>_<日期-时间>.log。修改仅对之后打开的标签页生效。";
+                    font-size: 11px * Theme.panel-font;
+                    color: Theme.text-muted;
+                    wrap: word-wrap;
                 }
             }
 

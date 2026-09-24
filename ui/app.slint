@@ -543,6 +543,7 @@ export component AppWindow inherits Window {
     in-out property <int> quick-external-sequence;
     in property <[string]> command-history;          // oldest first (newest last, #113)
     in property <[string]> history-view;             // filtered dropdown, oldest first (newest last, #101)
+    in property <[string]> history-preview;          // history-view flattened to one line each (#419)
     callback run-command(string /* tab-id */, string /* cmd */, bool /* to-all */);
     callback copy-text(string);                 // copy a history command (#96)
     callback delete-history(int /* index */);   // remove a history entry (#96)
@@ -726,6 +727,14 @@ export component AppWindow inherits Window {
     // Always ask where to save on each download (#87); default off.
     in-out property <bool> download-always-ask: false;
     callback set-download-always-ask(bool);        // apply + persist
+    // Session logging (#265): global default + where files go.
+    in-out property <bool> session-log-enabled: false;
+    in-out property <string> session-log-dir;          // effective folder
+    in-out property <bool> session-log-dir-custom: false;
+    callback set-session-log-enabled(bool);        // apply + persist
+    callback pick-session-log-dir();
+    callback reset-session-log-dir();
+    callback open-session-log-dir();
     in-out property <bool> paste-confirm-enabled: true;
     callback set-paste-confirm-enabled(bool);
     in-out property <bool> extra-paste-shortcuts-enabled: true;
@@ -1114,6 +1123,7 @@ export component AppWindow inherits Window {
     in-out property <string> dialog-rdp-height: "720";
     in-out property <string> dialog-encoding: "UTF-8";
     in-out property <bool> dialog-vt100-drawing: false;
+    in-out property <string> dialog-session-log: "default";
     in-out property <bool> dialog-disable-shell-integration: false;
     in-out property <string> dialog-note;
     in-out property <string> dialog-test-status;
@@ -2430,6 +2440,7 @@ export component AppWindow inherits Window {
                         focus-sequence: root.terminal-focus-sequence;
                         command-history: root.command-history;
                         history-view: root.history-view;
+                        history-preview: root.history-preview;
                         run-command(cmd, all) => { root.run-command(term.id, cmd, all); }
                         copy-text(t) => { root.copy-text(t); }
                         delete-history(i) => { root.delete-history(i); }
@@ -2854,6 +2865,7 @@ export component AppWindow inherits Window {
                         root.quick-external-send-enter = send-enter;
                         root.quick-external-sequence += 1;
                     }
+                    edit(i) => { root.edit-quick-command(i); }
                     toggle-group(group) => { root.toggle-quick-group(group); }
                     manage => {
                         root.qcm-name = "";
@@ -4781,7 +4793,9 @@ export component AppWindow inherits Window {
                                 font-family: Theme.font-mono;
                                 font-size: Theme.fs-sm;
                                 single-line: false;
-                                wrap: no-wrap;
+                                // Wrap so long one-liners stay fully visible while
+                                // editing; the box scrolls vertically (#419).
+                                wrap: word-wrap;
                             }
                         }
                     }
@@ -4927,11 +4941,15 @@ export component AppWindow inherits Window {
                             if q.orig-index >= 0 : Rectangle {
                                 height: 38px;
                                 border-radius: Theme.radius-sm;
-                                background: Theme.bg-root;
+                                // The row being edited in the form above is marked (#419).
+                                background: q.orig-index == root.qcm-edit-index ? Theme.accent.with-alpha(0.15) : Theme.bg-root;
+                                border-width: q.orig-index == root.qcm-edit-index ? 1px : 0px;
+                                border-color: Theme.accent;
                                 property <length> ctx-x;
                                 property <length> ctx-y;
                                 item-ta := TouchArea {
                                     clicked => { }  // grab so right-click pointer-events register inside the Flickable
+                                    double-clicked => { root.edit-quick-command(q.orig-index); }
                                     pointer-event(e) => {
                                         if (e.kind == PointerEventKind.down && e.button == PointerEventButton.right) {
                                             ctx-x = self.mouse-x; ctx-y = self.mouse-y; qctx-menu.show();
@@ -4945,8 +4963,23 @@ export component AppWindow inherits Window {
                                         alignment: center;
                                         Text { text: q.name; color: Theme.text-primary; font-size: Theme.fs-sm;
                                                overflow: elide; }
-                                        Text { text: q.command; color: Theme.text-muted; font-size: Theme.fs-xs;
+                                        Text { text: q.command-preview; color: Theme.text-muted; font-size: Theme.fs-xs;
                                                overflow: elide; font-family: Theme.ui-font-family; }
+                                    }
+                                    // Edit (#419): previously only reachable via right-click.
+                                    Rectangle {
+                                        width: 24px; height: 28px;
+                                        y: (parent.height - self.height) / 2;
+                                        border-radius: Theme.radius-sm;
+                                        background: edit-ta.has-hover ? Theme.bg-hover : transparent;
+                                        edit-ta := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.edit-quick-command(q.orig-index); }
+                                        }
+                                        Text { text: "\u{E3C9}"; font-family: "Material Icons";
+                                               color: q.orig-index == root.qcm-edit-index ? Theme.accent : Theme.text-secondary;
+                                               font-size: Theme.fs-sm;
+                                               horizontal-alignment: center; vertical-alignment: center; }
                                     }
                                     Rectangle {
                                         width: 24px; height: 28px;
@@ -5661,6 +5694,7 @@ export component AppWindow inherits Window {
         draft-rdp-height <=> root.dialog-rdp-height;
         draft-encoding <=> root.dialog-encoding;
         draft-vt100-drawing <=> root.dialog-vt100-drawing;
+        draft-session-log <=> root.dialog-session-log;
         draft-disable-shell-integration <=> root.dialog-disable-shell-integration;
         draft-note <=> root.dialog-note;
         test-status <=> root.dialog-test-status;
@@ -6132,6 +6166,9 @@ export component AppWindow inherits Window {
                     ai-discover-state: root.ai-discover-state;
                     ai-discover-error: root.ai-discover-error;
                     download-always-ask <=> root.download-always-ask;
+                    session-log-enabled <=> root.session-log-enabled;
+                    session-log-dir: root.session-log-dir;
+                    session-log-dir-custom: root.session-log-dir-custom;
                     paste-confirm-enabled <=> root.paste-confirm-enabled;
                     extra-paste-shortcuts-enabled <=> root.extra-paste-shortcuts-enabled;
                     zen-mode <=> root.zen-mode;
@@ -6216,6 +6253,10 @@ export component AppWindow inherits Window {
                         root.dock-layout-changed();
                     }
                     set-download-always-ask(v) => { root.set-download-always-ask(v); }
+                    set-session-log-enabled(v) => { root.set-session-log-enabled(v); }
+                    pick-session-log-dir => { root.pick-session-log-dir(); }
+                    reset-session-log-dir => { root.reset-session-log-dir(); }
+                    open-session-log-dir => { root.open-session-log-dir(); }
                     set-paste-confirm-enabled(v) => { root.set-paste-confirm-enabled(v); }
                     set-extra-paste-shortcuts-enabled(v) => { root.set-extra-paste-shortcuts-enabled(v); }
                     set-zen-mode(v) => { root.set-zen-mode(v); }

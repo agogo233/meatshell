@@ -223,6 +223,13 @@ pub struct ConfigFile {
     /// Seconds between auto-reconnect scans. 0 = default (5).
     #[serde(default)]
     pub auto_reconnect_interval_secs: u64,
+    /// Record terminal output of new tabs to plain-text session logs (#265).
+    /// Off by default; saved sessions can override it either way.
+    #[serde(default)]
+    pub session_log_enabled: bool,
+    /// Folder for session logs. Empty = `<log dir>/sessions`.
+    #[serde(default)]
+    pub session_log_dir: String,
     /// Global UI scale in percent (#100). 0 = default (100%).
     #[serde(default)]
     pub ui_scale: u32,

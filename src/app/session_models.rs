@@ -493,6 +493,7 @@ pub(super) fn session_from_draft(
         flow_control: draft.flow_control.to_string(),
         encoding: draft.encoding.to_string(),
         vt100_drawing: draft.vt100_drawing,
+        session_log: SessionLogMode::from_str(draft.session_log.as_str()),
         forwards,
         triggers,
         disable_shell_integration: draft.disable_shell_integration,

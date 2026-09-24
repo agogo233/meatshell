@@ -50,6 +50,8 @@ export struct SessionDraft {
     // Honor VT100 line drawing (DEC Special Graphics) even in UTF-8 mode (#376),
     // like PuTTY's Window → Translation option. On by default.
     vt100-drawing: bool,
+    // Session logging override (#265): "default" | "on" | "off".
+    session-log: string,
     // Skip the POSIX shell-integration setup (cwd-follow hook + monitor) for
     // Windows / pwsh servers where it breaks the shell (#140).
     disable-shell-integration: bool,
@@ -505,6 +507,7 @@ export component SessionDialog inherits Rectangle {
     in-out property <string> draft-rdp-height: "720";
     in-out property <string> draft-encoding: "UTF-8";
     in-out property <bool> draft-vt100-drawing: false;
+    in-out property <string> draft-session-log: "default";
     in-out property <bool> draft-disable-shell-integration: false;
     in-out property <string> draft-note;
     in-out property <string> test-status;
@@ -1195,6 +1198,39 @@ export component SessionDialog inherits Rectangle {
                 Rectangle { height: 6px; }
             }
 
+            // ── Session log override (terminal sessions) (#265) ─────────────
+            if root.show-advanced && root.draft-kind != "rdp" : VerticalLayout {
+                spacing: 4px;
+                Text {
+                    text: @tr("Session log");
+                    color: Theme.text-secondary;
+                    font-size: Theme.fs-sm;
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    SegOption {
+                        label: @tr("Follow global");
+                        active: root.draft-session-log != "on" && root.draft-session-log != "off";
+                        clicked => { root.draft-session-log = "default"; }
+                    }
+                    SegOption {
+                        label: @tr("Always record");
+                        active: root.draft-session-log == "on";
+                        clicked => { root.draft-session-log = "on"; }
+                    }
+                    SegOption {
+                        label: @tr("Never record");
+                        active: root.draft-session-log == "off";
+                        clicked => { root.draft-session-log = "off"; }
+                    }
+                }
+                Text {
+                    text: @tr("Saves this session's terminal output as timestamped plain text. Keystrokes are not recorded. The folder is set in Settings → Session log.");
+                    color: Theme.text-muted; font-size: Theme.fs-xs; wrap: word-wrap;
+                }
+                Rectangle { height: 6px; }
+            }
+
             // ── Optional outbound proxy (SSH / Telnet only) ─────────────────
             if root.show-advanced && root.draft-kind != "serial" : VerticalLayout {
                 spacing: 4px;
@@ -1367,6 +1403,7 @@ export component SessionDialog inherits Rectangle {
                             rdp-height: root.draft-rdp-height.to-float(),
                             encoding: root.draft-encoding,
                             vt100-drawing: root.draft-vt100-drawing,
+                            session-log: root.draft-session-log,
                             disable-shell-integration: root.draft-disable-shell-integration,
                             note: root.draft-note,
                             jump-session-id: (root.draft-jump-index > 0 && root.draft-jump-index < root.jump-ids.length)
@@ -1424,6 +1461,7 @@ export component SessionDialog inherits Rectangle {
                             rdp-height: root.draft-rdp-height.to-float(),
                             encoding: root.draft-encoding,
                             vt100-drawing: root.draft-vt100-drawing,
+                            session-log: root.draft-session-log,
                             disable-shell-integration: root.draft-disable-shell-integration,
                             note: root.draft-note,
                             jump-session-id: (root.draft-jump-index > 0 && root.draft-jump-index < root.jump-ids.length)

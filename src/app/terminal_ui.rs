@@ -152,6 +152,25 @@ pub(super) fn history_view_model(store: &ConfigStore, query: &str) -> ModelRc<Sh
     ModelRc::from(Rc::new(VecModel::from(rows)))
 }
 
+/// One-line previews parallel to [`history_view_model`] (same order and
+/// length). A history entry pasted with line breaks (e.g. a block of `top`
+/// output sent via the command bar) used to be drawn with its real newlines
+/// inside a 28px row and overlapped the rows around it (#419). The raw
+/// strings stay in `history-view` for run / copy / delete.
+pub(super) fn history_preview_model(store: &ConfigStore, query: &str) -> ModelRc<SharedString> {
+    let rows: Vec<SharedString> = history_view_rows(store.command_history(), query)
+        .iter()
+        .map(|command| command_preview(command).into())
+        .collect();
+    ModelRc::from(Rc::new(VecModel::from(rows)))
+}
+
+/// Refresh the history dropdown's raw rows and their display previews together.
+pub(super) fn set_history_view(window: &AppWindow, store: &ConfigStore, query: &str) {
+    window.set_history_view(history_view_model(store, query));
+    window.set_history_preview(history_preview_model(store, query));
+}
+
 #[cfg(test)]
 #[path = "../../tests/app/command_history/mod.rs"]
 mod history_view_tests;

@@ -47,6 +47,8 @@ fn make_buf(
         csi_state: CsiState::Normal,
         csi_pending: Vec::new(),
         raw: std::collections::VecDeque::new(),
+        session_log: None,
+        session_log_spec: None,
     }
 }
 
@@ -156,3 +158,48 @@ mod colors;
 mod protocol;
 mod selection;
 mod sftp_sorting;
+
+#[test]
+fn enabling_session_log_mid_session_seeds_screen_and_keeps_prompt_spacing() {
+    let dir = std::env::temp_dir().join(format!("meatshell-log-test-{}", uuid::Uuid::new_v4()));
+    let mut buffer = make_buf(5, 40, &[], &[], 0);
+    buffer.parser.process(b"line one\r\nuser@host:~$ ");
+    buffer.session_log_spec = Some(crate::terminal::SessionLogSpec {
+        name: "web".into(),
+        target: "ssh root@h:22".into(),
+        mode: crate::config::SessionLogMode::Default,
+    });
+
+    // Global off: nothing is opened.
+    buffer.apply_session_log(false, &dir).unwrap();
+    assert!(buffer.session_log.is_none());
+
+    // Turning it on for an open tab starts logging right away.
+    buffer.apply_session_log(true, &dir).unwrap();
+    let path = buffer.session_log.as_ref().unwrap().path().to_path_buf();
+    let _ = buffer.ingest(b"ls\r\n");
+
+    // Turning it off again closes the file.
+    buffer.apply_session_log(false, &dir).unwrap();
+    assert!(buffer.session_log.is_none());
+
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.lines().any(|l| l.ends_with("] line one")), "{text}");
+    assert!(text.lines().any(|l| l.ends_with("] user@host:~$ ls")), "{text}");
+    assert!(text.lines().last().unwrap().starts_with("=== session log closed"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn session_override_off_wins_over_global_on() {
+    let dir = std::env::temp_dir().join(format!("meatshell-log-test-{}", uuid::Uuid::new_v4()));
+    let mut buffer = make_buf(5, 40, &[], &[], 0);
+    buffer.session_log_spec = Some(crate::terminal::SessionLogSpec {
+        name: "web".into(),
+        target: "local".into(),
+        mode: crate::config::SessionLogMode::Off,
+    });
+    buffer.apply_session_log(true, &dir).unwrap();
+    assert!(buffer.session_log.is_none());
+    assert!(!dir.exists());
+}

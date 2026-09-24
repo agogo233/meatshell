@@ -740,3 +740,18 @@ msgstr "Available"
 
 msgid "-L: local port → target reached from the server; -R: server port → target reached from here; -D: local SOCKS5 proxy"
 msgstr "-L: local port → target reached from the server; -R: server port → target reached from here; -D: local SOCKS5 proxy"
+
+msgid "Session log"
+msgstr "Session log"
+
+msgid "Follow global"
+msgstr "Follow global"
+
+msgid "Always record"
+msgstr "Always record"
+
+msgid "Never record"
+msgstr "Never record"
+
+msgid "Saves this session's terminal output as timestamped plain text. Keystrokes are not recorded. The folder is set in Settings → Session log."
+msgstr "Saves this session's terminal output as timestamped plain text. Keystrokes are not recorded. The folder is set in Settings → Session log."

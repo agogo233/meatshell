@@ -51,6 +51,9 @@ export struct QuickCmd {
     // false → clicking only fills the input box (no trailing Return), so the
     // command can be tweaked before sending; true → send + execute (B站 suggestion).
     send-enter: bool,
+    // `command` flattened to one line for display (#419); multi-line commands
+    // used to overflow their fixed-height rows.
+    command-preview: string,
 }
 
 // One chat row in the AI panel. `role` is "user", "assistant", or "error"
@@ -102,6 +105,7 @@ export component QuickDockPanel inherits Rectangle {
     in property <[QuickCmd]> commands;
     in property <string> dock-edge: "right";
     callback activate(string, bool /* send-enter */);
+    callback edit(int /* orig-index */);
     callback toggle-group(string);
     callback manage();
     callback close();
@@ -212,7 +216,8 @@ export component QuickDockPanel inherits Rectangle {
                             clicked => { root.activate(q.command, q.send-enter); }
                         }
                         item-col := VerticalLayout {
-                            padding-left: 9px; padding-right: 9px;
+                            // Right padding leaves room for the hover edit button.
+                            padding-left: 9px; padding-right: 32px;
                             padding-top: 4px; padding-bottom: 4px; spacing: 1px;
                             Text {
                                 text: q.name; color: Theme.text-primary;
@@ -220,11 +225,30 @@ export component QuickDockPanel inherits Rectangle {
                                 vertical-alignment: center;
                             }
                             Text {
-                                text: q.command; color: Theme.text-muted;
+                                text: q.command-preview; color: Theme.text-muted;
                                 font-size: Theme.fs-xs; overflow: elide;
                                 font-family: Theme.ui-font-family;
                                 vertical-alignment: center;
                             }
+                        }
+                        // Edit shortcut, shown on hover (#419).
+                        if item-ta.has-hover || dock-edit-ta.has-hover : Rectangle {
+                            x: parent.width - self.width - 4px;
+                            y: (parent.height - self.height) / 2;
+                            width: 24px; height: 24px;
+                            border-radius: Theme.radius-sm;
+                            background: dock-edit-ta.has-hover ? Theme.bg-active : transparent;
+                            Text {
+                                text: "\u{E3C9}"; font-family: "Material Icons";
+                                color: Theme.text-secondary; font-size: Theme.fs-sm;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                        }
+                        dock-edit-ta := TouchArea {
+                            x: parent.width - 28px;
+                            width: 28px;
+                            mouse-cursor: pointer;
+                            clicked => { root.edit(q.orig-index); }
                         }
                     }
                 }
@@ -540,6 +564,9 @@ export component TerminalView inherits Rectangle {
     in property <[QuickCmd]> quick-commands;
     in property <[string]> command-history;   // oldest first (newest last, #113)
     in property <[string]> history-view;       // filtered dropdown, oldest first (newest last, #101)
+    // Same rows as history-view, one line each for display (#419). Actions
+    // (run / copy / delete / recall) keep using the raw history-view strings.
+    in property <[string]> history-preview;
     property <bool> send-to-all: false;
     in property <bool> cmd-bar-hidden: false;  // toolbar toggle hides the whole bar
     // Effective terminal font size in px: per-session zoom override when > 0,
@@ -2150,14 +2177,16 @@ export component TerminalView inherits Rectangle {
                                         }
                                     }
                                 }
-                                // Name + command on one line; each elides so a long
-                                // entry never overflows the popup (#55).
+                                // Name + one-line command preview; each elides so a
+                                // long entry never overflows the popup (#55). The
+                                // name keeps its natural width up to 45% of the row
+                                // so a long command can't squeeze it to "…" (#419).
                                 HorizontalLayout {
                                     padding-left: 8px; padding-right: 8px; spacing: 10px;
                                     Text { text: q.name; color: Theme.text-primary; font-size: Theme.fs-sm;
                                            vertical-alignment: center; overflow: elide;
-                                           horizontal-stretch: 1; }
-                                    Text { text: q.command; color: Theme.text-muted; font-size: Theme.fs-xs;
+                                           width: min(self.preferred-width, (parent.width - 26px) * 0.45); }
+                                    Text { text: q.command-preview; color: Theme.text-muted; font-size: Theme.fs-xs;
                                            vertical-alignment: center; overflow: elide;
                                            horizontal-alignment: right; horizontal-stretch: 1;
                                            font-family: Theme.ui-font-family; }
@@ -2319,7 +2348,7 @@ export component TerminalView inherits Rectangle {
                             HorizontalLayout {
                                 padding-left: 8px; padding-right: 4px; spacing: 1px;
                                 Text {
-                                    text: h;
+                                    text: idx < root.history-preview.length ? root.history-preview[idx] : h;
                                     color: Theme.text-secondary;
                                     font-size: Theme.fs-sm;
                                     font-family: Theme.ui-font-family;

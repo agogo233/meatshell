@@ -76,6 +76,46 @@ fn default_rdp_height() -> u16 {
     720
 }
 
+/// Per-session override of the global session-log setting (#265).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionLogMode {
+    /// Follow the global "record session logs" setting.
+    #[default]
+    Default,
+    /// Always log this session.
+    On,
+    /// Never log this session.
+    Off,
+}
+
+impl SessionLogMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SessionLogMode::Default => "default",
+            SessionLogMode::On => "on",
+            SessionLogMode::Off => "off",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "on" => SessionLogMode::On,
+            "off" => SessionLogMode::Off,
+            _ => SessionLogMode::Default,
+        }
+    }
+
+    /// Effective on/off given the global default.
+    pub fn resolve(self, global_enabled: bool) -> bool {
+        match self {
+            SessionLogMode::Default => global_enabled,
+            SessionLogMode::On => true,
+            SessionLogMode::Off => false,
+        }
+    }
+}
+
 /// How a session authenticates.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -194,6 +234,11 @@ pub struct Session {
     #[serde(default = "default_vt100_drawing")]
     pub vt100_drawing: bool,
 
+    /// Record this session's terminal output to a log file (#265):
+    /// follow the global setting, or force on/off.
+    #[serde(default)]
+    pub session_log: SessionLogMode,
+
     // --- SSH port forwarding / tunnels (#56) --------------------------------
     /// Tunnels established automatically when this SSH session connects.
     #[serde(default)]
@@ -253,6 +298,34 @@ fn default_true() -> bool {
     true
 }
 
+#[cfg(test)]
+mod session_log_mode_tests {
+    use super::*;
+
+    #[test]
+    fn resolves_against_global_default() {
+        assert!(SessionLogMode::Default.resolve(true));
+        assert!(!SessionLogMode::Default.resolve(false));
+        assert!(SessionLogMode::On.resolve(false));
+        assert!(!SessionLogMode::Off.resolve(true));
+    }
+
+    #[test]
+    fn missing_field_deserializes_as_default() {
+        let mut value = serde_json::to_value(Session::new_empty()).unwrap();
+        value.as_object_mut().unwrap().remove("session_log");
+        let session: Session = serde_json::from_value(value).unwrap();
+        assert_eq!(session.session_log, SessionLogMode::Default);
+    }
+
+    #[test]
+    fn round_trips_through_strings() {
+        for mode in [SessionLogMode::Default, SessionLogMode::On, SessionLogMode::Off] {
+            assert_eq!(SessionLogMode::from_str(mode.as_str()), mode);
+        }
+    }
+}
+
 impl Session {
     pub fn new_empty() -> Self {
         Self {
@@ -284,6 +357,7 @@ impl Session {
             rdp_height: default_rdp_height(),
             encoding: default_encoding(),
             vt100_drawing: default_vt100_drawing(),
+            session_log: SessionLogMode::Default,
             forwards: Vec::new(),
             triggers: Vec::new(),
             disable_shell_integration: false,

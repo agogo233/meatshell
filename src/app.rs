@@ -184,6 +184,50 @@ fn ingest_terminal_output(bufs: &TermBuffers, tab_id: &str, chunk: &[u8]) -> Vec
     }
 }
 
+/// Header details and override for a tab's session log (#265); `None` for
+/// session kinds without a terminal.
+fn session_log_spec(session: &Session) -> Option<crate::terminal::SessionLogSpec> {
+    if session.kind == SessionKind::Rdp {
+        return None;
+    }
+    let target = match session.kind {
+        SessionKind::Serial => format!("serial {} @{}", session.serial_port, session.baud_rate),
+        SessionKind::Local => "local".to_string(),
+        kind => {
+            let user = if session.user.trim().is_empty() {
+                String::new()
+            } else {
+                format!("{}@", session.user.trim())
+            };
+            format!("{} {}{}:{}", kind.as_str(), user, session.host, session.port)
+        }
+    };
+    let name = if session.name.trim().is_empty() {
+        session.host.clone()
+    } else {
+        session.name.clone()
+    };
+    Some(crate::terminal::SessionLogSpec {
+        name,
+        target,
+        mode: session.session_log,
+    })
+}
+
+/// Bring one tab's session log in line with the current settings; a failure
+/// is printed into that terminal rather than interrupting the session.
+fn apply_session_log_to_buffer(buffer: &mut TermBuffer, enabled: bool, dir: &std::path::Path) {
+    if let Err(err) = buffer.apply_session_log(enabled, dir) {
+        tracing::warn!("session log: cannot create file in {}: {err}", dir.display());
+        let notice = format!(
+            "\r\n\x1b[33m{} {} ({err})\x1b[0m\r\n",
+            t("[会话日志] 无法创建日志文件:", "[session log] could not create log file in"),
+            dir.display()
+        );
+        let _ = buffer.ingest(notice.as_bytes());
+    }
+}
+
 fn record_ingested_chunk(chunk_len: usize, ingested_since_checkpoint: &mut usize) -> bool {
     debug_assert!(*ingested_since_checkpoint < INGEST_FRAME_BUDGET);
     if chunk_len == 0 {
@@ -225,7 +269,7 @@ use tokio::runtime::Runtime;
 use crate::app::core::{AppCore, TabRoute, TabRoutes, WindowRegistry, WindowState};
 use crate::config::{
     is_reserved_session_group, named_display_groups, AuthMethod, ConfigFile, ConfigStore,
-    OutputHighlightRule, Secret, Session, SessionKind,
+    OutputHighlightRule, Secret, Session, SessionKind, SessionLogMode,
 };
 use crate::i18n::t;
 use crate::layout::{LogicalRect, TerminalWheelHit};
@@ -246,11 +290,12 @@ use crate::ssh::{
 #[cfg(windows)]
 use crate::terminal::c0_letter_key_down;
 use crate::terminal::{
-    bare_ctrl_marker_workaround_enabled, cell_prefix, clear_pending_paste, compile_output_rules,
-    default_command, encode_command_bar_input, encode_mouse_event, encode_pasted_text,
-    is_terminal_interrupt, key_to_pty_bytes, paste_requires_large_review, should_drop_bare_ctrl_marker,
-    store_pending_paste, take_pending_paste, terminal_uses_bracketed_paste, ActionLinkKind,
-    CsiState, OutputHighlightPreset, PendingPaste, RenderGates,
+    bare_ctrl_marker_workaround_enabled, BACK_TAB_BYTES, cell_prefix, clear_pending_paste,
+    compile_output_rules, default_command, encode_command_bar_input, encode_mouse_event,
+    encode_pasted_text, is_back_tab, is_terminal_interrupt, key_to_pty_bytes,
+    paste_requires_large_review, should_drop_bare_ctrl_marker, store_pending_paste,
+    take_pending_paste, terminal_uses_bracketed_paste, ActionLinkKind, CsiState,
+    OutputHighlightPreset, PendingPaste, RenderGates,
     TabRenderGate, TermBuffer, TermBufferHandle, TermBuffers,
 };
 #[cfg(test)]
@@ -934,6 +979,9 @@ fn open_window(
         // the per-row ceil error of the wrapped-line gutter.
         window.set_editor_probe_text(("M\n".repeat(2047) + "M").into());
         window.set_json_format_output(s.json_format_output());
+        window.set_session_log_enabled(s.session_log_enabled());
+        window.set_session_log_dir(s.session_log_dir().to_string_lossy().to_string().into());
+        window.set_session_log_dir_custom(!s.session_log_dir_setting().is_empty());
         window.set_output_highlight_preset(s.output_highlight_preset().into());
         window.set_output_highlight_rules(output_highlight_rule_model(&s));
         window.set_action_links_enabled(s.action_links_enabled());
@@ -996,7 +1044,7 @@ fn open_window(
         &all_quick_group_names(&store.borrow()),
     ));
     window.set_command_history(history_model(&store.borrow()));
-    window.set_history_view(history_view_model(&store.borrow(), "")); // #101
+    set_history_view(&window, &store.borrow(), ""); // #101, #419
 
     // Interface setting: SFTP follows the terminal's cd. The shell event pumps
     // read this AtomicBool on every CwdChanged, so toggling applies live to
@@ -1110,6 +1158,75 @@ fn open_window(
             let mut s = store.borrow_mut();
             s.set_download_always_ask(ask);
             let _ = s.save();
+        });
+    }
+    // --- Session logging (#265) -------------------------------------------
+    {
+        let store = store.clone();
+        let bufs = bufs.clone();
+        window.on_set_session_log_enabled(move |enabled| {
+            let dir = {
+                let mut s = store.borrow_mut();
+                s.set_session_log_enabled(enabled);
+                let _ = s.save();
+                s.session_log_dir()
+            };
+            // Apply to tabs that are already open, not only to new ones.
+            let handles: Vec<TermBufferHandle> = bufs.lock().unwrap().values().cloned().collect();
+            for handle in handles {
+                apply_session_log_to_buffer(&mut handle.lock().unwrap(), enabled, &dir);
+            }
+        });
+    }
+    {
+        let store = store.clone();
+        let weak = window.as_weak();
+        window.on_pick_session_log_dir(move || {
+            let start = store.borrow().session_log_dir();
+            let Some(folder) = rfd::FileDialog::new().set_directory(&start).pick_folder() else {
+                return;
+            };
+            let effective = {
+                let mut s = store.borrow_mut();
+                s.set_session_log_dir(folder.to_string_lossy().to_string());
+                let _ = s.save();
+                s.session_log_dir()
+            };
+            if let Some(w) = weak.upgrade() {
+                w.set_session_log_dir(effective.to_string_lossy().to_string().into());
+                w.set_session_log_dir_custom(true);
+            }
+        });
+    }
+    {
+        let store = store.clone();
+        let weak = window.as_weak();
+        window.on_reset_session_log_dir(move || {
+            let effective = {
+                let mut s = store.borrow_mut();
+                s.set_session_log_dir(String::new());
+                let _ = s.save();
+                s.session_log_dir()
+            };
+            if let Some(w) = weak.upgrade() {
+                w.set_session_log_dir(effective.to_string_lossy().to_string().into());
+                w.set_session_log_dir_custom(false);
+            }
+        });
+    }
+    {
+        let store = store.clone();
+        window.on_open_session_log_dir(move || {
+            let dir = store.borrow().session_log_dir();
+            if std::fs::create_dir_all(&dir).is_err() {
+                return;
+            }
+            #[cfg(windows)]
+            let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("open").arg(&dir).spawn();
+            #[cfg(all(not(windows), not(target_os = "macos")))]
+            let _ = std::process::Command::new("xdg-open").arg(&dir).spawn();
         });
     }
     {
@@ -4802,6 +4919,7 @@ fn wire_session_callbacks(
             w.set_dialog_rdp_height("720".into());
             w.set_dialog_encoding("UTF-8".into());
             w.set_dialog_vt100_drawing(false);
+            w.set_dialog_session_log("default".into());
             w.set_dialog_disable_shell_integration(false);
             w.set_dialog_note("".into());
             w.set_dialog_editing(false);
@@ -5256,6 +5374,7 @@ fn wire_session_callbacks(
                 w.set_dialog_rdp_height(session.rdp_height.to_string().into());
                 w.set_dialog_encoding(session.encoding.clone().into());
                 w.set_dialog_vt100_drawing(session.vt100_drawing);
+                w.set_dialog_session_log(session.session_log.as_str().into());
                 w.set_dialog_disable_shell_integration(session.disable_shell_integration);
                 w.set_dialog_note(session.note.clone().into());
                 w.set_dialog_editing(true);
@@ -5664,6 +5783,7 @@ fn wire_session_callbacks(
                 flow_control: draft.flow_control.to_string(),
                 encoding: draft.encoding.to_string(),
                 vt100_drawing: draft.vt100_drawing,
+                session_log: SessionLogMode::from_str(draft.session_log.as_str()),
                 forwards,
                 triggers,
                 disable_shell_integration: draft.disable_shell_integration,
@@ -6381,8 +6501,19 @@ fn wire_session_callbacks(
                     csi_state: CsiState::Normal,
                     csi_pending: Vec::new(),
                     raw: std::collections::VecDeque::new(),
+                    session_log: None,
+                    session_log_spec: session_log_spec(&session),
                 })),
             );
+            // Session logging (#265): open the transcript before the first
+            // byte arrives.
+            {
+                let (enabled, dir) = {
+                    let settings = store.borrow();
+                    (settings.session_log_enabled(), settings.session_log_dir())
+                };
+                with_term_buf(&bufs, &tab_id, |b| apply_session_log_to_buffer(b, enabled, &dir));
+            }
             lock_or_recover(&render_gates).insert(
                 tab_id.clone(),
                 Arc::new(TabRenderGate::new(RENDER_MIN_INTERVAL)),
@@ -7219,7 +7350,7 @@ fn wire_key_input(
         window.on_search_history(move |query: SharedString| {
             *hist_query.borrow_mut() = query.to_string();
             if let Some(w) = weak.upgrade() {
-                w.set_history_view(history_view_model(&store_rc.borrow(), &query));
+                set_history_view(&w, &store_rc.borrow(), &query);
             }
         });
     }
@@ -7240,7 +7371,7 @@ fn wire_key_input(
             if let Some(w) = weak.upgrade() {
                 let s = store_rc.borrow();
                 w.set_command_history(history_model(&s));
-                w.set_history_view(history_view_model(&s, &hist_query.borrow()));
+                set_history_view(&w, &s, &hist_query.borrow());
             }
         });
     }
@@ -7298,6 +7429,16 @@ fn wire_key_input(
                 let _ = s.save();
             }
             if let Some(w) = weak.upgrade() {
+                // Deleting the entry being edited resets the form; deleting one
+                // above it shifts the index so Save still hits the right entry.
+                let edit = edit_index_after_delete(w.get_qcm_edit_index(), index);
+                if edit < 0 && w.get_qcm_edit_index() >= 0 {
+                    w.set_qcm_name("".into());
+                    w.set_qcm_command("".into());
+                    w.set_qcm_group("".into());
+                    w.set_qcm_send_enter(true);
+                }
+                w.set_qcm_edit_index(edit);
                 w.set_quick_commands(quick_cmd_model(&store_rc.borrow(), &collapsed.borrow()));
             }
         });
@@ -7395,6 +7536,11 @@ fn wire_key_input(
                 }
             }
             if let Some(w) = weak.upgrade() {
+                // The copy lands right after `index`; later entries shift down.
+                let edit = w.get_qcm_edit_index();
+                if edit > index {
+                    w.set_qcm_edit_index(edit + 1);
+                }
                 w.set_quick_commands(quick_cmd_model(&store_rc.borrow(), &collapsed.borrow()));
             }
         });
@@ -7432,18 +7578,24 @@ fn wire_key_input(
         let weak = window.as_weak();
         let collapsed = collapsed_quick_groups.clone();
         window.on_reorder_quick_command(move |index: i32, move_up: bool| {
-            let changed = {
+            let swapped = {
                 let mut s = store_rc.borrow_mut();
                 let mut commands = s.quick_commands().to_vec();
-                let changed = reorder_quick_command(&mut commands, index as usize, move_up);
-                if changed {
+                let swapped = reorder_quick_command(&mut commands, index as usize, move_up);
+                if swapped.is_some() {
                     s.set_quick_commands(commands);
                     let _ = s.save();
                 }
-                changed
+                swapped
             };
-            if changed {
+            if let Some(target) = swapped {
                 if let Some(w) = weak.upgrade() {
+                    // Keep the edit form bound to the entry it was loaded from.
+                    w.set_qcm_edit_index(edit_index_after_swap(
+                        w.get_qcm_edit_index(),
+                        index as usize,
+                        target,
+                    ));
                     w.set_quick_commands(quick_cmd_model(&store_rc.borrow(), &collapsed.borrow()));
                 }
             }
@@ -7672,7 +7824,10 @@ fn wire_key_input(
             //
             // 检测到 IME Shift 标记后，记录时间戳，让 Layer 2 在 1500ms 内
             // 拦截随后可能到来的 Backspace（右Shift场景，日志显示间隔约 914ms）。
-            if !ctrl && !alt {
+            // Shift+Tab → back-tab (ESC [ Z). Slint's Key.Backtab is U+0019,
+            // which the IME C0-marker filter below would otherwise drop.
+            let back_tab = is_back_tab(key.as_str(), ctrl, alt, shift);
+            if !ctrl && !alt && !back_tab {
                 if let Some(c) = key.as_str().chars().next() {
                     let cp = c as u32;
                     let is_standalone = matches!(cp, 0x08 | 0x09 | 0x0A | 0x0D | 0x1B)
@@ -7819,7 +7974,11 @@ fn wire_key_input(
                 return;
             }
 
-            let bytes = key_to_pty_bytes(key.as_str(), ctrl, alt, app_cursor);
+            let bytes = if back_tab {
+                BACK_TAB_BYTES.to_vec()
+            } else {
+                key_to_pty_bytes(key.as_str(), ctrl, alt, app_cursor)
+            };
             if cfg!(target_os = "macos")
                 && (ctrl || key.chars().any(|c| (0x10..=0x18).contains(&(c as u32))))
             {
@@ -8659,7 +8818,11 @@ fn reconnect_tab_in_place(tab_id: &str, ctx: &ConnectCtx) -> bool {
     }
     // Fresh screen: new parser, cleared history/selection.
     if let Some(h) = term_buf(&ctx.bufs, tab_id) {
-        lock_or_recover(&h).release_scrollback();
+        let mut b = lock_or_recover(&h);
+        b.release_scrollback();
+        if let Some(log) = b.session_log.as_mut() {
+            log.note("reconnecting");
+        }
     }
     if let Some(st) = lock_or_recover(&ctx.tab_statuses).get_mut(tab_id) {
         st.state = 0;
