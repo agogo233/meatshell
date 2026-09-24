@@ -8747,15 +8747,25 @@ fn wire_key_input(
     {
         let bufs_mouse = bufs.clone();
         let handles_mouse = handles.clone();
+        let weak = window.as_weak();
         window.on_terminal_mouse(
             move |tab_id: SharedString, kind: i32, button: i32, row: i32, col: i32| -> bool {
                 let tid = tab_id.to_string();
+                let mut cleared = false;
                 let Some(bytes) = term_buf(&bufs_mouse, &tid).map(|h| {
-                    let buf = lock_or_recover(&h);
-                    let screen = buf.parser.screen();
-                    let (rows, cols) = screen.size();
+                    let mut buf = lock_or_recover(&h);
+                    let (rows, cols) = buf.parser.screen().size();
                     if buf.mouse_tracked {
-                        let encoding = screen.mouse_protocol_encoding();
+                        // Plain left click forwarded to a mouse-tracking app:
+                        // deselect locally, matching how a click clears the
+                        // selection in a normal terminal.
+                        if kind == 0 && buf.selection_has_extent() {
+                            buf.sel_anchor = None;
+                            buf.sel_focus = None;
+                            buf.sel_ranges.clear();
+                            cleared = true;
+                        }
+                        let encoding = buf.parser.screen().mouse_protocol_encoding();
                         let (btn, release) = match kind {
                             1 => (button as u8, true), // release
                             2 => (35, false),          // drag motion with button held
@@ -8779,12 +8789,18 @@ fn wire_key_input(
                 let Some(bytes) = bytes else {
                     return false;
                 };
-                if let Some(h) = handles_mouse.borrow().get(&tid) {
+                let sent = if let Some(h) = handles_mouse.borrow().get(&tid) {
                     h.send_raw(bytes);
                     true
                 } else {
                     false
+                };
+                if cleared {
+                    if let Some(win) = weak.upgrade() {
+                        refresh_terminal_selection(&win, &bufs_mouse, &tid);
+                    }
                 }
+                sent
             },
         );
     }
