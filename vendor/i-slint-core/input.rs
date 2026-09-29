@@ -1101,6 +1101,12 @@ pub(crate) fn handle_mouse_grab(
         }
         _ => {
             mouse_input_state.grabbed = false;
+            // A wheel event ignored by the grabber (e.g. TextInput while
+            // drag-selecting) must still reach scroll containers below it,
+            // so re-dispatch the original wheel via normal hit-testing.
+            if matches!(mouse_event, MouseEvent::Wheel { .. }) {
+                return Some(mouse_event.clone());
+            }
             // Return a move event so that the new position can be registered properly
             Some(mouse_event.position().map_or(MouseEvent::Exit, |position| MouseEvent::Moved {
                 position,
