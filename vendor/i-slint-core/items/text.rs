@@ -929,6 +929,45 @@ impl Item for TextInput {
                     return InputEventResult::GrabMouse;
                 }
             }
+            MouseEvent::Wheel { position, .. } => {
+                // While drag-selecting, this wheel can scroll the containing
+                // viewport, moving the text under the still pointer. Refresh
+                // the selection endpoint once the new geometry is settled so
+                // the selection follows the scroll (anchor stays where the
+                // drag began).
+                if self.as_ref().pressed.get() > 0 {
+                    let item_weak = self_rc.downgrade();
+                    let adapter = window_adapter.clone();
+                    let pointer = *position + self_rc.geometry().origin.to_vector();
+                    // Run the refresh one frame later so the geometry of the
+                    // scrolled viewport has been laid out by then.
+                    crate::timers::Timer::single_shot(core::time::Duration::from_millis(16), move || {
+                        let Some(item_rc2) = item_weak.upgrade() else { return; };
+                        let Some(item) =
+                            ItemRef::downcast_pin::<TextInput>(item_rc2.borrow()) else {
+                            return;
+                        };
+                        if item.as_ref().pressed.get() == 0 {
+                            return;
+                        }
+                        let off = item.byte_offset_for_position(
+                            pointer - item_rc2.geometry().origin.to_vector(),
+                            &adapter,
+                            &item_rc2,
+                        ) as i32;
+                        if off != item.as_ref().cursor_position_byte_offset() {
+                            item.set_cursor_position(
+                                off,
+                                true,
+                                TextChangeNotify::TriggerCallbacks,
+                                &adapter,
+                                &item_rc2,
+                            );
+                        }
+                    });
+                }
+                return InputEventResult::EventIgnored;
+            }
             _ => return InputEventResult::EventIgnored,
         }
         InputEventResult::EventAccepted
