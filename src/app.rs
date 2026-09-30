@@ -6406,6 +6406,7 @@ fn wire_session_callbacks(
                 spans: ModelRc::from(std::rc::Rc::new(VecModel::<TermSpan>::default())),
                 cursor_row: 0,
                 cursor_col: 0,
+                cursor_visible: true,
                 rows_used: 0,
                 scroll_max: 0,
                 scroll_offset: 0,
@@ -8285,6 +8286,9 @@ fn wire_key_input(
                     row.has_selection = false;
                     row.cursor_row = 0;
                     row.cursor_col = 0;
+                    // A fresh blank screen has no app-hide request, so the
+                    // caret belongs at the home cell until output says otherwise.
+                    row.cursor_visible = true;
                     row.rows_used = 0;
                     row.scroll_max = 0;
                     row.scroll_offset = 0;

@@ -55,6 +55,7 @@ export struct TerminalState {
     spans: [TermSpan],     // coloured runs of the visible terminal screen
     cursor-row: int,       // cursor cell on the grid
     cursor-col: int,
+    cursor-visible: bool,  // false while the app hides the caret (DECTCEM, btop/htop)
     rows-used: int,        // content rows, for viewport sizing
     scroll-max: int,       // scrollback depth (max offset) — terminal scrollbar (#103)
     scroll-offset: int,    // current scrollback offset (0 = live bottom)
@@ -2408,6 +2409,7 @@ export component AppWindow inherits Window {
                         spans: term.spans;
                         cursor-row: term.cursor-row;
                         cursor-col: term.cursor-col;
+                        cursor-visible: term.cursor-visible;
                         cursor-style: root.term-cursor-style;
                         cursor-color: root.term-cursor-color;
                         terminal-line-spacing: root.terminal-line-spacing;

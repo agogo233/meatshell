@@ -872,11 +872,15 @@ impl TermBuffer {
     /// Render the terminal grid for the current scrollback `view_offset`
     /// (0 = live).  Caches the displayed plain text for find/selection.
     pub(crate) fn render(&mut self) -> BuiltScreen {
-        let (is_alt, rows, cols, cur_row, cur_col) = {
+        let (is_alt, rows, cols, cur_row, cur_col, caret) = {
             let s = self.parser.screen();
             let (r, c) = s.size();
             let (cr, cc) = s.cursor_position();
-            (s.alternate_screen(), r, c, cr, cc)
+            // DECTCEM (`CSI ? 25 l`): full-screen programs that repaint the whole
+            // grid hide the caret and never restore it, so honouring it is what
+            // keeps a blinking block from sitting wherever their first frame
+            // happened to leave the VT cursor.
+            (s.alternate_screen(), r, c, cr, cc, !s.hide_cursor())
         };
 
         // --- Live view (also alt-screen): render the current grid -----------
@@ -921,6 +925,7 @@ impl TermBuffer {
                 spans,
                 cursor_row: cur_row as i32,
                 cursor_col: cur_col as i32,
+                cursor_visible: caret,
                 rows_used,
                 is_alt,
                 mouse_tracked: self.mouse_tracked,
@@ -973,6 +978,7 @@ impl TermBuffer {
             spans,
             cursor_row: -1, // hide the live cursor while viewing history
             cursor_col: 0,
+            cursor_visible: false,
             rows_used: win as i32,
             is_alt: false,
             mouse_tracked: self.mouse_tracked,

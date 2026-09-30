@@ -264,7 +264,9 @@ pub(super) fn apply_terminal_resize(
 
 /// Recompute spans + cursor + find/selection highlights for one tab from its
 /// current vt100 screen (respecting scrollback) and push them to the model.
-/// Used by scroll + selection callbacks (Output has its own equivalent inline).
+/// Used by the scroll + selection callbacks and by every output flush (see
+/// `do_tab_render_flush`), so it is the single place the caret cell and its
+/// DECTCEM visibility reach the model.
 pub(super) fn rebuild_tab_display(win: &AppWindow, bufs: &TermBuffers, tab_id: &str) {
     let data = with_term_buf(bufs, tab_id, |buf| {
         let cols = buf.parser.screen().size().1;
@@ -300,11 +302,13 @@ pub(super) fn rebuild_tab_display(win: &AppWindow, bufs: &TermBuffers, tab_id: &
     let lm = ModelRc::from(Rc::new(VecModel::from(links)));
     let sm = ModelRc::from(Rc::new(VecModel::from(sel)));
     let (cr, cc, ru, alt) = (b.cursor_row, b.cursor_col, b.rows_used, b.is_alt);
+    let caret_visible = b.cursor_visible;
     let (smax, soff) = (b.scroll_max, b.scroll_offset);
     set_terminal_row(win, tab_id, move |row| {
         row.spans = spans.clone();
         row.cursor_row = cr;
         row.cursor_col = cc;
+        row.cursor_visible = caret_visible;
         row.rows_used = ru;
         row.is_alt_screen = alt;
         row.mouse_tracked = b.mouse_tracked;

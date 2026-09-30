@@ -91,3 +91,43 @@ fn scrollback_ime_anchor_stays_in_the_visible_tree_without_a_mouse_hitbox() {
     assert!(input.contains("width: 0px;"));
     assert!(input.contains("height: 0px;"));
 }
+
+#[test]
+fn an_app_hidden_caret_stops_painting_without_moving_the_ime_anchor() {
+    let source = include_str!("../ui/terminal_view.slint");
+    assert!(source.contains("in property <bool> cursor-visible: true;"));
+
+    // The caret Rectangle is the only element gated on the app's DECTCEM state.
+    let caret_start = source
+        .find("// Blinking cursor (overlay, decoupled from text)")
+        .expect("blinking cursor overlay");
+    let caret_end = source[caret_start..]
+        .find("// Alt-screen (TUI) top-level selection overlay")
+        .expect("selection overlay after the caret")
+        + caret_start;
+    let caret = &source[caret_start..caret_end];
+    assert!(caret.contains("visible: root.cursor-row >= 0"));
+    // Counted, not just found: the gate must live in the `visible:` binding and
+    // nowhere else inside the caret.
+    assert_eq!(caret.matches("root.cursor-visible").count(), 1);
+    // Hidden caret means nothing to blink, so the 530ms repaint timer idles too.
+    assert!(source.contains(
+        "running: ime-input.has-focus && Theme.window-focused && root.cursor-visible;"
+    ));
+
+    // The IME anchor must keep following the (always tracked) VT position, or
+    // the native candidate window would jump to the corner under full-screen
+    // programs that hide the caret.
+    let input_start = source
+        .find("ime-input := TextInput")
+        .expect("hidden terminal IME input");
+    let input_end = source[input_start..]
+        .find("changed has-focus")
+        .expect("IME focus handler")
+        + input_start;
+    assert!(!source[input_start..input_end].contains("cursor-visible"));
+
+    let app_source = include_str!("../ui/app.slint");
+    assert!(app_source.contains("cursor-visible: bool,"));
+    assert!(app_source.contains("cursor-visible: term.cursor-visible;"));
+}

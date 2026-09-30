@@ -511,6 +511,11 @@ export component TerminalView inherits Rectangle {
     in property <[TermSpan]> spans;     // coloured runs of the visible screen
     in property <int> cursor-row;       // cursor cell (grid coords)
     in property <int> cursor-col;
+    // Whether the remote app wants the caret painted (the negation of DECTCEM).
+    // Full-screen programs (btop/htop) hide it and stop moving it, so the
+    // position above stops meaning "where to draw" while they run — the hidden
+    // IME anchor still follows it, the caret below just isn't painted.
+    in property <bool> cursor-visible: true;
     in property <string> cursor-style: "block";
     in property <color> cursor-color: Theme.term-fg;
     in property <int> rows-used;        // content rows, for viewport sizing
@@ -896,7 +901,9 @@ export component TerminalView inherits Rectangle {
             Timer {
                 // Stop blinking (and thus repainting) when the window isn't
                 // focused — an idle background terminal should cost ~0 CPU (#127).
-                running: ime-input.has-focus && Theme.window-focused;
+                // An app that hid the caret has nothing to blink either, so the
+                // same applies while a full-screen program owns the grid.
+                running: ime-input.has-focus && Theme.window-focused && root.cursor-visible;
                 interval: 530ms;
                 triggered => { key-capture.cursor-blink = !key-capture.cursor-blink; }
             }
@@ -1204,7 +1211,15 @@ export component TerminalView inherits Rectangle {
                             // that row, which lands back INSIDE the clip as a
                             // blinking horizontal dash at column 0 of the first
                             // row. Gate on the row instead of trusting clipping.
+                            //
+                            // `cursor-visible` is the app's DECTCEM state: a
+                            // full-screen program (btop/htop) hides the caret and
+                            // stops moving it, so its VT position stays wherever
+                            // the first frame ended — usually mid top row.
+                            // Painting there looked like a stray blinking block
+                            // stuck in the program's header.
                             visible: root.cursor-row >= 0
+                                && root.cursor-visible
                                 && ime-input.has-focus
                                 && (key-capture.cursor-blink || !Theme.window-focused);
                         }

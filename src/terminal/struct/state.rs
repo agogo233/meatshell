@@ -142,6 +142,15 @@ pub(crate) struct BuiltScreen {
     pub(crate) spans: Vec<TermSpan>,
     pub(crate) cursor_row: i32,
     pub(crate) cursor_col: i32,
+    /// Whether the remote app wants the terminal caret painted, i.e. the
+    /// negation of vt100's DECTCEM state (`CSI ? 25 h` / `CSI ? 25 l`).
+    /// Full-screen programs (btop/htop) hide the caret and normally restore it
+    /// on exit; a shell never sends `?25h` itself, so if one of them dies
+    /// without cleaning up the caret stays hidden for the rest of the session —
+    /// exactly as in a real terminal. Only the caret's painting is gated on
+    /// this; `cursor_row` / `cursor_col` stay tracked so the hidden IME anchor
+    /// keeps following the real insertion point.
+    pub(crate) cursor_visible: bool,
     pub(crate) rows_used: i32,
     pub(crate) is_alt: bool,
     pub(crate) mouse_tracked: bool,
