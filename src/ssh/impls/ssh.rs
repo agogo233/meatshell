@@ -1732,19 +1732,20 @@ async fn execute_command_inner(
 /// so host-key, credential and MFA prompts keep working from this path too.
 pub(crate) async fn push_authorized_keys(
     session: Session,
-    jump: Option<Session>,
+    jump: Vec<Session>,
     public_key_line: String,
     events: UnboundedSender<SessionEvent>,
 ) -> Result<()> {
     let config = ssh_client_config();
-    let (mut handle, mut jump_handle) =
-        connect_ssh(&session, jump.as_ref(), config.clone(), &events).await?;
+    let (mut handle, mut jump_handle, mut remote_forwards) =
+        connect_ssh(&session, &jump, config.clone(), &events).await?;
 
     match authenticate_session(
         &mut handle,
         &mut jump_handle,
+        &mut remote_forwards,
         &session,
-        jump.as_ref(),
+        &jump,
         config,
         &events,
     )
@@ -1797,7 +1798,7 @@ pub(crate) async fn push_authorized_keys(
     let _ = handle
         .disconnect(Disconnect::ByApplication, "push complete", "")
         .await;
-    if let Some(jump_handle) = jump_handle {
+    for jump_handle in jump_handle.into_iter().rev() {
         let _ = jump_handle
             .disconnect(Disconnect::ByApplication, "push complete", "")
             .await;

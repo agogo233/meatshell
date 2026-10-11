@@ -150,7 +150,6 @@ impl Default for SftpQueueConfig {
 /// Handle retained by the UI to drive a running SFTP worker.
 pub struct SftpHandle {
     pub commands: UnboundedSender<SftpCommand>,
-    #[allow(dead_code)]
     pub join: JoinHandle<()>,
 }
 

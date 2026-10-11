@@ -5878,7 +5878,15 @@ fn wire_session_callbacks(
             let weak_done = weak.clone();
 
             if kind == "ssh" {
-                let jump = resolve_jump(&store, &session);
+                let jump = match resolve_jump(&store, &session) {
+                    Ok(jump) => jump,
+                    Err(error) => {
+                        if let Some(w) = weak.upgrade() {
+                            w.set_dialog_test_status(error.to_string().into());
+                        }
+                        return;
+                    }
+                };
                 let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
                 runtime.spawn(async move {
                     let mut test = Box::pin(test_session_auth(session, jump, events_tx));
@@ -6135,7 +6143,15 @@ fn wire_session_callbacks(
                     return;
                 }
             };
-            let jump = resolve_jump(&store, &session);
+            let jump = match resolve_jump(&store, &session) {
+                Ok(jump) => jump,
+                Err(error) => {
+                    if let Some(w) = weak_done.upgrade() {
+                        w.set_dialog_key_status(error.to_string().into());
+                    }
+                    return;
+                }
+            };
             let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
             let session_for_task = session.clone();
             let events_tx_for_task = events_tx.clone();
