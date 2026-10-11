@@ -3,6 +3,99 @@
 All notable changes are documented here. 本文件记录所有重要变更。
 中英对照（中文在前，English after）.
 
+## [0.7.6] - 2026-10-10
+
+- **修复 macOS 0.7.5 启动即闪退的问题（#486）。** 0.7.5 新增的系统托盘依赖 muda 0.20，而 Slint 的 macOS 菜单栏使用 muda 0.18，两者注册了同名但内存布局不同的 Objective-C 类 `MudaMenuItem`，创建托盘菜单时程序崩溃。macOS 上暂时停用系统托盘，关闭窗口的行为恢复为 0.7.5 之前；Windows 与 Linux 托盘不受影响。
+- **Fix the macOS launch crash in 0.7.5 (#486).** The system tray added in 0.7.5 uses muda 0.20 while Slint's macOS menu bar uses muda 0.18; both register an Objective-C class named `MudaMenuItem` with different layouts, so building the tray menu crashed the app. The tray is disabled on macOS for now and closing a window behaves as it did before 0.7.5; the Windows and Linux tray are unchanged.
+
+- **修复带 Touch Bar 的 Mac 上关闭窗口或退出时弹出“意外退出”的问题（#488）。** AccessKit 释放时会恢复窗口视图的原始类，破坏了 AppKit Touch Bar 在该视图上的 KVO 观察，导致 AppKit 抛出未捕获异常。现在 macOS 上不再释放 AccessKit 适配器，旁白（VoiceOver）等辅助功能保持可用。
+- **Fix the "quit unexpectedly" crash when closing a window or quitting on Touch Bar Macs (#488).** Releasing AccessKit restored the window view's original class, corrupting the KVO observations AppKit's Touch Bar support keeps on that view, and AppKit threw an uncaught exception. The AccessKit adapter is no longer released on macOS; VoiceOver and other accessibility features keep working.
+
+- **修复在 nano / vim 等全屏程序中调整窗口大小后退出时可能崩溃的问题（#490）。** vt100 0.15 调整尺寸时没有修正备用屏幕保存的光标位置，缩小窗口后退出全屏程序，光标会落在屏幕之外并触发崩溃。终端解析库升级到 vt100 0.16.2 修复此问题，并同步升级 unicode-width 0.2，保持中日韩宽字符的列宽计算与解析库一致（#132）。
+- **Fix a possible crash when leaving nano / vim and other full-screen programs after resizing the window (#490).** vt100 0.15 did not clamp the cursor saved by the alternate screen when resizing, so shrinking the window and then leaving a full-screen program put the cursor outside the screen and crashed. The terminal parser is upgraded to vt100 0.16.2, together with unicode-width 0.2 so CJK wide-character column math stays in step with the parser (#132).
+
+- **新增窗口置顶（#450）。** 右上角工具栏新增📌按钮，可让窗口保持在其他应用之上，再次点击取消；置顶状态按窗口区分，不会保存。该窗口的编辑器、进程和系统信息窗口会一同置顶；在 Windows 上，文件选择框和提示框以主窗口为父窗口，置顶时不会被遮挡。
+- **Add an always-on-top pin (#450).** A new 📌 button in the top-right toolbar keeps the window above other applications; click again to unpin. The pin is per window and not saved. The window's editor, process and system-information windows follow it, and on Windows file pickers and message boxes are owned by the main window so they are not hidden behind a pinned window.
+
+- **命令历史打开时默认显示最新命令（#447）。** 历史弹窗现在自动滚动到底部最新的命令（紧邻搜索框），修改搜索条件后回到最新结果，↑/↓ 键盘选择时列表会跟随滚动，选中项始终可见。
+- **Open the command history at the newest entry (#447).** The history popup now opens scrolled to the newest commands at the bottom, next to the search box, returns there when the search changes, and follows the ↑/↓ keyboard selection so the selected entry stays visible.
+
+- **按会话设置 MCP 访问范围（#432）。** 会话编辑器新增“允许 MCP 访问此会话”选项（默认开启）。关闭后 MCP 无法列出、连接该会话，也无法经由它作为跳板；CLI 不受影响。
+- **Per-session MCP access scope (#432).** The session editor gains an "Allow MCP access to this session" option (on by default). When it is off, MCP clients cannot list or connect to the session, or route through it as a jump host; the CLI is unaffected.
+
+- **断开或重新连接 SSH 会话时保留终端历史。** 会话断开后不再清空滚动历史，按回车重新连接时，之前的屏幕内容会并入历史记录，只有关闭标签页时才清除；在查看历史时输入不会再强制跳回底部，除非光标已不在可见区域。（感谢 @nilxbit）
+- **Keep terminal history across SSH disconnects and reconnects.** Scrollback is no longer cleared when a session disconnects; reconnecting with Enter moves the previous screen into history, and history is only cleared when the tab is closed. Typing while scrolled back no longer jumps to the bottom unless the cursor is out of view. (Thanks @nilxbit)
+
+- **串口会话可从本机已检测到的串口中选择。** 新建 / 编辑串口会话时，端口输入框旁新增下拉列表，列出本机可用的串口，仍可手动输入。（感谢 @nilxbit）
+- **Pick serial ports from those detected on this machine.** When creating or editing a serial session, the port field gains a dropdown of the available local serial ports; typing a port by hand still works. (Thanks @nilxbit)
+
+- **代码维护。** 将超过 7600 行的 `src/app.rs` 拆分为按职责划分的模块，行为不变；清理编译警告中的死代码与无用导入（感谢 @lyj404）。
+- **Maintenance.** Split the 7,600-line `src/app.rs` into focused modules with no behaviour change, and removed dead code and unused imports flagged by compiler warnings (thanks @lyj404).
+
+## [0.7.5] - 2026-10-07
+
+新功能 / Features
+
+- 会话日志：可按标签页将终端输出记录为带时间戳的纯文本日志（去除 ANSI 控制序列，不记录按键，不回显提示处输入的密码不会进入日志）。在“设置 → 会话日志”全局开启（默认关闭，可自定义目录），会话可单独选择“跟随全局 / 始终记录 / 从不记录”；开关对已打开的标签页立即生效。(#265)
+  Session logging: optionally record each tab's terminal output as timestamped plain-text logs (ANSI stripped, keystrokes never recorded, so passwords typed at no-echo prompts stay out). Enabled globally under Settings → Session log (off by default, custom folder supported), with a per-session Follow global / Always / Never override; toggling applies to already-open tabs immediately. (#265)
+- 多级 SSH 跳板：终端、SFTP 与自动化共用同一跳板链路；会话编辑器支持展示、添加、删除和拖拽排序跳板；跳板连接各阶段可取消并带超时。(#470)
+  Multi-hop SSH jump hosts, shared by the terminal, SFTP and automation. The session editor can show, add, remove and drag-reorder hops; each jump-connection stage is cancellable and has a timeout. (#470)
+- 隧道面板：连接后可新建、停止、重新启动和删除端口转发，可保存到当前会话并选择下次连接时是否自动启用；同时修复隧道生命周期问题。(#474)
+  Tunnel panel: create, stop, restart and delete port forwards on a live connection, save them to the session and choose whether they start automatically next time; also fixes the tunnel lifecycle. (#474)
+- 系统托盘：关闭主窗口后会话继续运行，可从托盘恢复或新建窗口，选择“退出”才结束程序。(#474)
+  System tray: sessions keep running after the main window is closed; restore or open a window from the tray, and choose Quit to exit. (#474)
+- 支持通过 CLI / MCP 安全导入会话配置，并支持无界面（headless）构建。(#477)
+  Securely import session configs via the CLI / MCP, and support headless (no-GUI) builds. (#477)
+- 新增可选的认证 Streamable HTTP MCP 端点 `/mcp`（外部签发的 RS256 OAuth 访问令牌）；客户端断开时取消相关会话任务。(#481)
+  Add an opt-in authenticated Streamable HTTP MCP endpoint `/mcp` (externally issued RS256 OAuth access tokens); session work is cancelled when the client disconnects. (#481)
+- 会话编辑器可查看已保存的凭据（默认隐藏，需授权）。
+  The session editor can reveal saved credentials (hidden by default, requires authorization).
+
+修复 / Fixes
+
+- 终端：滚回历史后保持并恢复键盘焦点，按键继续发送到远端，Vim 中的 Ctrl+V 可正常转发。(#458)
+  Terminal: keep and restore keyboard focus after scrolling back, so keys still reach the remote, and forward Ctrl+V correctly in Vim. (#458)
+- 终端：Shift+Tab 现在发送 CSI Z（ESC [ Z），远端 TUI 能收到反向 Tab。
+  Terminal: Shift+Tab now sends CSI Z (ESC [ Z) so remote TUIs receive back-tab.
+- 历史：含换行的历史记录以单行预览显示，不再与相邻条目重叠。(#419)
+  History: multi-line entries render as a one-line preview instead of overlapping neighbouring rows. (#419)
+- SFTP：修改权限后文件不再变成 0 B，时间戳也不再被重置。(#468)
+  SFTP: changing permissions no longer truncates the file to 0 B or resets its timestamps. (#468)
+- SFTP：Shell 兼容模式（自动登录脚本）下不再隐藏 SFTP 面板。(#467)
+  SFTP: the panel is no longer hidden in shell compatibility mode (auto-login scripts). (#467)
+- SFTP：属主 / 属组优先显示账号名，不再闪现 UID / GID 数字。(#460)
+  SFTP: Owner / Group show account names and no longer flash numeric UID / GID. (#460)
+- SFTP：面板变窄时优先保证文件名列，其余列按优先级依次隐藏；右键列菜单反映用户实际的开关设置。(#459)
+  SFTP: on narrow panels the Name column is kept and other columns hide by priority; the column context menu reflects the user's own toggles. (#459)
+- 配置：固定配置目录，防止过期快照覆盖连接配置。
+  Config: pin the config directory and stop stale snapshots from overwriting connections.
+- 会话编辑器：保存会话不再依赖连接测试结果；支持键盘快捷键取消；恢复已授权凭据的遮罩回显；修复备注长文本拖选越界和横向滚动。
+  Session editor: saving no longer depends on the connection test result; keyboard shortcut to cancel; restore masked echo for authorized credentials; fix drag-select overflow and horizontal scrolling in long notes.
+- 界面：统一各弹窗的取消快捷键与焦点管理。
+  UI: unify cancel shortcuts and focus handling across dialogs.
+
+其他 / Other
+
+- 设置：“欢迎页设为侧栏”选项移至“侧栏”页面，行为不变。
+  Settings: the "Show the welcome page as a sidebar" option moved to the Sidebars page; behaviour unchanged.
+- 发布：tag 名含 `-remote.` 的构建标记为预发布；AUR 只发布上游正式版本。
+  Release: builds from tags containing `-remote.` are marked as prereleases; AUR publishing is limited to upstream stable releases.
+- 文档与测试：补充 MCP 无界面 / TLS 部署说明和回归测试；README 新增友情链接（XenTerm）。
+  Docs & tests: MCP headless / TLS deployment guidance and regression tests; README gains a Friendly Links section (XenTerm).
+
+## 0.7.4-remote.1 (fork prerelease)
+
+- Add opt-in authenticated Streamable HTTP MCP `/mcp`, using the official Rust
+  MCP SDK and externally issued RS256 OAuth access tokens
+- Require exact issuer/resource audience, expiry/not-before, scope, explicit
+  subject allowlist, private profile selection, and public-only pinned JWKS
+- Add principal-bound sessions, request/stream limits, discovery metadata,
+  strict origins/hosts, and cancellation of target/jump SSH and SFTP workers
+- Keep default desktop GUI, CLI, stdio MCP, host-key checks and all local tool gates
+- Include the existing fork history: multi-hop SSH, safe profile/config storage,
+  CLI/MCP imports/headless mode, session editor fixes and bounded connection stages
+- Add synthetic loopback tests and external IdP/HTTPS deployment documentation
+
 ## [0.7.4] - 2026-09-21
 
 - **修复编辑器右键剪切/粘贴导致应用闪退的问题（#454）。** 剪切与粘贴会修改文本，触发重算行号与语法高亮模型的回调。此前这次模型替换发生在右键菜单自身的点击回调栈内，随后的行号槽与高亮覆盖层重建又落在同一次布局刷新里——弹窗事件尚未分发完毕，就要创建或销毁整批子元素（行号每一项都是一个只读文本输入框），在事件中途创建或销毁交互元素会重入 Slint 内部状态并 panic。复制与全选不触碰模型，所以此前只有剪切/粘贴闪退。现在菜单点击只记录请求并关闭菜单，真正的操作与随后的重新聚焦改在下一次界面事件循环执行；四项统一走这条延迟路径，键盘上的 Ctrl+X / Ctrl+V 未被本次改动触及（它们同样触发模型重建，只是发生在按键分发而非弹窗分发中，所以从未闪退）。

@@ -80,8 +80,10 @@ pub enum SessionEvent {
         /// Per-filesystem (mount_point, available_bytes, total_bytes).
         disks: Vec<(String, u64, u64)>,
         /// Effective login name reported by the remote host (`id -un`).
+        #[allow(dead_code)] // the dedicated ProcessStats event is the live source
         current_user: String,
         /// Top processes by CPU (#23). Empty if the host's `ps` is unusable.
+        #[allow(dead_code)] // the dedicated ProcessStats event is the live source
         procs: Vec<ProcInfo>,
         /// Detailed system information for the detached system-info window.
         /// Detailed data is present only for the separately delayed one-shot
@@ -189,6 +191,14 @@ impl SessionHandle {
 
     pub fn stop_tunnel(&self, id: String) {
         let _ = self.commands.send(SessionCommand::StopTunnel(id));
+    }
+
+    pub fn start_tunnel(&self, id: String) {
+        let _ = self.commands.send(SessionCommand::StartTunnel(id));
+    }
+
+    pub fn delete_tunnel(&self, id: String) {
+        let _ = self.commands.send(SessionCommand::DeleteTunnel(id));
     }
 
     pub fn kill_process(

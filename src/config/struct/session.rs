@@ -167,9 +167,22 @@ pub struct Session {
     pub proxy: Secret,
     /// Optional SSH jump host (bastion): the id of another saved SSH session to
     /// tunnel this connection through, like OpenSSH's ProxyJump. Empty = direct.
-    /// Single hop only; the jump session supplies its own host/user/auth (#211).
+    /// The jump session may reference another jump. The full chain is validated
+    /// before connecting; each hop supplies its own host/user/auth (#211).
     #[serde(default)]
     pub jump_session_id: String,
+    /// Explicit connection order (first hop first). When non-empty, this list
+    /// replaces inherited jump references without modifying the saved hops.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub jump_session_ids: Vec<String>,
+    /// Opt in to revealing saved credentials in the editor; always masked on open.
+    #[serde(default)]
+    pub allow_secret_reveal: bool,
+    /// Expose this session to MCP clients (#432). When false, MCP tools treat
+    /// it as nonexistent and refuse routes that use it as a jump host. The CLI
+    /// is unaffected. Absent in older configs → true, preserving behaviour.
+    #[serde(default = "default_true")]
+    pub mcp_access: bool,
     #[serde(default)]
     pub last_used: Option<String>,
     /// Optional folder/group name to organize sessions in the list (#41).
@@ -248,10 +261,9 @@ pub struct Session {
     #[serde(default)]
     pub triggers: Vec<SessionTrigger>,
 
-    /// Skip the shell-integration setup (the cwd-follow PROMPT_COMMAND hook + the
-    /// remote resource monitor). Those assume a POSIX shell; on a Windows server
-    /// whose shell is pwsh/cmd the injected hook breaks the shell. Turn this on
-    /// for such servers (#140).
+    /// Skip shell-integration setup (the cwd-follow hook + remote resource
+    /// monitor). Those assume a POSIX shell and can interfere with Windows
+    /// shells or interactive auto-login scripts. SFTP remains available.
     #[serde(default)]
     pub disable_shell_integration: bool,
     /// Free-form note for this session — somewhere to stash extra info (jump-host
@@ -266,7 +278,13 @@ pub struct Session {
 /// for dynamic it is ignored (the SOCKS client picks the destination).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PortForward {
+    /// Stable identifier for a saved rule, including across edits and deletes.
+    #[serde(default)]
+    pub id: String,
     pub kind: String,
+    /// Start this saved tunnel when the SSH connection is established.
+    #[serde(default = "default_forward_auto_start")]
+    pub auto_start: bool,
     /// Optional label to tell rules apart (#100). Empty = unnamed.
     #[serde(default)]
     pub name: String,
@@ -279,6 +297,10 @@ pub struct PortForward {
     pub host: String,
     #[serde(default)]
     pub host_port: u16,
+}
+
+fn default_forward_auto_start() -> bool {
+    true
 }
 
 /// Automatically send a response when literal terminal output is observed.
@@ -320,7 +342,11 @@ mod session_log_mode_tests {
 
     #[test]
     fn round_trips_through_strings() {
-        for mode in [SessionLogMode::Default, SessionLogMode::On, SessionLogMode::Off] {
+        for mode in [
+            SessionLogMode::Default,
+            SessionLogMode::On,
+            SessionLogMode::Off,
+        ] {
             assert_eq!(SessionLogMode::from_str(mode.as_str()), mode);
         }
     }
@@ -340,6 +366,9 @@ impl Session {
             private_key_inline: Secret::default(),
             proxy: Secret::default(),
             jump_session_id: String::new(),
+            jump_session_ids: Vec::new(),
+            allow_secret_reveal: false,
+            mcp_access: true,
             last_used: None,
             group: String::new(),
             kind: SessionKind::Ssh,

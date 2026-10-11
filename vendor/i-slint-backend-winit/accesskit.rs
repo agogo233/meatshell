@@ -41,12 +41,33 @@ use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 /// platform adapter to the slint::Window. `handle_focus_change` is already internal to WindowInner, as well
 /// as `component_destroyed`. The `WindowInner` would own this `AccessKit`.
 pub struct AccessKitAdapter {
-    inner: accesskit_winit::Adapter,
+    // MeatShell patch (#488): see the `Drop` impl below.
+    inner: std::mem::ManuallyDrop<accesskit_winit::Adapter>,
     window_adapter_weak: Weak<WinitWindowAdapter>,
     nodes: NodeCollection,
     global_property_tracker: Pin<Box<AccessibilityPropertyTracker>>,
     pending_update: bool,
     initial_tree_sent: bool,
+}
+
+// MeatShell patch (#488): on macOS, accesskit_winit uses accesskit_macos's
+// SubclassingAdapter, which swaps the winit view's Objective-C class and swaps
+// it back when dropped. AppKit's Touch Bar support keeps KVO observations on
+// that view; restoring the class corrupts their state, and on Touch Bar Macs
+// AppKit then throws from `-[_NSTouchBarFinderObservation invalidate]` during
+// the next display flush, killing the app when a window closes or the app
+// quits. Never drop the adapter there: the view keeps its subclass and stays
+// retained by the adapter, so the observations stay valid. This leaks one
+// view and adapter per closed window. Zed hit the same crash
+// (zed-industries/zed#65186).
+impl Drop for AccessKitAdapter {
+    fn drop(&mut self) {
+        #[cfg(not(target_os = "macos"))]
+        // SAFETY: `inner` is dropped exactly once, here, and never used again.
+        unsafe {
+            std::mem::ManuallyDrop::drop(&mut self.inner)
+        };
+    }
 }
 
 impl AccessKitAdapter {
@@ -57,11 +78,11 @@ impl AccessKitAdapter {
         proxy: EventLoopProxy<SlintEvent>,
     ) -> Self {
         Self {
-            inner: accesskit_winit::Adapter::with_event_loop_proxy(
+            inner: std::mem::ManuallyDrop::new(accesskit_winit::Adapter::with_event_loop_proxy(
                 active_event_loop,
                 winit_window,
                 proxy,
-            ),
+            )),
             window_adapter_weak: window_adapter_weak.clone(),
             nodes: NodeCollection {
                 next_component_id: 1,

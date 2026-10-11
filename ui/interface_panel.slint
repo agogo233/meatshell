@@ -2076,6 +2076,16 @@ export component InterfacePanel inherits Rectangle {
                         }
                     }
                 }
+                // Per-session MCP scope lives in the session editor (#432).
+                Rectangle { height: 10px; }
+                Text {
+                    text: root.lang-en
+                        ? "To keep a server manual-only, untick \"Allow MCP access to this session\" in its session editor."
+                        : "如需某台服务器仅供手动使用，请在其会话编辑窗口中取消勾选“允许 MCP 访问此会话”。";
+                    color: Theme.text-muted;
+                    font-size: 11px * Theme.panel-font;
+                    wrap: word-wrap;
+                }
                 Rectangle { height: 18px; }
                 Text {
                     text: root.lang-en

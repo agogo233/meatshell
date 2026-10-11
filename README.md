@@ -96,6 +96,8 @@ open /Applications/meatshell.app
 - [x] SFTP 文件浏览 + 上传 / 下载（拖拽）+ 终端内 ZMODEM（`sz` 下载 / `rz` 多文件上传）
 - [x] 内置编辑器语法高亮：Shell / JSON / YAML / TOML / INI / Python（按扩展名或 shebang 识别），可在设置开关；高亮文件不折行、横向滚动，超 2000 行自动退回纯文本
 - [x] SSH 端口转发 / 隧道：本地 -L / 远程 -R / 动态 -D（SOCKS5）
+  - 连接后的 Tunnel 面板可新建、停止、重新启动和删除转发；可保存到当前 SSH 会话，并选择下次连接时是否自动启用。
+- [x] 系统托盘：关闭主窗口后会话继续运行；从托盘恢复或新建窗口，选择“退出”才结束程序。
 - [x] 快捷命令 + 命令输入框（可群发到所有会话）+ 命令历史
 - [x] 串口 / Telnet 会话
 - [x] RDP 远程桌面：只保存主机 / 端口 / 用户名 / 密码 / 域，分辨率可选全屏 / 常见分辨率 / 自定义，连接时交给远程桌面客户端（Windows 用系统自带 `mstsc`；Linux / macOS 用 FreeRDP 的 `xfreerdp3` / `xfreerdp`，需自行安装，Flatpak 版已内置）
@@ -183,6 +185,36 @@ meatshell cli download <session-id> /tmp/result.txt ./downloads
 CLI 的 `<session-id>` 可由 `meatshell cli sessions` 获取。文件下载要求本地目标目录已经
 存在，且不会覆盖同名文件。
 
+### 无 GUI 导入会话
+
+云端/服务器可使用 `cargo build --locked --features headless`，跳过桌面 UI 编译。
+产物仍使用同一份 CLI/MCP 和 SSH/SFTP 实现；不带子命令启动会提示用法。
+默认构建仍包含完整桌面 UI。当前 Cargo 依赖图仍包含 Slint，平台编译依赖可能仍需安装。
+
+直接使用 MeatShell **导出** 功能生成的 JSON 文件：
+
+```bash
+meatshell --data-dir /absolute/path/to/profile cli import ./meatshell-connections.json --dry-run --json
+meatshell --data-dir /absolute/path/to/profile cli import ./meatshell-connections.json --json
+```
+
+导入只追加会话，仅跳过配置内容等价的会话（忽略本地 ID 和最近使用时间），不替换已有会话和应用设置。
+同一服务器的不同名称、分组、凭据、代理和跳板配置会分别保留。
+跳板引用会映射到新的会话 ID，支持前向引用和指向已存在重复会话的引用。
+`--dry-run` 只校验并返回计数，不改变已保存会话；常规初始化可能创建配置目录和加密密钥。
+
+文件上限为 16 MiB。兼容 MeatShell 便携导出（`meatshell_export: 1`，包括
+`enc:exp:v1:` 凭据）、FinalShell 导出和原生 JSON 配置。原生配置只导入会话，
+其中机器本地 `enc:v1:` 凭据需要匹配的配置密钥；无法解密的凭据或无效跳板链路会中止整个导入。
+私钥文件路径原样保留，不复制私钥文件，需要另外在目标机器准备对应文件。
+便携导出的加密使用内置密钥可还原，因此应按含有凭据的敏感文件保管。
+
+MCP 新增 `import_sessions`，参数为 `local_path` 和可选的 `dry_run`（默认 `true`），
+只返回 `added`、`skipped`、`dry_run`。沿用 MCP 启用和文件传输权限；实际写入还需
+显式以 `meatshell --data-dir /absolute/path/to/profile mcp serve --allow-config-import`
+启动，并传入 `dry_run: false`。不要为不信任的 MCP 客户端启用此参数。
+导入不会信任 SSH 主机密钥，连接时仍需完成验证。
+
 ### MCP
 
 先打开 MeatShell 的 **设置 → 界面 → MCP**：
@@ -191,6 +223,9 @@ CLI 的 `<session-id>` 可由 `meatshell cli sessions` 获取。文件下载要�
 2. 根据需要允许使用已保存的凭据。
 3. 需要远程诊断时允许执行任意 SSH 命令。
 4. 需要上传或下载文件时允许文件传输。
+
+如需让某台服务器仅供手动使用，在该会话的编辑窗口中取消勾选 **允许 MCP 访问此会话**：
+MCP 将无法列出、连接该会话，也无法经由它跳转；CLI 不受影响。
 
 然后在支持 stdio MCP 的客户端中添加名为 `meatshell` 的服务：
 
@@ -307,6 +342,17 @@ meatshell/
   <em>扫描二维码加入 QQ 群，与其他用户交流使用经验、反馈问题或获取最新动态</em>
 </p>
 
+## 友情链接
+
+- [XenTerm](https://github.com/ixbaicn/XenTerm) (新衍生分支，共同进步)
+
 ## License
 
 MIT OR Apache-2.0（双许可）。
+
+
+## Authenticated remote MCP / 带认证的远程 MCP
+
+Run the new opt-in Streamable HTTP service with an external OAuth 2.1 provider,
+HTTPS reverse proxy and an explicitly selected private profile. Existing GUI, CLI
+and stdio MCP remain unchanged. See [deployment, authentication and security limits](docs/REMOTE_MCP.md).

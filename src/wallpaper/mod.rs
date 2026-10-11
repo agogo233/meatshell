@@ -4,4 +4,3 @@ mod wallpaper_types;
 mod wallpaper;
 
 pub(crate) use wallpaper::*;
-pub(crate) use wallpaper_types::*;

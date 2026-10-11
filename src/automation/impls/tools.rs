@@ -13,9 +13,14 @@ const DEFAULT_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 
 pub(crate) async fn call(name: &str, arguments: &Value, frontend: Frontend) -> Result<Value> {
+    crate::ssh::with_automation_cancellation(call_inner(name, arguments, frontend)).await
+}
+
+async fn call_inner(name: &str, arguments: &Value, frontend: Frontend) -> Result<Value> {
     match name {
         "list_sessions" => list_sessions(arguments, frontend),
         "get_session" => get_session(arguments, frontend),
+        "import_sessions" => import_sessions(arguments, frontend),
         "run_command" => run_command(arguments, frontend).await,
         "list_remote_files" => list_remote_files(arguments, frontend).await,
         "read_remote_text_file" => read_remote_text_file(arguments, frontend).await,
@@ -23,6 +28,26 @@ pub(crate) async fn call(name: &str, arguments: &Value, frontend: Frontend) -> R
         "download_file" => download_file(arguments, frontend).await,
         _ => Err(anyhow!("unknown tool: {name}")),
     }
+}
+
+fn import_sessions(arguments: &Value, frontend: Frontend) -> Result<Value> {
+    let path = required_string(arguments, "local_path")?;
+    if path.trim().is_empty() {
+        return Err(anyhow!("local_path must not be empty"));
+    }
+    // Preview is the safe default for protocol callers. The CLI passes its
+    // explicit --dry-run choice; a server process must opt in before applying.
+    let dry_run = optional_bool(arguments, "dry_run")?.unwrap_or(true);
+    if !dry_run && !frontend.allows_config_import() {
+        return Err(anyhow!(
+            "configuration import is disabled; restart MCP with --allow-config-import to apply imports"
+        ));
+    }
+    let mut store = load_store(frontend)?;
+    enforce_transfer_permissions(&store, frontend)?;
+    let result = store.import_from_preview(std::path::Path::new(path), dry_run)?;
+    // Never return source JSON, credential material, or private file paths.
+    Ok(json!({ "added": result.added, "skipped": result.skipped, "dry_run": dry_run }))
 }
 
 async fn upload_file(arguments: &Value, frontend: Frontend) -> Result<Value> {
@@ -100,7 +125,7 @@ async fn download_file(arguments: &Value, frontend: Frontend) -> Result<Value> {
 }
 
 fn enforce_transfer_permissions(store: &ConfigStore, frontend: Frontend) -> Result<()> {
-    if frontend == Frontend::Mcp && !store.mcp_allow_file_transfers() {
+    if frontend.is_mcp() && !store.mcp_allow_file_transfers() {
         return Err(anyhow!(
             "file transfers are disabled in Settings > Interface > MCP"
         ));
@@ -128,31 +153,19 @@ async fn read_remote_text_file(arguments: &Value, frontend: Frontend) -> Result<
 fn sftp_context(
     arguments: &Value,
     frontend: Frontend,
-) -> Result<(Session, Option<Session>, Duration)> {
+) -> Result<(Session, Vec<Session>, Duration)> {
     let store = load_store(frontend)?;
-    if frontend == Frontend::Mcp && !store.mcp_use_saved_credentials() {
+    if frontend.is_mcp() && !store.mcp_use_saved_credentials() {
         return Err(anyhow!(
             "using saved credentials is disabled in Settings > Interface > MCP"
         ));
     }
     let id = required_string(arguments, "session_id")?;
-    let session = store
-        .get(id)
-        .cloned()
-        .ok_or_else(|| anyhow!("session not found: {id}"))?;
+    let session = visible_session(&store, id, frontend)?.clone();
     if session.kind.as_str() != "ssh" {
         return Err(anyhow!("SFTP tools only support SSH sessions"));
     }
-    let jump = if session.jump_session_id.trim().is_empty() {
-        None
-    } else {
-        Some(
-            store
-                .get(&session.jump_session_id)
-                .cloned()
-                .ok_or_else(|| anyhow!("jump session not found: {}", session.jump_session_id))?,
-        )
-    };
+    let jump = visible_jump_chain(&store, &session, frontend)?;
     let timeout = optional_u64(arguments, "timeout_seconds")?
         .unwrap_or(DEFAULT_TIMEOUT_SECONDS)
         .clamp(1, MAX_TIMEOUT_SECONDS);
@@ -161,10 +174,50 @@ fn sftp_context(
 
 fn load_store(frontend: Frontend) -> Result<ConfigStore> {
     let store = ConfigStore::load().context("load MeatShell configuration")?;
-    if frontend == Frontend::Mcp && !store.mcp_enabled() {
+    if frontend.is_mcp() && !store.mcp_enabled() {
         return Err(anyhow!("MCP is disabled in Settings > Interface > MCP"));
     }
     Ok(store)
+}
+
+/// Per-session MCP scope (#432). The CLI is an explicit local user action and
+/// always sees every session.
+fn exposed_to(session: &Session, frontend: Frontend) -> bool {
+    !frontend.is_mcp() || session.mcp_access
+}
+
+/// Look up a session the caller may use. Sessions hidden from MCP report the
+/// same error as missing ones so their existence is not disclosed.
+fn visible_session<'a>(
+    store: &'a ConfigStore,
+    id: &str,
+    frontend: Frontend,
+) -> Result<&'a Session> {
+    store
+        .get(id)
+        .filter(|session| exposed_to(session, frontend))
+        .ok_or_else(|| anyhow!("session not found: {id}"))
+}
+
+/// Resolve the jump route, refusing it when any hop is hidden from MCP:
+/// routing through a hop authenticates with that hop's saved credentials.
+fn visible_jump_chain(
+    store: &ConfigStore,
+    session: &Session,
+    frontend: Frontend,
+) -> Result<Vec<Session>> {
+    let jump = store.resolve_jump_chain(session)?;
+    ensure_hops_exposed(&jump, frontend)?;
+    Ok(jump)
+}
+
+fn ensure_hops_exposed(jump: &[Session], frontend: Frontend) -> Result<()> {
+    if jump.iter().any(|hop| !exposed_to(hop, frontend)) {
+        return Err(anyhow!(
+            "this session routes through a jump host that does not allow MCP access"
+        ));
+    }
+    Ok(())
 }
 
 fn list_sessions(arguments: &Value, frontend: Frontend) -> Result<Value> {
@@ -173,6 +226,7 @@ fn list_sessions(arguments: &Value, frontend: Frontend) -> Result<Value> {
     let sessions: Vec<Value> = store
         .sessions()
         .iter()
+        .filter(|session| exposed_to(session, frontend))
         .filter(|session| group.map_or(true, |group| session.group == group))
         .map(safe_session)
         .collect();
@@ -182,20 +236,17 @@ fn list_sessions(arguments: &Value, frontend: Frontend) -> Result<Value> {
 fn get_session(arguments: &Value, frontend: Frontend) -> Result<Value> {
     let store = load_store(frontend)?;
     let id = required_string(arguments, "session_id")?;
-    let session = store
-        .get(id)
-        .ok_or_else(|| anyhow!("session not found: {id}"))?;
-    Ok(safe_session(session))
+    Ok(safe_session(visible_session(&store, id, frontend)?))
 }
 
 async fn run_command(arguments: &Value, frontend: Frontend) -> Result<Value> {
     let store = load_store(frontend)?;
-    if frontend == Frontend::Mcp && !store.mcp_use_saved_credentials() {
+    if frontend.is_mcp() && !store.mcp_use_saved_credentials() {
         return Err(anyhow!(
             "using saved credentials is disabled in Settings > Interface > MCP"
         ));
     }
-    if frontend == Frontend::Mcp && !store.mcp_allow_commands() {
+    if frontend.is_mcp() && !store.mcp_allow_commands() {
         return Err(anyhow!(
             "arbitrary command execution is disabled in Settings > Interface > MCP"
         ));
@@ -213,23 +264,11 @@ async fn run_command(arguments: &Value, frontend: Frontend) -> Result<Value> {
         .unwrap_or(DEFAULT_MAX_OUTPUT_BYTES as u64)
         .clamp(1024, MAX_OUTPUT_BYTES as u64) as usize;
 
-    let session = store
-        .get(id)
-        .cloned()
-        .ok_or_else(|| anyhow!("session not found: {id}"))?;
+    let session = visible_session(&store, id, frontend)?.clone();
     if session.kind.as_str() != "ssh" {
         return Err(anyhow!("run_command only supports SSH sessions"));
     }
-    let jump = if session.jump_session_id.trim().is_empty() {
-        None
-    } else {
-        Some(
-            store
-                .get(&session.jump_session_id)
-                .cloned()
-                .ok_or_else(|| anyhow!("jump session not found: {}", session.jump_session_id))?,
-        )
-    };
+    let jump = visible_jump_chain(&store, &session, frontend)?;
 
     let result = crate::ssh::execute_command(
         session,
@@ -256,7 +295,8 @@ fn safe_session(session: &Session) -> Value {
         "has_private_key": !session.private_key_path.trim().is_empty()
             || !session.private_key_inline.is_empty(),
         "jump_session_id": session.jump_session_id,
-        "has_proxy": !session.proxy.as_str().trim().is_empty(),
+        "jump_session_ids": session.jump_session_ids,
+        "has_proxy": !session.proxy.trim().is_empty(),
     })
 }
 
@@ -277,6 +317,16 @@ fn optional_string<'a>(arguments: &'a Value, key: &str) -> Result<Option<&'a str
     }
 }
 
+fn optional_bool(arguments: &Value, key: &str) -> Result<Option<bool>> {
+    match arguments.get(key) {
+        None => Ok(None),
+        Some(value) => value
+            .as_bool()
+            .map(Some)
+            .ok_or_else(|| anyhow!("invalid boolean argument: {key}")),
+    }
+}
+
 fn optional_u64(arguments: &Value, key: &str) -> Result<Option<u64>> {
     match arguments.get(key) {
         None | Some(Value::Null) => Ok(None),
@@ -290,6 +340,66 @@ fn optional_u64(arguments: &Value, key: &str) -> Result<Option<u64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn import_permissions_are_explicit() {
+        assert!(Frontend::Cli.allows_config_import());
+        assert!(!Frontend::Mcp {
+            allow_config_import: false
+        }
+        .allows_config_import());
+        assert!(Frontend::Mcp {
+            allow_config_import: true
+        }
+        .allows_config_import());
+        assert_eq!(optional_bool(&json!({}), "dry_run").unwrap(), None);
+        assert_eq!(
+            optional_bool(&json!({"dry_run": false}), "dry_run").unwrap(),
+            Some(false)
+        );
+        assert!(optional_bool(&json!({"dry_run": "false"}), "dry_run").is_err());
+        assert!(optional_bool(&json!({"dry_run": null}), "dry_run").is_err());
+        let err = import_sessions(
+            &json!({"local_path": "unused", "dry_run": false}),
+            Frontend::Mcp {
+                allow_config_import: false,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("--allow-config-import"));
+    }
+
+    #[test]
+    fn mcp_scope_hides_opted_out_sessions_from_mcp_only() {
+        let mcp = Frontend::Mcp {
+            allow_config_import: false,
+        };
+        let mut hidden = Session::new_empty();
+        hidden.mcp_access = false;
+        let shown = Session::new_empty();
+        assert!(!exposed_to(&hidden, mcp));
+        assert!(exposed_to(&shown, mcp));
+        assert!(exposed_to(&hidden, Frontend::Cli));
+
+        assert!(ensure_hops_exposed(&[shown.clone()], mcp).is_ok());
+        let err = ensure_hops_exposed(&[shown.clone(), hidden.clone()], mcp).unwrap_err();
+        assert!(err.to_string().contains("jump host"));
+        assert!(ensure_hops_exposed(&[hidden], Frontend::Cli).is_ok());
+    }
+
+    #[test]
+    fn mcp_access_defaults_on_for_new_and_legacy_sessions() {
+        let session = Session::new_empty();
+        assert!(session.mcp_access);
+        let mut legacy = serde_json::to_value(&session).unwrap();
+        legacy.as_object_mut().unwrap().remove("mcp_access");
+        let restored: Session = serde_json::from_value(legacy).unwrap();
+        assert!(restored.mcp_access);
+        let mut opted_out = session;
+        opted_out.mcp_access = false;
+        let json = serde_json::to_value(&opted_out).unwrap();
+        assert!(!serde_json::from_value::<Session>(json).unwrap().mcp_access);
+    }
 
     #[test]
     fn numeric_arguments_are_strict() {

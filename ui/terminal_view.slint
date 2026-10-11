@@ -638,11 +638,13 @@ export component TerminalView inherits Rectangle {
     callback sftp-edit-external(string);
     callback sftp-sort-request(string);
     callback sftp-clear-sort();
-    // Keyboard type-ahead in the file list (#sftp-typeahead): returns the first
+// Keyboard type-ahead in the file list (#sftp-typeahead): returns the first
     // row index whose name starts with the prefix, -1 if none.
     callback sftp-type-ahead(string) -> int;
     callback tunnel-add(string, string, string, string, string, string);
     callback tunnel-stop(string);
+    callback tunnel-start(string);
+    callback tunnel-delete(string);
     // Context-menu extensions (#69), forwarded up to the app shell.
     callback sftp-rename-request(string, string);
     callback sftp-chmod-request(string, string, int);
@@ -2354,10 +2356,31 @@ export component TerminalView inherits Rectangle {
                     // History list fills the popup; the search box is pinned at the
                     // bottom (next to the command input) so it stays in a fixed,
                     // easy-to-find spot no matter how tall the list is (#131).
-                    Flickable {
+                    h-flick := Flickable {
                     vertical-stretch: 1;
                     viewport-width: self.width;
                     viewport-height: max(self.height, h-col.preferred-height);
+                    // The newest commands are at the bottom, next to the search box
+                    // and the command input, so open scrolled there (#447). Scrolling
+                    // by hand replaces this binding until the popup reopens.
+                    viewport-y: min(0px, self.height - self.viewport-height);
+                    // Keep the ↑/↓ keyboard selection visible (#447).
+                    property <int> follow-selected: root.history-selected;
+                    changed follow-selected => { self.reveal-row(self.follow-selected); }
+                    public function scroll-to-newest() {
+                        self.viewport-y = min(0px, self.height - self.viewport-height);
+                    }
+                    function reveal-row(row: int) {
+                        if (row < 0 || row >= root.history-view.length) { return; }
+                        // Rows are 28px tall below h-col's 4px top padding.
+                        let top = 4px + row * 28px;
+                        let bottom = top + 28px;
+                        if (top < -self.viewport-y) {
+                            self.viewport-y = -top;
+                        } else if (bottom > self.height - self.viewport-y) {
+                            self.viewport-y = self.height - bottom;
+                        }
+                    }
                     h-col := VerticalLayout {
                         padding: 4px;
                         alignment: start;
@@ -2479,7 +2502,11 @@ export component TerminalView inherits Rectangle {
                                     // half-built layout, panicking with "Recursion
                                     // detected" (#349 / #343).
                                     init => { root.history-search-focus-pending = true; }
-                                    edited => { root.search-history(self.text); root.history-selected = root.history-view.length > 0 ? root.history-view.length - 1 : 0; }
+                                    edited => {
+                                        root.search-history(self.text);
+                                        root.history-selected = root.history-view.length > 0 ? root.history-view.length - 1 : 0;
+                                        h-flick.scroll-to-newest();
+                                    }
                                     // ↑/↓ move the selection, Enter runs it, Esc
                                     // closes and returns focus to the terminal (#140).
                                     key-pressed(e) => {

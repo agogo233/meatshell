@@ -1,4 +1,4 @@
-﻿import { Theme } from "theme.slint";
+import { Theme } from "theme.slint";
 import { ScrollView } from "std-widgets.slint";
 import { TabInfo } from "tabs.slint";
 
@@ -233,6 +233,8 @@ export component SftpPanel inherits Rectangle {
     callback type-ahead(string /* prefix */) -> int;   // first row whose name starts with prefix, -1 if none
     callback tunnel-add(string /* name */, string /* kind */, string /* bind */, string /* bind-port */, string /* host */, string /* host-port */);
     callback tunnel-stop(string /* id */);
+    callback tunnel-start(string /* id */);
+    callback tunnel-delete(string /* id */);
     // Context-menu extensions (#69). The *-request callbacks open dialogs in
     // the app shell; copy-path goes straight to the system clipboard.
     callback rename-request(string /* path */, string /* current name */);
@@ -992,6 +994,7 @@ export component SftpPanel inherits Rectangle {
                         Rectangle { width: 16px; }
                         Rectangle {
                             horizontal-stretch: 1;
+                            min-width: root.name-min;
                             header-name-ta := TouchArea {
                                 mouse-cursor: pointer;
                                 clicked => { root.sort-request("name"); }
@@ -1519,6 +1522,12 @@ export component SftpPanel inherits Rectangle {
                             td-ta := TouchArea { mouse-cursor: pointer; clicked => { root.tunnel-kind = "dynamic"; } }
                             Text { text: "-D"; color: root.tunnel-kind == "dynamic" ? #ffffff : Theme.text-primary; font-size: Theme.fs-sm; horizontal-alignment: center; vertical-alignment: center; }
                         }
+                        Rectangle {
+                            width: 54px; height: 24px; border-radius: Theme.radius-sm;
+                            background: root.tunnel-kind == "remote" ? Theme.accent : (tr-ta.has-hover ? Theme.bg-hover : Theme.bg-root);
+                            tr-ta := TouchArea { mouse-cursor: pointer; clicked => { root.tunnel-kind = "remote"; } }
+                            Text { text: "-R"; color: root.tunnel-kind == "remote" ? #ffffff : Theme.text-primary; font-size: Theme.fs-sm; horizontal-alignment: center; vertical-alignment: center; }
+                        }
                         Rectangle { horizontal-stretch: 1; }
                         Rectangle {
                             width: 72px; height: 24px; border-radius: Theme.radius-sm;
@@ -1537,20 +1546,32 @@ export component SftpPanel inherits Rectangle {
 
                     HorizontalLayout {
                         spacing: 8px;
-                        Rectangle {
-                            horizontal-stretch: 1; height: 24px; border-radius: Theme.radius-sm;
-                            background: Theme.bg-root; border-width: 1px; border-color: Theme.border-subtle;
-                            TextInput { x: 7px; width: parent.width - 14px; height: parent.height; text <=> root.tunnel-name; color: Theme.text-primary; font-family: Theme.ui-font-family; font-size: Theme.fs-sm; single-line: true; vertical-alignment: center; }
+                        VerticalLayout {
+                            horizontal-stretch: 1; spacing: 3px;
+                            Text { text: @tr("Name (optional)"); color: Theme.text-secondary; font-size: Theme.fs-xs; }
+                            Rectangle {
+                                height: 24px; border-radius: Theme.radius-sm;
+                                background: Theme.bg-root; border-width: 1px; border-color: Theme.border-subtle;
+                                TextInput { x: 7px; width: parent.width - 14px; height: parent.height; text <=> root.tunnel-name; color: Theme.text-primary; font-family: Theme.ui-font-family; font-size: Theme.fs-sm; single-line: true; vertical-alignment: center; }
+                            }
                         }
-                        Rectangle {
-                            width: 128px; height: 24px; border-radius: Theme.radius-sm;
-                            background: Theme.bg-root; border-width: 1px; border-color: Theme.border-subtle;
-                            TextInput { x: 7px; width: parent.width - 14px; height: parent.height; text <=> root.tunnel-bind; color: Theme.text-primary; font-family: Theme.ui-font-family; font-size: Theme.fs-sm; single-line: true; vertical-alignment: center; }
+                        VerticalLayout {
+                            width: 128px; spacing: 3px;
+                            Text { text: root.tunnel-kind == "remote" ? @tr("Server listen address") : @tr("Local listen address"); color: Theme.text-secondary; font-size: Theme.fs-xs; overflow: elide; }
+                            Rectangle {
+                                height: 24px; border-radius: Theme.radius-sm;
+                                background: Theme.bg-root; border-width: 1px; border-color: Theme.border-subtle;
+                                TextInput { x: 7px; width: parent.width - 14px; height: parent.height; text <=> root.tunnel-bind; color: Theme.text-primary; font-family: Theme.ui-font-family; font-size: Theme.fs-sm; single-line: true; vertical-alignment: center; }
+                            }
                         }
-                        Rectangle {
-                            width: 68px; height: 24px; border-radius: Theme.radius-sm;
-                            background: Theme.bg-root; border-width: 1px; border-color: Theme.border-subtle;
-                            TextInput { x: 7px; width: parent.width - 14px; height: parent.height; text <=> root.tunnel-bind-port; color: Theme.text-primary; font-family: Theme.ui-font-family; font-size: Theme.fs-sm; single-line: true; vertical-alignment: center; }
+                        VerticalLayout {
+                            width: 74px; spacing: 3px;
+                            Text { text: @tr("Listen port"); color: Theme.text-secondary; font-size: Theme.fs-xs; overflow: elide; }
+                            Rectangle {
+                                height: 24px; border-radius: Theme.radius-sm;
+                                background: Theme.bg-root; border-width: 1px; border-color: Theme.border-subtle;
+                                TextInput { x: 7px; width: parent.width - 14px; height: parent.height; text <=> root.tunnel-bind-port; color: Theme.text-primary; font-family: Theme.ui-font-family; font-size: Theme.fs-sm; single-line: true; vertical-alignment: center; }
+                            }
                         }
                     }
 
@@ -1596,9 +1617,15 @@ export component SftpPanel inherits Rectangle {
                             Text { text: tun.status; color: tun.active ? Theme.accent : Theme.text-muted; width: 62px; font-size: Theme.fs-xs; overflow: elide; vertical-alignment: center; horizontal-alignment: right; }
                             Rectangle {
                                 width: 48px; height: 22px; border-radius: Theme.radius-sm;
-                                background: tun.active ? (stop-ta.has-hover ? Theme.danger.with-alpha(0.24) : transparent) : transparent;
-                                stop-ta := TouchArea { mouse-cursor: tun.active ? pointer : default; clicked => { if (tun.active) { root.tunnel-stop(tun.id); } } }
-                                Text { text: @tr("Stop"); color: tun.active ? Theme.danger : Theme.text-muted; font-size: Theme.fs-xs; horizontal-alignment: center; vertical-alignment: center; }
+                                background: control-ta.has-hover ? Theme.bg-hover : transparent;
+                                control-ta := TouchArea { mouse-cursor: pointer; clicked => { if (tun.active) { root.tunnel-stop(tun.id); } else { root.tunnel-start(tun.id); } } }
+                                Text { text: tun.active ? @tr("Stop") : @tr("Start"); color: tun.active ? Theme.danger : Theme.accent; font-size: Theme.fs-xs; horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                            Rectangle {
+                                width: 52px; height: 22px; border-radius: Theme.radius-sm;
+                                background: delete-ta.has-hover ? Theme.danger.with-alpha(0.24) : transparent;
+                                delete-ta := TouchArea { mouse-cursor: pointer; clicked => { root.tunnel-delete(tun.id); } }
+                                Text { text: @tr("Delete"); color: Theme.danger; font-size: Theme.fs-xs; horizontal-alignment: center; vertical-alignment: center; }
                             }
                         }
                     }

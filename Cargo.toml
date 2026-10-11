@@ -1,13 +1,13 @@
 [package]
 name = "meatshell"
-version = "0.7.4"
+version = "0.7.6"
 edition = "2021"
 authors = ["meatshell contributors"]
 description = "A lightweight FinalShell-style SSH/terminal client written in Rust + Slint"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/your/meatshell"
 readme = "README.md"
-rust-version = "1.75"
+rust-version = "1.88"
 
 [package.metadata.deb]
 extended-description = "MeatShell is a cross-platform terminal client written in Rust and Slint."
@@ -26,7 +26,12 @@ assets = [
     ["assets/meatshell.desktop", "usr/share/applications/", "644"],
     ["assets/icon@512.png", "usr/share/icons/hicolor/512x512/apps/meatshell.png", "644"],
     ["THIRD_PARTY_NOTICES.md", "usr/share/doc/meatshell/", "644"],
+    ["docs/REMOTE_MCP.md", "usr/share/doc/meatshell/", "644"],
 ]
+
+[features]
+# Cloud/server CLI and MCP build without compiling the desktop UI.
+headless = []
 
 [dependencies]
 # Keep all desktop platforms on the native text layout patched below.
@@ -54,7 +59,7 @@ directories = "5"
 chrono = { version = "0.4", features = ["serde"] }
 sysinfo = "0.33"
 uuid = { version = "1", features = ["v4", "serde"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util", "net", "time", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util", "net", "time", "fs", "signal"] }
 # Pinned to 0.49: RUSTSEC-2026-0154 (an unbounded-allocation DoS in russh's
 # ssh-AGENT frame parsing) is fixed only in >= 0.60.3, which drags in pre-release
 # crypto crates (ed25519-dalek 3.0.0-pre, aes-gcm 0.11.0-rc, 鈥?. meatshell never
@@ -72,12 +77,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rand = "0.8"
 async-trait = "0.1"
 futures = "0.3"
-vt100 = "0.15"
+# 0.16.2+ clamps the saved cursor on resize; older versions panic after
+# resizing inside nano/vim and leaving the alternate screen (#490).
+vt100 = "0.16.2"
 portable-pty = "0.8"
 # East Asian width detection for terminal copy/find column math. Pinned to the
 # same version vt100 uses so "is this glyph 2 cells wide?" agrees with how vt100
 # lays CJK glyphs on the grid 鈥?otherwise selection/find columns drift (#132).
-unicode-width = "0.1.14"
+unicode-width = "0.2.1"
 # Split terminal output into complete emoji grapheme clusters (ZWJ sequences,
 # flags, skin tones, variation selectors) before replacing them with images.
 unicode-segmentation = "1.12"
@@ -104,6 +111,8 @@ cbc = "0.1"
 hmac = "0.12"
 sha1 = "0.10"
 sha2 = "0.10"
+# OS locks serialize configuration writes across GUI and automation processes.
+fs2 = "0.4.3"
 # FinalShell connection exports derive a DES key with MD5 using java.util.Random.
 des = "0.8"
 md5 = "0.7"
@@ -129,11 +138,19 @@ ureq = { version = "2", features = ["tls"] }
 # .ico embedded by winresource at link time; on macOS from the app bundle.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp"] }
 
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+# Keep SSH sessions alive after the main window is hidden in the system tray.
+# Not on macOS (#486): tray-icon brings muda 0.20, while Slint's winit backend
+# uses muda 0.18 for the app menu bar. Both define an Objective-C class named
+# `MudaMenuItem`, and the clash crashed 0.7.5 at launch.
+tray-icon = { version = "0.25.1", default-features = false }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 # Native Wayland clipboard (wlr-data-control protocol) so copy/paste works on
 # Wayland sessions (KDE/wlroots) without relying on XWayland (issue #47).
 # Feature is additive over the base `arboard = "3"` dependency above.
 arboard = { version = "3", features = ["wayland-data-control"] }
+tray-icon = { version = "0.25.1", default-features = false, features = ["ksni"] }
 
 # Use jemalloc on Unix-like desktop/mobile targets. Unsupported targets keep
 # Rust's portable System allocator without pulling in platform dependencies.
@@ -147,6 +164,24 @@ jemallocator = "0.5"
 # import library at link time when using the MSVC toolchain (#224).
 [target.'cfg(target_os = "macos")'.dependencies]
 slint = { version = "=1.16.1", default-features = false, features = ["renderer-skia"] }
+
+# Official MCP HTTP transport and externally issued OAuth JWT verification.
+[dependencies.rmcp]
+version = "=2.2.0"
+default-features = false
+features = ["server", "transport-streamable-http-server"]
+
+[dependencies.axum]
+version = "0.8"
+
+[dependencies.jsonwebtoken]
+version = "9.3"
+
+[dependencies.tokio-util]
+version = "0.7"
+
+[dependencies.url]
+version = "2"
 
 [build-dependencies]
 slint-build = "=1.16.1"
@@ -197,7 +232,9 @@ opt-level = 1
 
 [patch.crates-io]
 # Avoid Slint/winit's AppKit DisplayLink selector on old macOS. The local
-# patched backend falls back to timer throttling on macOS only.
+# patched backend falls back to timer throttling on macOS only. On macOS it also
+# never drops its AccessKit adapter, which avoids a Touch Bar crash when a
+# window closes (#488; see vendor/i-slint-backend-winit/accesskit.rs).
 i-slint-backend-winit = { path = "vendor/i-slint-backend-winit" }
 # Slint 1.16.1's software renderer fills text selection/cursor/decoration
 # rectangles without honoring the active clip, so a select-all in the editor

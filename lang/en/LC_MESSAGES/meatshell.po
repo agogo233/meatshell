@@ -507,11 +507,11 @@ msgstr "Please confirm"
 msgid "Confirm"
 msgstr "Confirm"
 
-msgid "Disable shell integration (Windows / pwsh server)"
-msgstr "Disable shell integration (Windows / pwsh server)"
+msgid "Interactive login compatibility mode"
+msgstr "Interactive login compatibility mode"
 
-msgid "Turn on for Windows servers: skips the cwd-follow hook and monitor that assume a POSIX shell and otherwise break the shell."
-msgstr "Turn on for Windows servers: skips the cwd-follow hook and monitor that assume a POSIX shell and otherwise break the shell."
+msgid "For auto-login scripts or non-POSIX shells: skips shell hooks and remote monitoring while keeping SFTP available."
+msgstr "For auto-login scripts or non-POSIX shells: skips shell hooks and remote monitoring while keeping SFTP available."
 
 msgid "Split right"
 msgstr "Split right"
@@ -740,6 +740,41 @@ msgstr "Available"
 
 msgid "-L: local port → target reached from the server; -R: server port → target reached from here; -D: local SOCKS5 proxy"
 msgstr "-L: local port → target reached from the server; -R: server port → target reached from here; -D: local SOCKS5 proxy"
+msgid "Hide secret"
+msgstr "Hide secret"
+
+msgid "Show secret"
+msgstr "Show secret"
+
+msgid "Jump chain (optional)"
+msgstr "Jump chain (optional)"
+
+msgid "Local → hops below → target. First hop connects first."
+msgstr "Local → hops below → target. First hop connects first."
+
+msgid "+ Add jump host"
+msgstr "+ Add jump host"
+
+msgid "Target"
+msgstr "Target"
+
+msgid "Move to hop"
+msgstr "Move to hop"
+
+msgid "Hop"
+msgstr "Hop"
+
+msgid "Allow viewing saved credentials in this session"
+msgstr "Allow viewing saved credentials in this session"
+
+msgid "Allow MCP access to this session"
+msgstr "Allow MCP access to this session"
+
+msgid "Hidden from MCP clients: they cannot list, connect to, or route through this session. The CLI is unaffected."
+msgstr "Hidden from MCP clients: they cannot list, connect to, or route through this session. The CLI is unaffected."
+
+msgid "Unavailable"
+msgstr "Unavailable"
 
 msgid "Session log"
 msgstr "Session log"
@@ -755,3 +790,27 @@ msgstr "Never record"
 
 msgid "Saves this session's terminal output as timestamped plain text. Keystrokes are not recorded. The folder is set in Settings → Session log."
 msgstr "Saves this session's terminal output as timestamped plain text. Keystrokes are not recorded. The folder is set in Settings → Session log."
+
+msgid "Discard unsaved changes?"
+msgstr "Discard unsaved changes?"
+
+msgid "This file has unsaved changes. Close without saving?"
+msgstr "This file has unsaved changes. Close without saving?"
+
+msgid "Discard and close"
+msgstr "Discard and close"
+
+msgid "Enter a new password"
+msgstr "Enter a new password"
+
+msgid "Enter a key passphrase"
+msgstr "Enter a key passphrase"
+
+msgid "Credentials start hidden. Click the eye to view. Save to remember this option."
+msgstr "Credentials start hidden. Click the eye to view. Save to remember this option."
+
+msgid "Save session"
+msgstr "Save session"
+
+msgid "Create session"
+msgstr "Create session"

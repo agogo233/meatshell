@@ -100,6 +100,8 @@ open /Applications/meatshell.app
 - [x] SSH (`russh`, pure Rust): password / private key / encrypted key (passphrase)
 - [x] SFTP browser + upload / download (drag-and-drop) + in-terminal ZMODEM (`sz` download / `rz` multi-file upload)
 - [x] SSH port forwarding / tunnels: local -L / remote -R / dynamic -D (SOCKS5)
+  - The connected session's Tunnels panel can add, stop, restart, and delete forwards. Rules can be saved to the SSH session with optional automatic startup on reconnect.
+- [x] System tray: closing the main window keeps sessions running; restore or create a window from the tray, or choose Quit to exit.
 - [x] Quick commands + command box (broadcast to all sessions) + command history
 - [x] Serial / Telnet sessions
 - [x] RDP remote desktop: stores host / port / user / password / domain with a resolution choice (full screen / common sizes / custom) and hands the session to a remote desktop client (`mstsc` on Windows; FreeRDP's `xfreerdp3` / `xfreerdp` on Linux / macOS — install it yourself, or use the Flatpak build, which bundles it)
@@ -185,6 +187,43 @@ meatshell cli download <session-id> /tmp/result.txt ./downloads
 Get `<session-id>` from `meatshell cli sessions`. A download requires an existing
 local destination directory and will not overwrite a file with the same name.
 
+### Import saved sessions without the GUI
+
+For a cloud/server build that omits the desktop UI, run `cargo build --locked --features headless`.
+The same binary supports CLI/MCP and the same SSH/SFTP implementation; launching without
+a subcommand returns a usage error. The default build still includes the desktop UI.
+This option avoids compiling the generated application UI; the current Cargo dependency
+graph still includes Slint, so normal platform build dependencies may still be required.
+
+Use the JSON file produced by MeatShell's **Export** action directly:
+
+```bash
+meatshell --data-dir /absolute/path/to/profile cli import ./meatshell-connections.json --dry-run --json
+meatshell --data-dir /absolute/path/to/profile cli import ./meatshell-connections.json --json
+```
+
+Import appends sessions and skips only equivalent configurations (ignoring local IDs
+and last-used timestamps). Different names, groups, credentials, proxies and jump routes
+remain separate profiles even on the same endpoint. Existing sessions and settings are never replaced. Imported
+jump-host references are remapped to the new IDs, including forward references and
+references to skipped duplicates. `--dry-run` validates and reports counts without
+changing saved sessions; normal profile initialization may create the directory/key.
+
+The limit is 16 MiB. MeatShell portable exports (`meatshell_export: 1`, including
+`enc:exp:v1:` credentials), FinalShell exports, and native JSON profiles are supported.
+Native profiles import sessions only. Machine-local `enc:v1:` credentials require the
+matching profile key; undecryptable secrets and invalid jump chains reject the entire
+import. A key-file path is preserved but its file is not copied: make that key available
+on the destination separately. Portable export encryption is reversible with a built-in
+key, so treat an export as a credential-bearing file and keep it private.
+
+MCP exposes `import_sessions` with `local_path` and optional `dry_run` (default `true`).
+It returns only `added`, `skipped`, and `dry_run`. The existing MCP enable/file-transfer
+permissions apply. To permit writes, explicitly start the server with
+`meatshell --data-dir /absolute/path/to/profile mcp serve --allow-config-import`, then
+call with `dry_run: false`. Do not enable this flag for untrusted MCP clients. Importing
+does not trust SSH host keys; connection verification is still required.
+
 ### MCP
 
 First open **Settings → Interface → MCP** in MeatShell:
@@ -193,6 +232,10 @@ First open **Settings → Interface → MCP** in MeatShell:
 2. Allow saved credentials when required.
 3. Allow arbitrary SSH commands for remote diagnostics.
 4. Allow file transfers when uploads or downloads are required.
+
+To keep a server manual-only, untick **Allow MCP access to this session** in its
+session editor: MCP can then neither list nor connect to it, nor route through it
+as a jump host. The CLI is unaffected.
 
 Then register a stdio MCP server named `meatshell` in your MCP-capable client:
 
@@ -316,6 +359,17 @@ tag, and pushes the current branch plus the tag. See
   <em>Scan the QR code to join QQ groups to exchange user experiences, provide feedback, or get the latest updates</em>
 </p>
 
+## Friendly Links
+
+- [XenTerm](https://github.com/ixbaicn/XenTerm) (A new derivative fork, progressing together)
+
 ## License
 
 Dual-licensed under MIT OR Apache-2.0.
+
+
+## Authenticated remote MCP / 带认证的远程 MCP
+
+Run the new opt-in Streamable HTTP service with an external OAuth 2.1 provider,
+HTTPS reverse proxy and an explicitly selected private profile. Existing GUI, CLI
+and stdio MCP remain unchanged. See [deployment, authentication and security limits](docs/REMOTE_MCP.md).

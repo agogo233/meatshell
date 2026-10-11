@@ -203,3 +203,21 @@ fn session_override_off_wins_over_global_on() {
     assert!(buffer.session_log.is_none());
     assert!(!dir.exists());
 }
+
+/// #490: shrinking the window while an alternate-screen program (nano, vim)
+/// runs must not leave the cursor saved by `CSI ? 1049 h` outside the grid,
+/// or the first character printed after `CSI ? 1049 l` panics inside vt100.
+/// vt100 0.16.2 clamps the saved cursor on resize; keep this when upgrading.
+#[test]
+fn leaving_alternate_screen_after_shrinking_keeps_cursor_in_bounds() {
+    for (start, rows, cols) in [("\x1b[40;1H", 20, 120), ("\x1b[40;100H", 20, 60)] {
+        let mut parser = vt100::Parser::new(40, 120, 0);
+        parser.process(start.as_bytes());
+        parser.process(b"\x1b[?1049h");
+        parser.screen_mut().set_size(rows, cols);
+        parser.process(b"\x1b[?1049l");
+        parser.process("x\u{4e2d}".as_bytes());
+        let (row, col) = parser.screen().cursor_position();
+        assert!(row < rows && col <= cols, "cursor {row},{col} outside {rows}x{cols}");
+    }
+}

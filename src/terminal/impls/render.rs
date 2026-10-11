@@ -51,7 +51,7 @@ fn cell_attrs(
             } else if contents.is_empty() {
                 " ".to_string()
             } else {
-                contents
+                contents.to_string()
             };
             (
                 contents,
