@@ -249,7 +249,7 @@ pub(super) fn apply_terminal_resize(
             if buf.parser.screen().alternate_screen() {
                 // Alt-screen (tmux/vim/btop): the remote redraws the whole screen
                 // on SIGWINCH, so just resize the grid and let that redraw fill it.
-                buf.parser.set_size(new_rows, new_cols);
+                buf.parser.screen_mut().set_size(new_rows, new_cols);
             } else {
                 // Reflow already-printed output to the new width by replaying the
                 // byte stream — vt100's set_size only truncates/pads (#169).

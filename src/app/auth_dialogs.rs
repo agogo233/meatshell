@@ -71,6 +71,7 @@ pub(super) fn enqueue_hostkey_prompt(
             hostkey_dialog_text(&host, port, &key_type, &fingerprint, changed);
         q.push_back(PendingHostKey {
             window_id,
+            test_id: None,
             host,
             port,
             changed,
@@ -242,6 +243,7 @@ pub(super) fn enqueue_cred_prompt(
         let show_now = !q.iter().any(|p| p.window_id == window_id);
         q.push_back(PendingCred {
             window_id,
+            test_id: None,
             session_id,
             host,
             user,
@@ -373,6 +375,7 @@ pub(super) fn enqueue_mfa_prompt(
         let show_now = !q.iter().any(|p| p.window_id == window_id);
         q.push_back(PendingMfa {
             window_id,
+            test_id: None,
             session_id,
             host,
             prompt,

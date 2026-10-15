@@ -35,7 +35,6 @@ use chacha20poly1305::{
 };
 use directories::ProjectDirs;
 use rand::rngs::OsRng;
-#[cfg(test)]
 use uuid::Uuid;
 
 use super::structs::*;
@@ -2503,123 +2502,7 @@ impl ConfigStore {
         Ok((serde_json::to_string_pretty(&out)?, out.sessions.len()))
     }
 
-    /// Import sessions from a MeatShell portable export, a FinalShell connection
-    /// export, or a MobaXterm `.mxtsessions` export. New sessions get fresh ids;
-    /// duplicates (same host+user+port+kind) are skipped.
-    /// Returns `(added, skipped, fixed-key secrets recovered)`. The store is
-    /// saved if anything was added, which also re-seals those secrets with this
-    /// machine's key.
-    pub fn import_json(&mut self, raw: &str) -> Result<(usize, usize, usize)> {
-        let (sessions, decrypt_meatshell_secrets) =
-            match serde_json::from_str::<ExportFile>(raw) {
-                Ok(file) => (file.sessions, true),
-                Err(meatshell_error) => {
-                    let sessions = super::finalshell::parse_export(raw)
-                        .or_else(|finalshell_error| {
-                            super::mobaxterm::parse_export(raw).with_context(|| {
-                                format!(
-                                    "not a valid MeatShell, FinalShell or MobaXterm export file; MeatShell parser: {meatshell_error}; FinalShell parser: {finalshell_error:#}"
-                                )
-                            })
-                        })?;
-                    (sessions, false)
-                }
-            };
 
-        let mut added = 0usize;
-        let mut skipped = 0usize;
-        // A fixed-key blob (`enc:exp:v1:`) decrypts with a key that ships in
-        // the source, so it is reported to the UI: until the store is saved
-        // the imported value only sits plain in the cache.
-        let mut recovered = 0usize;
-        let key = self.key;
-        let mut open_imported = |value: &str| -> Option<String> {
-            match Self::decrypt_export(value) {
-                Some(plain) => {
-                    recovered += 1;
-                    Some(plain)
-                }
-                None => Self::try_decrypt(&key, value),
-            }
-        };
-        for mut s in sessions {
-            // Dedupe first, so the fixed-key count below only covers sessions
-            // that actually land in this store and get resealed on save.
-            let dup = self.cache.sessions.iter().any(|x| {
-                x.host == s.host && x.user == s.user && x.port == s.port && x.kind == s.kind
-            });
-            if dup {
-                skipped += 1;
-                continue;
-            }
-            // Recover the plaintext password (cache stores plaintext). Accept an
-            // export blob, our local enc:v1 blob, or a legacy plaintext value.
-            // FinalShell's parser has already decrypted its DES password, so avoid
-            // interpreting a coincidental `enc:*` plaintext prefix as ours.
-            if decrypt_meatshell_secrets {
-                if let Some(plain) = open_imported(s.password.as_str()) {
-                    s.password = Secret::new(plain);
-                }
-                if let Some(plain) = open_imported(s.private_key_inline.as_str()) {
-                    s.private_key_inline = Secret::new(plain);
-                }
-                if let Some(plain) = open_imported(s.proxy.as_str()) {
-                    s.proxy = Secret::new(plain);
-                }
-                for trigger in &mut s.triggers {
-                    if let Some(plain) = open_imported(trigger.response.as_str()) {
-                        trigger.response = Secret::new(plain);
-                    }
-                }
-                // Anything still carrying one of our prefixes was sealed with a
-                // key this machine does not have (a foreign export); kept
-                // verbatim it would be saved back and used as a literal
-                // password.
-                Self::strip_undecryptable(&mut s.password);
-                Self::strip_undecryptable(&mut s.private_key_inline);
-                Self::strip_undecryptable(&mut s.proxy);
-                for trigger in &mut s.triggers {
-                    Self::strip_undecryptable(&mut trigger.response);
-                }
-            }
-            s.id = Uuid::new_v4().to_string();
-            self.upsert(s);
-            added += 1;
-        }
-        if added > 0 {
-            self.save()?;
-        }
-        Ok((added, skipped, recovered))
-    }
-
-    /// Import sessions from a MeatShell, FinalShell or MobaXterm export file.
-    /// Returns `(added, skipped, fixed-key secrets recovered)`.
-    pub fn import_from(&mut self, path: &Path) -> Result<(usize, usize, usize)> {
-        let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-        // MobaXterm writes `.mxtsessions` in the system ANSI code page —
-        // Windows-1252 on Western locales, GBK (a superset of GB2312, CP936)
-        // on Simplified-Chinese ones; MeatShell / FinalShell exports are
-        // UTF-8. Decode UTF-8 first, then a byte-pattern-gated GBK pass so
-        // Chinese session names, folder names and key paths survive the
-        // import, and only then fall back to CP1252. Known limitation: a
-        // file whose only non-ASCII content is a single two-byte character
-        // still decodes as CP1252; pairing is required to keep Western
-        // accents safe.
-        let raw = match String::from_utf8(bytes) {
-            Ok(raw) => raw,
-            Err(err) => {
-                let bytes = err.into_bytes();
-                Self::decode_gbk(&bytes)
-                    .or_else(|| {
-                        encoding_rs::WINDOWS_1252
-                            .decode_without_bom_handling_and_without_replacement(&bytes)
-                            .map(|value| value.into_owned())
-                    })
-                    .with_context(|| format!("failed to decode {}", path.display()))?
-            }
-        };
-        self.import_json(&raw)
-    }
 
     /// Decode a GBK/GB2312 byte stream only when the bytes actually look
     /// like Chinese text: every character is a pair of high bytes, so an

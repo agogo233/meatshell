@@ -1283,7 +1283,7 @@ where
     H::Error: std::error::Error + Send + Sync + 'static,
 {
     let addr = format!("{}:{}", session.host, session.port);
-    let stream = match crate::ssh::proxy::resolve(&session.proxy) {
+    let stream = match crate::ssh::proxy::resolve(&session.proxy.as_str()) {
         Some(p) => {
             let _ = events.send(SessionEvent::Status(format!(
                 "{} {} → {}",

@@ -8,6 +8,8 @@ pub(super) fn blank_forward_draft() -> PortFwd {
         bind_port: "".into(),
         host: "".into(),
         host_port: "".into(),
+        auto_start: false,
+        id: String::new(),
     }
 }
 
@@ -29,6 +31,8 @@ pub(super) fn forward_drafts(forwards: &[crate::config::PortForward]) -> Vec<Por
             } else {
                 forward.host_port.to_string().into()
             },
+            auto_start: forward.auto_start,
+            id: forward.id.clone().into(),
         })
         .collect()
 }
@@ -104,6 +108,8 @@ pub(super) fn validated_port_forwards(
             bind_port,
             host,
             host_port,
+            auto_start: false,
+            id: uuid::Uuid::new_v4().to_string(),
         });
     }
     Ok(forwards)

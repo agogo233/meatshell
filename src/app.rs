@@ -282,7 +282,7 @@ use crate::i18n::t;
 use crate::layout::{LogicalRect, TerminalWheelHit};
 use crate::resource::system::{format_bytes_per_sec, format_mem};
 use crate::resource::{
-    LocalGpuInfo, LocalHardwareInfo, LocalSnap, NetHist, TabStatus, TabStatuses,
+    LocalSnap, NetHist, TabStatus, TabStatuses,
 };
 use crate::resource::{SystemSampler, SystemSnapshot};
 use crate::session::{ConnectCtx, PendingCred, PendingHostKey, PendingMfa};
@@ -4896,7 +4896,6 @@ fn wire_session_callbacks(
                 jump_candidates(&store_ng.borrow(), &empty.id, "");
             w.set_jump_choices(jump_labels);
             w.set_jump_ids(jump_ids);
-            w.set_dialog_jump_index(jump_idx);
             w.set_dialog_id(empty.id.into());
             w.set_dialog_name("".into());
             w.set_dialog_host("".into());
@@ -5355,11 +5354,10 @@ fn wire_session_callbacks(
                 let (proxy_type, proxy_hostport) = split_proxy(session.proxy.as_str());
                 w.set_dialog_proxy_type(proxy_type.into());
                 w.set_dialog_proxy_hostport(proxy_hostport.into());
-                let (jump_labels, jump_ids, jump_idx) =
+                let (jump_labels, jump_ids, _) =
                     jump_candidates(&store, &session.id, &session.jump_session_id);
                 w.set_jump_choices(jump_labels);
                 w.set_jump_ids(jump_ids);
-                w.set_dialog_jump_index(jump_idx);
                 w.set_dialog_group(session.group.clone().into());
                 w.set_dialog_kind(session.kind.as_str().into());
                 w.set_dialog_serial_port(session.serial_port.clone().into());
@@ -5795,7 +5793,10 @@ fn wire_session_callbacks(
                 triggers,
                 disable_shell_integration: draft.disable_shell_integration,
                 note: draft.note.to_string(),
-                jump_session_id: draft.jump_session_id.to_string(),
+                jump_session_id: String::new(),
+                allow_secret_reveal: draft.allow_secret_reveal,
+                jump_session_ids: Vec::new(),
+                mcp_access: draft.allow_mcp_access,
                 rdp_domain: draft.rdp_domain.to_string(),
                 rdp_fullscreen,
                 rdp_width,
@@ -7293,6 +7294,8 @@ fn wire_key_input(
                     bind_port,
                     host: host.trim().to_string(),
                     host_port,
+                    auto_start: false,
+                    id: uuid::Uuid::new_v4().to_string(),
                 };
                 if let Some(handle) = handles_rc.borrow().get(tab_id.as_str()) {
                     handle.add_tunnel(format!("runtime-{}", uuid::Uuid::new_v4()), forward);
