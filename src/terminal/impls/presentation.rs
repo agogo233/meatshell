@@ -423,11 +423,13 @@ fn render_term_span_with(
             fg,
             bg,
             bold: span.bold,
+            underline: span.underline,
             row,
             col: span.col,
             cells: span.cells,
             cjk: false,
             emoji: false,
+            font: slint::SharedString::default(),
             emoji_image: slint::Image::default(),
         }];
     }
