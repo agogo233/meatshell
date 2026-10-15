@@ -11,6 +11,8 @@ mod json_output;
 mod charset;
 #[path = "impls/encoding.rs"]
 mod encoding;
+#[path = "impls/glyph_fallback.rs"]
+mod glyph_fallback;
 #[path = "impls/local.rs"]
 pub(crate) mod local;
 #[path = "impls/output_highlight.rs"]
@@ -47,6 +49,9 @@ pub(crate) use input::{
 pub(crate) use charset::CharsetTracker;
 pub(crate) use session_log::{SessionLogSpec, SessionLogger};
 pub(crate) use encoding::TerminalEncoding;
+pub(crate) use glyph_fallback::{
+    install_glyph_fallback, Coverage, GlyphFallback, BUNDLED_TERM_FONT,
+};
 pub(crate) use json_output::format_json_output;
 pub(crate) use action_links::{
     default_command, scan_action_links, ActionLinkFlags, ActionLinkHit, ActionLinkKind,
