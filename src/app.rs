@@ -2195,7 +2195,7 @@ fn open_window(
             if pass.is_empty() {
                 // Without a passphrase only the legacy plaintext file can be
                 // tried, and that import is fast (no KDF), so it stays inline.
-                let res: Result<(usize, usize, usize), anyhow::Error> = webdav_get_json(
+                let res: Result<(usize, usize), anyhow::Error> = webdav_get_json(
                     &url,
                     &remote_path,
                     &username,
@@ -2215,16 +2215,15 @@ fn open_window(
                     )
                 });
                 let msg = match res {
-                    Ok((added, skipped, recovered)) => {
+                    Ok((added, skipped)) => {
                         sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
                         registry.broadcast_config_changed();
                         format!(
-                            "{} {}, {} {}{}{}",
+                            "{} {}, {} {}{}",
                             t("已导入", "imported"),
                             added,
                             t("跳过", "skipped"),
                             skipped,
-                            recovered_secrets_note(recovered),
                             webdav_status_suffix(accept_invalid_certs)
                         )
                     }
@@ -2784,16 +2783,15 @@ fn open_window(
                         )
                         .and_then(|json| store.borrow_mut().import_json(&json));
                         let msg = match res {
-                            Ok((added, skipped, recovered)) => {
+                            Ok((added, skipped)) => {
                                 sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
                                 registry.broadcast_config_changed();
                                 format!(
-                                    "{} {}, {} {}{}{}",
+                                    "{} {}, {} {}{}",
                                     t("已导入", "imported"),
                                     added,
                                     t("跳过", "skipped"),
                                     skipped,
-                                    recovered_secrets_note(recovered),
                                     webdav_status_suffix(fb.accept_invalid_certs)
                                 )
                             }
@@ -5116,16 +5114,15 @@ fn wire_session_callbacks(
                 let res = store.borrow_mut().import_from(&path);
                 if let Some(w) = weak.upgrade() {
                     let hint = match res {
-                        Ok((added, skipped, recovered)) => {
+                            Ok((added, skipped)) => {
                             sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
                             registry.broadcast_config_changed();
                             format!(
-                                "{} {} / {} {}{}",
+                                "{} {} / {} {}",
                                 t("已导入", "imported"),
                                 added,
                                 t("跳过重复", "skipped"),
-                                skipped,
-                                recovered_secrets_note(recovered)
+                                skipped
                             )
                         }
                         Err(e) => format!("{}: {}", t("导入失败", "import failed"), e),

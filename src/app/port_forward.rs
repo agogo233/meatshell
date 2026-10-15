@@ -9,7 +9,7 @@ pub(super) fn blank_forward_draft() -> PortFwd {
         host: "".into(),
         host_port: "".into(),
         auto_start: false,
-        id: String::new(),
+        id: String::new().into(),
     }
 }
 
