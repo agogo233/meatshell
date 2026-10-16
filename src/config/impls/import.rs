@@ -76,13 +76,35 @@ fn read_import(path: &Path) -> Result<String> {
     if bytes.len() > MAX_IMPORT_BYTES {
         bail!("import file exceeds the 16 MiB limit");
     }
-    // Do not attach UTF-8/serde errors: they can quote credential-bearing input.
-    String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("import file must be UTF-8 JSON"))
+    // MobaXterm writes `.mxtsessions` in the system ANSI code page —
+    // Windows-1252 on Western locales, GBK (a superset of GB2312, CP936) on
+    // Simplified-Chinese ones; MeatShell / FinalShell exports are UTF-8.
+    // Decode UTF-8 first, then a byte-pattern-gated GBK pass so Chinese
+    // session names, folder names and key paths survive the import, and only
+    // then fall back to CP1252. Known limitation: a file whose only
+    // non-ASCII content is a single two-byte character still decodes as
+    // CP1252; the pairing gate keeps Western accents safe. Do not attach
+    // decode/serde errors: they can quote credential-bearing input.
+    let raw = match String::from_utf8(bytes) {
+        Ok(raw) => raw,
+        Err(err) => {
+            let bytes = err.into_bytes();
+            ConfigStore::decode_gbk(&bytes)
+                .or_else(|| {
+                    encoding_rs::WINDOWS_1252
+                        .decode_without_bom_handling_and_without_replacement(&bytes)
+                        .map(|value| value.into_owned())
+                })
+                .with_context(|| format!("failed to decode {}", path.display()))?
+        }
+    };
+    Ok(raw)
 }
 
 impl ConfigStore {
-    /// Import a portable MeatShell export, native sessions.json or FinalShell
-    /// connection JSON. Global settings in native files are never imported.
+    /// Import a portable MeatShell export, native sessions.json, a FinalShell
+    /// connection JSON, or a MobaXterm `.mxtsessions` export. Global settings
+    /// in native files are never imported.
     /// Dry-run performs the same parsing/validation without saving or mutating
     /// this store. Existing sessions are never overwritten.
     pub fn import_from_preview(&mut self, path: &Path, dry_run: bool) -> Result<ImportSummary> {
@@ -93,29 +115,37 @@ impl ConfigStore {
         if raw.len() > MAX_IMPORT_BYTES {
             bail!("import file exceeds the 16 MiB limit");
         }
-        let value: serde_json::Value = serde_json::from_str(raw).map_err(|error| {
-            anyhow::anyhow!(
-                "invalid import JSON at line {}, column {}",
-                error.line(),
-                error.column()
-            )
-        })?;
-        let meatshell = value.get("meatshell_export").is_some() || value.get("sessions").is_some();
-        let mut sessions = if meatshell {
-            if let Some(version) = value.get("meatshell_export") {
-                if version.as_u64() != Some(1) {
-                    bail!("unsupported MeatShell export version; expected version 1");
+        let mut sessions = match serde_json::from_str::<serde_json::Value>(raw) {
+            Ok(value)
+                if value.get("meatshell_export").is_some()
+                    || value.get("sessions").is_some() =>
+            {
+                if let Some(version) = value.get("meatshell_export") {
+                    if version.as_u64() != Some(1) {
+                        bail!("unsupported MeatShell export version; expected version 1");
+                    }
+                }
+                serde_json::from_value::<ImportedSessions>(value)
+                    .map_err(|_| anyhow::anyhow!("invalid MeatShell session fields in import file"))?
+                    .sessions
+            }
+            // FinalShell exports are JSON arrays; MobaXterm `.mxtsessions`
+            // files are not JSON at all, so any input without a MeatShell
+            // marker goes through the raw decoders. Their plaintext output
+            // must never be reinterpreted as our enc:* secret format. Parser
+            // errors are dropped: they can quote entry fields (hosts, keys),
+            // so the failure stays generic (#redact).
+            _ => {
+                if let Ok(sessions) = super::super::finalshell::parse_export(raw) {
+                    sessions
+                } else {
+                    super::super::mobaxterm::parse_export(raw).map_err(|_| {
+                        anyhow::anyhow!(
+                            "invalid or unsupported MeatShell, FinalShell or MobaXterm import; check connection fields and password encoding"
+                        )
+                    })?
                 }
             }
-            serde_json::from_value::<ImportedSessions>(value)
-                .map_err(|_| anyhow::anyhow!("invalid MeatShell session fields in import file"))?
-                .sessions
-        } else {
-            // FinalShell's decoder already returns plaintext. Never reinterpret
-            // a coincidental enc:* prefix in that decoded password as our format.
-            super::super::finalshell::parse_export(raw).map_err(|_| {
-                anyhow::anyhow!("invalid or unsupported FinalShell import; check connection fields and password encoding")
-            })?
         };
 
         let mut source_ids = HashSet::new();

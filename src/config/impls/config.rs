@@ -3397,18 +3397,17 @@ mod tests {
         assert!(!raw.contains("s3cr3t"));
         assert!(!raw.contains("p4ss"));
 
-        // Importing into a fresh store recovers the plaintext password and proxy.
-        // Both came from a fixed-key blob, so they are reported as recovered.
+        // Importing into a fresh store recovers the plaintext password and
+        // proxy from the fixed-key blobs.
         let mut b = temp_store();
-        assert_eq!(b.import_from(&export_path).unwrap(), (1, 0, 2));
+        assert_eq!(b.import_from(&export_path).unwrap(), (1, 0));
         assert_eq!(b.cache.sessions.len(), 1);
         assert_eq!(b.cache.sessions[0].password.as_str(), "s3cr3t");
         assert_eq!(b.cache.sessions[0].proxy.as_str(), "socks5://me:p4ss@proxy.corp:1080");
         assert_eq!(b.cache.sessions[0].host, "192.168.100.2");
 
-        // Re-importing the same file skips the duplicate, and a skipped row
-        // does not inflate the recovered count.
-        assert_eq!(b.import_from(&export_path).unwrap(), (0, 1, 0));
+        // Re-importing the same file skips the duplicate.
+        assert_eq!(b.import_from(&export_path).unwrap(), (0, 1));
 
         let _ = std::fs::remove_file(&export_path);
         let _ = std::fs::remove_file(&a.path);
@@ -3497,7 +3496,7 @@ mod tests {
             "terminal_encoding": "UTF-8"
         }"#;
 
-        assert_eq!(store.import_json(raw).unwrap(), (1, 0, 0));
+        assert_eq!(store.import_json(raw).unwrap(), (1, 0));
         let session = &store.cache.sessions[0];
         assert_eq!(session.host, "192.0.2.20");
         assert_eq!(session.user, "operator");
@@ -3528,7 +3527,7 @@ SubRep=Network\r\n\
 ImgNum=41\r\n\
 old-switch=#98#7%10.0.0.1%23%cisco%0%0#15%80%24#0# #-1\r\n";
 
-        assert_eq!(store.import_json(raw).unwrap(), (2, 0, 0));
+        assert_eq!(store.import_json(raw).unwrap(), (2, 0));
         let ssh = &store.cache.sessions[0];
         assert_eq!(ssh.name, "prod-server");
         assert_eq!(ssh.host, "192.0.2.10");
@@ -3553,7 +3552,7 @@ old-switch=#98#7%10.0.0.1%23%cisco%0%0#15%80%24#0# #-1\r\n";
         std::fs::write(&path, &data).unwrap();
 
         let mut store = temp_store();
-        assert_eq!(store.import_from(&path).unwrap(), (1, 0, 0));
+        assert_eq!(store.import_from(&path).unwrap(), (1, 0));
         assert_eq!(store.cache.sessions[0].name, "caf\u{e9}");
         assert_eq!(store.cache.sessions[0].host, "192.0.2.60");
 
@@ -3576,7 +3575,7 @@ SubRep=上海机房\r\n\
         std::fs::write(&path, &data[..]).unwrap();
 
         let mut store = temp_store();
-        assert_eq!(store.import_from(&path).unwrap(), (1, 0, 0));
+        assert_eq!(store.import_from(&path).unwrap(), (1, 0));
         let session = &store.cache.sessions[0];
         assert_eq!(session.name, "生产服务器");
         assert_eq!(session.group, "上海机房");
