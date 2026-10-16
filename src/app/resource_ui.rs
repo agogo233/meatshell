@@ -1,5 +1,7 @@
 use super::*;
-use crate::resource::{LocalGpuInfo, LocalHardwareInfo};
+use crate::resource::LocalHardwareInfo;
+#[cfg(target_os = "windows")]
+use crate::resource::LocalGpuInfo;
 
 pub(super) fn push_ring(buf: &mut Vec<f32>, val: f32) {
     if buf.len() != NET_HISTORY_LEN {

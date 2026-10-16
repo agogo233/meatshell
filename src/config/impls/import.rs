@@ -115,7 +115,10 @@ impl ConfigStore {
         if raw.len() > MAX_IMPORT_BYTES {
             bail!("import file exceeds the 16 MiB limit");
         }
-        let mut sessions = match serde_json::from_str::<serde_json::Value>(raw) {
+        // Each arm also reports whether the sessions came from a MeatShell
+        // export: only those carry `enc:`-sealed secrets that need decryption
+        // here; FinalShell/MobaXterm decoders already return plaintext.
+        let (mut sessions, meatshell) = match serde_json::from_str::<serde_json::Value>(raw) {
             Ok(value)
                 if value.get("meatshell_export").is_some()
                     || value.get("sessions").is_some() =>
@@ -125,9 +128,9 @@ impl ConfigStore {
                         bail!("unsupported MeatShell export version; expected version 1");
                     }
                 }
-                serde_json::from_value::<ImportedSessions>(value)
-                    .map_err(|_| anyhow::anyhow!("invalid MeatShell session fields in import file"))?
-                    .sessions
+                let parsed = serde_json::from_value::<ImportedSessions>(value)
+                    .map_err(|_| anyhow::anyhow!("invalid MeatShell session fields in import file"))?;
+                (parsed.sessions, true)
             }
             // FinalShell exports are JSON arrays; MobaXterm `.mxtsessions`
             // files are not JSON at all, so any input without a MeatShell
@@ -137,13 +140,15 @@ impl ConfigStore {
             // so the failure stays generic (#redact).
             _ => {
                 if let Ok(sessions) = super::super::finalshell::parse_export(raw) {
-                    sessions
+                    (sessions, false)
                 } else {
-                    super::super::mobaxterm::parse_export(raw).map_err(|_| {
-                        anyhow::anyhow!(
-                            "invalid or unsupported MeatShell, FinalShell or MobaXterm import; check connection fields and password encoding"
-                        )
-                    })?
+                    super::super::mobaxterm::parse_export(raw)
+                        .map(|sessions| (sessions, false))
+                        .map_err(|_| {
+                            anyhow::anyhow!(
+                                "invalid or unsupported MeatShell, FinalShell or MobaXterm import; check connection fields and password encoding"
+                            )
+                        })?
                 }
             }
         };

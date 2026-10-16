@@ -127,24 +127,19 @@ impl TermBuffer {
     /// terminal, or reconnects into what is effectively a brand new session,
     /// so a dead tab does not keep a large scrollback allocation alive until
     /// it is closed. Both of those cases *want* a blank screen. A plain
-    /// disconnect does not — see `release_history_keep_screen` below (#451).
+    /// disconnect keeps the history instead — see #f654b61.
     pub(crate) fn release_scrollback(&mut self) {
         let (rows, cols) = self.parser.screen().size();
         self.parser = vt100::Parser::new(rows, cols, 5000);
         self.reset_light_state();
     }
 
-    /// Like `release_scrollback`, but keeps the live screen grid intact
-    /// instead of recreating the parser. Used when a session disconnects
-    /// (#451): the tab stays open for Enter-to-reconnect and a "Disconnected
-    /// — press Enter to reconnect" hint is printed right after this call, so
-    /// it should append to whatever the user was looking at when the
-    /// connection dropped, not land on a screen this call just wiped. Still
-    /// frees the two genuinely unbounded structures — the raw replay stream
-    /// (up to `RAW_CAP`) and rendered scrollback history (up to
-    /// `MAX_HISTORY` lines) — so an idle disconnected tab doesn't keep a
-    /// large allocation alive. The live screen itself is already bounded by
-    /// rows×cols, so keeping it costs nothing.
+    /// Like `release_scrollback`, but keeps the live screen grid and the full
+    /// scrollback history intact instead of recreating the parser. Used when
+    /// a tab is closed (#f654b61 / #451): a plain disconnect now retains the
+    /// history so the user can review what happened before the drop, and the
+    /// live screen itself is already bounded by rows×cols, so keeping it
+    /// costs nothing.
     pub(crate) fn release_history_keep_screen(&mut self) {
         self.reset_light_state();
     }

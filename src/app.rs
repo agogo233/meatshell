@@ -4809,8 +4809,8 @@ fn sync_sessions_for_window(
     }
 }
 
-/// Max rows in the session-dialog jump editor; matches the dialog's own
-/// cap and `draft_jump_ids`' route bound (#211).
+/// Max rows in the session-dialog jump editor; matches the dialog's own cap
+/// (session_dialog.slint) and the route bound in `config::jump_chain` (#211).
 const MAX_JUMP_EDITOR_ROWS: usize = 16;
 
 /// Preserve dangling ids as an unselected row so saving cannot silently go
@@ -4935,7 +4935,7 @@ fn wire_session_callbacks(
             w.set_dialog_forwards(forward_model(&ef_new.borrow()));
             w.set_dialog_triggers(trigger_model(&et_new.borrow()));
             let empty = Session::new_empty();
-            let (jump_labels, jump_ids, jump_idx) =
+            let (jump_labels, jump_ids, _jump_idx) =
                 jump_candidates(&store_ng.borrow(), &empty.id, "");
             w.set_jump_choices(jump_labels);
             w.set_jump_ids(jump_ids);
@@ -5750,6 +5750,7 @@ fn wire_session_callbacks(
                 });
             }
         });
+        let weak = window.as_weak();
         window.on_update_jump(move |index, choice| {
             if let Some(w) = weak.upgrade() {
                 let Some(id) = w.get_jump_ids().row_data(choice.max(0) as usize) else {
@@ -5769,6 +5770,7 @@ fn wire_session_callbacks(
                 });
             }
         });
+        let weak = window.as_weak();
         window.on_delete_jump(move |index| {
             if let Some(w) = weak.upgrade() {
                 update_jump_rows(&w, |rows| {
@@ -5778,6 +5780,7 @@ fn wire_session_callbacks(
                 });
             }
         });
+        let weak = window.as_weak();
         window.on_move_jump(move |from, to| {
             if let Some(w) = weak.upgrade() {
                 update_jump_rows(&w, |rows| move_jump_row(rows, from, to));
@@ -5925,6 +5928,15 @@ fn wire_session_callbacks(
                 rdp_height,
             };
             {
+                // An invalid jump chain (dangling/empty hop) must fail the save
+                // with on-screen feedback instead of persisting a route that
+                // cannot connect (#211). Non-SSH drafts resolve to no hops.
+                if let Err(err) = store.borrow().resolve_jump_chain(&new_session) {
+                    if let Some(w) = weak.upgrade() {
+                        w.set_dialog_test_status(err.to_string().into());
+                    }
+                    return;
+                }
                 let mut s = store.borrow_mut();
                 s.upsert(new_session);
                 if let Err(err) = s.save() {
@@ -9471,5 +9483,34 @@ mod jump_route_tests {
             rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
             ["a", "b", "c"]
         );
+    }
+
+    #[test]
+    fn blank_draft_fields_keep_existing_credentials_inline_secret_reveal() {
+        let mut saved = Session::new_empty();
+        saved.password = Secret::new("fixture-password");
+        saved.private_key_inline = Secret::new("fixture-key");
+        let mut draft = SessionDraft::default();
+        draft.id = saved.id.clone().into();
+        draft.kind = "ssh".into();
+        draft.auth = "key".into();
+        draft.private_key_inline_mode = true;
+        draft.allow_secret_reveal = true;
+        draft.session_log = "on".into();
+        // Blank password/key fields while editing mean "keep the existing
+        // one" (issue #10), and the route comes from the jump rows.
+        draft.jumps = jump_rows(vec!["a".into()], &ModelRc::default());
+        let session = session_from_draft(&draft, Some(&saved), vec![], vec![]);
+        assert_eq!(session.password.as_str(), "fixture-password");
+        assert_eq!(session.private_key_inline.as_str(), "fixture-key");
+        assert_eq!(session.jump_session_ids, ["a"]);
+        assert!(session.allow_secret_reveal);
+        assert_eq!(session.session_log, SessionLogMode::On);
+        // Typed values overwrite the stored ones.
+        draft.password = "replacement".into();
+        draft.private_key_inline = "replacement-key".into();
+        let session = session_from_draft(&draft, Some(&saved), vec![], vec![]);
+        assert_eq!(session.password.as_str(), "replacement");
+        assert_eq!(session.private_key_inline.as_str(), "replacement-key");
     }
 }

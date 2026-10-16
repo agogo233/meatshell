@@ -366,7 +366,7 @@ fn rejects_unknown_export_versions_and_missing_session_array() {
 }
 
 #[test]
-fn file_import_is_bounded_and_requires_regular_utf8_json() {
+fn file_import_is_bounded_and_rejects_non_session_files() {
     let mut store = temp_store();
     let path = std::env::temp_dir().join(format!("ms-import-{}.json", Uuid::new_v4()));
     fs::write(&path, native(vec![session("from-file")])).unwrap();
@@ -383,6 +383,8 @@ fn file_import_is_bounded_and_requires_regular_utf8_json() {
     assert!(store
         .import_json(&" ".repeat(MAX_IMPORT_BYTES + 1))
         .is_err());
+    // ANSI bytes now decode (GBK/CP1252) instead of failing as "not UTF-8",
+    // but this pair carries no parseable session content in any decoder.
     fs::write(&path, [0xff, 0xfe]).unwrap();
     assert!(store.import_from(&path).is_err());
     fs::remove_file(&path).unwrap();
