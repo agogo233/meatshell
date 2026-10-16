@@ -29,12 +29,14 @@ mod terminal_ui;
 mod webdav;
 mod window;
 
-// [upstream] 上游 yituorou 将 app.rs 拆分为 aux_windows/open_window/panes/session_callbacks/
-// settings_callbacks/misc_callbacks/tunnel_callbacks/window_events/key_input/hit_test/file_drop/
-// fonts/helpers/term_output/session_editor/editor_syntax 等子模块；本 fork 保留 app.rs 单文件实现
-// （含本地 dock/ai/sftp/editor 独有逻辑），故不声明这些拆分模块，对应功能由本地版承载。
-// 上游独立新模块 tray 亦未启用：其依赖 core::WindowState.editor_win 字段，需 core.rs 配合扩展，
-// 后续人工决策是否采纳（见合并报告 needs_user_decision）。
+// [upstream] 上游 yituorou 将 app.rs 拆分为 aux_windows/open_window/panes/
+// session_callbacks/settings_callbacks/misc_callbacks/tunnel_callbacks/
+// window_events/key_input/hit_test/file_drop/fonts/helpers/term_output/
+// session_editor/editor_syntax 等子模块；本 fork 保留 app.rs 单文件实现
+// （含本地 dock/ai/sftp/editor 独有逻辑），故不声明这些拆分模块，对应功能
+// 由本地版承载；上游拆分文件已从仓库删除，仅在此留档说明。
+// 上游独立新模块 tray 亦未启用：其依赖 core::WindowState.editor_win 字段，
+// 需 core.rs 配合扩展，后续人工决策是否采纳（见合并报告 needs_user_decision）。
 
 use self::ai::*;
 use self::auth_dialogs::*;
