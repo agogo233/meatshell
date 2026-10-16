@@ -256,11 +256,12 @@ export component SftpPanel inherits Rectangle {
     clip: true;
 
     // Keep the editable path bar in sync when the directory changes elsewhere
-    // (tree click, file double-click, terminal cd) (#54).
+    // (tree click, file double-click, terminal cd) (#54). A one-way `text`
+    // binding breaks as soon as the user types, so re-assign manually here;
+    // also reset the list selection and type-ahead state.
     changed current-path => {
-        // The path fields stay in sync via their own `text` binding (see
-        // path-input / compact-path-input below), so here we only reset the list
-        // selection and type-ahead state when the directory changes (#54).
+        path-input.text = root.current-path;
+        compact-path-input.text = root.current-path;
         root.selected-row = -1;
         root.jump-prefix = "";
         root.jump-target = -1;
