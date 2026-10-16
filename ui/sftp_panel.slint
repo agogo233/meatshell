@@ -256,12 +256,13 @@ export component SftpPanel inherits Rectangle {
     clip: true;
 
     // Keep the editable path bar in sync when the directory changes elsewhere
-    // (tree click, file double-click, terminal cd) (#54). A one-way `text`
-    // binding breaks as soon as the user types, so re-assign manually here;
-    // also reset the list selection and type-ahead state.
+    // (tree click, file double-click, terminal cd) (#54). The per-tier
+    // `Rectangle` bridges below mirror root.current-path into the text fields:
+    // `if`-scoped ids are invisible to this root-level handler, and a one-way
+    // `text` binding breaks as soon as the user types.
     changed current-path => {
-        path-input.text = root.current-path;
-        compact-path-input.text = root.current-path;
+        // Also reset the list selection and type-ahead state when the
+        // directory changes (#54).
         root.selected-row = -1;
         root.jump-prefix = "";
         root.jump-target = -1;
@@ -459,6 +460,12 @@ export component SftpPanel inherits Rectangle {
                         background: Theme.bg-root;
                         border-width: 1px;
                         border-color: path-input.has-focus ? Theme.accent : Theme.border-subtle;
+                        // Mirror directory changes into the editable field: the
+                        // one-way `text` binding below breaks once the user
+                        // types, and ids declared inside `if` branches are not
+                        // visible to the root-level `changed current-path`.
+                        property <string> current-dir: root.current-path;
+                        changed current-dir => { path-input.text = root.current-path; }
                         path-input := TextInput {
                             x: 6px;
                             width: parent.width - 12px;
@@ -825,6 +832,10 @@ export component SftpPanel inherits Rectangle {
                         background: Theme.bg-root;
                         border-width: 1px;
                         border-color: compact-path-input.has-focus ? Theme.accent : Theme.border-subtle;
+                        // Same bridge as the wide tier: keep this field in sync
+                        // with directory changes after the user has typed.
+                        property <string> current-dir: root.current-path;
+                        changed current-dir => { compact-path-input.text = root.current-path; }
                         compact-path-input := TextInput {
                             x: 6px;
                             width: parent.width - 12px;
