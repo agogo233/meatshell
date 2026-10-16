@@ -754,7 +754,7 @@ export component AppWindow inherits Window {
     // Render the welcome/session list as a left sidebar instead of a tab (v0.5).
     in-out property <bool> welcome-as-sidebar: false;
     callback set-welcome-as-sidebar(bool);         // apply + persist
-    in-out property <bool> update-check-enabled: true;   // startup new-version check (#184)
+    in-out property <bool> update-check-enabled: false;  // startup new-version check (#184, off by default for this fork)
     callback set-update-check-enabled(bool);       // apply + persist
     in-out property <bool> mcp-enabled: true;
     in-out property <bool> mcp-use-saved-credentials: true;

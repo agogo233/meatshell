@@ -316,6 +316,12 @@ fn migrate_defaults(cfg: &mut ConfigFile) -> bool {
     {
         cfg.wallpaper_overlay = DEFAULT_WALLPAPER_OVERLAY;
     }
+    // rev 4: turn the startup new-version check off by default. The check
+    // queries the upstream project's releases, which is not meaningful for a
+    // fork; users can still re-enable it from settings.
+    if cfg.defaults_rev < 4 {
+        cfg.update_check_disabled = true;
+    }
     cfg.defaults_rev = DEFAULTS_REV;
     true
 }
