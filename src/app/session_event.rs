@@ -103,14 +103,13 @@ pub(super) fn apply_session_event_to_window(
             }
         }
         SessionEvent::Closed(reason) => {
-            // A disconnected tab remains open for Enter-to-reconnect, but it
-            // must not retain the old firehose scrollback while idle. Keep the
-            // tab, its status, and the currently visible screen; only release
-            // the raw replay stream and deep history, then append the
-            // reconnect hint below onto what was already on screen (#451).
+            // A disconnected tab remains open for Enter-to-reconnect with its
+            // full scrollback intact, so the user can review what happened
+            // before the drop; history is only released when the tab itself
+            // is closed (#f654b61). Append the reconnect hint below onto
+            // what was already on screen.
             if let Some(h) = crate::app::term_buf(bufs, tab_id) {
                 let mut b = lock_or_recover(&h);
-                b.release_history_keep_screen();
                 if let Some(log) = b.session_log.as_mut() {
                     log.note(&format!("disconnected: {reason}"));
                 }
