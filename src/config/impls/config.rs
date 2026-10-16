@@ -2768,6 +2768,7 @@ mod tests {
             path,
             backup_dir: None,
             cache: fresh_config(),
+            disk_snapshot: std::cell::RefCell::new(None),
             key: [7u8; 32],
             lost_secrets: 0,
             recovered_secrets: 0,
@@ -3960,6 +3961,7 @@ mod profile_safety_tests {
             path: dir.join("sessions.json"), backup_dir: None,
             cache: ConfigFile::default(), key: [1; 32],
             disk_snapshot: std::cell::RefCell::new(None),
+            lost_secrets: 0, recovered_secrets: 0,
         };
         current.cache.sessions.push(Session::new_empty());
         current.save().unwrap();
@@ -3967,6 +3969,7 @@ mod profile_safety_tests {
             path: current.path.clone(), backup_dir: None,
             cache: current.cache.clone(), key: current.key,
             disk_snapshot: std::cell::RefCell::new(current.disk_snapshot.borrow().clone()),
+            lost_secrets: 0, recovered_secrets: 0,
         };
         current.cache.sessions.push(Session::new_empty());
         current.save().unwrap();

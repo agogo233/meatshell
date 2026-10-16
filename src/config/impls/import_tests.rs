@@ -464,7 +464,9 @@ fn literal_encryption_prefix_stays_protected_across_load_and_ordinary_saves() {
         // without ever resolving or writing the process-global user profile.
         let mut loaded: ConfigFile = serde_json::from_str(&raw).unwrap();
         assert!(loaded.sessions[0].password.is_local_ciphertext());
-        ConfigStore::decrypt_local_secrets(&store.key, &mut loaded);
+        let mut lost = 0;
+        let mut recovered = 0;
+        ConfigStore::open_config_secrets(&store.key, &mut loaded, &mut lost, &mut recovered);
         for secret in [
             &loaded.sessions[0].password,
             &loaded.sessions[0].private_key_inline,
@@ -487,7 +489,9 @@ fn saving_import_preserves_undecodable_existing_local_ciphertext() {
     let mut store = temp_store();
     store.cache = serde_json::from_str(&native(vec![session("existing")])).unwrap();
     store.cache.sessions[0].password = serde_json::from_value(serde_json::json!(opaque)).unwrap();
-    ConfigStore::decrypt_local_secrets(&store.key, &mut store.cache);
+    let mut lost = 0;
+    let mut recovered = 0;
+    ConfigStore::open_config_secrets(&store.key, &mut store.cache, &mut lost, &mut recovered);
     assert!(store.cache.sessions[0].password.is_local_ciphertext());
     assert_eq!(
         store.import_json(&native(vec![session("new")])).unwrap(),
@@ -512,7 +516,7 @@ fn same_endpoint_profiles_preserve_names_auth_credentials_proxy_and_routes() {
             1 => alias.group = "Different group".into(),
             2 => alias.auth = super::super::AuthMethod::Key,
             3 => alias.password = Secret::new("different-synthetic-password"),
-            4 => alias.proxy = "socks5://127.0.0.1:1080".into(),
+            4 => alias.proxy = Secret::new("socks5://127.0.0.1:1080"),
             _ => alias.jump_session_ids = vec!["hop".into()],
         }
         aliases.push(alias);

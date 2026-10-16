@@ -4,6 +4,8 @@ pub(crate) mod system;
 mod system_types;
 
 pub(crate) use system_types::{
-    LocalGpuInfo, LocalHardwareInfo, LocalSnap, NetHist, SystemSampler, SystemSnapshot, TabStatus,
+    #[cfg(target_os = "windows")]
+    LocalGpuInfo,
+    LocalHardwareInfo, LocalSnap, NetHist, SystemSampler, SystemSnapshot, TabStatus,
     TabStatuses,
 };
