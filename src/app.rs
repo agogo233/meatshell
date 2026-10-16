@@ -4807,6 +4807,49 @@ fn sync_sessions_for_window(
     }
 }
 
+/// Max rows in the session-dialog jump editor; matches the dialog's own
+/// cap and `draft_jump_ids`' route bound (#211).
+const MAX_JUMP_EDITOR_ROWS: usize = 16;
+
+/// Preserve dangling ids as an unselected row so saving cannot silently go
+/// direct: an id that no longer exists renders as row 0 ("no jump host")
+/// and fails validation instead of dropping the hop.
+fn jump_rows(ids: Vec<String>, choices: &ModelRc<SharedString>) -> ModelRc<JumpHop> {
+    ModelRc::from(Rc::new(VecModel::from(
+        ids.into_iter()
+            .map(|id| {
+                let choice = choices
+                    .iter()
+                    .position(|value| value.as_str() == id)
+                    .map(|index| index as i32)
+                    .unwrap_or(0);
+                JumpHop {
+                    id: id.into(),
+                    choice,
+                    placeholder: false,
+                }
+            })
+            .collect::<Vec<_>>(),
+    )))
+}
+
+/// Apply an edit to the dialog's jump rows, refreshing the model and clearing
+/// any stale "test connection" status the edit invalidates.
+fn update_jump_rows(window: &AppWindow, update: impl FnOnce(&mut Vec<JumpHop>)) {
+    let mut rows = window.get_dialog_jumps().iter().collect::<Vec<_>>();
+    update(&mut rows);
+    window.set_dialog_jumps(ModelRc::from(Rc::new(VecModel::from(rows))));
+    window.set_dialog_test_status("".into());
+}
+
+/// Reorder jump rows by drag-and-drop; out-of-range indices are ignored.
+fn move_jump_row(rows: &mut Vec<JumpHop>, from: i32, to: i32) {
+    if from >= 0 && to >= 0 && (from as usize) < rows.len() && (to as usize) < rows.len() {
+        let row = rows.remove(from as usize);
+        rows.insert(to as usize, row);
+    }
+}
+
 /// Parse the batch-import textarea (#150). Each non-empty, non-`#` line is
 /// `host|port|user|password|name`; trailing fields are optional (port → 22,
 /// user → root, password → none, name → user@host). A leading header row such as
@@ -4894,6 +4937,7 @@ fn wire_session_callbacks(
                 jump_candidates(&store_ng.borrow(), &empty.id, "");
             w.set_jump_choices(jump_labels);
             w.set_jump_ids(jump_ids);
+            w.set_dialog_jumps(ModelRc::default());
             w.set_dialog_id(empty.id.into());
             w.set_dialog_name("".into());
             w.set_dialog_host("".into());
@@ -5353,6 +5397,24 @@ fn wire_session_callbacks(
                 w.set_dialog_proxy_hostport(proxy_hostport.into());
                 let (jump_labels, jump_ids, _) =
                     jump_candidates(&store, &session.id, &session.jump_session_id);
+                // Backfill the jump editor from the saved route. A resolvable
+                // chain shows one row per hop (immediate first); a broken
+                // route shows a test error and, when only the legacy single
+                // hop is set, forces an explicit repair instead of silently
+                // flattening it (#211).
+                let route = store.resolve_jump_chain(session);
+                let ids = match route {
+                    Ok(hops) => hops.into_iter().rev().map(|hop| hop.id).collect(),
+                    Err(err) => {
+                        w.set_dialog_test_status(err.to_string().into());
+                        if session.jump_session_ids.is_empty() {
+                            vec![String::new(), session.jump_session_id.clone()]
+                        } else {
+                            session.jump_session_ids.clone()
+                        }
+                    }
+                };
+                w.set_dialog_jumps(jump_rows(ids, &jump_ids));
                 w.set_jump_choices(jump_labels);
                 w.set_jump_ids(jump_ids);
                 w.set_dialog_group(session.group.clone().into());
@@ -5669,6 +5731,58 @@ fn wire_session_callbacks(
         });
     }
 
+    // Jump-chain editor rows in the session dialog (#211): add / update /
+    // delete / move. Rows hold the chosen id + dropdown choice; saving maps
+    // them back to `jump_session_ids` (see submit / `session_from_draft`).
+    {
+        let weak = window.as_weak();
+        window.on_add_jump(move || {
+            if let Some(w) = weak.upgrade() {
+                update_jump_rows(&w, |rows| {
+                    if rows.len() < MAX_JUMP_EDITOR_ROWS {
+                        rows.push(JumpHop {
+                            placeholder: true,
+                            ..JumpHop::default()
+                        });
+                    }
+                });
+            }
+        });
+        window.on_update_jump(move |index, choice| {
+            if let Some(w) = weak.upgrade() {
+                let Some(id) = w.get_jump_ids().row_data(choice.max(0) as usize) else {
+                    return;
+                };
+                update_jump_rows(&w, |rows| {
+                    if index >= 0 {
+                        if let Some(row) = rows.get_mut(index as usize) {
+                            let placeholder = row.placeholder && id.trim().is_empty();
+                            *row = JumpHop {
+                                id,
+                                choice,
+                                placeholder,
+                            };
+                        }
+                    }
+                });
+            }
+        });
+        window.on_delete_jump(move |index| {
+            if let Some(w) = weak.upgrade() {
+                update_jump_rows(&w, |rows| {
+                    if index >= 0 && (index as usize) < rows.len() {
+                        rows.remove(index as usize);
+                    }
+                });
+            }
+        });
+        window.on_move_jump(move |from, to| {
+            if let Some(w) = weak.upgrade() {
+                update_jump_rows(&w, |rows| move_jump_row(rows, from, to));
+            }
+        });
+    }
+
     // Dialog submit -> persist + (optionally) connect.
     {
         let weak = window.as_weak();
@@ -5748,6 +5862,15 @@ fn wire_session_callbacks(
                 draft.rdp_width,
                 draft.rdp_height,
             );
+            // Immediate jump first; only SSH sessions carry a jump chain
+            // (#211). Fresh unselected editor rows stay out of the route.
+            let jump_session_ids = if kind == crate::config::SessionKind::Ssh {
+                crate::config::draft_jump_ids(
+                    draft.jumps.iter().map(|hop| (hop.id.to_string(), hop.placeholder)),
+                )
+            } else {
+                Vec::new()
+            };
             let new_session = Session {
                 id,
                 name: if draft.name.is_empty() {
@@ -5792,7 +5915,7 @@ fn wire_session_callbacks(
                 note: draft.note.to_string(),
                 jump_session_id: String::new(),
                 allow_secret_reveal: draft.allow_secret_reveal,
-                jump_session_ids: Vec::new(),
+                jump_session_ids,
                 mcp_access: draft.allow_mcp_access,
                 rdp_domain: draft.rdp_domain.to_string(),
                 rdp_fullscreen,
@@ -9273,3 +9396,78 @@ mod log_highlight_tests;
 #[cfg(test)]
 #[path = "../tests/app/text_editor/mod.rs"]
 mod text_editor_tests;
+
+#[cfg(test)]
+mod jump_route_tests {
+    use super::*;
+
+    #[test]
+    fn session_from_draft_saves_the_jump_chain_and_clears_empty_rows() {
+        let saved = Session::new_empty();
+        let mut draft = SessionDraft::default();
+        draft.id = saved.id.clone().into();
+        draft.kind = "ssh".into();
+        draft.jumps = jump_rows(vec!["a".into(), "b".into()], &ModelRc::default());
+        let session = session_from_draft(&draft, Some(&saved), vec![], vec![]);
+        assert_eq!(session.jump_session_ids, ["a", "b"]);
+        assert!(session.jump_session_id.is_empty());
+        // An SSH route with no selected rows stays direct.
+        draft.jumps = ModelRc::default();
+        let session = session_from_draft(&draft, Some(&saved), vec![], vec![]);
+        assert!(session.jump_session_ids.is_empty());
+    }
+
+    #[test]
+    fn non_ssh_drafts_never_carry_a_jump_chain() {
+        let saved = Session::new_empty();
+        let mut draft = SessionDraft::default();
+        draft.id = saved.id.clone().into();
+        draft.kind = "telnet".into();
+        draft.jumps = jump_rows(vec!["a".into()], &ModelRc::default());
+        let session = session_from_draft(&draft, Some(&saved), vec![], vec![]);
+        assert!(session.jump_session_ids.is_empty());
+    }
+
+    #[test]
+    fn dangling_jump_row_stays_unselected_so_saving_cannot_go_direct() {
+        let choices = ModelRc::from(Rc::new(VecModel::from(vec!["".into(), "a".into()])));
+        let rows = jump_rows(vec!["missing".into(), "a".into()], &choices);
+        assert_eq!(rows.row_data(0).unwrap().id, "missing");
+        assert_eq!(rows.row_data(0).unwrap().choice, 0);
+        assert_eq!(rows.row_data(1).unwrap().choice, 1);
+    }
+
+    #[test]
+    fn move_jump_row_reorders_and_ignores_invalid_indices() {
+        let mut rows = vec![
+            JumpHop {
+                id: "a".into(),
+                ..JumpHop::default()
+            },
+            JumpHop {
+                id: "b".into(),
+                ..JumpHop::default()
+            },
+            JumpHop {
+                id: "c".into(),
+                ..JumpHop::default()
+            },
+        ];
+        move_jump_row(&mut rows, 0, 2);
+        assert_eq!(
+            rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["b", "c", "a"]
+        );
+        move_jump_row(&mut rows, 2, 0);
+        assert_eq!(
+            rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["a", "b", "c"]
+        );
+        move_jump_row(&mut rows, -1, 1);
+        move_jump_row(&mut rows, 0, 3);
+        assert_eq!(
+            rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["a", "b", "c"]
+        );
+    }
+}

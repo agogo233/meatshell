@@ -500,7 +500,13 @@ pub(super) fn session_from_draft(
         note: draft.note.to_string(),
         jump_session_id: String::new(),
         allow_secret_reveal: draft.allow_secret_reveal,
-        jump_session_ids: Vec::new(),
+        jump_session_ids: if kind == SessionKind::Ssh {
+            crate::config::draft_jump_ids(
+                draft.jumps.iter().map(|hop| (hop.id.to_string(), hop.placeholder)),
+            )
+        } else {
+            Vec::new()
+        },
         mcp_access: draft.allow_mcp_access,
         rdp_domain: draft.rdp_domain.to_string(),
         rdp_fullscreen,
