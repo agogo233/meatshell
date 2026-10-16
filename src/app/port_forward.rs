@@ -102,14 +102,16 @@ pub(super) fn validated_port_forwards(
         };
 
         forwards.push(crate::config::PortForward {
+            // Editing an existing rule must keep its id so saves update it
+            // instead of appending a duplicate (matches upstream).
+            id: draft.id.to_string(),
             kind: kind.to_string(),
             name: draft.name.trim().to_string(),
             bind_addr,
             bind_port,
             host,
             host_port,
-            auto_start: false,
-            id: uuid::Uuid::new_v4().to_string(),
+            auto_start: draft.auto_start,
         });
     }
     Ok(forwards)

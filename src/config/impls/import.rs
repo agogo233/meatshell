@@ -175,6 +175,8 @@ impl ConfigStore {
             if meatshell {
                 self.decode_import_secret(&mut session.password, index, "password")?;
                 self.decode_import_secret(&mut session.private_key_inline, index, "private key")?;
+                // Portable exports seal the SOCKS/HTTP proxy credentials too.
+                self.decode_import_secret(&mut session.proxy, index, "proxy")?;
                 for trigger in &mut session.triggers {
                     self.decode_import_secret(&mut trigger.response, index, "trigger response")?;
                 }

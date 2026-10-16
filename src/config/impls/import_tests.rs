@@ -488,10 +488,9 @@ fn saving_import_preserves_undecodable_existing_local_ciphertext() {
     let opaque = "enc:v1:synthetic-unknown-key-ciphertext";
     let mut store = temp_store();
     store.cache = serde_json::from_str(&native(vec![session("existing")])).unwrap();
+    // A blob the current key cannot open stays as-is in the profile; importing
+    // other sessions must never rewrite or drop it.
     store.cache.sessions[0].password = serde_json::from_value(serde_json::json!(opaque)).unwrap();
-    let mut lost = 0;
-    let mut recovered = 0;
-    ConfigStore::open_config_secrets(&store.key, &mut store.cache, &mut lost, &mut recovered);
     assert!(store.cache.sessions[0].password.is_local_ciphertext());
     assert_eq!(
         store.import_json(&native(vec![session("new")])).unwrap(),
