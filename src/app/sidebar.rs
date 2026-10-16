@@ -211,7 +211,7 @@ pub(super) fn refresh_sidebar(
                 down: format_bytes_per_sec(snap.net_rx_per_sec).into(),
             }],
             Vec::new(),
-            SystemDetails::default(),
+            local_system_details(&snap),
         );
     };
     win.set_proc_available(false);

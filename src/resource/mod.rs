@@ -4,5 +4,6 @@ pub(crate) mod system;
 mod system_types;
 
 pub(crate) use system_types::{
-    LocalSnap, NetHist, SystemSampler, SystemSnapshot, TabStatus, TabStatuses,
+    LocalGpuInfo, LocalHardwareInfo, LocalSnap, NetHist, SystemSampler, SystemSnapshot, TabStatus,
+    TabStatuses,
 };

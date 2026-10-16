@@ -1,4 +1,5 @@
 use super::*;
+use crate::resource::{LocalGpuInfo, LocalHardwareInfo};
 
 pub(super) fn push_ring(buf: &mut Vec<f32>, val: f32) {
     if buf.len() != NET_HISTORY_LEN {
@@ -295,4 +296,341 @@ pub(super) fn place_process_window(main: &AppWindow, process: &ProcWindow) {
     let x = origin.x + monitor_size.width.saturating_sub(window_size.width) as i32 / 2;
     let y = origin.y + monitor_size.height.saturating_sub(window_size.height) as i32 / 2;
     process.window().set_position(slint::PhysicalPosition::new(x, y));
+}
+
+/// Blank cells render as "-" so the overview grid keeps its column widths.
+pub(super) fn nonempty_or_dash(value: impl Into<String>) -> String {
+    let value = value.into();
+    if value.trim().is_empty() {
+        "-".to_string()
+    } else {
+        value
+    }
+}
+
+/// Sample the local machine's hardware once (sysinfo) and cache it; the
+/// Windows GPU probe runs in the same init so it never repeats.
+pub(super) fn local_hardware_info() -> &'static LocalHardwareInfo {
+    static INFO: std::sync::OnceLock<LocalHardwareInfo> = std::sync::OnceLock::new();
+    INFO.get_or_init(|| {
+        let mut sys = sysinfo::System::new_all();
+        sys.refresh_all();
+        let first_cpu = sys.cpus().first();
+        let mut info = LocalHardwareInfo {
+            os: sysinfo::System::long_os_version()
+                .or_else(sysinfo::System::name)
+                .unwrap_or_else(|| std::env::consts::OS.to_string()),
+            kernel: sysinfo::System::name().unwrap_or_else(|| std::env::consts::FAMILY.to_string()),
+            kernel_version: sysinfo::System::kernel_version().unwrap_or_default(),
+            arch: std::env::consts::ARCH.to_string(),
+            hostname: sysinfo::System::host_name().unwrap_or_default(),
+            cpu_name: first_cpu
+                .map(|cpu| cpu.brand().to_string())
+                .unwrap_or_default(),
+            cpu_vendor: first_cpu
+                .map(|cpu| cpu.vendor_id().to_string())
+                .unwrap_or_default(),
+            cpu_cores: sys.cpus().len().to_string(),
+            cpu_frequency: first_cpu
+                .map(|cpu| {
+                    let mhz = cpu.frequency();
+                    if mhz == 0 {
+                        String::new()
+                    } else if mhz >= 1000 {
+                        format!("{:.2} GHz", mhz as f64 / 1000.0)
+                    } else {
+                        format!("{mhz} MHz")
+                    }
+                })
+                .unwrap_or_default(),
+            ..Default::default()
+        };
+        fill_local_gpu_info(&mut info);
+        info
+    })
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn fill_local_gpu_info(info: &mut LocalHardwareInfo) {
+    let output = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            "$controllers = @(Get-CimInstance Win32_VideoController | Select-Object Name,AdapterCompatibility,DriverVersion,AdapterRAM); $regs = @(Get-ChildItem 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}' -ErrorAction SilentlyContinue | ForEach-Object { $p = Get-ItemProperty $_.PsPath -ErrorAction SilentlyContinue; if ($p.DriverDesc) { [pscustomobject]@{ Name=$p.DriverDesc; Vendor=$p.ProviderName; Driver=$p.DriverVersion; Memory=$p.'HardwareInformation.qwMemorySize' } } }); [pscustomobject]@{ Controllers=$controllers; Registry=$regs } | ConvertTo-Json -Compress -Depth 4",
+        ])
+        .output();
+    let Ok(output) = output else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text.trim()) else {
+        return;
+    };
+    let registry_values = value.get("Registry").map(json_values).unwrap_or_default();
+    let controller_values = value
+        .get("Controllers")
+        .map(json_values)
+        .unwrap_or_else(|| json_values(&value));
+    let registry_gpus: Vec<LocalGpuInfo> = registry_values
+        .iter()
+        .filter_map(gpu_from_registry_json)
+        .collect();
+    info.gpus = controller_values
+        .iter()
+        .filter_map(|gpu| {
+            let get_str = |key: &str| {
+                gpu.get(key)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string()
+            };
+            let name = get_str("Name");
+            if name.is_empty() {
+                return None;
+            }
+            let matched = registry_gpus
+                .iter()
+                .find(|item| item.name.eq_ignore_ascii_case(&name))
+                .or_else(|| {
+                    registry_gpus
+                        .iter()
+                        .find(|item| !item.name.is_empty() && name.contains(&item.name))
+                });
+            Some(LocalGpuInfo {
+                name,
+                vendor: nonempty_prefer(
+                    matched.map(|item| item.vendor.as_str()).unwrap_or_default(),
+                    &get_str("AdapterCompatibility"),
+                ),
+                driver: nonempty_prefer(
+                    matched.map(|item| item.driver.as_str()).unwrap_or_default(),
+                    &get_str("DriverVersion"),
+                ),
+                memory: nonempty_prefer(
+                    matched.map(|item| item.memory.as_str()).unwrap_or_default(),
+                    &gpu.get("AdapterRAM")
+                        .and_then(|v| v.as_u64())
+                        .filter(|bytes| *bytes > 0)
+                        .map(format_size)
+                        .unwrap_or_default(),
+                ),
+            })
+        })
+        .collect();
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn json_values(value: &serde_json::Value) -> Vec<serde_json::Value> {
+    if let Some(items) = value.as_array() {
+        items.clone()
+    } else if value.is_null() {
+        Vec::new()
+    } else {
+        vec![value.clone()]
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn nonempty_prefer(primary: &str, fallback: &str) -> String {
+    if primary.trim().is_empty() {
+        fallback.trim().to_string()
+    } else {
+        primary.trim().to_string()
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn gpu_from_registry_json(gpu: &serde_json::Value) -> Option<LocalGpuInfo> {
+    let get_str = |key: &str| {
+        gpu.get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    };
+    let name = get_str("Name");
+    if name.is_empty() {
+        return None;
+    }
+    Some(LocalGpuInfo {
+        name,
+        vendor: get_str("Vendor"),
+        driver: get_str("Driver"),
+        memory: gpu
+            .get("Memory")
+            .and_then(|v| {
+                v.as_u64().or_else(|| {
+                    v.as_array().and_then(|bytes| {
+                        let mut raw = [0u8; 8];
+                        let mut any = false;
+                        for (idx, b) in bytes.iter().take(8).enumerate() {
+                            if let Some(n) = b.as_u64() {
+                                raw[idx] = n as u8;
+                                any = true;
+                            }
+                        }
+                        any.then(|| u64::from_le_bytes(raw))
+                    })
+                })
+            })
+            .filter(|bytes| *bytes > 0)
+            .map(format_size)
+            .unwrap_or_default(),
+    })
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(super) fn fill_local_gpu_info(_info: &mut LocalHardwareInfo) {}
+
+/// Assemble the local machine's system-information rows (OS/kernel/CPU/GPU)
+/// for the sidebar + detached window of local shell tabs.
+pub(super) fn local_system_details(snap: &SystemSnapshot) -> SystemDetails {
+    let mem_used = snap.mem_used_mib.saturating_mul(1024 * 1024);
+    let mem_total = snap.mem_total_mib.saturating_mul(1024 * 1024);
+    let swap_used = snap.swap_used_mib.saturating_mul(1024 * 1024);
+    let swap_total = snap.swap_total_mib.saturating_mul(1024 * 1024);
+    let info = local_hardware_info();
+    SystemDetails {
+        overview: vec![
+            (
+                t("操作系统", "Operating system").to_string(),
+                nonempty_or_dash(&info.os),
+            ),
+            (
+                t("内核版本", "Kernel version").to_string(),
+                nonempty_or_dash(&info.kernel_version),
+            ),
+            (
+                t("主机名称", "Hostname").to_string(),
+                nonempty_or_dash(&info.hostname),
+            ),
+            (
+                t("内核", "Kernel").to_string(),
+                nonempty_or_dash(&info.kernel),
+            ),
+            (
+                t("硬件架构", "Architecture").to_string(),
+                nonempty_or_dash(&info.arch),
+            ),
+            (
+                t("连接", "Connection").to_string(),
+                t("本机", "Local").to_string(),
+            ),
+        ],
+        cpu_info: vec![
+            (
+                t("名称", "Name").to_string(),
+                nonempty_or_dash(&info.cpu_name),
+            ),
+            (
+                t("核心数", "Cores").to_string(),
+                nonempty_or_dash(&info.cpu_cores),
+            ),
+            (
+                t("频率", "Frequency").to_string(),
+                nonempty_or_dash(&info.cpu_frequency),
+            ),
+            (t("缓存", "Cache").to_string(), "-".to_string()),
+            ("BogoMips".to_string(), nonempty_or_dash(&info.cpu_vendor)),
+        ],
+        gpu_info: info
+            .gpus
+            .iter()
+            .flat_map(|gpu| {
+                [
+                    (t("名称", "Name").to_string(), nonempty_or_dash(&gpu.name)),
+                    (
+                        t("厂商", "Vendor").to_string(),
+                        nonempty_or_dash(&gpu.vendor),
+                    ),
+                    (
+                        t("驱动", "Driver").to_string(),
+                        nonempty_or_dash(&gpu.driver),
+                    ),
+                    (
+                        t("内存", "Memory").to_string(),
+                        nonempty_or_dash(&gpu.memory),
+                    ),
+                ]
+            })
+            .collect(),
+        cpu_usage: vec![
+            (
+                t("用户", "User").to_string(),
+                format!("{:.1}%", snap.cpu_percent * 100.0),
+            ),
+            ("Nice".to_string(), "-".to_string()),
+            (t("系统", "System").to_string(), "-".to_string()),
+            (t("空闲", "Idle").to_string(), "-".to_string()),
+        ],
+        memory: vec![
+            (
+                t("总计", "Total").to_string(),
+                format_size(mem_total),
+            ),
+            (
+                t("已使用", "Used").to_string(),
+                format_size(mem_used),
+            ),
+            (
+                t("剩余", "Free").to_string(),
+                format_size(mem_total.saturating_sub(mem_used)),
+            ),
+            (
+                t("已用", "Usage").to_string(),
+                format!("{:.1}%", snap.mem_percent * 100.0),
+            ),
+            (t("缓存", "Cached").to_string(), "-".to_string()),
+        ],
+        swap: vec![
+            (
+                t("总计", "Total").to_string(),
+                format_size(swap_total),
+            ),
+            (
+                t("已使用", "Used").to_string(),
+                format_size(swap_used),
+            ),
+            (
+                t("剩余", "Free").to_string(),
+                format_size(swap_total.saturating_sub(swap_used)),
+            ),
+            (
+                t("已用", "Usage").to_string(),
+                format!("{:.1}%", snap.swap_percent * 100.0),
+            ),
+        ],
+        networks: vec![(
+            t("本机", "Local").to_string(),
+            "-".to_string(),
+            "-".to_string(),
+            format_bytes_per_sec(snap.net_tx_per_sec),
+            format_bytes_per_sec(snap.net_rx_per_sec),
+        )],
+        filesystems: snap
+            .disks
+            .iter()
+            .map(|(mount, avail, total)| {
+                let used = total.saturating_sub(*avail);
+                let pct = if *total == 0 {
+                    "-".to_string()
+                } else {
+                    format!("{:.1}%", used as f64 * 100.0 / *total as f64)
+                };
+                (
+                    mount.clone(),
+                    format_size(*total),
+                    pct,
+                    format_size(*avail),
+                    mount.clone(),
+                )
+            })
+            .collect(),
+    }
 }
