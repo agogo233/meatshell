@@ -616,7 +616,7 @@ export component SftpPanel inherits Rectangle {
                 if root.panel-mode == "files" && !root.tight-toolbar : Rectangle {
                     // The tight tiers fold upload into the "…" menu so bookmarks
                     // and parent navigation stay visible (#sftp-tight-toolbar).
-                    // Narrow shows the Material Icons file_upload glyph (E9C1,
+                    // Narrow shows the Material Icons file_upload glyph (E2C6,
                     // the pair of the row's file_download) with a narrow-only
                     // font swap — the default UI font (Microsoft YaHei on
                     // Windows) has no ⇪-style arrow-with-bar, and it must not
@@ -628,7 +628,7 @@ export component SftpPanel inherits Rectangle {
                         mouse-cursor: pointer;
                         clicked => { ul-menu.show(); }
                     }
-                    Text { text: root.narrow-toolbar ? "\u{E9C1}" : @tr("Upload"); font-size: Theme.fs-sm;
+                    Text { text: root.narrow-toolbar ? "\u{E2C6}" : @tr("Upload"); font-size: Theme.fs-sm;
                            font-family: root.narrow-toolbar ? "Material Icons" : Theme.ui-font-family;
                            color: #ffffff;
                            horizontal-alignment: center; vertical-alignment: center; }
