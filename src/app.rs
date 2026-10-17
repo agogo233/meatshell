@@ -9412,6 +9412,10 @@ mod log_highlight_tests;
 mod text_editor_tests;
 
 #[cfg(test)]
+#[path = "../tests/app/modal_layers.rs"]
+mod modal_layers_tests;
+
+#[cfg(test)]
 mod jump_route_tests {
     use super::*;
 
