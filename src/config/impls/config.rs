@@ -666,6 +666,10 @@ impl ConfigStore {
         let key = Self::load_or_create_key(&config_dir)?;
 
         let mut migrated = false;
+        // Original on-disk file kept aside when some encrypted secrets cannot
+        // be opened (a regenerated `secret.key`): the cache clears those
+        // values, so the next save would erase the only copy of them.
+        let mut pre_rekey: Option<String> = None;
         // Secrets that carried our encryption prefix but could not be opened
         // with the current key (a regenerated `secret.key`); surfaced once to
         // the user instead of silently becoming literal passwords.
@@ -687,6 +691,9 @@ impl ConfigStore {
                         &mut lost_secrets,
                         &mut recovered_secrets,
                     );
+                    if lost_secrets > 0 {
+                        pre_rekey = Some(raw.clone());
+                    }
                     // Give legacy port forwards a stable id so the runtime can
                     // start/stop them individually.
                     for session in &mut cfg.sessions {
@@ -728,6 +735,12 @@ impl ConfigStore {
             recovered_secrets,
         };
         drop(load_lock);
+        // If any secret could not be opened, the save below may overwrite the
+        // original encrypted blobs with the cleared values; keep an archive so
+        // they stay recoverable if the old key turns up later.
+        if let Some(original) = pre_rekey {
+            Self::archive_pre_rekey(&store.path, &original);
+        }
         // Persist the migration so it runs exactly once (and so a later opt-out —
         // e.g. turning the welcome sidebar back off — isn't reverted next launch).
         // The recovered fixed-key blobs ride along: the cache now holds plain
@@ -739,6 +752,20 @@ impl ConfigStore {
             }
         }
         Ok(store)
+    }
+
+    /// Archive the original on-disk configuration next to it
+    /// (`sessions.json.pre-rekey`) before the cleared cache overwrites it.
+    /// Best effort — an unwritable backup still loses nothing beyond what the
+    /// overwrite itself would lose.
+    fn archive_pre_rekey(path: &Path, original: &str) {
+        let backup = path.with_extension("json.pre-rekey");
+        if let Err(e) = fs::write(&backup, original) {
+            tracing::warn!(
+                "failed to archive undecodable secrets to {}: {e}",
+                backup.display()
+            );
+        }
     }
 
     fn config_path() -> Result<PathBuf> {
@@ -3990,6 +4017,26 @@ mod profile_safety_tests {
         fs::write(dir.join("secret.key"), b"broken").unwrap();
         assert!(ConfigStore::load_or_create_key(&dir).is_err());
         assert_eq!(fs::read(dir.join("secret.key")).unwrap(), b"broken");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pre_rekey_archive_copies_the_original_blobs_verbatim() {
+        let dir = std::env::temp_dir().join(format!("ms-rekey-archive-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sessions.json");
+        let original = r#"{"password":"enc:v1:fixture"}"#;
+        fs::write(&path, original).unwrap();
+        ConfigStore::archive_pre_rekey(&path, original);
+        assert_eq!(
+            fs::read_to_string(dir.join("sessions.json.pre-rekey")).unwrap(),
+            original,
+            "the archive must keep the original encrypted blobs"
+        );
+        // A failed backup (unwritable location) must not take the load down
+        // with it — it only logs.
+        let missing_parent = dir.join("no-such-dir").join("sessions.json");
+        ConfigStore::archive_pre_rekey(&missing_parent, original);
         let _ = fs::remove_dir_all(dir);
     }
 
