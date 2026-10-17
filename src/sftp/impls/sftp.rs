@@ -1914,25 +1914,30 @@ fn available_download_path(requested: &Path) -> PathBuf {
 /// local [`available_download_path`] numbering. Bounded at 100 probes so a
 /// pathological server can't spin us; the last candidate is returned as-is.
 async fn available_remote_path(sftp: &SftpSession, requested: &str) -> String {
-    let (stem, extension) = match requested.rsplit_once('.') {
-        Some((stem, ext)) if !stem.is_empty() && !ext.contains('/') => {
-            (stem.to_string(), Some(ext.to_string()))
-        }
-        _ => (requested.to_string(), None),
+    // Number only the file name: `requested` carries a directory prefix, and
+    // the extension belongs to the name alone (not to a directory like
+    // `backup.dir`). The split mirrors std's `file_stem`/`extension` on the
+    // local side of [`available_download_path`]: a dot leading the name
+    // (`.bashrc`) is not an extension separator.
+    let (prefix, name) = match requested.trim_end_matches('/').rsplit_once('/') {
+        Some((dir, base)) => (format!("{dir}/"), base),
+        None => (String::new(), requested.trim_end_matches('/')),
     };
-    for suffix in 1u32..=100 {
-        let candidate = match &extension {
-            Some(ext) if !ext.is_empty() => format!("{stem} ({suffix}).{ext}"),
-            _ => format!("{stem} ({suffix})"),
-        };
-        if sftp.metadata(&candidate).await.is_err() {
-            return candidate;
+    let (stem, extension) = match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem, Some(ext)),
+        _ => (name, None),
+    };
+    let candidate = |suffix: u32| match extension {
+        Some(ext) if !ext.is_empty() => format!("{prefix}{stem} ({suffix}).{ext}"),
+        _ => format!("{prefix}{stem} ({suffix})"),
+    };
+    for suffix in 1..=100u32 {
+        let free = candidate(suffix);
+        if sftp.metadata(&free).await.is_err() {
+            return free;
         }
     }
-    match &extension {
-        Some(ext) if !ext.is_empty() => format!("{stem} (100).{ext}"),
-        _ => format!("{stem} (100)"),
-    }
+    candidate(100)
 }
 
 fn skipped_upload_status(events: &UnboundedSender<SessionEvent>, name: &str) {
@@ -2885,7 +2890,8 @@ async fn upload_dir(
     Ok(())
 }
 
-/// Create the remote end of an upload and return its handle.
+/// Create the remote end of an upload and return its handle and the final
+/// path it was written to.
 ///
 /// With `no_clobber` the create carries `EXCLUDE` (SSH_FXF_EXCL) so the server
 /// decides "target is free" atomically: the duplicate probe ran earlier in the
@@ -2894,13 +2900,16 @@ async fn upload_dir(
 /// Servers that do not honour `EXCLUDE` fail in the same way, so after an
 /// error a stat on the target separates "someone else created it" (renumber
 /// and retry) from "not supported" (one truncating create) instead of trusting
-/// a status code.
+/// a status code. Only an explicit no-such-file stat proves the target is
+/// still absent: any other stat outcome (permission denied, timeout, I/O)
+/// could hide a live target, so it aborts rather than risk a truncating
+/// clobber.
 async fn open_upload_target(
     raw: &RawSftpSession,
     sftp: &SftpSession,
     remote: &str,
     no_clobber: bool,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<(String, String)> {
     const MAX_RENUMBER: u32 = 10;
 
     let mut target = remote.to_string();
@@ -2913,9 +2922,11 @@ async fn open_upload_target(
             OpenFlags::CREATE | OpenFlags::WRITE | OpenFlags::TRUNCATE
         };
         match raw.open(&target, flags, FileAttributes::default()).await {
-            Ok(h) => return Ok(h.handle),
-            Err(open_error) if exclusive => {
-                if raw.stat(&target).await.is_err() {
+            Ok(h) => return Ok((h.handle, target.clone())),
+            Err(open_error) if exclusive => match raw.stat(&target).await {
+                Err(SftpError::Status(status))
+                    if status.status_code == StatusCode::NoSuchFile =>
+                {
                     // Still absent: the server refused the flag itself. One
                     // plain create is then as safe as the probe said.
                     tracing::warn!(
@@ -2925,14 +2936,22 @@ async fn open_upload_target(
                     exclusive = false;
                     continue;
                 }
-                renumbered += 1;
-                if renumbered > MAX_RENUMBER {
+                Ok(_) => {
+                    renumbered += 1;
+                    if renumbered > MAX_RENUMBER {
+                        return Err(anyhow::anyhow!(
+                            "keep-both target {target} was re-created {MAX_RENUMBER} times: {open_error}"
+                        ));
+                    }
+                    target = available_remote_path(sftp, &target).await;
+                }
+                Err(stat_error) => {
                     return Err(anyhow::anyhow!(
-                        "keep-both target {target} was re-created {MAX_RENUMBER} times: {open_error}"
+                        "keep-both create of {target} failed: {open_error}; \
+                         target state undetermined: {stat_error}"
                     ));
                 }
-                target = available_remote_path(sftp, &target).await;
-            }
+            },
             Err(e) => return Err(anyhow::anyhow!("{e}")),
         }
     }
@@ -2991,9 +3010,13 @@ async fn upload_pipelined(
     let raw = Arc::new(RawSftpSession::new(channel.into_stream()));
     raw.init().await.context("sftp upload handshake")?;
 
-    let fhandle = open_upload_target(raw.as_ref(), sftp, remote, no_clobber)
+    // With keep-both a renumber can land the upload on a different name than
+    // `remote`, so the cleanup and the terminal status lines below track the
+    // actually-created path (in-progress lines still show the source name).
+    let (fhandle, final_path) = open_upload_target(raw.as_ref(), sftp, remote, no_clobber)
         .await
         .with_context(|| format!("create remote {remote}"))?;
+    let final_name = base_name(&final_path);
 
     emit_transfer(events, id, name, true, 0, total, 0, "");
 
@@ -3055,16 +3078,18 @@ async fn upload_pipelined(
     let _ = raw.close(fhandle).await;
     if let Some(e) = err {
         // Drop the partial remote file so a failed upload leaves no junk.
-        let _ = raw.remove(remote).await;
+        // A keep-both renumber wrote to `final_path`, not `remote` — removing
+        // the original would delete a file another client created.
+        let _ = raw.remove(&final_path).await;
         return Err(e);
     }
     if cancelled {
         // Remove the half-written remote file on cancel (#100).
-        let _ = raw.remove(remote).await;
+        let _ = raw.remove(&final_path).await;
         emit_transfer(
             events,
             id,
-            name,
+            final_name.as_str(),
             true,
             done,
             total,
@@ -3073,7 +3098,7 @@ async fn upload_pipelined(
         );
         return Ok(false);
     }
-    emit_transfer(events, id, name, true, done, total.max(done), 1, "");
+    emit_transfer(events, id, final_name.as_str(), true, done, total.max(done), 1, "");
     Ok(true)
 }
 
