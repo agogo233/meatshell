@@ -814,3 +814,27 @@ msgstr "Save session"
 
 msgid "Create session"
 msgstr "Create session"
+
+msgid "Upload…"
+msgstr "Upload…"
+
+msgid "Generate keypair…"
+msgstr "Generate keypair…"
+
+msgid "Start"
+msgstr "Start"
+
+msgid "Server listen address"
+msgstr "Server listen address"
+
+msgid "Local listen address"
+msgstr "Local listen address"
+
+msgid "Start automatically when connecting"
+msgstr "Start automatically when connecting"
+
+msgid "Ed25519"
+msgstr "Ed25519"
+
+msgid "RSA"
+msgstr "RSA"
