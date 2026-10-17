@@ -1307,9 +1307,11 @@ where
         None => {
             // russh's `connect` does an untimed TCP connect; bound that phase
             // ourselves and hand the established stream to `connect_stream`.
+            // The (host, port) tuple keeps bare IPv6 literals working the way
+            // the proxy path does — a joined "host:port" string would not.
             let stream = tokio::time::timeout(
                 SSH_TCP_CONNECT_TIMEOUT,
-                tokio::net::TcpStream::connect(addr.as_str()),
+                tokio::net::TcpStream::connect((session.host.as_str(), session.port)),
             )
             .await
             .map_err(|_| anyhow!(t("连接超时", "connection timed out")))?
@@ -1760,10 +1762,13 @@ pub(crate) async fn push_authorized_keys(
     // `sh -c` script — a single argv element because it is wrapped in single
     // quotes (with any literal `'` in the comment escaped) — so no shell
     // quoting of the base64 body is needed. `grep -qF` skips the append on a
-    // repeat; `chmod 600` keeps the file owner-only even when it pre-existed.
+    // repeat; a hand-edited `authorized_keys` may lack a trailing newline,
+    // in which case the first `printf` repairs it so the new key lands on
+    // its own line instead of gluing onto the previous one; `chmod 600`
+    // keeps the file owner-only even when it pre-existed.
     let escaped = public_key_line.replace('\'', "'\\''");
     let command = format!(
-        "sh -c 'mkdir -p ~/.ssh && chmod 700 ~/.ssh && grep -qF \"$0\" ~/.ssh/authorized_keys 2>/dev/null || printf \"%s\\n\" \"$0\" >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys' '{}'",
+        "sh -c 'mkdir -p ~/.ssh && chmod 700 ~/.ssh && grep -qF \"$0\" ~/.ssh/authorized_keys 2>/dev/null || {{ [ -f ~/.ssh/authorized_keys ] && [ -n \"$(tail -c1 ~/.ssh/authorized_keys)\" ] && printf \"\\n\" >> ~/.ssh/authorized_keys; printf \"%s\\n\" \"$0\" >> ~/.ssh/authorized_keys; }} && chmod 600 ~/.ssh/authorized_keys' '{}'",
         escaped
     );
 
