@@ -85,10 +85,23 @@ pub async fn connect(cfg: &ProxyConfig, target_host: &str, target_port: u16) -> 
     }
 }
 
+/// Strip the optional IPv6 brackets (and padding) from a target host.
+///
+/// `tokio_socks` takes `(host, port)` the same way `TcpStream::connect` does,
+/// so a bracketed literal (`[::1]`) must arrive bare — mirroring the direct
+/// path. HTTP CONNECT, by contrast, *needs* the brackets, so callers that
+/// build the CONNECT line keep the original host untouched.
+fn bare_target_host(host: &str) -> &str {
+    host.trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim()
+}
+
 async fn connect_socks5(cfg: &ProxyConfig, host: &str, port: u16) -> Result<TcpStream> {
     use tokio_socks::tcp::Socks5Stream;
     let proxy = (cfg.host.as_str(), cfg.port);
-    let target = (host, port);
+    let target = (bare_target_host(host), port);
     let stream = match &cfg.auth {
         Some((u, p)) => Socks5Stream::connect_with_password(proxy, target, u, p.as_str())
             .await

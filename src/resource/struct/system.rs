@@ -29,6 +29,10 @@ pub struct SystemSampler {
     pub(super) disks: Disks,
     pub(super) last_rx_total: u64,
     pub(super) last_tx_total: u64,
+    /// Whether the previous sample fell back to counting *all* adapters (no
+    /// physical one matched). A flip between the two counting scopes re-baselines
+    /// so the delta doesn't jump to the whole since-boot counter.
+    pub(super) last_fallback: bool,
     pub(super) last_instant: std::time::Instant,
 }
 

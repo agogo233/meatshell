@@ -14,7 +14,7 @@ impl SystemSampler {
         let mut sys = System::new_all();
         sys.refresh_all();
         let nets = Networks::new_with_refreshed_list();
-        let (last_rx_total, last_tx_total) = net_totals(&nets);
+        let (last_rx_total, last_tx_total, last_fallback) = net_totals(&nets);
         let disks = Disks::new_with_refreshed_list();
         Self {
             sys,
@@ -22,6 +22,7 @@ impl SystemSampler {
             disks,
             last_rx_total,
             last_tx_total,
+            last_fallback,
             last_instant: std::time::Instant::now(),
         }
     }
@@ -57,7 +58,15 @@ impl SystemSampler {
         // RX / TX bytes/sec from the delta across the physical iface list
         // (all adapters when no physical one exists); virtual adapters would
         // otherwise double-count the same frames (see `should_count_interface`).
-        let (rx_total, tx_total) = net_totals(&self.nets);
+        let (rx_total, tx_total, fallback) = net_totals(&self.nets);
+        // A flip between the two counting scopes (physical-only ⇄ all) would
+        // otherwise replay a since-boot counter as a one-shot spike (or, the
+        // other way, under-report); re-baseline instead — one flat second.
+        if fallback != self.last_fallback {
+            self.last_rx_total = rx_total;
+            self.last_tx_total = tx_total;
+            self.last_fallback = fallback;
+        }
         let now = std::time::Instant::now();
         let elapsed = now
             .duration_since(self.last_instant)
@@ -142,7 +151,7 @@ fn should_count_interface(name: &str) -> bool {
     }
     // Brand prefixes stay ASCII even when the rest of the name is localized
     // (e.g. "vEthernet (默认交换机)").
-    const EXCLUDED_SUBSTRINGS: [&str; 4] = ["VETHEREIN", "HYPER-V", "VMWARE", "WSL"];
+    const EXCLUDED_SUBSTRINGS: [&str; 4] = ["VETHERNET", "HYPER-V", "VMWARE", "WSL"];
     !EXCLUDED_SUBSTRINGS.iter().any(|s| upper.contains(s))
 }
 
@@ -152,12 +161,14 @@ fn should_count_interface(name: &str) -> bool {
 /// When no adapter counts as physical — a tunnel-only or fully virtualised
 /// machine whose traffic rides entirely on `tun`/`vEthernet`/bridge devices —
 /// fall back to counting *all* adapters instead of reporting a permanent
-/// zero, since nothing else on the box carries the real traffic.
+/// zero, since nothing else on the box carries the real traffic. The boolean
+/// return tells the sampler which scope produced the totals, so a later flip
+/// between the two scopes can be re-baselined instead of spiking the delta.
 ///
 /// An adapter that disappears and reappears (e.g. a Wi‑Fi reconnect) is
 /// re‑baselined on the next sample, so its since‑boot counter isn't replayed;
 /// at most one one‑second spike shows up in the graph.
-fn net_totals(nets: &Networks) -> (u64, u64) {
+fn net_totals(nets: &Networks) -> (u64, u64, bool) {
     let mut rx = 0u64;
     let mut tx = 0u64;
     let mut all_rx = 0u64;
@@ -182,14 +193,14 @@ fn net_totals(nets: &Networks) -> (u64, u64) {
             skipped = ?skipped,
             "local net counters: no physical adapter matched, counting all"
         );
-        return (all_rx, all_tx);
+        return (all_rx, all_tx, true);
     }
     tracing::debug!(
         counted = ?counted,
         skipped = ?skipped,
         "local net counters: physical adapters only"
     );
-    (rx, tx)
+    (rx, tx, false)
 }
 
 /// Format a used/total memory pair (both in MiB) for the narrow sidebar.
@@ -282,6 +293,7 @@ mod interface_filter_tests {
             "vEthernet (WSL)",
             "vEthernet (Default Switch)",
             "vEthernet (默认交换机)",
+            "我的虚拟 vEthernet 网卡",
             "VMware Network Adapter VMnet1",
             "Hyper-V 虚拟交换器 (Internal)",
             "Loopback Pseudo-Interface 1st Edition",

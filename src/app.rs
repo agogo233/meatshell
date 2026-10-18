@@ -4748,24 +4748,6 @@ fn update_file_drop_highlight(win: &AppWindow, dock_stacks: &Rc<RefCell<DockStac
 #[cfg(not(windows))]
 fn update_file_drop_highlight(_win: &AppWindow, _dock_stacks: &Rc<RefCell<DockStacks>>) {}
 
-/// Message fragment for fixed-key (`enc:exp:v1:`) secrets recovered from a
-/// legacy-format export: they are decrypted at import time and only resealed
-/// under this machine's key when the store is saved, so the user should see
-/// that it happened. Empty when the file used the current encryption.
-fn recovered_secrets_note(recovered: usize) -> String {
-    if recovered == 0 {
-        return String::new();
-    }
-    format!(
-        "{} {}",
-        t(
-            "；旧版跨机导入写入的凭据已改用本机密钥重新加密：",
-            "; credentials written by an older cross-machine import were re-encrypted with the local key:"
-        ),
-        recovered
-    )
-}
-
 /// Re-push every setting the UI still displays into the live window.
 ///
 /// `apply_bundle` replaces the whole store in one go, and the upload/download
@@ -6183,33 +6165,34 @@ fn wire_session_callbacks(
                 _ => crate::ssh::keygen::KeyAlgorithm::Ed25519,
             };
             std::thread::spawn(move || {
-                let outcome = (|| -> Result<(String, String, String), String> {
+                let outcome: Result<(String, String), String> = (|| {
                     let key = crate::ssh::keygen::generate_keypair(algo).map_err(|e| e.to_string())?;
                     let fp = key.fingerprint.clone();
                     let pem = key.private_key_pem.clone();
                     let key = crate::ssh::keygen::write_key_files(key, algo).map_err(|e| e.to_string())?;
-                    Ok((pem, fp, key.private_key_path.display().to_string()))
-                })();
-                let (pem, fp, path, status) = match outcome {
-                    Ok((p, f, path)) => (
-                        p,
-                        f.clone(),
-                        path.clone(),
-                        format!("{} · {} · {}", t("已生成", "generated"), path, f),
-                    ),
-                    Err(e) => (
-                        String::new(),
-                        String::new(),
-                        String::new(),
-                        format!("{}: {e}", t("生成失败", "generation failed")),
-                    ),
-                };
+                    let path = key.private_key_path.display().to_string();
+                    Ok((
+                        pem,
+                        format!("{} · {} · {}", t("已生成", "generated"), path, fp),
+                    ))
+                })()
+                .map_err(|e| format!("{}: {e}", t("生成失败", "generation failed")));
                 let _ = slint::invoke_from_event_loop(move || {
                     let Some(w) = weak.upgrade() else { return };
-                    w.set_dialog_key_inline(pem.into());
-                    w.set_dialog_key_inline_mode(true);
-                    w.set_dialog_key_generated(true);
-                    w.set_dialog_key_status(status.into());
+                    // Only a successful generation fills the inline field and
+                    // arms the upload button; a failure leaves whatever the
+                    // user already typed untouched.
+                    match outcome {
+                        Ok((pem, status)) => {
+                            w.set_dialog_key_inline(pem.into());
+                            w.set_dialog_key_inline_mode(true);
+                            w.set_dialog_key_generated(true);
+                            w.set_dialog_key_status(status.into());
+                        }
+                        Err(status) => {
+                            w.set_dialog_key_status(status.into());
+                        }
+                    }
                 });
             });
         });

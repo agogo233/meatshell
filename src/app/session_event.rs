@@ -341,6 +341,11 @@ pub(super) fn apply_session_event_to_window(
             // re-marks the editor dirty (nothing was written). Both fire only for
             // the file that is still open.
             if win.get_editor_open() && win.get_editor_path().as_str() == path.as_str() {
+                // Slint's `changed` handler only re-arms the auto-dismiss timer
+                // on a value change, so reset first: two back-to-back failures
+                // (2 → 2) must still restart the countdown instead of the first
+                // timer dismissing the second pill early.
+                win.set_editor_save_ack(0);
                 win.set_editor_save_ack(kind);
                 if !ok {
                     win.set_editor_dirty(true);

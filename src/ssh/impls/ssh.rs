@@ -21,7 +21,8 @@ use crate::config::{AuthMethod, PortForward, Secret, Session, SessionTrigger};
 use crate::i18n::t;
 
 use super::connection::{
-    connect_ssh_stream, disconnect_ssh, network_stage, HandshakeHandler, HostKeyWait,
+    connect_ssh_stream, disconnect_jump_chain, disconnect_ssh, network_stage, HandshakeHandler,
+    HostKeyWait,
 };
 use super::structs::*;
 
@@ -1309,9 +1310,18 @@ where
             // ourselves and hand the established stream to `connect_stream`.
             // The (host, port) tuple keeps bare IPv6 literals working the way
             // the proxy path does — a joined "host:port" string would not.
+            // Bracketed literals (`[::1]`) only parse in the string form, so
+            // strip the brackets before the tuple; trims also cover any
+            // padding whitespace around/inside the brackets.
+            let host = session
+                .host
+                .trim()
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .trim();
             let stream = tokio::time::timeout(
                 SSH_TCP_CONNECT_TIMEOUT,
-                tokio::net::TcpStream::connect((session.host.as_str(), session.port)),
+                tokio::net::TcpStream::connect((host, session.port)),
             )
             .await
             .map_err(|_| anyhow!(t("连接超时", "connection timed out")))?
@@ -1586,16 +1596,15 @@ pub async fn test_session_auth(
 
     // Bound cleanup for the entire route, not once per hop. The outcome is
     // already known; a stalled transport must not keep Test Connection busy.
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        let _ = handle
-            .disconnect(Disconnect::ByApplication, "connection test complete", "")
-            .await;
-        for jump_handle in jump_handle.into_iter().rev() {
-            let _ = jump_handle
-                .disconnect(Disconnect::ByApplication, "connection test complete", "")
-                .await;
-        }
-    })
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        disconnect_ssh(&handle, "connection test complete"),
+    )
+    .await;
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        disconnect_jump_chain(&jump_handle, "connection test complete"),
+    )
     .await;
     result
 }
@@ -1716,11 +1725,7 @@ async fn execute_command_inner(
     let _ = handle
         .disconnect(Disconnect::ByApplication, "command complete", "")
         .await;
-    for jump_handle in jump_handle.into_iter().rev() {
-        let _ = jump_handle
-            .disconnect(Disconnect::ByApplication, "command complete", "")
-            .await;
-    }
+    disconnect_jump_chain(&jump_handle, "command complete").await;
     Ok(result)
 }
 
@@ -1754,8 +1759,19 @@ pub(crate) async fn push_authorized_keys(
     .await?
     {
         AuthResult::Success => {}
-        AuthResult::Cancelled => return Err(anyhow!("login cancelled")),
-        AuthResult::Failed => return Err(anyhow!("authentication failed")),
+        // A cancelled or rejected login leaves the transport half-open (the
+        // session tab stays "connecting"); drop both handles before returning
+        // so the peer gets a clean disconnect instead of a leaked socket.
+        AuthResult::Cancelled => {
+            disconnect_ssh(&handle, "push cancelled").await;
+            disconnect_jump_chain(&jump_handle, "push cancelled").await;
+            return Err(anyhow!("login cancelled"));
+        }
+        AuthResult::Failed => {
+            disconnect_ssh(&handle, "push failed").await;
+            disconnect_jump_chain(&jump_handle, "push failed").await;
+            return Err(anyhow!("authentication failed"));
+        }
     }
 
     // Append the public key idempotently. The line travels as `$0` of the
@@ -1800,14 +1816,8 @@ pub(crate) async fn push_authorized_keys(
         // treat it as a failure rather than a success.
         .unwrap_or(1);
 
-    let _ = handle
-        .disconnect(Disconnect::ByApplication, "push complete", "")
-        .await;
-    for jump_handle in jump_handle.into_iter().rev() {
-        let _ = jump_handle
-            .disconnect(Disconnect::ByApplication, "push complete", "")
-            .await;
-    }
+    disconnect_ssh(&handle, "push complete").await;
+    disconnect_jump_chain(&jump_handle, "push complete").await;
 
     if exit_code != 0 {
         return Err(anyhow!(

@@ -74,6 +74,18 @@ pub(crate) async fn disconnect_ssh<H: Handler>(handle: &Handle<H>, reason: &str)
     .await;
 }
 
+/// Disconnect a jump-host chain — the hops from the target back out — shared
+/// by the test-connection, command-runner and public-key-upload paths. Callers
+/// drop the target handle first and this chain second.
+pub(crate) async fn disconnect_jump_chain<H: Handler + Send + 'static>(
+    chain: &[Handle<H>],
+    reason: &str,
+) {
+    for handle in chain.iter().rev() {
+        disconnect_ssh(handle, reason).await;
+    }
+}
+
 fn stage_timeout(label: &str) -> anyhow::Error {
     anyhow!(
         "{label} timed out after {} seconds",
