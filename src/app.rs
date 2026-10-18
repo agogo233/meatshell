@@ -6165,7 +6165,7 @@ fn wire_session_callbacks(
                 _ => crate::ssh::keygen::KeyAlgorithm::Ed25519,
             };
             std::thread::spawn(move || {
-                let outcome: Result<(String, String), String> = (|| {
+                let outcome = (|| -> Result<(String, String), String> {
                     let key = crate::ssh::keygen::generate_keypair(algo).map_err(|e| e.to_string())?;
                     let fp = key.fingerprint.clone();
                     let pem = key.private_key_pem.clone();
