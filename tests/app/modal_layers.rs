@@ -326,7 +326,7 @@ fn detached_windows_share_cancel_keys() {
         process_window.set_size(slint::PhysicalSize::new(1000, 850));
         let closes = Rc::new(Cell::new(0));
         let count = closes.clone();
-        process_ui.on_close(move || count.set(count.get() + 1));
+        process_ui.on_close_window(move || count.set(count.get() + 1));
         settle(&process_window);
         key(&process_window, Key::Escape);
         assert_eq!(closes.get(), 1);
@@ -336,7 +336,7 @@ fn detached_windows_share_cancel_keys() {
         let system_window = windows.borrow()[2].clone();
         system_window.set_size(slint::PhysicalSize::new(1000, 850));
         let count = closes.clone();
-        system_ui.on_close(move || count.set(count.get() + 1));
+        system_ui.on_close_window(move || count.set(count.get() + 1));
         settle(&system_window);
         key(&system_window, Key::Escape);
         assert_eq!(closes.get(), 2);

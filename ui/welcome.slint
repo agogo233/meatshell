@@ -227,7 +227,7 @@ component SessionRow inherits Rectangle {
                 // yields each group once; the current group is skipped.
                 for s[i] in root.all-sessions : Rectangle {
                     visible: !root.system-row && s.group-header != ""
-                        && s.group-header != "system" && s.group-header != root.session.group;
+                        && !s.builtin && s.group-header != root.session.group;
                     height: self.visible ? 28px : 0px;
                     border-radius: Theme.radius-sm;
                     background: mv-ta.has-hover ? Theme.bg-hover : transparent;
@@ -659,8 +659,8 @@ export component Welcome inherits Rectangle {
 
                 if sessions.length > 0 : ScrollView {
                     vertical-stretch: 1;
-                    viewport-width: self.visible-width;
-                    viewport-height: max(self.visible-height, sess-list.preferred-height);
+                    content-width: self.visible-width;
+                    content-height: max(self.visible-height, sess-list.preferred-height);
                     sess-list := VerticalLayout {
                     spacing: 0px;
                     for session[i] in sessions : VerticalLayout {

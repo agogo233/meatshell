@@ -26,6 +26,18 @@ pub struct SftpBookmarkGroup {
     pub paths: Vec<String>,
 }
 
+/// A user-defined agent launcher (#427), for agent CLIs meatshell does not
+/// detect by itself. `command` runs inside a local shell tab (PowerShell on
+/// Windows, the login shell elsewhere), optionally starting in `directory`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CustomAgent {
+    pub id: String,
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub directory: String,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -113,6 +125,9 @@ pub struct ConfigFile {
     /// WSL entry for backwards compatibility.
     #[serde(default)]
     pub wsl_profiles: Vec<WslProfile>,
+    /// User-defined agent launchers shown next to the detected ones (#427).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_agents: Vec<CustomAgent>,
     /// Preset SFTP download directory. Empty = ask each time.
     #[serde(default)]
     pub download_dir: String,
@@ -268,6 +283,10 @@ pub struct ConfigFile {
     /// enabled for existing users (#300).
     #[serde(default)]
     pub extra_paste_shortcuts_disabled: bool,
+    /// Open SFTP text files in a panel docked inside the main window instead of
+    /// the detached editor window. Defaults to false (#494).
+    #[serde(default)]
+    pub editor_embedded: bool,
     /// Hide auxiliary panels and edge strips so the terminal fills the window.
     #[serde(default)]
     pub zen_mode: bool,

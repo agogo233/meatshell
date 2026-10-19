@@ -4,9 +4,11 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
+use crate::winit_compat::WindowSurfaceSizeExt;
 use crate::winitwindowadapter::physical_size_to_slint;
 use i_slint_core::graphics::RequestedGraphicsAPI;
 use i_slint_core::platform::PlatformError;
+use i_slint_core::renderer::DrawOutcome;
 use i_slint_renderer_skia::SkiaRenderer;
 
 pub struct WinitSkiaRenderer {
@@ -20,7 +22,7 @@ impl WinitSkiaRenderer {
     ) -> Result<Box<dyn super::WinitCompatibleRenderer>, PlatformError> {
         Ok(Box::new(Self {
             renderer: SkiaRenderer::default(&shared_backend_data.skia_context),
-            requested_graphics_api: shared_backend_data._requested_graphics_api.clone(),
+            requested_graphics_api: shared_backend_data.requested_graphics_api.clone(),
         }))
     }
 
@@ -30,7 +32,7 @@ impl WinitSkiaRenderer {
     ) -> Result<Box<dyn super::WinitCompatibleRenderer>, PlatformError> {
         Ok(Box::new(Self {
             renderer: SkiaRenderer::default_software(&shared_backend_data.skia_context),
-            requested_graphics_api: shared_backend_data._requested_graphics_api.clone(),
+            requested_graphics_api: shared_backend_data.requested_graphics_api.clone(),
         }))
     }
 
@@ -40,7 +42,7 @@ impl WinitSkiaRenderer {
     ) -> Result<Box<dyn super::WinitCompatibleRenderer>, PlatformError> {
         Ok(Box::new(Self {
             renderer: SkiaRenderer::default_opengl(&shared_backend_data.skia_context),
-            requested_graphics_api: shared_backend_data._requested_graphics_api.clone(),
+            requested_graphics_api: shared_backend_data.requested_graphics_api.clone(),
         }))
     }
 
@@ -50,17 +52,17 @@ impl WinitSkiaRenderer {
     ) -> Result<Box<dyn super::WinitCompatibleRenderer>, PlatformError> {
         Ok(Box::new(Self {
             renderer: SkiaRenderer::default_metal(&shared_backend_data.skia_context),
-            requested_graphics_api: shared_backend_data._requested_graphics_api.clone(),
+            requested_graphics_api: shared_backend_data.requested_graphics_api.clone(),
         }))
     }
 
-    #[cfg(feature = "renderer-skia-vulkan")]
+    #[cfg(supports_vulkan)]
     pub fn new_vulkan_suspended(
         shared_backend_data: &Rc<crate::SharedBackendData>,
     ) -> Result<Box<dyn super::WinitCompatibleRenderer>, PlatformError> {
         Ok(Box::new(Self {
             renderer: SkiaRenderer::default_vulkan(&shared_backend_data.skia_context),
-            requested_graphics_api: shared_backend_data._requested_graphics_api.clone(),
+            requested_graphics_api: shared_backend_data.requested_graphics_api.clone(),
         }))
     }
 
@@ -70,26 +72,27 @@ impl WinitSkiaRenderer {
     ) -> Result<Box<dyn super::WinitCompatibleRenderer>, PlatformError> {
         Ok(Box::new(Self {
             renderer: SkiaRenderer::default_direct3d(&shared_backend_data.skia_context),
-            requested_graphics_api: shared_backend_data._requested_graphics_api.clone(),
+            requested_graphics_api: shared_backend_data.requested_graphics_api.clone(),
         }))
     }
 
-    #[cfg(feature = "unstable-wgpu-27")]
-    pub fn new_wgpu_27_suspended(
+    #[cfg(feature = "unstable-wgpu-29")]
+    pub fn new_wgpu_29_suspended(
         shared_backend_data: &Rc<crate::SharedBackendData>,
     ) -> Result<Box<dyn super::WinitCompatibleRenderer>, PlatformError> {
         Ok(Box::new(Self {
-            renderer: SkiaRenderer::default_wgpu_27(&shared_backend_data.skia_context),
-            requested_graphics_api: shared_backend_data._requested_graphics_api.clone(),
+            renderer: SkiaRenderer::default_wgpu_29(&shared_backend_data.skia_context),
+            requested_graphics_api: shared_backend_data.requested_graphics_api.clone(),
         }))
     }
-    #[cfg(feature = "unstable-wgpu-28")]
-    pub fn new_wgpu_28_suspended(
+
+    // skia depends on default features which includes wgpu_30, so this is always available
+    pub fn new_wgpu_30_suspended(
         shared_backend_data: &Rc<crate::SharedBackendData>,
     ) -> Result<Box<dyn super::WinitCompatibleRenderer>, PlatformError> {
         Ok(Box::new(Self {
-            renderer: SkiaRenderer::default_wgpu_28(&shared_backend_data.skia_context),
-            requested_graphics_api: shared_backend_data._requested_graphics_api.clone(),
+            renderer: SkiaRenderer::default_wgpu_30(&shared_backend_data.skia_context),
+            requested_graphics_api: shared_backend_data.requested_graphics_api.clone(),
         }))
     }
 
@@ -120,9 +123,9 @@ impl WinitSkiaRenderer {
                         return Err("Metal rendering requested but this is only supported on Apple platforms".to_string().into());
                     }
                     RequestedGraphicsAPI::Vulkan => {
-                        #[cfg(feature = "renderer-skia-vulkan")]
+                        #[cfg(supports_vulkan)]
                         return Ok(Self::new_vulkan_suspended);
-                        #[cfg(not(feature = "renderer-skia-vulkan"))]
+                        #[cfg(not(supports_vulkan))]
                         return Err(
                             "Vulkan rendering requested but renderer-skia-vulkan is not enabled"
                                 .to_string()
@@ -139,10 +142,10 @@ impl WinitSkiaRenderer {
                                 .into(),
                         );
                     }
-                    #[cfg(feature = "unstable-wgpu-27")]
-                    RequestedGraphicsAPI::WGPU27(..) => Ok(Self::new_wgpu_27_suspended),
-                    #[cfg(feature = "unstable-wgpu-28")]
-                    RequestedGraphicsAPI::WGPU28(..) => Ok(Self::new_wgpu_28_suspended),
+                    #[cfg(feature = "unstable-wgpu-29")]
+                    RequestedGraphicsAPI::WGPU29(..) => Ok(Self::new_wgpu_29_suspended),
+                    #[cfg(feature = "unstable-wgpu-30")]
+                    RequestedGraphicsAPI::WGPU30(..) => Ok(Self::new_wgpu_30_suspended),
                 }
             }
             None => Ok(Self::new_suspended),
@@ -151,7 +154,7 @@ impl WinitSkiaRenderer {
 }
 
 impl super::WinitCompatibleRenderer for WinitSkiaRenderer {
-    fn render(&self, _window: &i_slint_core::api::Window) -> Result<(), PlatformError> {
+    fn render(&self, _window: &i_slint_core::api::Window) -> Result<DrawOutcome, PlatformError> {
         self.renderer.render()
     }
 
@@ -164,11 +167,18 @@ impl super::WinitCompatibleRenderer for WinitSkiaRenderer {
         self.renderer.suspend()
     }
 
+    #[cfg(target_os = "macos")]
+    fn set_transparent(&self, transparent: bool) -> Result<(), PlatformError> {
+        self.renderer.set_transparent(transparent)
+    }
+
     fn resume(
         &self,
         active_event_loop: &winit::event_loop::ActiveEventLoop,
         window_attributes: winit::window::WindowAttributes,
+        _window_adapter_weak: std::rc::Weak<crate::winitwindowadapter::WinitWindowAdapter>,
     ) -> Result<Arc<winit::window::Window>, PlatformError> {
+        let transparent = window_attributes.transparent;
         let winit_window = Arc::new(active_event_loop.create_window(window_attributes).map_err(
             |winit_os_error| {
                 PlatformError::from(format!(
@@ -178,13 +188,14 @@ impl super::WinitCompatibleRenderer for WinitSkiaRenderer {
             },
         )?);
 
-        let size = winit_window.inner_size();
+        let size = winit_window.surface_size();
 
         self.renderer.set_window_handle(
             winit_window.clone(),
             winit_window.clone(),
             physical_size_to_slint(&size),
             self.requested_graphics_api.clone(),
+            transparent,
         )?;
 
         self.renderer.set_pre_present_callback(Some(Box::new({

@@ -201,6 +201,12 @@ pub struct Session {
     pub local_distribution: String,
     #[serde(default)]
     pub local_working_dir: String,
+    /// Program a generated local session runs inside its shell, e.g. the
+    /// resolved path of an agent CLI launched from the welcome page (#427).
+    /// The shell stays open after the program exits. Never set on saved
+    /// sessions, so it is left out of the config file when empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub local_command: String,
 
     // --- Serial-only fields (ignored unless kind == Serial) -----------------
     /// Serial device path, e.g. "COM3" (Windows) or "/dev/ttyUSB0" (Linux).
@@ -266,6 +272,16 @@ pub struct Session {
     /// shells or interactive auto-login scripts. SFTP remains available.
     #[serde(default)]
     pub disable_shell_integration: bool,
+    /// Who the SFTP panel works as (#438): "" = the login user (the `sftp`
+    /// subsystem), "sudo" = root, by running sftp-server through sudo, or
+    /// "custom" = run `sftp_command` as the SFTP server, like WinSCP's
+    /// "SFTP server" setting.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sftp_mode: String,
+    /// SFTP server command for `sftp_mode == "custom"`, e.g.
+    /// `sudo -u www-data /usr/lib/openssh/sftp-server`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sftp_command: String,
     /// Free-form note for this session — somewhere to stash extra info (jump-host
     /// details, credentials hints, owner, etc.). Shown only in the edit dialog.
     /// (B站 suggestion)
@@ -374,6 +390,7 @@ impl Session {
             kind: SessionKind::Ssh,
             local_distribution: String::new(),
             local_working_dir: String::new(),
+            local_command: String::new(),
             serial_port: String::new(),
             baud_rate: default_baud(),
             data_bits: default_data_bits(),
@@ -390,6 +407,8 @@ impl Session {
             forwards: Vec::new(),
             triggers: Vec::new(),
             disable_shell_integration: false,
+            sftp_mode: String::new(),
+            sftp_command: String::new(),
             note: String::new(),
         }
     }

@@ -76,6 +76,9 @@ pub enum SftpCommand {
     TouchFile(String),
     /// Read a remote file's text for the built-in viewer/editor (#70).
     ReadText { remote: String, edit: bool },
+    /// Double-click on a file (#493): open it in the built-in editor when it
+    /// is text the editor accepts, otherwise ask the UI to download it.
+    OpenOrDownload { remote: String },
     /// Overwrite a remote file with text from the built-in editor (#70).
     WriteText { remote: String, content: String },
     /// Gracefully shut down the SFTP worker.

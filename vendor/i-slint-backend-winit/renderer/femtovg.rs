@@ -1,25 +1,28 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
+// cSpell: ignore glcontext glprobe webglcontextlost webglcontextrestored
 use std::rc::Rc;
 #[cfg(supports_opengl)]
 use std::rc::Weak;
 use std::sync::Arc;
 
-use i_slint_core::renderer::Renderer;
+use i_slint_core::renderer::{DrawOutcome, Renderer};
 use i_slint_core::{graphics::RequestedGraphicsAPI, platform::PlatformError};
 #[cfg(supports_opengl)]
 use i_slint_renderer_femtovg::{FemtoVGOpenGLRendererExt, opengl};
 use i_slint_renderer_femtovg::{FemtoVGRenderer, FemtoVGRendererExt};
 
 use winit::event_loop::ActiveEventLoop;
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", supports_opengl))]
 use winit::platform::web::WindowExtWebSys;
 
 use super::WinitCompatibleRenderer;
 
 #[cfg(all(supports_opengl, not(target_arch = "wasm32")))]
 mod glcontext;
+#[cfg(all(supports_opengl, target_os = "windows"))]
+mod glprobe;
 
 #[cfg(supports_opengl)]
 pub struct GlutinFemtoVGRenderer {
@@ -33,9 +36,16 @@ impl GlutinFemtoVGRenderer {
     pub fn new_suspended(
         shared_backend_data: &Rc<crate::SharedBackendData>,
     ) -> Result<Box<dyn WinitCompatibleRenderer>, PlatformError> {
+        // Bail out before a window is created, so that the backend can still fall back to
+        // another renderer.
+        #[cfg(target_os = "windows")]
+        if !glprobe::opengl_2_available() {
+            return Err("The FemtoVG renderer requires an OpenGL 2.0 driver".into());
+        }
+
         Ok(Box::new(Self {
             renderer: FemtoVGRenderer::new_suspended(),
-            _requested_graphics_api: shared_backend_data._requested_graphics_api.clone(),
+            _requested_graphics_api: shared_backend_data.requested_graphics_api.clone(),
             _shared_backend_data_weak: Rc::downgrade(shared_backend_data),
         }))
     }
@@ -43,8 +53,8 @@ impl GlutinFemtoVGRenderer {
 
 #[cfg(supports_opengl)]
 impl super::WinitCompatibleRenderer for GlutinFemtoVGRenderer {
-    fn render(&self, _window: &i_slint_core::api::Window) -> Result<(), PlatformError> {
-        self.renderer.render()
+    fn render(&self, _window: &i_slint_core::api::Window) -> Result<DrawOutcome, PlatformError> {
+        self.renderer.render().map(|()| DrawOutcome::Success)
     }
 
     fn as_core_renderer(&self) -> &dyn Renderer {
@@ -55,6 +65,7 @@ impl super::WinitCompatibleRenderer for GlutinFemtoVGRenderer {
         &self,
         active_event_loop: &ActiveEventLoop,
         window_attributes: winit::window::WindowAttributes,
+        _window_adapter_weak: std::rc::Weak<crate::winitwindowadapter::WinitWindowAdapter>,
     ) -> Result<Arc<winit::window::Window>, PlatformError> {
         #[cfg(not(target_arch = "wasm32"))]
         let (winit_window, opengl_context) = glcontext::OpenGLContext::new_context(
@@ -166,34 +177,56 @@ impl GlutinFemtoVGRenderer {
     }
 }
 
-#[cfg(all(feature = "renderer-femtovg-wgpu", not(target_family = "wasm")))]
+#[cfg(feature = "renderer-femtovg-wgpu")]
+fn wgpu_backends_to_avoid() -> i_slint_core::graphics::wgpu_30::wgpu::Backends {
+    // On WASM keep GL so wgpu can fall through to WebGL when WebGPU is missing.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        i_slint_core::graphics::wgpu_30::default_backends_to_avoid()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        i_slint_core::graphics::wgpu_30::wgpu::Backends::empty()
+    }
+}
+
+#[cfg(feature = "renderer-femtovg-wgpu")]
 pub struct WGPUFemtoVGRenderer {
     renderer: FemtoVGRenderer<i_slint_renderer_femtovg::wgpu::WGPUBackend>,
     requested_graphics_api: Option<RequestedGraphicsAPI>,
 }
 
-#[cfg(all(feature = "renderer-femtovg-wgpu", not(target_family = "wasm")))]
+#[cfg(feature = "renderer-femtovg-wgpu")]
 impl WGPUFemtoVGRenderer {
     pub fn new_suspended(
         shared_backend_data: &Rc<crate::SharedBackendData>,
     ) -> Result<Box<dyn WinitCompatibleRenderer>, PlatformError> {
-        if !i_slint_core::graphics::wgpu_28::any_wgpu28_adapters_with_gpu(
-            shared_backend_data._requested_graphics_api.clone(),
+        if !i_slint_core::graphics::wgpu_30::any_wgpu30_adapters_with_gpu(
+            shared_backend_data.requested_graphics_api.clone(),
+            wgpu_backends_to_avoid(),
         ) {
             return Err(PlatformError::from("WGPU: No GPU adapters found"));
         }
         Ok(Box::new(Self {
             renderer: FemtoVGRenderer::<i_slint_renderer_femtovg::wgpu::WGPUBackend>::new_suspended(
             ),
-            requested_graphics_api: shared_backend_data._requested_graphics_api.clone(),
+            requested_graphics_api: shared_backend_data.requested_graphics_api.clone(),
         }))
     }
 }
 
-#[cfg(all(feature = "renderer-femtovg-wgpu", not(target_family = "wasm")))]
+#[cfg(feature = "renderer-femtovg-wgpu")]
 impl WinitCompatibleRenderer for WGPUFemtoVGRenderer {
-    fn render(&self, _window: &i_slint_core::api::Window) -> Result<(), PlatformError> {
-        self.renderer.render()
+    #[cfg(target_os = "macos")]
+    fn set_transparent(&self, transparent: bool) -> Result<(), PlatformError> {
+        self.renderer.set_transparent(transparent);
+        Ok(())
+    }
+
+    fn render(&self, window: &i_slint_core::api::Window) -> Result<DrawOutcome, PlatformError> {
+        // Use the Ext entry point so we get the `DrawOutcome` back without changing
+        // `FemtoVGRenderer::render`'s public `Result<(), _>` signature.
+        self.renderer.render_transformed_with_post_callback(0., (0., 0.), window.size(), None)
     }
 
     fn as_core_renderer(&self) -> &dyn Renderer {
@@ -208,7 +241,9 @@ impl WinitCompatibleRenderer for WGPUFemtoVGRenderer {
         &self,
         active_event_loop: &ActiveEventLoop,
         window_attributes: winit::window::WindowAttributes,
+        window_adapter_weak: std::rc::Weak<crate::winitwindowadapter::WinitWindowAdapter>,
     ) -> Result<Arc<winit::window::Window>, PlatformError> {
+        let transparent = window_attributes.transparent;
         let winit_window = Arc::new(active_event_loop.create_window(window_attributes).map_err(
             |winit_os_error| {
                 PlatformError::from(format!(
@@ -218,15 +253,78 @@ impl WinitCompatibleRenderer for WGPUFemtoVGRenderer {
             },
         )?);
 
-        let size = winit_window.inner_size();
+        let requested_graphics_api = self.requested_graphics_api.clone();
+        let window_handle = Box::new(winit_window.clone())
+            as Box<dyn i_slint_core::graphics::wgpu_30::wgpu::DisplayAndWindowHandle>;
+        let winit_window_for_size = winit_window.clone();
 
-        self.renderer.set_surface(
-            Box::new(winit_window.clone())
-                as Box<dyn i_slint_core::graphics::wgpu_28::wgpu::WindowHandle>,
-            crate::winitwindowadapter::physical_size_to_slint(&size),
-            self.requested_graphics_api.clone(),
+        let context = {
+            let window_adapter = window_adapter_weak.upgrade().ok_or_else(|| {
+                PlatformError::from("Cannot initialize wgpu: window adapter is destroyed")
+            })?;
+            use i_slint_core::platform::WindowAdapter;
+            i_slint_core::window::WindowInner::from_pub(window_adapter.window()).context().clone()
+        };
+
+        i_slint_core::graphics::wgpu_30::init_instance_adapter_device_queue_surface_then(
+            &context,
+            window_handle,
+            requested_graphics_api,
+            wgpu_backends_to_avoid(),
+            move |instance, adapter, device, queue, surface| {
+                finalize_wgpu_init(
+                    &window_adapter_weak,
+                    &winit_window_for_size,
+                    instance,
+                    adapter,
+                    device,
+                    queue,
+                    surface,
+                    transparent,
+                )?;
+                #[cfg(target_arch = "wasm32")]
+                i_slint_core::debug_log!("Slint: Using FemtoVG WGPU renderer");
+                Ok(())
+            },
         )?;
 
         Ok(winit_window)
     }
+}
+
+#[cfg(feature = "renderer-femtovg-wgpu")]
+fn finalize_wgpu_init(
+    window_adapter_weak: &std::rc::Weak<crate::winitwindowadapter::WinitWindowAdapter>,
+    winit_window: &Arc<winit::window::Window>,
+    instance: i_slint_core::graphics::wgpu_30::wgpu::Instance,
+    adapter: i_slint_core::graphics::wgpu_30::wgpu::Adapter,
+    device: i_slint_core::graphics::wgpu_30::wgpu::Device,
+    queue: i_slint_core::graphics::wgpu_30::wgpu::Queue,
+    surface: i_slint_core::graphics::wgpu_30::wgpu::Surface<'static>,
+    transparent: bool,
+) -> Result<(), PlatformError> {
+    let Some(window_adapter) = window_adapter_weak.upgrade() else {
+        return Ok(());
+    };
+
+    let this = (window_adapter.renderer() as &dyn std::any::Any)
+        .downcast_ref::<WGPUFemtoVGRenderer>()
+        .unwrap();
+
+    use crate::winit_compat::WindowSurfaceSizeExt;
+    let slint_size =
+        crate::winitwindowadapter::physical_size_to_slint(&winit_window.surface_size());
+    this.renderer.configure_surface_from_init_result(
+        instance,
+        adapter,
+        device,
+        queue,
+        surface,
+        slint_size,
+        transparent,
+    );
+
+    use i_slint_core::platform::WindowAdapter;
+    window_adapter.request_redraw();
+    Ok(())
 }

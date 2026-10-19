@@ -195,7 +195,8 @@ export component SystemInfoWindow inherits Window {
     in property <[SysInfoRow]> network-rows;
     in property <[SysInfoRow]> filesystem-rows;
 
-    callback close();
+    // Not `close`: Slint 1.18 windows have a builtin close() this would shadow.
+    callback close-window();
     callback win-drag();
     callback win-resize-se();
 
@@ -216,7 +217,7 @@ export component SystemInfoWindow inherits Window {
     ModalScope {
         active: true;
         is-mac: root.is-mac;
-        cancel-requested => { root.close(); }
+        cancel-requested => { root.close-window(); }
     VerticalLayout {
         spacing: 0;
 
@@ -244,7 +245,7 @@ export component SystemInfoWindow inherits Window {
                 Rectangle {
                     width: 46px;
                     background: close-ta.has-hover ? #e81123 : transparent;
-                    close-ta := TouchArea { mouse-cursor: pointer; clicked => { root.close(); } }
+                    close-ta := TouchArea { mouse-cursor: pointer; clicked => { root.close-window(); } }
                     Text {
                         text: "\u{E5CD}";
                         font-family: "Material Icons";
@@ -259,8 +260,8 @@ export component SystemInfoWindow inherits Window {
 
         Flickable {
             vertical-stretch: 1;
-            viewport-width: self.width;
-            viewport-height: max(self.height, content.preferred-height);
+            content-width: self.width;
+            content-height: max(self.height, content.preferred-height);
 
             content := VerticalLayout {
                 padding: 14px;

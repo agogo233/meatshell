@@ -1,3 +1,5 @@
+#[path = "impls/elevation.rs"]
+mod elevation;
 #[path = "impls/sftp.rs"]
 mod sftp;
 #[path = "struct/transfer.rs"]

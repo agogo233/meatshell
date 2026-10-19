@@ -65,6 +65,10 @@ export struct SessionDraft {
     // Skip shell-integration setup for Windows / pwsh servers or interactive
     // auto-login scripts where injected commands break the shell.
     disable-shell-integration: bool,
+    // Who the SFTP panel works as (#438): "" login user | "sudo" root |
+    // "custom" = run `sftp-command` as the SFTP server.
+    sftp-mode: string,
+    sftp-command: string,
     // Free-form note (B站 suggestion).
     note: string,
     // Explicit first-hop-first route, owned by this session (#211).
@@ -601,6 +605,41 @@ component SerialPortCombo inherits VerticalLayout {
     }
 }
 
+// One choice of the SFTP privileges radio group (#438).
+component SftpModeOption inherits Rectangle {
+    in property <string> label;
+    in property <bool> checked;
+    callback clicked();
+    height: 22px;
+    accessible-role: checkbox;
+    accessible-label: root.label;
+    accessible-checked: root.checked;
+    HorizontalLayout {
+        spacing: 8px;
+        Rectangle {
+            width: 16px; height: 16px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: root.checked ? Theme.accent : Theme.border-strong;
+            Rectangle {
+                width: 8px; height: 8px;
+                border-radius: 4px;
+                background: root.checked ? Theme.accent : transparent;
+            }
+        }
+        Text {
+            text: root.label;
+            color: Theme.text-primary; font-size: Theme.fs-sm;
+            vertical-alignment: center; horizontal-stretch: 1;
+        }
+    }
+    TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
 // Terminal character encoding picker (#338, #435). Shared by SSH/Telnet (in
 // the Advanced section) and serial (main section: serial has no Advanced).
 // Values are encoding_rs / WHATWG labels; unknown labels fall back to UTF-8.
@@ -750,6 +789,8 @@ export component SessionDialog inherits ModalLayer {
     in-out property <bool> draft-vt100-drawing: false;
     in-out property <string> draft-session-log: "default";
     in-out property <bool> draft-disable-shell-integration: false;
+    in-out property <string> draft-sftp-mode: "";
+    in-out property <string> draft-sftp-command: "";
     in-out property <string> draft-note;
     in-out property <string> test-status;
     // In-app SSH keypair generator. Transient UI state — the generated private
@@ -822,6 +863,8 @@ export component SessionDialog inherits ModalLayer {
             vt100-drawing: root.draft-vt100-drawing,
             session-log: root.draft-session-log,
             disable-shell-integration: root.draft-disable-shell-integration,
+            sftp-mode: root.draft-sftp-mode,
+            sftp-command: root.draft-sftp-command,
             note: root.draft-note,
             jumps: root.jumps,
             allow-secret-reveal: root.allow-secret-reveal,
@@ -945,8 +988,8 @@ export component SessionDialog inherits ModalLayer {
             interactive: false;
             width: 100%;
             vertical-stretch: 1;
-            viewport-width: self.width;
-            viewport-height: body.preferred-height;
+            content-width: self.width;
+            content-height: body.preferred-height;
             body := VerticalLayout {
                 padding: 20px;
                 spacing: 12px;
@@ -1684,6 +1727,45 @@ export component SessionDialog inherits ModalLayer {
                 }
                 Rectangle { height: 6px; }
 
+                // SFTP privileges (#438): servers that refuse root logins can
+                // still browse root-only files, like WinSCP's "SFTP server".
+                Text {
+                    text: @tr("SFTP privileges");
+                    color: Theme.text-secondary;
+                    font-size: Theme.fs-sm;
+                }
+                // Radio rows bound straight to the draft: the dialog is reused
+                // between sessions, so no widget-internal selection can go stale.
+                SftpModeOption {
+                    label: @tr("Login user (default)");
+                    checked: root.draft-sftp-mode != "sudo" && root.draft-sftp-mode != "custom";
+                    clicked => { root.draft-sftp-mode = ""; }
+                }
+                SftpModeOption {
+                    label: @tr("Root, via sudo");
+                    checked: root.draft-sftp-mode == "sudo";
+                    clicked => { root.draft-sftp-mode = "sudo"; }
+                }
+                SftpModeOption {
+                    label: @tr("Custom SFTP server command");
+                    checked: root.draft-sftp-mode == "custom";
+                    clicked => { root.draft-sftp-mode = "custom"; }
+                }
+                if root.draft-sftp-mode == "custom" : LabeledInput {
+                    label: @tr("SFTP server command");
+                    placeholder: "sudo -u www-data /usr/lib/openssh/sftp-server";
+                    value <=> root.draft-sftp-command;
+                }
+                Text {
+                    text: root.draft-sftp-mode == "sudo"
+                        ? @tr("The SFTP panel runs sftp-server through sudo, so it can read and write files only root can. Needs passwordless sudo, or the saved login password when sudo asks for one.")
+                        : root.draft-sftp-mode == "custom"
+                            ? @tr("Runs this command instead of the sftp subsystem; it must speak SFTP on stdin/stdout. Folder downloads (tar) still run as the login user.")
+                            : @tr("The SFTP panel works as the user you log in with.");
+                    color: Theme.text-muted; font-size: Theme.fs-xs; wrap: word-wrap;
+                }
+                Rectangle { height: 6px; }
+
                 Text {
                     text: @tr("Port forwarding");
                     color: Theme.text-secondary;
@@ -1775,6 +1857,8 @@ export component SessionDialog inherits ModalLayer {
                             vt100-drawing: root.draft-vt100-drawing,
                             session-log: root.draft-session-log,
                             disable-shell-integration: root.draft-disable-shell-integration,
+                            sftp-mode: root.draft-sftp-mode,
+                            sftp-command: root.draft-sftp-command,
                             note: root.draft-note,
                             jumps: root.jumps,
                             allow-secret-reveal: root.allow-secret-reveal,

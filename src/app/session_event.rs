@@ -2,6 +2,7 @@ use super::*;
 
 pub(super) fn apply_session_event_to_window(
     win: &AppWindow,
+    editor: &EditorWindow,
     window_id: u64,
     tab_id: &str,
     event: SessionEvent,
@@ -118,6 +119,7 @@ pub(super) fn apply_session_event_to_window(
             // synthetic Output event so it reuses the normal render path (#79).
             apply_session_event_to_window(
                 win,
+                editor,
                 window_id,
                 tab_id,
                 SessionEvent::Output(format!(
@@ -328,29 +330,12 @@ pub(super) fn apply_session_event_to_window(
             message,
         } => {
             // Built-in editor save outcome (#70). The status bar is colour-coded
-            // via `sftp-status-kind` (1 saved / 2 failed). A failure re-marks the
-            // editor dirty (nothing was written), but only when this same file is
-            // still open — a stale failure must not flag a different file.
+            // via `sftp-status-kind` (1 saved / 2 failed).
             let kind = if ok { 1 } else { 2 };
             update_terminal(&|t| {
                 t.sftp_status = message.clone().into();
                 t.sftp_status_kind = kind;
             });
-            // Mirror the outcome as a transient pill in the editor title bar so the
-            // confirmation is obvious at the point of action; a failure also
-            // re-marks the editor dirty (nothing was written). Both fire only for
-            // the file that is still open.
-            if win.get_editor_open() && win.get_editor_path().as_str() == path.as_str() {
-                // Slint's `changed` handler only re-arms the auto-dismiss timer
-                // on a value change, so reset first: two back-to-back failures
-                // (2 → 2) must still restart the countdown instead of the first
-                // timer dismissing the second pill early.
-                win.set_editor_save_ack(0);
-                win.set_editor_save_ack(kind);
-                if !ok {
-                    win.set_editor_dirty(true);
-                }
-            }
         }
         SessionEvent::SftpFileText {
             path,
@@ -360,35 +345,27 @@ pub(super) fn apply_session_event_to_window(
             error,
         } => {
             if error.is_empty() {
-                // Open the built-in viewer/editor (#70). Windows line endings
-                // are normalised to LF — a literal `\r` would render as an
-                // extra empty row in the body and the gutter — and the file's
-                // original ending is remembered so saving rewrites nothing.
-                let crlf = content.contains("\r\n");
-                let content = crate::editor::eol::strip_cr(&content);
-                win.set_editor_eol_crlf(crlf);
-                win.set_editor_lines(editor_lines_for(&content));
-                win.set_editor_path(path.into());
-                win.set_editor_name(name.into());
-                win.set_editor_content(content.into());
-                win.set_editor_readonly(!edit);
-                win.set_editor_dirty(false);
-                // A freshly loaded file has no pending save result, so clear any
-                // lingering success/failure pill from the previously open file
-                // (switching files does not re-fire `changed editor-open`).
-                win.set_editor_save_ack(0);
-                // Fresh document: rebuild the highlight overlay from scratch
-                // (also re-detects the language from the new editor-name).
-                win.set_editor_bracket_open(-1);
-                win.set_editor_bracket_close(-1);
-                sync_editor_highlight(win, true);
-                win.set_editor_open(true);
+                // Open the built-in viewer/editor (#70): as an editor tab in
+                // this window or in the detached editor window, per
+                // Settings → SFTP (#494).
+                if win.get_editor_embedded() {
+                    win.invoke_open_editor_tab(
+                        tab_id.into(),
+                        path.into(),
+                        name.into(),
+                        content.into(),
+                        !edit,
+                    );
+                } else {
+                    open_document(editor, tab_id, path, name, content, edit);
+                }
             } else {
                 // Couldn't open as text. The SFTP status line alone is easy to
                 // miss (looks like "nothing happened"), so also print the reason
                 // into the terminal via a synthetic Output event (#70).
                 apply_session_event_to_window(
                     win,
+                    editor,
                     window_id,
                     tab_id,
                     SessionEvent::Output(format!(
@@ -408,6 +385,11 @@ pub(super) fn apply_session_event_to_window(
                     t.sftp_status_kind = 2;
                 });
             }
+        }
+        SessionEvent::SftpDownloadInstead { path } => {
+            // Double-clicked file that isn't editable text (#493): run the
+            // regular download, exactly as the Download menu entry would.
+            win.invoke_sftp_download(tab_id.into(), path.into());
         }
         SessionEvent::SftpTreeUpdate(nodes) => {
             let slint_nodes: Vec<SftpTreeNode> = nodes

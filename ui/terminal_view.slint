@@ -173,8 +173,8 @@ export component QuickDockPanel inherits Rectangle {
 
         Flickable {
             vertical-stretch: 1;
-            viewport-width: self.width;
-            viewport-height: max(self.height, list.preferred-height);
+            content-width: self.width;
+            content-height: max(self.height, list.preferred-height);
             list := VerticalLayout {
                 padding: 6px; spacing: 2px; alignment: start;
                 if root.commands.length == 0 : Text {
@@ -624,6 +624,7 @@ export component TerminalView inherits Rectangle {
     callback terminal-resize(float, float);
     callback sftp-navigate(string);
     callback sftp-download(string);
+    callback sftp-open-file(string);                // double-click a file (#493)
     callback sftp-upload-clicked(string, bool);
     callback sftp-refresh(string);
     callback sftp-tree-expand(string);
@@ -936,7 +937,7 @@ export component TerminalView inherits Rectangle {
                 //    lapsed.  Without the Flickable, every wheel lands on
                 //    body-touch-overlay below, which always claims I-beam.
                 // 2. Scroll ownership: the captured wheel also scrolled
-                //    viewport-y natively (flick physics included), fighting the
+                //    content-y natively (flick physics included), fighting the
                 //    Rust-managed view_offset and the `changed spans` snap-back.
                 //    All scrolling already flows through terminal-scroll /
                 //    terminal-scroll-to, so the Flickable only ever added drift.
@@ -954,7 +955,7 @@ export component TerminalView inherits Rectangle {
                     // Vertical placement of the content inside the clip: newest
                     // output pinned to the bottom edge (negative), alt-screen
                     // top-aligned (0).  Replaces the old imperative
-                    // `flickable.viewport-y = height - viewport-height` sync —
+                    // `flickable.content-y = height - content-height` sync —
                     // as a binding it can no longer drift between rebuilds.
                     property <length> view-y: root.is-alt-screen
                         ? 0px
@@ -1067,7 +1068,7 @@ export component TerminalView inherits Rectangle {
                                 if (root.selecting) {
                                     // Position of the cursor within the *visible*
                                     // viewport (body-touch sits on the grid Rectangle
-                                    // at content y=8px; viewport-y offsets the scroll).
+                                    // at content y=8px; content-y offsets the scroll).
                                     root.select-update(
                                         floor(self.mouse-y / root.cell-h),
                                         floor(self.mouse-x / root.cell-w));
@@ -1895,15 +1896,15 @@ export component TerminalView inherits Rectangle {
                     clip: true;
                     TouchArea {
                         scroll-event(event) => {
-                            command-scroll.viewport-y = clamp(
-                                command-scroll.viewport-y + event.delta-y,
-                                min(0px, command-scroll.visible-height - command-scroll.viewport-height), 0px);
+                            command-scroll.content-y = clamp(
+                                command-scroll.content-y + event.delta-y,
+                                min(0px, command-scroll.visible-height - command-scroll.content-height), 0px);
                             accept
                         }
                     }
                     command-scroll := ScrollView {
-                        viewport-width: self.visible-width;
-                        viewport-height: max(self.visible-height, cmd-input.preferred-height);
+                        content-width: self.visible-width;
+                        content-height: max(self.visible-height, cmd-input.preferred-height);
                         cmd-input := TextInput {
                             x: 8px;
                             width: max(1px, command-scroll.visible-width - 16px);
@@ -1916,13 +1917,13 @@ export component TerminalView inherits Rectangle {
                             wrap: char-wrap;
                             page-height: command-scroll.visible-height;
                             cursor-position-changed(position) => {
-                                let cursor-y = position.y + command-scroll.viewport-y;
+                                let cursor-y = position.y + command-scroll.content-y;
                                 if (cursor-y < 0px) {
-                                    command-scroll.viewport-y = min(0px, command-scroll.viewport-y - cursor-y);
+                                    command-scroll.content-y = min(0px, command-scroll.content-y - cursor-y);
                                 } else if (cursor-y > command-scroll.visible-height - self.font-size) {
-                                    command-scroll.viewport-y = max(
-                                        min(0px, command-scroll.visible-height - command-scroll.viewport-height),
-                                        command-scroll.viewport-y - (cursor-y - command-scroll.visible-height + self.font-size));
+                                    command-scroll.content-y = max(
+                                        min(0px, command-scroll.visible-height - command-scroll.content-height),
+                                        command-scroll.content-y - (cursor-y - command-scroll.visible-height + self.font-size));
                                 }
                             }
                             // Preserve pasted newlines. A single-line input rewrites
@@ -2125,8 +2126,8 @@ export component TerminalView inherits Rectangle {
                 drop-shadow-color: #00000070;
                 TouchArea {}  // swallow clicks
                 Flickable {
-                    viewport-width: self.width;
-                    viewport-height: max(self.height, qc-col.preferred-height);
+                    content-width: self.width;
+                    content-height: max(self.height, qc-col.preferred-height);
                     qc-col := VerticalLayout {
                         padding: 4px;
                         alignment: start;
@@ -2373,27 +2374,27 @@ export component TerminalView inherits Rectangle {
                     // easy-to-find spot no matter how tall the list is (#131).
                     h-flick := Flickable {
                     vertical-stretch: 1;
-                    viewport-width: self.width;
-                    viewport-height: max(self.height, h-col.preferred-height);
+                    content-width: self.width;
+                    content-height: max(self.height, h-col.preferred-height);
                     // The newest commands are at the bottom, next to the search box
                     // and the command input, so open scrolled there (#447). Scrolling
                     // by hand replaces this binding until the popup reopens.
-                    viewport-y: min(0px, self.height - self.viewport-height);
+                    content-y: min(0px, self.height - self.content-height);
                     // Keep the ↑/↓ keyboard selection visible (#447).
                     property <int> follow-selected: root.history-selected;
                     changed follow-selected => { self.reveal-row(self.follow-selected); }
                     public function scroll-to-newest() {
-                        self.viewport-y = min(0px, self.height - self.viewport-height);
+                        self.content-y = min(0px, self.height - self.content-height);
                     }
                     function reveal-row(row: int) {
                         if (row < 0 || row >= root.history-view.length) { return; }
                         // Rows are 28px tall below h-col's 4px top padding.
                         let top = 4px + row * 28px;
                         let bottom = top + 28px;
-                        if (top < -self.viewport-y) {
-                            self.viewport-y = -top;
-                        } else if (bottom > self.height - self.viewport-y) {
-                            self.viewport-y = self.height - bottom;
+                        if (top < -self.content-y) {
+                            self.content-y = -top;
+                        } else if (bottom > self.height - self.content-y) {
+                            self.content-y = self.height - bottom;
                         }
                     }
                     h-col := VerticalLayout {
@@ -2569,6 +2570,8 @@ export component TerminalView inherits Rectangle {
         }
             }
         }
+
+
         }
     }
 }

@@ -140,6 +140,14 @@ pub(super) fn wire_tab_callbacks(
             if id == "welcome" {
                 return;
             }
+            // Editor tab with unsaved edits (#494): ask first; "Discard and
+            // close" clears the flag and comes back through here.
+            if weak
+                .upgrade()
+                .is_some_and(|w| close_needs_confirm(&w, &id))
+            {
+                return;
+            }
 
             if let Some(h) = crate::app::term_buf(&bufs, id.as_str()) {
                 h.lock().unwrap().release_history_keep_screen();
@@ -193,6 +201,9 @@ pub(super) fn wire_tab_callbacks(
 
             layout.borrow_mut().remove_tab(&id);
             if let Some(w) = weak.upgrade() {
+                // Drop a closed editor tab's document, or orphan the editor
+                // tabs whose SFTP channel was this terminal's (#494).
+                forget_tab(&w, &id);
                 let lay = layout.borrow().clone();
                 refresh_panes(
                     &w,

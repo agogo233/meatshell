@@ -1,6 +1,6 @@
 [package]
 name = "meatshell"
-version = "0.7.7"
+version = "0.7.8"
 edition = "2021"
 authors = ["meatshell contributors"]
 description = "A lightweight FinalShell-style SSH/terminal client written in Rust + Slint"
@@ -12,6 +12,9 @@ rust-version = "1.88"
 [package.metadata.deb]
 extended-description = "MeatShell is a cross-platform terminal client written in Rust and Slint."
 depends = "$auto"
+# Upstream-built package: the version is the release version alone, without
+# cargo-deb's default Debian revision "-1".
+revision = ""
 # RDP sessions drive FreeRDP's `xfreerdp3` / `xfreerdp`, which is not linked
 # into the binary, so `$auto` cannot see it. Recommended rather than required:
 # RDP is one feature among many, and the package name differs per distribution
@@ -35,7 +38,7 @@ headless = []
 
 [dependencies]
 # Keep all desktop platforms on the native text layout patched below.
-slint = { version = "=1.16.1", default-features = false, features = ["std", "backend-winit", "renderer-femtovg", "renderer-software", "accessibility", "compat-1-2"] }
+slint = { version = "=1.18.1", default-features = false, features = ["std", "backend-winit", "renderer-femtovg", "renderer-software", "accessibility", "compat-1-2"] }
 
 # ICU4X (pulled in by Slint's text layout) spams stderr with raw `eprintln!`
 # ("ICU4X data error: No segmentation model for language: ja") because its
@@ -44,7 +47,7 @@ slint = { version = "=1.16.1", default-features = false, features = ["std", "bac
 # subscriber, where init_tracing silences the `icu_provider` target.
 icu_provider = { version = "2", features = ["logging"] }
 # Direct access to the winit window/events (OS file-drop for drag-and-drop upload).
-i-slint-backend-winit = "1.16"
+i-slint-backend-winit = "=1.18.1"
 # Raw HWND access (matches winit's rwh 0.6) for the Win11 rounded-corner + shadow
 # DWM tweaks on the frameless window (#162 / #166). Only used under cfg(windows).
 raw-window-handle = "0.6"
@@ -131,10 +134,13 @@ chacha20poly1305 = "0.10"
 # Detect whether the OS is running in dark or light mode.
 # Used on startup to honour the system preference before the user overrides it.
 dark-light = "1"
-# Lightweight synchronous HTTPS client (bundled rustls, no OpenSSL) for the
-# in-app update check against the GitHub releases API (#48). Runs on a
-# background thread so it never blocks startup; failure is silently ignored.
+# HTTPS release checks and installer downloads run on background threads.
+# rustls provides TLS without requiring a system OpenSSL installation.
 ureq = { version = "2", features = ["tls"] }
+# Unpack the Linux .tar.gz release for one-click in-place updates (#390).
+# Both were already in the dependency tree.
+flate2 = "1"
+tar = "0.4"
 
 # Image decoding: custom wallpapers (PNG/JPEG/WebP/BMP) for the immersive theme,
 # and the embedded PNG window icon on Linux. On Windows the icon comes from the
@@ -166,7 +172,7 @@ jemallocator = "0.5"
 # Windows/Linux never compile Skia; on Windows it conflicts with another ICU
 # import library at link time when using the MSVC toolchain (#224).
 [target.'cfg(target_os = "macos")'.dependencies]
-slint = { version = "=1.16.1", default-features = false, features = ["renderer-skia"] }
+slint = { version = "=1.18.1", default-features = false, features = ["renderer-skia"] }
 
 # Official MCP HTTP transport and externally issued OAuth JWT verification.
 [dependencies.rmcp]
@@ -187,7 +193,7 @@ version = "0.7"
 version = "2"
 
 [build-dependencies]
-slint-build = "=1.16.1"
+slint-build = "=1.18.1"
 # Precomputes the bundled terminal font's glyph coverage table (#461).
 ttf-parser = "0.20"
 
@@ -206,6 +212,7 @@ windows = { version = "0.58", features = [
     "Win32_Storage_EnhancedStorage",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
+    "Win32_System_Registry",
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",
     "Win32_UI_Shell_PropertiesSystem",
@@ -236,21 +243,10 @@ debug = 1
 opt-level = 1
 
 [patch.crates-io]
-# Avoid Slint/winit's AppKit DisplayLink selector on old macOS. The local
-# patched backend falls back to timer throttling on macOS only. On macOS it also
-# never drops its AccessKit adapter, which avoids a Touch Bar crash when a
-# window closes (#488; see vendor/i-slint-backend-winit/accesskit.rs).
+# Patched backend (see vendor/EDITOR_PATCH.md): on macOS it never drops its
+# AccessKit adapter, which avoids a Touch Bar crash when a window closes (#488),
+# and on Wayland windows the app never showed stay unmapped. The old macOS
+# DisplayLink workaround is upstream since Slint 1.18.
 i-slint-backend-winit = { path = "vendor/i-slint-backend-winit" }
-# Slint 1.16.1's software renderer fills text selection/cursor/decoration
-# rectangles without honoring the active clip, so a select-all in the editor
-# bleeds over the panel borders while scrolling. Backports upstream commit
-# 37490e0 (unreleased as of 1.17.1). Drop this patch when upgrading Slint to
-# a release that contains the fix.
-i-slint-renderer-software = { path = "vendor/i-slint-renderer-software" }
-# Slint 1.16.1's TextInput insert() copies a pasted `\r\n` (Windows clipboard)
-# verbatim into the document, while parley counts CR and LF as two independent
-# line breaks — every pasted row shows a stray empty line and the LF-only line
-# model (gutter, highlight bands) built around the document falls out of step.
-# The vendor patch normalises the inserted text to LF. Drop this patch when
-# upgrading Slint to a release that normalises paste line endings upstream.
+# Native colour spans and a virtual line-number gutter; see vendor/EDITOR_PATCH.md.
 i-slint-core = { path = "vendor/i-slint-core" }

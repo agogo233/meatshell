@@ -116,6 +116,7 @@ pub(super) fn configured_dedup_policy(weak: &slint::Weak<AppWindow>) -> DedupPol
 
 pub(super) fn wire_sftp_callbacks(
     window: &AppWindow,
+    editor: &EditorWindow,
     sftp_handles: SftpHandles,
     sftp_last_cwd: SftpLastCwd,
     store: Rc<RefCell<ConfigStore>>,
@@ -735,6 +736,17 @@ pub(super) fn wire_sftp_callbacks(
             }
         });
     }
+    // Double-click on a file (#493): edit it if it is text, else download.
+    {
+        let sftp_handles = sftp_handles.clone();
+        window.on_sftp_open_file(move |tab_id: SharedString, path: SharedString| {
+            if let Ok(handles) = sftp_handles.lock() {
+                if let Some(h) = handles.get(tab_id.as_str()) {
+                    h.open_or_download(path.to_string());
+                }
+            }
+        });
+    }
     {
         let sftp_handles = sftp_handles.clone();
         window.on_sftp_edit(move |tab_id: SharedString, path: SharedString| {
@@ -868,182 +880,9 @@ pub(super) fn wire_sftp_callbacks(
         });
     }
 
-    // Refresh editor syntax after edits. The debounced callback keeps typing
-    // responsive while the native TextInput owns selection and IME handling.
-    {
-        let weak = window.as_weak();
-        window.on_editor_recount(move |text: SharedString| {
-            if let Some(w) = weak.upgrade() {
-                w.set_editor_lines(editor_lines_for(text.as_str()));
-                // Incremental: only the rows that actually changed repaint.
-                sync_editor_highlight(&w, false);
-            }
-        });
-    }
-
-    // Bracket-match box: the TextInput reports the caret byte offset on every
-    // move/edit; we recompute the pair and repaint only the touched rows.
-    {
-        let weak = window.as_weak();
-        window.on_editor_bracket_check(move |offset| {
-            let Some(w) = weak.upgrade() else { return };
-            if !w.get_editor_hl_active() {
-                return;
-            }
-            let content = w.get_editor_content().to_string();
-            let lang = crate::editor::lang::detect(
-                w.get_editor_name().as_str(),
-                content.lines().next().unwrap_or(""),
-            );
-            let pair =
-                crate::editor::bracket::find_pair(&content, offset.max(0) as usize, lang);
-            let cur = match pair {
-                Some((o, c)) => (o as i32, c as i32),
-                None => (-1, -1),
-            };
-            let prev = (w.get_editor_bracket_open(), w.get_editor_bracket_close());
-            if cur == prev {
-                return;
-            }
-            w.set_editor_bracket_open(cur.0);
-            w.set_editor_bracket_close(cur.1);
-            if let Some(model) = w
-                .get_editor_hl_lines()
-                .as_any()
-                .downcast_ref::<VecModel<crate::ui::HlLine>>()
-            {
-                let old = if prev.0 >= 0 && prev.1 >= 0 {
-                    Some((prev.0 as usize, prev.1 as usize))
-                } else {
-                    None
-                };
-                crate::editor::highlight::apply_bracket(
-                    model,
-                    &content,
-                    lang,
-                    w.get_dark_mode(),
-                    old,
-                    pair,
-                );
-            }
-        });
-    }
-
-    // Built-in editor: save (Ctrl+S / button) writes the text back to the
-    // remote file (#70). Read-only (view) sessions never save.
-    {
-        let sftp_handles = sftp_handles.clone();
-        let weak = window.as_weak();
-        window.on_save_file(move || {
-            let Some(w) = weak.upgrade() else { return };
-            if w.get_editor_readonly() {
-                return;
-            }
-            let path = w.get_editor_path().to_string();
-            // The document is kept on LF, so a CRLF file has to be written back
-            // with its original endings instead of re-writing every line.
-            let mut content = w.get_editor_content().to_string();
-            if w.get_editor_eol_crlf() {
-                content = content.replace('\n', "\r\n");
-            }
-            let tab_id = w.get_active_tab_id().to_string();
-            if let Ok(handles) = sftp_handles.lock() {
-                if let Some(h) = handles.get(&tab_id) {
-                    h.write_text(path, content);
-                }
-            }
-            w.set_editor_dirty(false);
-        });
-    }
-    // Closing the editor discards unsaved edits. Saving is an explicit action
-    // (button / Ctrl+S); silently uploading on X or Esc is surprising and can
-    // overwrite a remote file the user only meant to inspect (#287).
-    {
-        let weak = window.as_weak();
-        window.on_close_editor(move || {
-            let Some(w) = weak.upgrade() else { return };
-            w.set_editor_open(false);
-            w.set_editor_dirty(false);
-            // Drop the overlay model so a stale highlight never leaks into the
-            // next file; it is rebuilt from scratch on every open.
-            w.set_editor_hl_lines(slint::ModelRc::default());
-            w.set_editor_hl_active(false);
-            w.set_editor_find_query("".into());
-            w.set_editor_replace_text("".into());
-            w.set_editor_match_count(0);
-            w.set_editor_find_position(-1);
-        });
-    }
-
-    // Built-in editor find/replace (#287). Keep matching literal and
-    // case-sensitive, which is predictable for configuration/source files.
-    window.on_editor_count_matches(|content: SharedString, query: SharedString| {
-        if query.is_empty() {
-            0
-        } else {
-            content
-                .matches(query.as_str())
-                .count()
-                .min(i32::MAX as usize) as i32
-        }
-    });
-    window.on_editor_find_step(
-        |content: SharedString, query: SharedString, current: i32, reverse: bool| {
-            if query.is_empty() {
-                return EditorFindResult {
-                    start: 0,
-                    end: 0,
-                    count: 0,
-                };
-            }
-            let positions: Vec<usize> = content
-                .match_indices(query.as_str())
-                .map(|(index, _)| index)
-                .collect();
-            let selected = if reverse {
-                positions
-                    .iter()
-                    .rev()
-                    .copied()
-                    .find(|position| current < 0 || *position < current as usize)
-                    .or_else(|| positions.last().copied())
-            } else {
-                positions
-                    .iter()
-                    .copied()
-                    .find(|position| current < 0 || *position > current as usize)
-                    .or_else(|| positions.first().copied())
-            };
-            let start = selected.unwrap_or(0).min(i32::MAX as usize) as i32;
-            EditorFindResult {
-                start,
-                end: start.saturating_add(query.len().min(i32::MAX as usize) as i32),
-                count: positions.len().min(i32::MAX as usize) as i32,
-            }
-        },
-    );
-    {
-        let weak = window.as_weak();
-        window.on_editor_replace_all(move |query: SharedString, replacement: SharedString| {
-            let Some(w) = weak.upgrade() else { return };
-            if w.get_editor_readonly() || query.is_empty() {
-                return;
-            }
-            let replaced = crate::editor::eol::strip_cr(
-                &w.get_editor_content().replace(query.as_str(), replacement.as_str()),
-            );
-            w.set_editor_content(replaced.clone().into());
-            w.set_editor_dirty(true);
-            w.set_editor_lines(editor_lines_for(&replaced));
-            // Replace-all can touch every row; the sync helper diffs them but
-            // a full reset is simpler and equally fast at this size. The old
-            // bracket pair's offsets are meaningless in the new text.
-            w.set_editor_bracket_open(-1);
-            w.set_editor_bracket_close(-1);
-            sync_editor_highlight(&w, true);
-            w.set_editor_match_count(0);
-        });
-    }
+    // Built-in editor (#70), detached-window mode. Editor tabs (#494) are
+    // wired in editor_tabs::wire_editor_tabs.
+    wire_editor_window(editor, sftp_handles);
 
     // Per-server path bookmarks: the panel menu adds the tab's current dir and
     // drops saved entries; jumping reuses sftp-navigate in Slint. Both

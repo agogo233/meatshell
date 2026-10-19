@@ -1,3 +1,4 @@
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthChar;
 
 use crate::terminal::{HistSpan, Line};
@@ -99,18 +100,37 @@ pub(crate) fn build_row(screen: &vt100::Screen, row: u16, columns: u16) -> Line 
     while column < columns {
         let first = cell_attrs(screen, row, column);
         if first.wide {
-            plain.push_str(&first.contents);
+            // vt100 gives every wide code point its own cells, so an emoji
+            // cluster such as 👍🏽 (base + skin tone) or 👨‍💻 (ZWJ sequence)
+            // lands in several cells. Keep a cluster in one run so it is drawn
+            // as one glyph; the extra cells stay reserved as blank columns.
+            let start_column = column;
+            let mut text = first.contents.clone();
+            column += 2;
+            while column < columns {
+                let next = cell_attrs(screen, row, column);
+                if next.contents.is_empty() || !next.same_style(&first) {
+                    break;
+                }
+                let mut joined = text.clone();
+                joined.push_str(&next.contents);
+                if joined.graphemes(true).nth(1).is_some() {
+                    break;
+                }
+                text = joined;
+                column += if next.wide { 2 } else { 1 };
+            }
+            plain.push_str(&text);
             runs.push(HistSpan {
-                text: first.contents,
+                text,
                 fg: first.fg,
                 bg: first.bg,
                 bold: first.bold,
                 inverse: first.inverse,
                 underline: first.underline,
-                col: column as i32,
-                cells: 2,
+                col: start_column as i32,
+                cells: (column - start_column) as i32,
             });
-            column += 2;
             continue;
         }
 
@@ -168,4 +188,44 @@ pub(crate) fn detect_scroll(previous: &[Line], current: &[Line]) -> usize {
         }
     }
     best_shift
+}
+
+#[cfg(test)]
+mod emoji_cluster_tests {
+    fn spans(sample: &str) -> Vec<(i32, i32, String)> {
+        let mut parser = vt100::Parser::new(2, 20, 0);
+        parser.process(sample.as_bytes());
+        let (_, runs, _) = super::build_row(parser.screen(), 0, 20);
+        runs.into_iter().map(|r| (r.col, r.cells, r.text)).collect()
+    }
+
+    #[test]
+    fn skin_tone_and_zwj_clusters_stay_in_one_run() {
+        // vt100 puts each wide code point in its own cells; the cluster must
+        // still reach the renderer whole, or it draws 👍 + 🏽 separately.
+        assert_eq!(spans("A👍🏽B")[1], (1, 4, "👍🏽".to_string()));
+        assert_eq!(spans("A👨\u{200d}💻B")[1], (1, 4, "👨\u{200d}💻".to_string()));
+        assert_eq!(
+            spans("👨\u{200d}👩\u{200d}👧 x")[0],
+            (0, 6, "👨\u{200d}👩\u{200d}👧".to_string())
+        );
+    }
+
+    #[test]
+    fn separate_wide_characters_are_not_merged() {
+        // Two emoji, CJK, and an emoji followed by a blank stay separate.
+        let s = spans("😀😀中文");
+        assert_eq!(s[0], (0, 2, "😀".to_string()));
+        assert_eq!(s[1], (2, 2, "😀".to_string()));
+        assert_eq!(s[2], (4, 2, "中".to_string()));
+        assert_eq!(s[3], (6, 2, "文".to_string()));
+        assert_eq!(spans("😀 B")[0], (0, 2, "😀".to_string()));
+    }
+
+    #[test]
+    fn differently_styled_cells_are_not_merged() {
+        let s = spans("👍\u{1b}[31m🏽\u{1b}[0m");
+        assert_eq!(s[0], (0, 2, "👍".to_string()));
+        assert_eq!(s[1], (2, 2, "🏽".to_string()));
+    }
 }

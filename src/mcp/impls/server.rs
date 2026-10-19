@@ -83,10 +83,9 @@ async fn call_tool(id: Value, params: &Value, allow_config_import: bool) -> Valu
     let Some(name) = params.get("name").and_then(Value::as_str) else {
         return error_response(id, -32602, "missing tool name");
     };
-    let arguments = params
-        .get("arguments")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
+    let Some(arguments) = tool_arguments(params.get("arguments")) else {
+        return error_response(id, -32602, "tool arguments must be a JSON object");
+    };
     match super::tools::call_mcp(name, &arguments, allow_config_import).await {
         Ok(value) => success_response(
             id,
@@ -103,6 +102,24 @@ async fn call_tool(id: Value, params: &Value, allow_config_import: bool) -> Valu
                 "isError": true
             }),
         ),
+    }
+}
+
+/// `tools/call` arguments as a JSON object. The spec requires an object, but
+/// some MCP bridges relay it as a JSON-encoded string; without accepting that,
+/// every required argument looked missing ("missing or invalid string
+/// argument: session_id") while argument-less tools such as list_sessions
+/// still worked. `None` for anything that is not (or does not encode) an object.
+fn tool_arguments(arguments: Option<&Value>) -> Option<Value> {
+    match arguments {
+        None | Some(Value::Null) => Some(json!({})),
+        Some(value @ Value::Object(_)) => Some(value.clone()),
+        Some(Value::String(text)) if text.trim().is_empty() => Some(json!({})),
+        Some(Value::String(text)) => match serde_json::from_str::<Value>(text) {
+            Ok(value @ Value::Object(_)) => Some(value),
+            _ => None,
+        },
+        Some(_) => None,
     }
 }
 
@@ -154,6 +171,60 @@ mod tests {
         )
         .await
         .is_none());
+    }
+
+    #[test]
+    fn tool_arguments_accept_objects_and_json_encoded_objects() {
+        let object = json!({ "session_id": "abc" });
+        assert_eq!(tool_arguments(Some(&object)), Some(object.clone()));
+        // Some bridges send the arguments object as a JSON string.
+        let encoded = Value::String(r#"{"session_id":"abc"}"#.into());
+        assert_eq!(tool_arguments(Some(&encoded)), Some(object));
+        assert_eq!(tool_arguments(None), Some(json!({})));
+        assert_eq!(tool_arguments(Some(&Value::Null)), Some(json!({})));
+        assert_eq!(tool_arguments(Some(&Value::String(" ".into()))), Some(json!({})));
+        // Anything else is rejected instead of looking like missing arguments.
+        assert_eq!(tool_arguments(Some(&json!([1, 2]))), None);
+        assert_eq!(tool_arguments(Some(&Value::String("[1]".into()))), None);
+        assert_eq!(tool_arguments(Some(&Value::String("not json".into()))), None);
+    }
+
+    #[tokio::test]
+    async fn string_encoded_arguments_reach_the_tool() {
+        // A required argument passed inside a JSON-encoded string must arrive;
+        // the tool then fails on the session lookup, not on argument parsing.
+        let response = handle(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "tools/call",
+                "params": {
+                    "name": "get_session",
+                    "arguments": r#"{"session_id":"no-such-session"}"#
+                }
+            }),
+            false,
+        )
+        .await
+        .unwrap();
+        let text = response["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(!text.contains("missing or invalid string argument"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn non_object_arguments_are_invalid_params() {
+        let response = handle(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 8,
+                "method": "tools/call",
+                "params": { "name": "get_session", "arguments": [1] }
+            }),
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(response["error"]["code"], -32602);
     }
 
     #[tokio::test]

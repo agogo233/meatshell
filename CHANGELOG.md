@@ -3,6 +3,35 @@
 All notable changes are documented here. 本文件记录所有重要变更。
 中英对照（中文在前，English after）.
 
+## [0.7.8] - 2026-10-18
+
+- **应用内一键更新（#390、#497）。** 检测到新版本后，“设置”中的更新按钮可直接下载并安装：先下载并校验 SHA-256，再点击“安装并重启”，程序会关闭所有窗口、替换为新版本并自动重新打开。MSI 安装版交由 Windows Installer 升级（感谢 @yanmuq，#497）；Windows 便携版（.zip）、Linux AppImage 与 .tar.gz、macOS .app 会直接替换自身文件，替换失败时自动回滚。便携版的 `config/` 与 `log/` 数据目录不会被改动。通过 .deb、Flatpak 或 AUR 安装的版本会提示使用系统包管理器更新；安装在无写入权限位置（如 Program Files、`/usr/local/bin`）的版本仍打开发布页面。
+- **One-click in-app updates (#390, #497).** When an update is available, the update button in Settings downloads it and verifies its SHA-256; "Install and restart" then closes every window, replaces MeatShell with the new version and reopens it. MSI installs are upgraded through Windows Installer (thanks @yanmuq, #497); the Windows portable .zip, Linux AppImage and .tar.gz, and macOS .app replace their own files and roll back if the swap fails. A portable build's `config/` and `log/` folders are never touched. Installs from .deb, Flatpak or AUR are told to update with their package manager, and installs in folders the user cannot write to (Program Files, `/usr/local/bin`, …) still open the release page.
+
+- **文本文件可在主界面的编辑器标签页中打开（#494）。** 设置 → SFTP 新增“在标签页中打开文件”：关闭（默认）时仍使用单独的编辑器窗口；开启后文件以编辑器标签页的形式在窗格中打开，拖动标签即可与终端分屏。重复打开同一文件会切换到已有标签，未保存的修改会在标签上标记，关闭前会确认是否放弃；来源终端关闭后无法再保存。
+- **Open text files as editor tabs in the main window (#494).** Settings → SFTP gains "Open files in a tab": off (default) keeps the separate editor window; on opens files as editor tabs in a pane, which can be dragged to split beside a terminal. Opening the same file again switches to its tab, unsaved edits are marked on the tab and closing asks before discarding them; Save is disabled once the originating terminal is closed.
+
+- **新建标签页菜单支持一键启动终端与 AI 智能体（#427）。** 参照 Warp，每个窗格标签栏的“+”旁新增“⌄”菜单，列出本地终端（PowerShell、CMD、WSL 配置等）以及本机已安装的命令行智能体，如 Claude Code、Codex、Gemini CLI、Qwen Code、Copilot CLI、OpenCode、Kimi CLI、Cursor CLI。选择智能体即在该窗格打开本地终端标签页并启动它（Windows 使用 PowerShell，其他平台使用登录 shell）；智能体退出后终端保留，可继续使用。欢迎页作为侧栏时菜单同样可用。快速连接列表中也新增与“system”相同、不可编辑的“agents”分组，列出这些智能体。未被自动识别的智能体可通过菜单中的“自定义…”（设置 → AI 智能体）手动添加：填写名称、启动命令和可选的启动目录。
+- **Launch terminals and AI agents from the new-tab menu (#427).** Following Warp, a "⌄" next to each pane's "+" lists the local shells (PowerShell, CMD, WSL profiles, …) and the agent CLIs installed on this machine, such as Claude Code, Codex, Gemini CLI, Qwen Code, Copilot CLI, OpenCode, Kimi CLI and Cursor CLI. Picking an agent opens a local terminal tab in that pane running it (PowerShell on Windows, the login shell elsewhere); the shell stays open after the agent exits. The menu is also available when the welcome page is docked as a sidebar. Quick connect also lists the agents in a read-only built-in "agents" group, like "system". Agents meatshell does not detect can be added by hand from "Customize…" in the menu (Settings → AI agents) with a name, a command and an optional start folder.
+
+- **SFTP 可切换为 root 身份（#438）。** 服务器出于安全考虑禁止 root 远程登录时，普通用户无法读写部分目录。参照 WinSCP 的“SFTP 服务器”设置，SSH 会话的高级选项中新增“SFTP 权限”：默认以登录用户身份工作；选择“root（通过 sudo）”后，SFTP 面板通过 sudo 运行 sftp-server（自动查找常见安装路径），浏览、上传、下载及打包下载均以 root 身份进行；也可填写自定义 SFTP 服务器命令（例如 `sudo -u www-data …/sftp-server`）。支持免密 sudo；sudo 需要密码时使用会话保存的登录密码，通过标准输入传给 `sudo -S`，不会出现在命令行中。sudo 不可用、密码被拒绝或找不到 sftp-server 时会给出明确提示。
+- **SFTP can work as root (#438).** When a server refuses root logins, a regular account cannot read or write some folders. Following WinSCP's "SFTP server" setting, SSH sessions get an "SFTP privileges" option under Advanced: the login user (default); "Root, via sudo", which runs sftp-server through sudo (found in the usual install locations) so browsing, uploads, downloads and folder downloads all run as root; or a custom SFTP server command such as `sudo -u www-data …/sftp-server`. Passwordless sudo works as is; when sudo asks for a password, the session's saved login password is sent to `sudo -S` on stdin, never on a command line. A missing sudo, a rejected password or a missing sftp-server each get a clear message.
+
+- **SFTP 面板双击文件时，文本文件直接在内置编辑器中打开（#493）。** 此前双击文件总是下载。现在双击会先按内置编辑器的规则检查文件：UTF-8 文本（不超过 512 KB、10,000 行）直接在编辑器中打开，可编辑并保存回服务器；二进制文件、非 UTF-8 文本或过大的文件仍照常下载（下载目录、同名文件处理等与“下载”菜单一致）。二进制文件通常在读取第一块数据时即可识别，不会先读完整个文件。
+- **Double-clicking a text file in the SFTP panel opens it in the built-in editor (#493).** Double-click used to always download. It now checks the file the way the built-in editor does: UTF-8 text (up to 512 KB and 10,000 lines) opens in the editor, ready to edit and save back; binaries, non-UTF-8 text and larger files are downloaded as before (same download folder and conflict handling as the Download menu entry). Binaries are usually recognised from the first chunk, so the whole file is not read first.
+
+- **修复 tmux 及嵌套 shell 中每次显示提示符都报 “__ms7: command not found” 的问题（#496）。** 目录跟踪钩子会把 `__ms7` 加到 `PROMPT_COMMAND` 前面；若服务器已导出 `PROMPT_COMMAND`，会话内启动的 tmux、bash、su 会继承该命令却没有对应函数。现仅在当前 shell 定义了该函数时才调用。
+- **Fix "__ms7: command not found" on every prompt in tmux and nested shells (#496).** The directory-tracking hook prepends `__ms7` to `PROMPT_COMMAND`; when the server already exports `PROMPT_COMMAND`, shells started inside the session (tmux, bash, su) inherited the call without the function. The hook now runs only when the function exists in the current shell.
+
+- **肤色修饰与 ZWJ 组合 emoji 显示为单个字形。** 👍🏽、👨‍👩‍👧 等由多个码点组成的 emoji 此前会拆成多个图标显示，现在按字素簇合并绘制。（vim 自身会把 ZWJ 显示为 `<200d>`，这一点不受影响。）
+- **Draw skin-tone and ZWJ emoji sequences as one glyph.** Multi-code-point emoji such as 👍🏽 and 👨‍👩‍👧 used to be drawn as several separate images; they are now merged by grapheme cluster. (vim itself still shows ZWJ as `<200d>`.)
+
+- **修复部分 MCP 客户端调用工具时报 “missing or invalid string argument: session_id” 的问题。** 某些 MCP 桥接会把工具参数作为 JSON 字符串而非对象转发，导致除 `list_sessions` 外所有带必填参数的工具都失败。现在会解码此类字符串；其他非对象参数返回明确的参数错误。
+- **Fix MCP tools failing with "missing or invalid string argument: session_id" in some clients.** Some MCP bridges send tool arguments as a JSON string instead of an object, so every tool with a required argument except `list_sessions` failed. Such strings are now decoded, and other non-object arguments get a clear invalid-params error.
+
+- **升级 Slint 至 1.18.1。**
+- **Upgrade Slint to 1.18.1.**
+
 ## [0.7.7] - 2026-10-11
 
 - **Telnet 与串口会话支持按会话设置字符编码（#435）。** 此前编码选项（#338）仅对 SSH 生效，通过 Telnet 或串口连接的 GBK 设备始终按 UTF-8 解码而显示乱码。现在 Telnet 与串口会按会话所选编码解码输出、编码输入，多字节字符跨读取被拆分时也不再显示为替换字符。会话编辑器在 SSH / Telnet（高级选项）和串口（主设置区）中提供编码选择，并新增 GB18030、EUC-JP 及西里尔 / 中欧等编码。

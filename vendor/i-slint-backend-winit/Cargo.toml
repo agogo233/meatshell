@@ -11,9 +11,9 @@
 
 [package]
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.92"
 name = "i-slint-backend-winit"
-version = "1.16.1"
+version = "1.18.1"
 authors = ["Slint Developers <info@slint.dev>"]
 build = "build.rs"
 autolib = false
@@ -39,6 +39,7 @@ rustdoc-args = ["--generate-link-to-definition"]
 accessibility = [
     "dep:accesskit",
     "dep:accesskit_winit",
+    "i-slint-core/accessibility-text",
 ]
 default = []
 raw-window-handle-06 = ["i-slint-core/raw-window-handle-06"]
@@ -46,11 +47,12 @@ renderer-femtovg = [
     "i-slint-renderer-femtovg/opengl",
     "dep:glutin",
     "dep:glutin-winit",
+    "windows/Win32_Graphics_OpenGL",
 ]
 renderer-femtovg-wgpu = [
     "i-slint-renderer-femtovg/wgpu",
     "dep:i-slint-renderer-femtovg",
-    "unstable-wgpu-28",
+    "unstable-wgpu-30",
 ]
 renderer-skia = ["i-slint-renderer-skia"]
 renderer-skia-opengl = [
@@ -69,21 +71,27 @@ renderer-software = [
     "i-slint-renderer-software/std",
     "dep:bytemuck",
 ]
-unstable-wgpu-27 = [
-    "i-slint-core/unstable-wgpu-27",
-    "i-slint-renderer-skia?/unstable-wgpu-27",
+renderer-vello = [
+    "dep:i-slint-renderer-anyrender",
+    "i-slint-renderer-anyrender/vello",
+    "unstable-wgpu-29",
 ]
-unstable-wgpu-28 = [
-    "i-slint-core/unstable-wgpu-28",
-    "i-slint-renderer-femtovg?/unstable-wgpu-28",
-    "i-slint-renderer-skia?/unstable-wgpu-28",
+unstable-wgpu-29 = [
+    "i-slint-core/unstable-wgpu-29",
+    "i-slint-renderer-skia?/unstable-wgpu-29",
+]
+unstable-wgpu-30 = [
+    "i-slint-core/unstable-wgpu-30",
+    "i-slint-renderer-femtovg?/unstable-wgpu-30",
+    "i-slint-renderer-skia?/unstable-wgpu-30",
 ]
 wayland = [
     "winit/wayland",
     "winit/wayland-csd-adwaita",
     "glutin?/wayland",
     "glutin-winit?/wayland",
-    "copypasta/wayland",
+    "dep:arboard",
+    "arboard/wayland-data-control",
     "i-slint-renderer-skia?/wayland",
     "softbuffer?/wayland",
     "softbuffer?/wayland-dlopen",
@@ -94,7 +102,7 @@ x11 = [
     "glutin?/glx",
     "glutin-winit?/x11",
     "glutin-winit?/glx",
-    "copypasta/x11",
+    "dep:arboard",
     "i-slint-renderer-skia?/x11",
     "softbuffer?/x11",
     "softbuffer?/x11-dlopen",
@@ -103,6 +111,16 @@ x11 = [
 [lib]
 name = "i_slint_backend_winit"
 path = "lib.rs"
+
+[[test]]
+name = "hide_from_window_event"
+path = "tests/hide_from_window_event.rs"
+harness = false
+
+[[test]]
+name = "hide_with_external_reference"
+path = "tests/hide_with_external_reference.rs"
+harness = false
 
 [[test]]
 name = "menubar_borrow"
@@ -117,50 +135,40 @@ optional = true
 [dependencies.cfg-if]
 version = "1"
 
-[dependencies.derive_more]
-version = "2.0.0"
-features = [
-    "deref",
-    "deref_mut",
-    "into",
-    "from",
-    "add",
-    "add_assign",
-    "mul",
-    "not",
-    "display",
-]
-default-features = false
-
 [dependencies.i-slint-common]
-version = "=1.16.1"
+version = "=1.18.1"
 features = ["default"]
 default-features = false
 
 [dependencies.i-slint-core]
-version = "=1.16.1"
+version = "=1.18.1"
 features = ["default"]
 default-features = false
 
 [dependencies.i-slint-core-macros]
-version = "=1.16.1"
+version = "=1.18.1"
 features = ["default"]
 default-features = false
 
+[dependencies.i-slint-renderer-anyrender]
+version = "=1.18.1"
+optional = true
+default-features = false
+
 [dependencies.i-slint-renderer-femtovg]
-version = "=1.16.1"
+version = "=1.18.1"
 features = ["default"]
 optional = true
 default-features = false
 
 [dependencies.i-slint-renderer-skia]
-version = "=1.16.1"
+version = "=1.18.1"
 features = ["default"]
 optional = true
 default-features = false
 
 [dependencies.i-slint-renderer-software]
-version = "=1.16.1"
+version = "=1.18.1"
 optional = true
 default-features = false
 
@@ -200,9 +208,6 @@ version = "0.28"
 features = ["derive"]
 default-features = false
 
-[dependencies.tracing]
-version = "0.1"
-
 [dependencies.webbrowser]
 version = "1.2.0"
 
@@ -214,7 +219,7 @@ default-features = false
 [dev-dependencies]
 
 [build-dependencies.cfg_aliases]
-version = "0.2.0"
+version = "0.2.2"
 
 [target.'cfg(all(not(target_arch = "wasm32"), not(all(target_vendor = "apple", not(target_os = "macos")))))'.dependencies.glutin]
 version = "0.32.0"
@@ -235,17 +240,22 @@ optional = true
 default-features = false
 
 [target.'cfg(all(target_vendor = "apple", not(target_os = "macos")))'.dependencies.i-slint-renderer-skia]
-version = "=1.16.1"
+version = "=1.18.1"
 features = ["default"]
 default-features = false
 
 [target.'cfg(any(target_os = "macos", target_family = "windows"))'.dependencies.muda]
-version = "0.18.0"
+version = "0.19.0"
 optional = true
 default-features = false
 
 [target.'cfg(any(target_os = "macos", target_family = "windows"))'.dependencies.vtable]
-version = "0.4"
+version = "0.5"
+
+[target.'cfg(not(any(target_family = "windows", target_vendor = "apple", target_arch = "wasm32", target_os = "android")))'.dependencies.arboard]
+version = "3.6"
+optional = true
+default-features = false
 
 [target.'cfg(not(any(target_family = "windows", target_vendor = "apple", target_arch = "wasm32", target_os = "android")))'.dependencies.futures]
 version = "0.3.31"
@@ -256,11 +266,11 @@ features = ["async-io"]
 default-features = false
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies.accesskit]
-version = "0.22"
+version = "0.24"
 optional = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies.accesskit_winit]
-version = "0.30"
+version = "0.33"
 features = [
     "accesskit_unix",
     "async-io",
@@ -269,8 +279,12 @@ features = [
 optional = true
 default-features = false
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies.copypasta]
-version = "0.10"
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies.i-slint-core]
+version = "=1.18.1"
+features = [
+    "image-decoders",
+    "svg",
+]
 default-features = false
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.wasm-bindgen]
@@ -284,12 +298,15 @@ features = [
     "Window",
     "Document",
     "Event",
+    "EventTarget",
+    "FocusEvent",
     "KeyboardEvent",
     "InputEvent",
     "CompositionEvent",
     "DomStringMap",
     "ClipboardEvent",
     "DataTransfer",
+    "Node",
     "WebGlContextEvent",
 ]
 default-features = false
@@ -309,6 +326,7 @@ features = [
     "NSNotification",
     "NSOperation",
     "NSGeometry",
+    "NSRunLoop",
     "objc2-core-foundation",
 ]
 default-features = false
@@ -318,22 +336,39 @@ version = "0.3.2"
 features = [
     "CADisplayLink",
     "CATransaction",
+    "CAFrameRateRange",
 ]
 default-features = false
 
 [target.'cfg(target_os = "ios")'.dependencies.objc2-ui-kit]
 version = "0.3.2"
 features = [
+    "UIApplication",
+    "UIScene",
+    "UISceneDefinitions",
+    "UISceneOptions",
+    "UISceneSession",
     "UIScreen",
     "UIWindow",
+    "UIWindowScene",
     "UIView",
     "UIViewAnimating",
     "UIViewPropertyAnimator",
     "UIResponder",
+    "UIInterface",
+    "UIPasteboard",
+    "UITrait",
+    "UITraitCollection",
+    "UIFont",
+    "UIFontDescriptor",
     "objc2-core-foundation",
     "objc2-quartz-core",
     "block2",
 ]
+default-features = false
+
+[target.'cfg(target_os = "macos")'.dependencies.arboard]
+version = "3.6"
 default-features = false
 
 [target.'cfg(target_os = "macos")'.dependencies.block2]
@@ -345,10 +380,15 @@ version = "0.6.3"
 [target.'cfg(target_os = "macos")'.dependencies.objc2-app-kit]
 version = "0.3.2"
 features = [
+    "std",
     "NSColor",
     "NSView",
+    "NSWindow",
+    "NSResponder",
     "objc2-core-foundation",
+    "objc2-quartz-core",
 ]
+default-features = false
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-foundation]
 version = "0.3.2"
@@ -357,8 +397,10 @@ features = [
     "block2",
     "NSString",
     "NSNotification",
+    "NSOperation",
     "NSRunLoop",
     "NSObjCRuntime",
+    "NSUserDefaults",
 ]
 default-features = false
 
@@ -367,10 +409,15 @@ version = "0.3.2"
 features = ["CADisplayLink"]
 default-features = false
 
+[target.'cfg(target_os = "windows")'.dependencies.arboard]
+version = "3.6"
+default-features = false
+
 [target.'cfg(target_os = "windows")'.dependencies.windows]
 version = "0.62"
 features = [
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_HiDpi",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Dwm",
 ]

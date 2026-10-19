@@ -111,7 +111,8 @@ export component ProcWindow inherits Window {
     property <length> menu-x;
     property <length> menu-y;
 
-    callback close();
+    // Not `close`: Slint 1.18 windows have a builtin close() this would shadow.
+    callback close-window();
     callback win-drag();          // start an OS window-move (frameless titlebar)
     callback win-resize-se();     // start an OS resize from the bottom-right grip
     callback copy-pid(string);
@@ -156,7 +157,7 @@ export component ProcWindow inherits Window {
     ModalScope {
         active: !root.terminate-dialog-open;
         is-mac: root.is-mac;
-        cancel-requested => { root.close(); }
+        cancel-requested => { root.close-window(); }
     VerticalLayout {
         spacing: 0;
 
@@ -198,7 +199,7 @@ export component ProcWindow inherits Window {
                     animate background { duration: 90ms; }
                     close-ta := TouchArea {
                         mouse-cursor: pointer;
-                        clicked => { root.close(); }
+                        clicked => { root.close-window(); }
                     }
                     Text {
                         text: "\u{E5CD}";
@@ -241,8 +242,8 @@ export component ProcWindow inherits Window {
 
             Flickable {
                 vertical-stretch: 1;
-                viewport-width: self.width;
-                viewport-height: max(self.height, proc-col.preferred-height);
+                content-width: self.width;
+                content-height: max(self.height, proc-col.preferred-height);
                 proc-col := VerticalLayout {
                     alignment: start;
                     spacing: 1px;

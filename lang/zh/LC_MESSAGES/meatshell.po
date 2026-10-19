@@ -426,6 +426,18 @@ msgstr "meatshell — 一个由「一坨肉」开发的轻量 Rust + Slint SSH �
 msgid "A lightweight and efficient Rust + Slint SSH client"
 msgstr "一个轻量、高效的 Rust + Slint SSH 客户端"
 
+msgid "Terminal"
+msgstr "终端"
+
+msgid "Open a terminal or AI agent"
+msgstr "打开终端或 AI 智能体"
+
+msgid "Customize…"
+msgstr "自定义…"
+
+msgid "AI agents"
+msgstr "AI 智能体"
+
 msgid "Quick connect"
 msgstr "快速连接"
 
@@ -509,6 +521,30 @@ msgstr "确认"
 
 msgid "Interactive login compatibility mode"
 msgstr "自动登录脚本兼容模式"
+
+msgid "SFTP privileges"
+msgstr "SFTP 权限"
+
+msgid "Login user (default)"
+msgstr "登录用户（默认）"
+
+msgid "Root, via sudo"
+msgstr "root（通过 sudo）"
+
+msgid "Custom SFTP server command"
+msgstr "自定义 SFTP 服务器命令"
+
+msgid "SFTP server command"
+msgstr "SFTP 服务器命令"
+
+msgid "The SFTP panel runs sftp-server through sudo, so it can read and write files only root can. Needs passwordless sudo, or the saved login password when sudo asks for one."
+msgstr "SFTP 面板通过 sudo 运行 sftp-server，可读写仅 root 有权限的文件。需要免密 sudo，或在 sudo 要求密码时使用已保存的登录密码。"
+
+msgid "Runs this command instead of the sftp subsystem; it must speak SFTP on stdin/stdout. Folder downloads (tar) still run as the login user."
+msgstr "用此命令代替 sftp 子系统，命令须在标准输入/输出上提供 SFTP 服务。打包下载（tar）仍以登录用户身份运行。"
+
+msgid "The SFTP panel works as the user you log in with."
+msgstr "SFTP 面板以登录用户的身份工作。"
 
 msgid "For auto-login scripts or non-POSIX shells: skips shell hooks and remote monitoring while keeping SFTP available."
 msgstr "适用于自动登录脚本或非 POSIX shell：跳过 Shell 注入和远程监控，但保留 SFTP。"

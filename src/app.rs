@@ -5,9 +5,13 @@
 //!   * Drive the 1-Hz system sampler.
 //!   * Manage the tab list + per-tab `SessionHandle` map.
 //!   * Route Slint callbacks to the right domain module.
+mod agents;
 mod auth_dialogs;
 mod ai;
 pub(crate) mod core;
+mod editor_host;
+mod editor_tabs;
+mod editor_syntax;
 #[cfg(windows)]
 mod jump_list;
 pub mod launch;
@@ -26,20 +30,25 @@ mod tab_callbacks;
 mod tab_transfer;
 mod dock_stacks;
 mod terminal_ui;
+mod tray;
+mod update;
 mod webdav;
 mod window;
 
 // [upstream] 上游 yituorou 将 app.rs 拆分为 aux_windows/open_window/panes/
 // session_callbacks/settings_callbacks/misc_callbacks/tunnel_callbacks/
 // window_events/key_input/hit_test/file_drop/fonts/helpers/term_output/
-// session_editor/editor_syntax 等子模块；本 fork 保留 app.rs 单文件实现
-// （含本地 dock/ai/sftp/editor 独有逻辑），故不声明这些拆分模块，对应功能
-// 由本地版承载；上游拆分文件已从仓库删除，仅在此留档说明。
-// 上游独立新模块 tray 亦未启用：其依赖 core::WindowState.editor_win 字段，
-// 需 core.rs 配合扩展，后续人工决策是否采纳（见合并报告 needs_user_decision）。
+// session_editor 等子模块；本 fork 保留 app.rs 单文件实现（含本地 dock/
+// ai/sftp/editor 独有逻辑），故不声明这些拆分模块，对应功能由本地版承载。
+// [merge-2026-10] 采纳上游编辑器标签页形态（#494）：启用上游新模块
+// editor_host / editor_tabs / editor_syntax（语法 span 喂给 vendored
+// i-slint-core 的原生 colour spans）与 agents / update / tray；旧拆分模块
+// 仍不启用，其函数以 app.rs 单文件内的本地实现为准。
 
 use self::ai::*;
 use self::auth_dialogs::*;
+use self::editor_host::*;
+use self::editor_tabs::*;
 use self::port_forward::*;
 use self::session_trigger::*;
 use self::quick_commands::*;
@@ -272,7 +281,6 @@ use anyhow::{Context, Result};
 use i_slint_backend_winit::WinitWindowAccessor;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
-use crate::editor;
 use tokio::runtime::Runtime;
 
 use crate::app::core::{AppCore, TabRoute, TabRoutes, WindowRegistry, WindowState};
@@ -340,6 +348,7 @@ fn teardown_window(
     sftp_handles: &SftpHandles,
     proc_weak: &slint::Weak<ProcWindow>,
     sys_weak: &slint::Weak<SystemInfoWindow>,
+    editor_weak: &slint::Weak<EditorWindow>,
 ) {
     abort_window_prompts(window_id);
     {
@@ -361,6 +370,9 @@ fn teardown_window(
     if let Some(w) = sys_weak.upgrade() {
         let _ = w.hide();
     }
+    if let Some(w) = editor_weak.upgrade() {
+        let _ = w.hide();
+    }
 }
 
 /// Tab ids currently shown in a pane (`term.id == pane.active-id` in Slint).
@@ -376,6 +388,44 @@ fn visible_tab_ids(win: &AppWindow) -> HashSet<String> {
         }
     }
     out
+}
+
+/// Per-window build context, mirroring the upstream `open_window` split's
+/// `WinCtx`: the agent launchers take it instead of a dozen loose arguments.
+struct WinCtx {
+    core: Rc<AppCore>,
+    store: Rc<RefCell<ConfigStore>>,
+    registry: Rc<WindowRegistry<slint::Weak<AppWindow>>>,
+    handles: Rc<RefCell<HashMap<String, SessionHandle>>>,
+    sftp_handles: SftpHandles,
+    bufs: TermBuffers,
+    window: AppWindow,
+    proc_win: Rc<ProcWindow>,
+    sys_win: Rc<SystemInfoWindow>,
+    editor_win: Rc<EditorWindow>,
+    window_id: u64,
+    pending_window_size_restore: Rc<Cell<Option<(f32, f32)>>>,
+    window_size_tracking_ready: Rc<Cell<bool>>,
+}
+
+/// File-dialog helper. The upstream split wraps a native parent window handle
+/// so rfd dialogs stay modal to the owning frameless window; this single-file
+/// layout builds a plain dialog (rfd still inherits the app window), keeping
+/// the `DialogOwner::of_weak(&weak).file().pick_folder()` call sites intact.
+struct DialogOwner(rfd::FileDialog);
+
+impl DialogOwner {
+    fn of_weak(_weak: &slint::Weak<AppWindow>) -> Self {
+        DialogOwner(rfd::FileDialog::new())
+    }
+
+    fn file(self) -> rfd::FileDialog {
+        self.0
+    }
+
+    fn message(&self) -> rfd::MessageDialog {
+        rfd::MessageDialog::new()
+    }
 }
 
 struct TabRenderTicket {
@@ -595,6 +645,7 @@ pub fn run(intent: crate::app::launch::LaunchIntent) -> Result<()> {
         window_states: Rc::new(RefCell::new(HashMap::new())),
         tab_routes: Arc::new(Mutex::new(HashMap::new())),
         first_window_done: Cell::new(false),
+        update: RefCell::new(update::State::default()),
     });
 
     // IPC listener: forwarded "new-window" requests arrive on the listener
@@ -667,7 +718,13 @@ pub fn run(intent: crate::app::launch::LaunchIntent) -> Result<()> {
     #[cfg(windows)]
     crate::app::jump_list::register_new_window_task();
 
+    #[cfg(windows)]
+    crate::update::windows::cleanup_stale_downloads();
+    crate::update::inplace::cleanup_after_update();
     open_window(core.clone(), false, None)?;
+    // System tray: keeps sessions running while all windows are hidden. The
+    // timer owns the tray icon, so it must outlive the event loop below.
+    let tray_timer = tray::install(core.clone());
 
     // Publish the core to the UI thread so the IPC listener's
     // invoke_from_event_loop closures can open windows without capturing the
@@ -690,6 +747,10 @@ pub fn run(intent: crate::app::launch::LaunchIntent) -> Result<()> {
     // hard-exit unconditionally. The event-loop error path goes through here
     // too: propagating with `?` would hand the runtime to the TLS destructor
     // chain, where a wedged blocking thread could hang the process forever.
+    update::cleanup(&core);
+    // Drop the tray before exit so no stale icon outlives the process.
+    tray::clear();
+    drop(tray_timer);
     NEW_WINDOW_CORE.with(|c| *c.borrow_mut() = None);
     if let Ok(core_owned) = Rc::try_unwrap(core) {
         if let Ok(runtime) = Arc::try_unwrap(core_owned.runtime) {
@@ -750,6 +811,8 @@ fn open_window(
     // Show the crate version (from Cargo.toml at compile time) in the sidebar,
     // so the footer never drifts out of sync with the actual build.
     window.set_app_version(env!("CARGO_PKG_VERSION").into());
+    // "Open files in a tab" (#494): seed from the persisted preference.
+    window.set_editor_embedded(store.borrow().editor_embedded());
 
     // Set the window icon from the PNG embedded in the binary so the dock
     // shows the correct icon even without a system-installed .desktop entry
@@ -795,6 +858,14 @@ fn open_window(
     proc_win.set_custom_titlebar(cfg!(not(target_os = "macos")));
     proc_win.set_proc_list(ModelRc::from(proc_rows_model.clone()));
     let sys_win = Rc::new(SystemInfoWindow::new().context("failed to build system info window")?);
+    // Detached built-in editor window (#70). Its save/find wiring is installed
+    // by `wire_sftp_callbacks` (below); the in-window editor tabs (#494) are
+    // wired here right after it. Kept alive like `proc_win`/`sys_win`: a hidden
+    // Slint window is dropped unless a strong handle outlives `open_window`.
+    let editor_win = Rc::new(EditorWindow::new().context("failed to build editor window")?);
+    editor_win.set_custom_titlebar(cfg!(not(target_os = "macos")));
+    editor_win.set_is_mac(cfg!(target_os = "macos"));
+    sync_editor_theme(&window, &editor_win);
     // Every fallible construction has now succeeded — register the window.
     // (cascade_origin above was captured before this point, as required.)
     let window_id = registry.register(window.as_weak());
@@ -982,11 +1053,6 @@ fn open_window(
             window.set_term_cursor_color(color);
         }
         window.set_output_highlight_enabled(s.output_highlight_enabled());
-        window.set_editor_hl_enabled(s.editor_highlight_enabled());
-        // Editor gutter pitch probe (app.slint `ed-pitch`): 2048 non-empty "M"
-        // lines; the .slint side measures their ceiled total and divides out
-        // the per-row ceil error of the wrapped-line gutter.
-        window.set_editor_probe_text(("M\n".repeat(2047) + "M").into());
         window.set_json_format_output(s.json_format_output());
         window.set_session_log_enabled(s.session_log_enabled());
         window.set_session_log_dir(s.session_log_dir().to_string_lossy().to_string().into());
@@ -1804,22 +1870,19 @@ fn open_window(
             }
         });
     }
-    // Built-in editor syntax highlighting (#70 follow-up): persist the switch
-    // and repaint the open editor (or fall back to the plain editor) at once.
+    // "Open files in a tab" (#494): persist the setting and mirror it onto
+    // this window; other windows follow via the config broadcast below.
     {
         let weak = window.as_weak();
         let store = store.clone();
-        window.on_set_editor_highlight(move |enabled| {
+        window.on_set_editor_embedded(move |embedded| {
             {
                 let mut s = store.borrow_mut();
-                s.set_editor_highlight_enabled(enabled);
+                s.set_editor_embedded(embedded);
                 let _ = s.save();
             }
             if let Some(w) = weak.upgrade() {
-                w.set_editor_hl_enabled(enabled);
-                // Full reset: flipping the branch swaps the whole rendering
-                // path (wrap mode + overlay), so incremental diffs don't apply.
-                sync_editor_highlight(&w, true);
+                w.set_editor_embedded(embedded);
             }
         });
     }
@@ -2024,6 +2087,7 @@ fn open_window(
         let store = store.clone();
         let bufs_wp = bufs.clone();
         let proc_weak = proc_win.as_weak();
+        let editor_weak = editor_win.as_weak();
         let registry = registry.clone();
         window.on_set_wallpaper(move |id: SharedString| {
             let id = id.to_string();
@@ -2036,6 +2100,9 @@ fn open_window(
                 // Keep an already-open process window in sync with the change.
                 if let Some(p) = proc_weak.upgrade() {
                     sync_proc_theme(&w, &p);
+                }
+                if let Some(e) = editor_weak.upgrade() {
+                    sync_editor_theme(&w, &e);
                 }
             }
             {
@@ -2061,6 +2128,7 @@ fn open_window(
         let store = store.clone();
         let bufs_wp = bufs.clone();
         let proc_weak = proc_win.as_weak();
+        let editor_weak = editor_win.as_weak();
         window.on_pick_wallpaper_file(move || {
             let picked = rfd::FileDialog::new()
                 .set_title("选择壁纸 / Choose wallpaper")
@@ -2072,6 +2140,9 @@ fn open_window(
                     apply_wallpaper(&w, &store.borrow(), &bufs_wp, &id, false);
                     if let Some(p) = proc_weak.upgrade() {
                         sync_proc_theme(&w, &p);
+                    }
+                    if let Some(e) = editor_weak.upgrade() {
+                        sync_editor_theme(&w, &e);
                     }
                 }
                 let mut s = store.borrow_mut();
@@ -2100,10 +2171,12 @@ fn open_window(
             sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
             // Re-apply the theme to the chrome AND every open terminal buffer.
             apply_dark_mode(&w, &bufs, theme_pref_is_dark(&store.borrow()));
-            // The editor overlay bakes palette colours into its model.
-            sync_editor_highlight(&w, true);
             // Language translations are process-global; refresh our flag only.
             w.set_lang_en(crate::i18n::is_en());
+            // Local shells / WSL profiles and detected agents can change in
+            // another window; rebuild this window's launch-menu groups.
+            w.set_launch_shells(launch_shell_model(&store.borrow()));
+            w.invoke_refresh_agent_launchers();
             // Command-bar visibility is a global preference.
             w.set_cmd_bar_hidden(store.borrow().cmd_bar_hidden());
             // Persisted terminal font size (settings stepper) is global too.
@@ -2898,6 +2971,7 @@ fn open_window(
         window_id,
         WindowState {
             weak: window.as_weak(),
+            main_win: window.clone(),
             handles: handles.clone(),
             bufs: bufs.clone(),
             gates: render_gates.clone(),
@@ -2917,6 +2991,7 @@ fn open_window(
             content_size: content_size.clone(),
             proc_win: proc_win.clone(),
             sys_win: sys_win.clone(),
+            editor_win: editor_win.clone(),
             proc_weak: proc_win.as_weak(),
             sys_weak: sys_win.as_weak(),
         },
@@ -3030,7 +3105,33 @@ fn open_window(
         core.tab_routes.clone(),
         tab_titles.clone(),
         bundle_mailbox.clone(),
+        editor_win.as_weak(),
     );
+
+    // Tab-bar "+" launch menu: local shells + WSL profiles (#launch).
+    window.set_launch_shells(launch_shell_model(&store.borrow()));
+
+    // In-app updates (#390): settings page state + the startup version check.
+    update::wire(&core, &window);
+
+    // Agent launchers (#427): the tab-bar launch menu, the Quick Connect
+    // "agents" group and the Settings → AI agents page.
+    let agent_ctx = WinCtx {
+        core: core.clone(),
+        store: store.clone(),
+        registry: registry.clone(),
+        handles: handles.clone(),
+        sftp_handles: sftp_handles.clone(),
+        bufs: bufs.clone(),
+        window: window.clone(),
+        proc_win: proc_win.clone(),
+        sys_win: sys_win.clone(),
+        editor_win: editor_win.clone(),
+        window_id,
+        pending_window_size_restore: pending_window_size_restore.clone(),
+        window_size_tracking_ready: window_size_tracking_ready.clone(),
+    };
+    agents::wire_agent_launchers(&agent_ctx, &sessions_model);
 
     // Recompute the sidebar whenever the active tab changes (fired from Slint's
     // `changed active-tab-id`).
@@ -3098,19 +3199,20 @@ fn open_window(
         let store = store.clone();
         let bufs_theme = bufs.clone();
         let proc_weak = proc_win.as_weak();
+        let editor_weak = editor_win.as_weak();
         let registry = registry.clone();
         window.on_toggle_theme(move || {
             let Some(w) = weak.upgrade() else { return };
             let next_dark = !w.get_dark_mode();
             // Flip theme + every terminal buffer + re-render (shared with wallpaper).
             apply_dark_mode(&w, &bufs_theme, next_dark);
-            // The editor overlay bakes palette colours into its model; repaint
-            // an open editor with the flipped theme (no-op when closed).
-            sync_editor_highlight(&w, true);
-            // Mirror the flip onto the detached process window (its Theme global
-            // is a separate instance) so an open process window follows.
+            // Mirror the flip onto the detached process window and editor
+            // window (their Theme globals are separate instances).
             if let Some(p) = proc_weak.upgrade() {
                 sync_proc_theme(&w, &p);
+            }
+            if let Some(e) = editor_weak.upgrade() {
+                sync_editor_theme(&w, &e);
             }
             let pref = if next_dark { "dark" } else { "light" };
             {
@@ -3426,8 +3528,25 @@ fn open_window(
         sftp_last_cwd.clone(),
         tab_titles.clone(),
     );
+    // Editor tabs (#494): the `editor-docs` rows the embedded `EditorPane`
+    // panes and the SFTP panel share, plus the window's tab/panes models.
+    let editor_docs_model: Rc<VecModel<EditorDoc>> = Rc::new(VecModel::default());
+    window.set_editor_docs(ModelRc::from(editor_docs_model.clone()));
+    wire_editor_tabs(
+        &window,
+        EditorTabModels {
+            docs: editor_docs_model,
+            tabs: tabs_model.clone(),
+            layout: layout.clone(),
+            content_size: content_size.clone(),
+            panes: panes_model.clone(),
+            splitters: splitters_model.clone(),
+        },
+        sftp_handles.clone(),
+    );
     wire_sftp_callbacks(
         &window,
+        &editor_win,
         sftp_handles.clone(),
         sftp_last_cwd.clone(),
         store.clone(),
@@ -3439,6 +3558,7 @@ fn open_window(
     wire_ai_callbacks(&window, &store, &bufs);
     let connect_ctx = ConnectCtx {
         weak: window.as_weak(),
+        editor: editor_win.as_weak(),
         window_id,
         runtime: runtime.clone(),
         handles: handles.clone(),
@@ -3612,6 +3732,7 @@ fn open_window(
         let close_sftp_handles = sftp_handles.clone();
         let ev_proc_weak = proc_win.as_weak();
         let ev_sys_weak = sys_win.as_weak();
+        let ev_editor_weak = editor_win.as_weak();
         let ev_store = store.clone();
         let ev_activity = activity.clone();
         let ev_exit_confirmed = exit_confirmed.clone();
@@ -4023,6 +4144,7 @@ fn open_window(
                             &close_sftp_handles,
                             &ev_proc_weak,
                             &ev_sys_weak,
+                            &ev_editor_weak,
                         );
                         if ev_registry.unregister(window_id) {
                             let _ = slint::quit_event_loop();
@@ -4039,6 +4161,7 @@ fn open_window(
         let weak = window.as_weak();
         let proc_weak = proc_win.as_weak();
         let sys_weak = sys_win.as_weak();
+        let editor_weak = editor_win.as_weak();
         let cc_store = store.clone();
         let cc_ds = dock_stacks.clone();
         let close_handles = handles.clone();
@@ -4068,6 +4191,7 @@ fn open_window(
                 &close_sftp_handles,
                 &proc_weak,
                 &sys_weak,
+                &editor_weak,
             );
             if close_registry.unregister(window_id) {
                 let _ = slint::quit_event_loop();
@@ -4106,6 +4230,7 @@ fn open_window(
         let close_sftp_handles = sftp_handles.clone();
         let wc_proc_weak = proc_win.as_weak();
         let wc_sys_weak = sys_win.as_weak();
+        let wc_editor_weak = editor_win.as_weak();
         let wc_store = store.clone();
         let wc_ds = dock_stacks.clone();
         let wc_exit_confirmed = exit_confirmed.clone();
@@ -4127,6 +4252,7 @@ fn open_window(
                         &close_sftp_handles,
                         &wc_proc_weak,
                         &wc_sys_weak,
+                        &wc_editor_weak,
                     );
                     let _ = w.hide();
                     if wc_registry.unregister(window_id) {
@@ -4866,6 +4992,9 @@ fn wire_session_callbacks(
     tab_routes: TabRoutes,
     tab_titles: Rc<RefCell<HashMap<String, String>>>,
     bundle_mailbox: BundleMailbox,
+    /// Detached editor window of this window (#494): connects pass it down to
+    /// the session event pump through `ConnectCtx`.
+    editor: slint::Weak<EditorWindow>,
 ) {
     // Working set of port forwards (#56) for the session being created/edited.
     // The forward add/delete callbacks mutate it; saving reads it into
@@ -6681,6 +6810,7 @@ fn wire_session_callbacks(
             // Shared with in-place reconnect (#79) via start_session_in_tab.
             let ctx = ConnectCtx {
                 weak: weak.clone(),
+                editor: editor.clone(),
                 window_id,
                 runtime: runtime.clone(),
                 handles: handles.clone(),
@@ -9080,76 +9210,6 @@ fn should_drop_macos_bare_ctrl_marker(key: &str, ctrl: bool, is_macos: bool) -> 
 /// when true the four arrow keys must use SS3 sequences (`\x1bOA`…) instead
 /// of the default CSI sequences (`\x1b[A`…).  Full-screen apps like nano and
 /// vim set this mode on startup.
-/// Preserve logical lines (including blank and trailing lines) for the gutter.
-/// Slint measures each line with the same wrapping and font as the editor.
-fn editor_lines_for(content: &str) -> ModelRc<SharedString> {
-    ModelRc::new(VecModel::from(
-        content.split('\n').map(SharedString::from).collect::<Vec<_>>(),
-    ))
-}
-
-/// Recompute the editor's highlight state from the window's own properties and
-/// repaint the overlay model.
-///
-/// `reset` swaps in a fresh model (open / theme flip / setting toggle — every
-/// row changes colour or content anyway); otherwise an existing model is
-/// diffed in place so typing only repaints the rows that really changed.
-fn sync_editor_highlight(win: &AppWindow, reset: bool) {
-    let enabled = win.get_editor_hl_enabled();
-    let content = win.get_editor_content().to_string();
-    let dark = win.get_dark_mode();
-    let lang = editor::lang::detect(
-        win.get_editor_name().as_str(),
-        content.lines().next().unwrap_or(""),
-    );
-    let line_count = content.split('\n').count();
-    let active =
-        enabled && lang != editor::lang::Lang::Plain && line_count <= editor::highlight::MAX_EDITOR_HL_LINES;
-    win.set_editor_hl_active(active);
-    if !active {
-        win.set_editor_bracket_open(-1);
-        win.set_editor_bracket_close(-1);
-        return;
-    }
-    if reset {
-        win.set_editor_hl_lines(editor::highlight::model_rc(
-            editor::highlight::build_lines(&content, lang, dark),
-        ));
-    } else {
-        match win
-            .get_editor_hl_lines()
-            .as_any()
-            .downcast_ref::<VecModel<crate::ui::HlLine>>()
-        {
-            Some(model) => editor::highlight::sync_model(model, &content, lang, dark),
-            None => {
-                win.set_editor_hl_lines(editor::highlight::model_rc(
-                    editor::highlight::build_lines(&content, lang, dark),
-                ));
-            }
-        }
-    }
-    // The rebuild above draws rows without boxes; re-apply the current
-    // bracket-match pair (owned by Rust, refreshed by editor-bracket-check).
-    let (bo, bc) = (win.get_editor_bracket_open(), win.get_editor_bracket_close());
-    if bo >= 0 && bc >= 0 {
-        if let Some(model) = win
-            .get_editor_hl_lines()
-            .as_any()
-            .downcast_ref::<VecModel<crate::ui::HlLine>>()
-        {
-            editor::highlight::apply_bracket(
-                model,
-                &content,
-                lang,
-                dark,
-                None,
-                Some((bo as usize, bc as usize)),
-            );
-        }
-    }
-}
-
 /// Write `text` to the system clipboard. Call from a dedicated thread, never the
 /// UI thread (arboard pumps the Win32 message loop / blocks).
 ///

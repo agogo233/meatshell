@@ -1054,6 +1054,14 @@ impl ConfigStore {
         self.cache.extra_paste_shortcuts_disabled = !enabled;
     }
 
+    pub fn editor_embedded(&self) -> bool {
+        self.cache.editor_embedded
+    }
+
+    pub fn set_editor_embedded(&mut self, embedded: bool) {
+        self.cache.editor_embedded = embedded;
+    }
+
     pub fn zen_mode(&self) -> bool {
         self.cache.zen_mode
     }
@@ -1640,6 +1648,30 @@ impl ConfigStore {
 
     pub fn remove_wsl_profile(&mut self, id: &str) {
         self.cache.wsl_profiles.retain(|profile| profile.id != id);
+    }
+
+    pub fn custom_agents(&self) -> &[CustomAgent] {
+        &self.cache.custom_agents
+    }
+
+    /// Add a user-defined agent launcher (#427). Returns false (and adds
+    /// nothing) when the name or command is blank.
+    pub fn add_custom_agent(&mut self, name: &str, command: &str, directory: &str) -> bool {
+        let (name, command) = (name.trim(), command.trim());
+        if name.is_empty() || command.is_empty() {
+            return false;
+        }
+        self.cache.custom_agents.push(CustomAgent {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: name.to_string(),
+            command: command.to_string(),
+            directory: directory.trim().to_string(),
+        });
+        true
+    }
+
+    pub fn remove_custom_agent(&mut self, id: &str) {
+        self.cache.custom_agents.retain(|agent| agent.id != id);
     }
 
     pub fn quick_panel_open(&self) -> bool {
@@ -2233,7 +2265,8 @@ impl ConfigStore {
     /// folder so expanding one folder does not accidentally expand the rest.
     pub fn set_session_group_collapsed(&mut self, name: &str, collapsed: bool) {
         if self.cache.collapsed_session_groups.is_none() {
-            let mut groups = vec!["system".to_string()];
+            // Built-in groups: local shells, and the detected agent CLIs (#427).
+            let mut groups = vec!["system".to_string(), "agents".to_string()];
             if self
                 .cache
                 .sessions
@@ -3658,6 +3691,19 @@ SubRep=上海机房\r\n\
         assert!(!store.paste_confirm_enabled());
         assert!(!store.extra_paste_shortcuts_enabled());
         assert!(store.zen_mode());
+    }
+
+    #[test]
+    fn issue_494_editor_embedded_defaults_off_and_round_trips() {
+        let mut store = temp_store();
+        // Existing configs keep the detached editor window.
+        store.cache = serde_json::from_str("{}").unwrap();
+        assert!(!store.editor_embedded());
+
+        store.set_editor_embedded(true);
+        let json = serde_json::to_string(&store.cache).unwrap();
+        store.cache = serde_json::from_str(&json).unwrap();
+        assert!(store.editor_embedded());
     }
 
     #[test]

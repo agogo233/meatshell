@@ -29,6 +29,28 @@ pub(super) fn wsl_profile_model(store: &ConfigStore) -> ModelRc<WslProfileInfo> 
     ModelRc::from(Rc::new(VecModel::from(rows)))
 }
 
+/// Local shells for the tab bar's launch menu (#427), in Quick connect order.
+pub(super) fn launch_shell_model(store: &ConfigStore) -> ModelRc<LaunchItem> {
+    let rows = builtin_local_sessions(store.wsl_profiles())
+        .into_iter()
+        .map(|session| LaunchItem {
+            id: session.id.into(),
+            name: session.name.into(),
+        })
+        .collect::<Vec<_>>();
+    ModelRc::from(Rc::new(VecModel::from(rows)))
+}
+
+/// SFTP privilege mode from the editor (#438): only "sudo" and "custom" are
+/// stored, and "custom" without a command falls back to the default.
+fn normalized_sftp_mode(mode: &str, command: &str) -> String {
+    match mode {
+        "sudo" => "sudo".to_string(),
+        "custom" if !command.trim().is_empty() => "custom".to_string(),
+        _ => String::new(),
+    }
+}
+
 pub(super) fn parse_batch_import(text: &str) -> Vec<Session> {
     let mut out = Vec::new();
     for raw in text.lines() {
@@ -212,24 +234,32 @@ fn build_session_rows(
         builtin: false,
     };
 
+    // Built-in rows keep their generated group ("system" shells, then the
+    // detected "agents"), each with its own header on its first row.
     let mut rows: Vec<SessionInfo> = Vec::new();
-    for (i, s) in builtin_sessions
-        .iter()
-        .filter(|session| matches(session))
-        .enumerate()
-    {
+    let mut prev_group: Option<&str> = None;
+    for s in builtin_sessions.iter().filter(|session| matches(session)) {
+        let first_in_group = prev_group != Some(s.group.as_str());
+        prev_group = Some(s.group.as_str());
+        // Agent rows show the program they run (kept in `note`, see
+        // agents.rs) instead of the hosting shell.
+        let host = if s.note.is_empty() { &s.host } else { &s.note };
         rows.push(SessionInfo {
             id: s.id.clone().into(),
             name: s.name.clone().into(),
-            host: s.host.clone().into(),
+            host: host.into(),
             serial_detail: "".into(),
             port: 0,
             user: s.user.clone().into(),
             auth: s.kind.as_str().into(),
             last_used: "".into(),
-            group: "system".into(),
-            group_header: if i == 0 { "system".into() } else { "".into() },
-            collapsed: group_is_collapsed("system"),
+            group: s.group.clone().into(),
+            group_header: if first_in_group {
+                s.group.clone().into()
+            } else {
+                "".into()
+            },
+            collapsed: group_is_collapsed(&s.group),
             builtin: true,
         });
     }
@@ -288,7 +318,7 @@ pub(super) fn sync_sessions_to_model_with_filter(
     model: &VecModel<SessionInfo>,
     query: &str,
 ) {
-    let builtin_sessions = builtin_local_sessions(store.wsl_profiles());
+    let builtin_sessions = quick_connect_builtin_sessions(store);
     model.set_vec(build_session_rows(
         store.sessions(),
         store.groups(),
@@ -310,7 +340,7 @@ pub(super) fn refresh_session_rows_in_place(
     query: &str,
 ) -> bool {
     use slint::Model as _;
-    let builtin_sessions = builtin_local_sessions(store.wsl_profiles());
+    let builtin_sessions = quick_connect_builtin_sessions(store);
     let rows = build_session_rows(
         store.sessions(),
         store.groups(),
@@ -331,6 +361,14 @@ pub(super) fn refresh_session_rows_in_place(
 
 pub(super) fn sync_sessions_to_model(store: &ConfigStore, model: &VecModel<SessionInfo>) {
     sync_sessions_to_model_with_filter(store, model, "");
+}
+
+/// Generated rows at the top of Quick connect: the "system" shells, then the
+/// "agents" group of detected and custom agent CLIs (#427).
+fn quick_connect_builtin_sessions(store: &ConfigStore) -> Vec<Session> {
+    let mut sessions = builtin_local_sessions(store.wsl_profiles());
+    sessions.extend(super::agents::agent_sessions(store));
+    sessions
 }
 
 pub(super) fn builtin_local_sessions(wsl_profiles: &[crate::config::WslProfile]) -> Vec<Session> {
@@ -377,6 +415,17 @@ pub(super) fn builtin_local_sessions(wsl_profiles: &[crate::config::WslProfile])
         out.push(builtin_local_session("system:shell", name, "shell"));
     }
     out
+}
+
+/// A built-in session by id: the `system:` shells listed in Quick connect or
+/// an `agent:` entry from the tab bar's launch menu (#427).
+pub(super) fn resolve_builtin_session(store: &ConfigStore, id: &str) -> Option<Session> {
+    if id.starts_with(super::agents::AGENT_ID_PREFIX) {
+        return super::agents::agent_session(store, id);
+    }
+    builtin_local_sessions(store.wsl_profiles())
+        .into_iter()
+        .find(|s| s.id == id)
 }
 
 pub(super) fn builtin_local_session(id: &str, name: impl Into<String>, host: &str) -> Session {
@@ -481,6 +530,7 @@ pub(super) fn session_from_draft(
         kind,
         local_distribution: String::new(),
         local_working_dir: String::new(),
+        local_command: String::new(),
         serial_port: draft.serial_port.to_string(),
         baud_rate: if draft.baud_rate <= 0 {
             115_200
@@ -497,6 +547,16 @@ pub(super) fn session_from_draft(
         forwards,
         triggers,
         disable_shell_integration: draft.disable_shell_integration,
+        sftp_mode: if kind == SessionKind::Ssh {
+            normalized_sftp_mode(&draft.sftp_mode, &draft.sftp_command)
+        } else {
+            String::new()
+        },
+        sftp_command: if kind == SessionKind::Ssh {
+            draft.sftp_command.trim().to_string()
+        } else {
+            String::new()
+        },
         note: draft.note.to_string(),
         jump_session_id: String::new(),
         allow_secret_reveal: draft.allow_secret_reveal,
@@ -656,6 +716,46 @@ mod search_tests {
         assert_eq!(rows[0].group_header.as_str(), "system");
         assert!(rows[0].builtin);
         assert!(!rows[0].collapsed);
+    }
+
+    #[test]
+    fn agents_get_their_own_builtin_group_after_system() {
+        let mut claude = session("agent:claude", "Claude Code", "powershell", "agents");
+        claude.note = "claude".into();
+        let codex = {
+            let mut s = session("agent:codex", "Codex", "powershell", "agents");
+            s.note = "codex".into();
+            s
+        };
+        let builtins = vec![
+            session("system:powershell", "PowerShell", "powershell", "system"),
+            claude,
+            codex,
+        ];
+        let collapsed = vec!["system".to_string()];
+
+        let rows = build_session_rows(&[], &[], Some(&collapsed), &builtins, "");
+
+        let headers: Vec<_> = rows.iter().map(|r| r.group_header.as_str()).collect();
+        assert_eq!(headers, ["system", "agents", ""]);
+        assert!(rows.iter().all(|r| r.builtin));
+        assert_eq!(rows[1].group.as_str(), "agents");
+        // Agent rows show the program, not the hosting shell.
+        assert_eq!(rows[1].host.as_str(), "claude");
+        assert_eq!(rows[2].host.as_str(), "codex");
+        assert_eq!(rows[0].host.as_str(), "powershell");
+        // Each built-in group collapses on its own.
+        assert!(rows[0].collapsed);
+        assert!(!rows[1].collapsed);
+    }
+
+    #[test]
+    fn sftp_mode_keeps_only_usable_choices() {
+        assert_eq!(normalized_sftp_mode("sudo", ""), "sudo");
+        assert_eq!(normalized_sftp_mode("custom", "  sudo -u web sftp-server "), "custom");
+        assert_eq!(normalized_sftp_mode("custom", "   "), "");
+        assert_eq!(normalized_sftp_mode("", "ignored"), "");
+        assert_eq!(normalized_sftp_mode("bogus", ""), "");
     }
 
     #[test]

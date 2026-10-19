@@ -215,6 +215,9 @@ export component SftpPanel inherits Rectangle {
     callback toggle-collapsed();    // minimise / restore the panel
     callback navigate(string);
     callback download(string);
+    // Double-click on a file (#493): open it in the built-in editor when it
+    // is text, otherwise download it.
+    callback open-file(string);
     callback upload-clicked(string /* remote dir */, bool /* folder */);
     callback refresh(string);
     callback tree-expand(string);   // toggle expand/collapse + navigate
@@ -1183,7 +1186,7 @@ export component SftpPanel inherits Rectangle {
                             } else if (event.text == Key.Return) {
                                 if (root.selected-row >= 0 && root.selected-row < root.entries.length) {
                                     let hit = root.entries[root.selected-row];
-                                    if (hit.is-dir) { root.navigate(hit.full-path); } else { root.download(hit.full-path); }
+                                    if (hit.is-dir) { root.navigate(hit.full-path); } else { root.open-file(hit.full-path); }
                                 }
                                 accept
                             } else if (event.text == Key.UpArrow) {
@@ -1214,9 +1217,7 @@ export component SftpPanel inherits Rectangle {
                                         root.selected-row = idx2;
                                         root.jump-target = idx2;
                                     }
-                                    root.jump-prefix = event.text;
                                 }
-                                accept
                             } else {
                                 reject
                             }
@@ -1224,8 +1225,8 @@ export component SftpPanel inherits Rectangle {
                         file-scroll-view := ScrollView {
                             width: parent.width;
                             height: parent.height;
-                            viewport-width: self.visible-width;
-                            viewport-height: max(self.visible-height, file-list.preferred-height);
+                            content-width: self.visible-width;
+                            content-height: max(self.visible-height, file-list.preferred-height);
 
                             file-list := VerticalLayout {
                                 spacing: 0;
@@ -1259,7 +1260,7 @@ export component SftpPanel inherits Rectangle {
                                             if (entry.is-dir) {
                                                 root.navigate(entry.full-path);
                                             } else {
-                                                root.download(entry.full-path);
+                                                root.open-file(entry.full-path);
                                             }
                                         }
                                         pointer-event(ev) => {
@@ -1377,6 +1378,7 @@ export component SftpPanel inherits Rectangle {
                                 }
                             }
                         }
+                    }
                     }
 
                     // One context menu for the whole list (#84). Item actions are
@@ -1513,8 +1515,8 @@ export component SftpPanel inherits Rectangle {
             ScrollView {
                 width: parent.width;
                 height: parent.height;
-                viewport-width: self.visible-width;
-                viewport-height: max(self.visible-height, tunnel-body.preferred-height);
+                content-width: self.visible-width;
+                content-height: max(self.visible-height, tunnel-body.preferred-height);
 
                 tunnel-body := VerticalLayout {
                     padding: 10px;
@@ -1663,4 +1665,3 @@ export component SftpPanel inherits Rectangle {
             }
         }
     }
-}

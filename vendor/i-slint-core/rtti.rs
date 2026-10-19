@@ -16,6 +16,7 @@ use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::convert::{TryFrom, TryInto};
+use core::ffi::c_void;
 use core::pin::Pin;
 
 macro_rules! declare_ValueType {
@@ -25,7 +26,7 @@ macro_rules! declare_ValueType {
 }
 
 macro_rules! declare_ValueType_2 {
-    ($( $(#[$enum_doc:meta])* enum $Name:ident { $($body:tt)* })*) => {
+    ($( $(#[$enum_doc:meta])* $vis:vis enum $Name:ident { $($body:tt)* })*) => {
         declare_ValueType![
             (),
             bool,
@@ -54,11 +55,14 @@ macro_rules! declare_ValueType_2 {
             crate::component_factory::ComponentFactory,
             crate::api::LogicalPosition,
             crate::items::FontMetrics,
+            crate::items::InputMethodHints,
             crate::items::MenuEntry,
             crate::items::DropEvent,
             crate::model::ModelRc<crate::items::MenuEntry>,
             crate::styled_text::StyledText,
             crate::input::Keys,
+            crate::data_transfer::DataTransfer,
+            crate::cursor::MouseCursorInner,
             $(crate::items::$Name,)*
         ];
     };
@@ -137,13 +141,16 @@ pub trait PropertyInfo<Item, Value> {
     /// # Safety
     /// the property2 must be a pinned pointer to a Property of the same type
     #[allow(unsafe_code)]
-    unsafe fn link_two_ways(&self, item: Pin<&Item>, property2: *const ());
+    unsafe fn link_two_ways(&self, item: Pin<&Item>, property2: *const c_void);
 
     /// Set the debug name of this property (only effective with `cfg(slint_debug_property)`)
     #[cfg(slint_debug_property)]
     fn set_debug_name(&self, _item: Pin<&Item>, _name: alloc::string::String) {}
 
     /// Prepare the property for two way binding and return the "common" shared property in the TwoWayBinding
+    ///
+    /// Every call for the same property must hand out a property backed by that one
+    /// common property, otherwise a later call detaches what an earlier one linked.
     fn prepare_for_two_way_binding(&self, item: Pin<&Item>) -> Pin<Rc<Property<Value>>>;
 
     /// Link another property to this property with a mapping function
@@ -155,6 +162,68 @@ pub trait PropertyInfo<Item, Value> {
         property2: Pin<Rc<Property<Value>>>,
         mapper: Option<Rc<dyn TwoWayBindingMapping<Value>>>,
     );
+
+    /// Install a two-way binding between this property and a row of a model.
+    /// `getter` reads the current row value (or `None` if the row no longer
+    /// exists); `setter` writes a new value back into the row.
+    fn link_two_way_to_model_data(
+        &self,
+        item: Pin<&Item>,
+        getter: Box<dyn Fn() -> Option<Value>>,
+        setter: Box<dyn Fn(&Value)>,
+    );
+}
+
+// The two helpers below only depend on `Value`, so they are kept out of the
+// generic `PropertyInfo` impl: there they would be instantiated once per
+// item property type instead of once.
+
+/// Returns the common property of `p`, installing a two-way binding on it first if needed.
+///
+/// link_two_way installs a TwoWayBinding on p (moving any
+/// existing binding into the shared common property), which
+/// check_common_property finds on subsequent calls. This keeps
+/// prepare_for_two_way_binding idempotent: when several fields of
+/// the same struct property are two-way bound, they must all share
+/// one common property instead of each creating its own.
+fn common_property<Value: Clone + PartialEq + Default + 'static>(
+    p: Pin<&Property<Value>>,
+) -> Pin<Rc<Property<Value>>> {
+    if let Some(cp) = Property::check_common_property(p) {
+        return cp;
+    }
+    let anchor = Rc::pin(Property::<Value>::default());
+    Property::link_two_way(anchor.as_ref(), p);
+    Property::check_common_property(p).unwrap()
+}
+
+/// Links `prop2` to the common property `prop1`, through `mapper` when given.
+fn link_common_properties<Value: Clone + PartialEq + 'static>(
+    prop1: Pin<Rc<Property<Value>>>,
+    prop2: Pin<Rc<Property<Value>>>,
+    mapper: Option<Rc<dyn TwoWayBindingMapping<Value>>>,
+) {
+    match mapper {
+        Some(m1) => {
+            let m2 = m1.clone();
+            Property::link_two_way_with_map_to_common_property(
+                prop2,
+                prop1.as_ref(),
+                move |value| m1.map_to(value),
+                move |value, value2| m2.map_from(value, value2),
+                true,
+            );
+        }
+        None => {
+            Property::link_two_way_with_map_to_common_property(
+                prop2,
+                prop1.as_ref(),
+                |value| value.clone(),
+                |value, value2| *value = value2.clone(),
+                true,
+            );
+        }
+    }
 }
 
 impl<Item: 'static, T, Value> PropertyInfo<Item, Value> for FieldOffset<Item, Property<T>>
@@ -203,7 +272,7 @@ where
     }
 
     #[allow(unsafe_code)]
-    unsafe fn link_two_ways(&self, item: Pin<&Item>, property2: *const ()) {
+    unsafe fn link_two_ways(&self, item: Pin<&Item>, property2: *const c_void) {
         let p1 = self.apply_pin(item);
         // Safety: that's the invariant of this function
         let p2 = unsafe { Pin::new_unchecked((property2 as *const Property<T>).as_ref().unwrap()) };
@@ -213,17 +282,14 @@ where
     fn prepare_for_two_way_binding(&self, item: Pin<&Item>) -> Pin<Rc<Property<Value>>> {
         if let Some(self_) =
             (self as &dyn core::any::Any).downcast_ref::<FieldOffset<Item, Property<Value>>>()
-            && let Some(p) = Property::check_common_property(self_.apply_pin(item))
         {
-            return p;
+            return common_property(self_.apply_pin(item));
         }
 
-        let p1 = self.apply_pin(item);
-        let value: Value = p1.get_internal().try_into().unwrap_or_default();
-        let shared_property = Rc::pin(Property::new(value));
-        Property::link_two_way_with_map_to_common_property(
-            shared_property.clone(),
-            p1,
+        let shared_property = Rc::pin(Property::<Value>::default());
+        Property::link_two_way_with_map(
+            self.apply_pin(item),
+            shared_property.as_ref(),
             |v| v.clone().try_into().unwrap_or_default(),
             |v, v2| *v = v2.clone().try_into().unwrap_or_default(),
         );
@@ -237,26 +303,20 @@ where
         mapper: Option<Rc<dyn TwoWayBindingMapping<Value>>>,
     ) {
         let prop1 = self.prepare_for_two_way_binding(item);
+        link_common_properties(prop1, prop2, mapper);
+    }
 
-        match mapper {
-            Some(m1) => {
-                let m2 = m1.clone();
-                Property::link_two_way_with_map_to_common_property(
-                    prop2,
-                    prop1.as_ref(),
-                    move |value| m1.map_to(value),
-                    move |value, value2| m2.map_from(value, value2),
-                );
-            }
-            None => {
-                Property::link_two_way_with_map_to_common_property(
-                    prop2,
-                    prop1.as_ref(),
-                    |value| value.clone(),
-                    |value, value2| *value = value2.clone(),
-                );
-            }
-        }
+    fn link_two_way_to_model_data(
+        &self,
+        item: Pin<&Item>,
+        getter: Box<dyn Fn() -> Option<Value>>,
+        setter: Box<dyn Fn(&Value)>,
+    ) {
+        self.apply_pin(item).link_two_way_to_model_data(
+            (),
+            move |_| getter().and_then(|v| v.try_into().ok()),
+            move |_, v: &T| setter(&v.clone().try_into().unwrap_or_default()),
+        );
     }
 }
 
@@ -352,7 +412,7 @@ where
     }
 
     #[allow(unsafe_code)]
-    unsafe fn link_two_ways(&self, item: Pin<&Item>, property2: *const ()) {
+    unsafe fn link_two_ways(&self, item: Pin<&Item>, property2: *const c_void) {
         let p1 = self.apply_pin(item);
         // Safety: that's the invariant of this function
         let p2 = unsafe { Pin::new_unchecked((property2 as *const Property<T>).as_ref().unwrap()) };
@@ -370,6 +430,15 @@ where
         mapper: Option<Rc<dyn TwoWayBindingMapping<Value>>>,
     ) {
         self.0.link_two_way_with_map(item, property2, mapper)
+    }
+
+    fn link_two_way_to_model_data(
+        &self,
+        item: Pin<&Item>,
+        getter: Box<dyn Fn() -> Option<Value>>,
+        setter: Box<dyn Fn(&Value)>,
+    ) {
+        self.0.link_two_way_to_model_data(item, getter, setter)
     }
 }
 

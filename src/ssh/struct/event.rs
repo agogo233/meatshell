@@ -147,16 +147,16 @@ pub enum SessionEvent {
         error: String,
     },
     /// Result of saving the built-in editor's text back to the remote file
-    /// (#70). `path` lets the UI ignore a stale failure after the user has
-    /// switched files; `ok == false` re-marks the editor dirty because nothing
-    /// was written. `message` is the localised status-bar text, and the result
-    /// also drives the transient success/failure pill beside the editor's Save
-    /// button (`editor-save-ack`) so the confirmation is obvious at the action.
+    /// (#70). `message` is the localised status-bar text colour-coded via
+    /// `sftp-status-kind` (1 saved / 2 failed).
     SftpSaveResult {
         path: String,
         ok: bool,
         message: String,
     },
+    /// A double-clicked file could not be opened as text (#493): download it
+    /// the usual way instead (download folder, conflict prompt and all).
+    SftpDownloadInstead { path: String },
 }
 
 /// Handle retained by the UI layer to talk to a running session.

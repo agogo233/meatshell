@@ -1,0 +1,152 @@
+//! Detached built-in file viewer/editor window (#70), plus the literal
+//! find helpers it shares with the editor tabs (#494, see `editor_tabs`).
+
+use super::*;
+
+/// Load a remote text file into the detached editor window and show it.
+pub(super) fn open_document(
+    editor: &EditorWindow,
+    tab_id: &str,
+    path: String,
+    name: String,
+    content: String,
+    edit: bool,
+) {
+    editor.set_editor_tab_id(tab_id.into());
+    editor.set_editor_path(path.into());
+    editor.set_editor_name(name.into());
+    editor_syntax::refresh(editor, &content);
+    editor.set_editor_content(content.into());
+    editor.set_editor_readonly(!edit);
+    editor.set_editor_dirty(false);
+    editor.set_editor_open(true);
+    let _ = editor.show();
+    editor.window().with_winit_window(|ww| ww.focus_window());
+}
+
+/// Save, close, syntax refresh and find/replace for the detached window.
+pub(super) fn wire_editor_window(editor: &EditorWindow, sftp_handles: SftpHandles) {
+    // Refresh syntax after edits. The debounced callback keeps typing
+    // responsive while the native TextInput owns selection and IME handling.
+    {
+        let weak = editor.as_weak();
+        editor.on_editor_highlight(move |text: SharedString| {
+            if let Some(e) = weak.upgrade() {
+                editor_syntax::refresh(&e, text.as_str());
+            }
+        });
+    }
+
+    // Save (Ctrl+S / button) writes the text back to the remote file (#70).
+    // Read-only (view) sessions never save.
+    {
+        let weak = editor.as_weak();
+        editor.on_save_file(move || {
+            let Some(e) = weak.upgrade() else { return };
+            if e.get_editor_readonly() {
+                return;
+            }
+            let path = e.get_editor_path().to_string();
+            let content = e.get_editor_content().to_string();
+            let tab_id = e.get_editor_tab_id().to_string();
+            if let Ok(handles) = sftp_handles.lock() {
+                if let Some(sftp) = handles.get(&tab_id) {
+                    sftp.write_text(path, content);
+                }
+            }
+            e.set_editor_dirty(false);
+        });
+    }
+
+    // Closing discards unsaved edits. Saving is an explicit action; silently
+    // uploading on X or Esc can overwrite a remote file the user only meant to
+    // inspect (#287). The window asks before discarding unsaved changes.
+    {
+        let weak = editor.as_weak();
+        editor.on_close_editor(move || {
+            let Some(e) = weak.upgrade() else { return };
+            e.set_editor_open(false);
+            let _ = e.hide();
+            e.set_editor_dirty(false);
+            e.set_editor_find_query("".into());
+            e.set_editor_replace_text("".into());
+            e.set_editor_match_count(0);
+            e.set_editor_find_position(-1);
+        });
+    }
+
+    editor.on_editor_count_matches(|content: SharedString, query: SharedString| {
+        count_matches(content.as_str(), query.as_str())
+    });
+    editor.on_editor_find_step(
+        |content: SharedString, query: SharedString, current: i32, reverse: bool| {
+            find_step(content.as_str(), query.as_str(), current, reverse)
+        },
+    );
+    {
+        let weak = editor.as_weak();
+        editor.on_editor_replace_all(move |query: SharedString, replacement: SharedString| {
+            let Some(e) = weak.upgrade() else { return };
+            if e.get_editor_readonly() || query.is_empty() {
+                return;
+            }
+            let replaced = e
+                .get_editor_content()
+                .replace(query.as_str(), replacement.as_str());
+            editor_syntax::refresh(&e, &replaced);
+            e.set_editor_content(replaced.into());
+            e.set_editor_dirty(true);
+            e.set_editor_match_count(0);
+        });
+    }
+}
+
+// Find/replace (#287). Matching is literal and case-sensitive, which is
+// predictable for configuration/source files.
+
+pub(super) fn count_matches(content: &str, query: &str) -> i32 {
+    if query.is_empty() {
+        0
+    } else {
+        content.matches(query).count().min(i32::MAX as usize) as i32
+    }
+}
+
+pub(super) fn find_step(
+    content: &str,
+    query: &str,
+    current: i32,
+    reverse: bool,
+) -> EditorFindResult {
+    if query.is_empty() {
+        return EditorFindResult {
+            start: 0,
+            end: 0,
+            count: 0,
+        };
+    }
+    let positions: Vec<usize> = content
+        .match_indices(query)
+        .map(|(index, _)| index)
+        .collect();
+    let selected = if reverse {
+        positions
+            .iter()
+            .rev()
+            .copied()
+            .find(|position| current < 0 || *position < current as usize)
+            .or_else(|| positions.last().copied())
+    } else {
+        positions
+            .iter()
+            .copied()
+            .find(|position| current < 0 || *position > current as usize)
+            .or_else(|| positions.first().copied())
+    };
+    let start = selected.unwrap_or(0).min(i32::MAX as usize) as i32;
+    EditorFindResult {
+        start,
+        end: start.saturating_add(query.len().min(i32::MAX as usize) as i32),
+        count: positions.len().min(i32::MAX as usize) as i32,
+    }
+}

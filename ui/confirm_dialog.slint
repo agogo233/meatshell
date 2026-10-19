@@ -127,8 +127,8 @@ export component ConfirmDialog inherits ModalLayer {
                     y: 1px;
                     width: parent.width - 2px;
                     height: parent.height - 2px;
-                    viewport-width: self.visible-width;
-                    viewport-height: max(self.visible-height, detail-text.preferred-height + 16px);
+                    content-width: self.visible-width;
+                    content-height: max(self.visible-height, detail-text.preferred-height + 16px);
 
                     detail-text := Text {
                         x: 8px;

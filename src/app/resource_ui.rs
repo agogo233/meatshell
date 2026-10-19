@@ -238,6 +238,19 @@ pub(super) fn sync_system_info_theme(main: &AppWindow, sys: &SystemInfoWindow) {
     sys.set_wp_tint(main.get_wp_tint());
 }
 
+/// Mirror the main window's theme onto the detached editor window (#494):
+/// its Theme global is a separate instance, so a wallpaper or dark-mode flip
+/// would otherwise leave it stale.
+pub(super) fn sync_editor_theme(main: &AppWindow, editor: &EditorWindow) {
+    editor.set_dark_mode(main.get_dark_mode());
+    editor.set_ui_scale(main.get_ui_scale());
+    editor.set_ui_font_family(main.get_ui_font_family());
+    editor.set_wallpaper_img(main.get_wallpaper_img());
+    editor.set_wallpaper_active(main.get_wallpaper_active());
+    editor.set_wp_accent(main.get_wp_accent());
+    editor.set_wp_tint(main.get_wp_tint());
+}
+
 pub(super) fn place_system_info_window(main: &AppWindow, sys: &SystemInfoWindow) {
     let Some((mon_x, mon_y, mon_w, mon_h)) = main
         .window()

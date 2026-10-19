@@ -409,7 +409,6 @@ fn render_term_span_with(
     glyph_fallback: Option<&GlyphFallback>,
 ) -> Vec<TermSpan> {
     use unicode_segmentation::UnicodeSegmentation as _;
-    use unicode_width::UnicodeWidthStr as _;
 
     // Pure-ASCII runs cannot contain emoji (every Twemoji glyph is non-ASCII),
     // are never wide (2-cell) or CJK, and have no combining sequences, so the
@@ -470,7 +469,14 @@ fn render_term_span_with(
 
     for (index, grapheme) in graphemes.iter().enumerate() {
         let following = (graphemes.len() - index - 1) as i32;
-        let desired = (*grapheme).width().clamp(1, 2) as i32;
+        // Count columns the way vt100 laid them out (per code point), not the
+        // cluster's display width: 👍🏽 occupies 2 + 2 cells and ❤️ just 1, so
+        // using the cluster width would shift everything after it.
+        let desired = grapheme
+            .chars()
+            .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0))
+            .sum::<usize>()
+            .max(1) as i32;
         let cells = if following == 0 {
             remaining_cells.max(1)
         } else {
@@ -497,8 +503,16 @@ fn render_term_span_with(
                 Some(family) => ((*grapheme).into(), family.clone()),
                 None => ("".into(), "".into()),
             };
-            result.push(make(text, col, cells, font, emoji_image));
-            plain_col = col + cells;
+            // A cluster vt100 spread over more than two cells (👍🏽 is 2 + 2)
+            // is drawn at normal emoji size; the rest of its columns stay
+            // reserved as blanks in the run's background.
+            let image_cells = if emoji_image.is_some() { cells.min(2) } else { cells };
+            result.push(make(text, col, image_cells, font, emoji_image));
+            plain_col = col + image_cells;
+            if image_cells < cells {
+                plain.push_str(&" ".repeat((cells - image_cells) as usize));
+                plain_cells = cells - image_cells;
+            }
         } else {
             if plain.is_empty() {
                 plain_col = col;
@@ -560,6 +574,29 @@ mod color_emoji_tests {
             assert!(spans[0].emoji, "missing color asset for {emoji}");
             assert_eq!(spans[0].cells, 2);
         }
+    }
+
+    #[test]
+    fn cluster_spread_over_four_cells_draws_one_normal_size_image() {
+        // vt100 stores 👍🏽 as two wide cells; build_row keeps them as one run.
+        let spans = render_term_span(&run("👍🏽B", 5), 0, true);
+        assert_eq!(spans.len(), 2);
+        assert!(spans[0].emoji);
+        assert_eq!((spans[0].col, spans[0].cells), (4, 2));
+        assert!(!spans[1].emoji);
+        assert_eq!((spans[1].col, spans[1].cells), (6, 3));
+        assert_eq!(spans[1].text.as_str(), "  B");
+    }
+
+    #[test]
+    fn text_after_a_variation_selector_emoji_keeps_its_grid_column() {
+        // vt100 stores ❤️ (U+2764 U+FE0F) in a single cell, so "B" is in the
+        // next column, not two columns later.
+        let spans = render_term_span(&run("A❤\u{fe0f}B", 3), 0, true);
+        let b = spans.iter().find(|s| s.text.as_str().ends_with('B')).unwrap();
+        assert_eq!(b.col + b.cells, 4 + 3);
+        let heart = spans.iter().find(|s| s.emoji).unwrap();
+        assert_eq!((heart.col, heart.cells), (5, 1));
     }
 
     #[test]

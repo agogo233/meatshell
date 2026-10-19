@@ -1,0 +1,376 @@
+import { Theme } from "theme.slint";
+import { ScrollView } from "std-widgets.slint";
+
+export struct EditorFindResult {
+    start: int,
+    end: int,
+    count: int,
+}
+
+// One open file in the main window's editor tabs (#494). Rows live in
+// AppWindow.editor-docs; Slint cannot two-way bind into model rows, so the
+// pane loads `content` on (re)show / `revision` bumps and reports every edit
+// back through a callback, which keeps the row authoritative.
+export struct EditorDoc {
+    id: string,          // tab id ("editor-N")
+    owner: string,       // terminal tab whose SFTP channel reads/writes the file
+    path: string,        // remote path
+    name: string,        // file name shown on the tab
+    content: string,     // latest text, updated on every edit
+    revision: int,       // bumped when Rust replaces `content` (open, replace all)
+    readonly: bool,      // opened with View
+    dirty: bool,         // edited since load / last save
+    orphaned: bool,      // owner tab closed: nothing left to save through
+    language: string,
+    syntax-source: string,
+    syntax-spans: string,
+}
+
+// Body of the built-in file viewer/editor (#70), shared by the detached
+// EditorWindow and the editor tabs in the main window (#494). It owns the find
+// bar, the line-number gutter, the text area and the debounced syntax refresh;
+// the host owns the document.
+export component EditorPane inherits Rectangle {
+    // True while a document is loaded; gates the highlight timer.
+    in property <bool> active: false;
+    // Editor tabs draw their own title row; the detached window draws the same
+    // controls in its custom title bar instead.
+    in property <bool> show-header: false;
+    // The tab strip already has a close button and Esc belongs to the window
+    // in tab mode, so both are only on for the detached window.
+    in property <bool> show-close: true;
+    in property <bool> esc-closes: true;
+    in property <bool> can-save: true;
+    in property <string> status-note;   // e.g. "Connection closed"
+
+    // Document mode (editor tabs): load `doc-content` whenever the pane is
+    // shown or `doc-revision` changes, instead of a two-way bound content.
+    in property <bool> doc-mode: false;
+    in property <string> doc-content;
+    in property <int> doc-revision: 0;
+    in property <bool> shown: false;
+
+    in property <string> editor-name;
+    in-out property <string> editor-content;
+    in property <bool> editor-readonly;
+    in property <bool> editor-dirty: false;
+    in property <string> editor-syntax-source;
+    in property <string> editor-syntax-spans;
+    in property <string> editor-language;
+    in-out property <string> editor-find-query;
+    in-out property <string> editor-replace-text;
+    in-out property <int> editor-match-count: 0;
+    in-out property <int> editor-find-position: -1;
+    in-out property <bool> highlight-pending: false;
+
+    callback save-file();
+    callback request-close();
+    callback content-changed();          // the user typed; host marks dirty
+    callback editor-highlight(string);
+    callback editor-count-matches(string, string) -> int;
+    callback editor-find-step(string, string, int, bool) -> EditorFindResult;
+    callback editor-replace-all(string, string);
+
+    public function focus-editor() { edit-input.focus(); }
+    function load-doc() {
+        if root.doc-mode && root.editor-content != root.doc-content {
+            root.editor-content = root.doc-content;
+        }
+    }
+    // Focus on the next UI turn; focusing from init or a change handler can
+    // re-enter the Windows accessibility adapter (#386).
+    property <bool> focus-pending: false;
+    init => {
+        root.load-doc();
+        if root.shown { root.focus-pending = true; }
+    }
+    changed doc-revision => {
+        root.load-doc();
+        root.editor-find-position = -1;
+        root.editor-match-count = root.editor-count-matches(root.editor-content, root.editor-find-query);
+    }
+    changed shown => {
+        if root.shown {
+            root.load-doc();
+            root.focus-pending = true;
+        }
+    }
+    Timer {
+        interval: 0ms;
+        running: root.focus-pending;
+        triggered => {
+            root.focus-pending = false;
+            edit-input.focus();
+        }
+    }
+
+    background: Theme.bg-root;
+
+    // Ctrl+S saves (and, for the detached window, Esc closes) while focus is
+    // anywhere inside the editor. The scope never takes focus itself, so in
+    // the main window it only sees keys whose focused item is in this pane.
+    FocusScope {
+        focus-on-click: false;
+        focus-on-tab-navigation: false;
+        capture-key-pressed(e) => {
+            if (root.esc-closes && e.text == Key.Escape) {
+                root.request-close();
+                return accept;
+            }
+            reject
+        }
+        key-pressed(e) => {
+            // ⌘S on macOS, Ctrl+S elsewhere. Slint maps `control` to Cmd on
+            // macOS, where Cmd+S can arrive as the C0 char "\u{13}" (#158).
+            if (e.modifiers.control && (e.text == "s" || e.text == "S" || e.text == "\u{0013}")) {
+                root.save-file();
+                return accept;
+            }
+            reject
+        }
+
+        VerticalLayout {
+            spacing: 0;
+
+            if root.show-header : Rectangle {
+                height: 36px;
+                background: Theme.bg-elevated;
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 4px;
+                    spacing: 4px;
+                    Text {
+                        text: root.editor-name + "  ·  " + root.editor-language
+                            + (root.editor-readonly
+                                ? "  ·  " + @tr("Read-only")
+                                : (root.editor-dirty ? "  ·  " + @tr("Modified") : ""))
+                            + (root.status-note == "" ? "" : "  ·  " + root.status-note);
+                        color: Theme.text-secondary;
+                        font-size: Theme.fs-sm;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    if !root.editor-readonly && root.can-save : Rectangle {
+                        width: 76px;
+                        height: 28px;
+                        y: (parent.height - self.height) / 2;
+                        border-radius: Theme.radius-sm;
+                        background: hdr-save-ta.has-hover ? Theme.accent-hover : Theme.accent;
+                        hdr-save-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.save-file(); }
+                        }
+                        Text { text: @tr("Save"); color: #ffffff; font-size: Theme.fs-sm;
+                               horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                    if root.show-close : Rectangle {
+                        width: 28px;
+                        height: 28px;
+                        y: (parent.height - self.height) / 2;
+                        border-radius: Theme.radius-sm;
+                        background: hdr-close-ta.has-hover ? Theme.bg-hover : transparent;
+                        hdr-close-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.request-close(); }
+                        }
+                        Text { text: "\u{E5CD}"; font-family: "Material Icons";
+                               color: Theme.text-secondary; font-size: 16px;
+                               horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                }
+            }
+            if root.show-header : Rectangle { height: 1px; background: Theme.border-subtle; }
+
+            // Lightweight find/replace bar (#287). Replacement is explicit;
+            // closing the editor never writes the file.
+            Rectangle {
+                height: 38px;
+                background: Theme.popup-bg;
+                HorizontalLayout {
+                    padding-left: 8px; padding-right: 8px;
+                    padding-top: 5px; padding-bottom: 5px; spacing: 6px;
+                    Text { text: @tr("Find"); color: Theme.text-muted; vertical-alignment: center; }
+                    TextInput {
+                        horizontal-stretch: 1;
+                        single-line: true;
+                        vertical-alignment: center;
+                        font-family: Theme.ui-font-family;
+                        font-size: Theme.fs-md;
+                        color: Theme.text-primary;
+                        text <=> root.editor-find-query;
+                        edited => {
+                            root.editor-find-position = -1;
+                            root.editor-match-count = root.editor-count-matches(
+                                root.editor-content, root.editor-find-query);
+                        }
+                    }
+                    Text {
+                        width: 42px;
+                        text: root.editor-find-query == "" ? "" : root.editor-match-count;
+                        color: Theme.text-muted;
+                        vertical-alignment: center;
+                        horizontal-alignment: center;
+                    }
+                    Rectangle {
+                        width: 28px;
+                        border-radius: Theme.radius-sm;
+                        background: find-prev-ta.has-hover ? Theme.bg-hover : Theme.bg-elevated;
+                        find-prev-ta := TouchArea {
+                            enabled: root.editor-match-count > 0;
+                            clicked => {
+                                let found = root.editor-find-step(root.editor-content,
+                                    root.editor-find-query, root.editor-find-position, true);
+                                root.editor-find-position = found.start;
+                                root.editor-match-count = found.count;
+                                edit-input.set-selection-offsets(found.start, found.end);
+                                edit-input.focus();
+                            }
+                        }
+                        Text { text: "↑"; color: Theme.text-primary; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                    Rectangle {
+                        width: 28px;
+                        border-radius: Theme.radius-sm;
+                        background: find-next-ta.has-hover ? Theme.bg-hover : Theme.bg-elevated;
+                        find-next-ta := TouchArea {
+                            enabled: root.editor-match-count > 0;
+                            clicked => {
+                                let found = root.editor-find-step(root.editor-content,
+                                    root.editor-find-query, root.editor-find-position, false);
+                                root.editor-find-position = found.start;
+                                root.editor-match-count = found.count;
+                                edit-input.set-selection-offsets(found.start, found.end);
+                                edit-input.focus();
+                            }
+                        }
+                        Text { text: "↓"; color: Theme.text-primary; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                    Text { text: @tr("Replace"); color: Theme.text-muted; vertical-alignment: center; }
+                    TextInput {
+                        horizontal-stretch: 1;
+                        single-line: true;
+                        vertical-alignment: center;
+                        font-family: Theme.ui-font-family;
+                        font-size: Theme.fs-md;
+                        color: Theme.text-primary;
+                        text <=> root.editor-replace-text;
+                    }
+                    Rectangle {
+                        width: 88px;
+                        border-radius: Theme.radius-sm;
+                        background: replace-all-ta.has-hover ? Theme.bg-hover : Theme.bg-elevated;
+                        replace-all-ta := TouchArea {
+                            enabled: !root.editor-readonly && root.editor-find-query != "";
+                            clicked => {
+                                root.editor-replace-all(root.editor-find-query, root.editor-replace-text);
+                            }
+                        }
+                        Text { text: @tr("Replace all"); color: replace-all-ta.enabled ? Theme.text-primary : Theme.text-muted;
+                               font-size: Theme.fs-sm; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                }
+            }
+            Rectangle { height: 1px; background: Theme.border-subtle; }
+
+            // Text area: a line-number gutter on the left + the editor. Long
+            // lines wrap to the visible width so text and selection painting
+            // cannot overflow to the right (#387). The gutter follows scrolling.
+            Rectangle {
+                vertical-stretch: 1;
+                background: Theme.bg-root;
+                HorizontalLayout {
+                    spacing: 0;
+                    Rectangle {
+                        width: 48px;
+                        background: Theme.bg-panel-alt;
+                        clip: true;
+                        TextInput {
+                            x: 0px;
+                            y: ed-scroll.content-y + 8px;
+                            width: edit-input.width;
+                            height: edit-input.height;
+                            text: root.editor-content;
+                            syntax-source: root.editor-content;
+                            line-number-width: parent.width - 6px;
+                            read-only: true;
+                            enabled: false;
+                            single-line: false;
+                            wrap: edit-input.wrap;
+                            font-family: edit-input.font-family;
+                            font-size: edit-input.font-size;
+                            color: Theme.text-muted;
+                        }
+                    }
+                    Rectangle { width: 1px; background: Theme.border-subtle; }
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        clip: true;
+                        // TextInput owns the pointer grab while selecting and
+                        // ignores wheel events. Catch the rejected wheel behind
+                        // it and scroll the editor (#388).
+                        TouchArea {
+                            scroll-event(event) => {
+                                ed-scroll.content-y = clamp(
+                                    ed-scroll.content-y + event.delta-y,
+                                    min(0px, ed-scroll.visible-height - ed-scroll.content-height),
+                                    0px);
+                                accept
+                            }
+                        }
+                        ed-scroll := ScrollView {
+                            content-width: self.visible-width;
+                            content-height: max(self.visible-height, edit-input.preferred-height + 16px);
+                            edit-input := TextInput {
+                                x: 8px;
+                                y: 8px;
+                                width: max(1px, ed-scroll.visible-width - 16px);
+                                height: max(ed-scroll.visible-height - 16px, self.preferred-height);
+                                text <=> root.editor-content;
+                                syntax-source: root.editor-syntax-source;
+                                syntax-spans: root.editor-syntax-spans;
+                                read-only: root.editor-readonly;
+                                single-line: false;
+                                wrap: char-wrap;
+                                color: Theme.text-primary;
+                                font-family: Theme.ui-font-family;
+                                font-size: Theme.fs-md;
+                                page-height: ed-scroll.visible-height;
+                                cursor-position-changed(position) => {
+                                    // Keep a keyboard/drag selection endpoint visible;
+                                    // during a pointer grab this also scrolls as the
+                                    // mouse leaves the top or bottom edge (#388).
+                                    let cursor-y = position.y + self.y + ed-scroll.content-y;
+                                    if (cursor-y < 12px) {
+                                        ed-scroll.content-y = min(0px,
+                                            ed-scroll.content-y + 12px - cursor-y);
+                                    } else if (cursor-y > ed-scroll.visible-height - 12px) {
+                                        ed-scroll.content-y = max(
+                                            min(0px, ed-scroll.visible-height - ed-scroll.content-height),
+                                            ed-scroll.content-y
+                                                - (cursor-y - ed-scroll.visible-height + 12px));
+                                    }
+                                }
+                                edited => {
+                                    root.content-changed();
+                                    root.highlight-pending = true;
+                                    root.editor-match-count = root.editor-count-matches(
+                                        root.editor-content, root.editor-find-query);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Timer {
+        interval: 100ms;
+        running: root.active && root.highlight-pending;
+        triggered => {
+            root.highlight-pending = false;
+            root.editor-highlight(root.editor-content);
+        }
+    }
+}

@@ -26,6 +26,14 @@ export struct WslProfileInfo {
     directory: string,
 }
 
+// A user-defined agent launcher (#427).
+export struct CustomAgentInfo {
+    id: string,
+    name: string,
+    command: string,
+    directory: string,
+}
+
 // One left-nav row (icon + label).
 component NavItem inherits Rectangle {
     in property <string> icon;
@@ -374,8 +382,6 @@ export component InterfacePanel inherits Rectangle {
     in property <color> term-cursor-color: #D4D4D4;
     in-out property <bool> output-highlight-enabled;
     in-out property <bool> json-format-output: true;
-    in-out property <bool> editor-hl-enabled: true;
-    callback set-editor-highlight(bool);
     in-out property <string> output-highlight-preset;
     in property <[OutputRuleItem]> output-highlight-rules;
     in-out property <string> output-highlight-rule-status;
@@ -387,6 +393,7 @@ export component InterfacePanel inherits Rectangle {
     in-out property <int> command-history-max-len: 0;
     in property <float> ui-scale;
     in-out property <bool> sftp-follow-cd;
+    in-out property <bool> editor-embedded;
     in-out property <int> sftp-queue-concurrency: 2;
     in-out property <int> sftp-queue-rate-limit: 0;   // KiB/s, 0 = unlimited
     in-out property <string> sftp-queue-dedup: "ask"; // ask/overwrite/skip/rename
@@ -427,6 +434,15 @@ export component InterfacePanel inherits Rectangle {
     in-out property <bool> welcome-as-sidebar;
     in-out property <bool> quick-commands-as-sidebar;
     in-out property <bool> update-check-enabled;
+    in property <string> update-version;
+    in property <bool> update-busy;
+    in property <bool> update-error;
+    in property <bool> update-install-supported;
+    in property <string> update-status;
+    in property <string> update-action-label;
+    callback check-for-updates();
+    callback update-action();
+    callback open-update-url();
     in-out property <bool> mcp-enabled: true;
     in-out property <bool> mcp-use-saved-credentials: true;
     in-out property <bool> mcp-allow-commands: true;
@@ -440,7 +456,14 @@ export component InterfacePanel inherits Rectangle {
     in-out property <string> wsl-new-distribution;
     in-out property <string> wsl-new-directory: "~";
 
-    property <string> ifd-page: "font";
+    // Page shown when the panel opens; "agents" when opened from the tab
+    // bar's launch menu (#427).
+    in property <string> start-page: "font";
+    property <string> ifd-page: root.start-page;
+    in property <[CustomAgentInfo]> custom-agents;
+    in-out property <string> agent-new-name;
+    in-out property <string> agent-new-command;
+    in-out property <string> agent-new-directory;
     property <string> new-rule-pattern;
     property <bool> new-rule-regex;
     property <bool> new-rule-case-sensitive;
@@ -478,6 +501,7 @@ export component InterfacePanel inherits Rectangle {
     callback set-auto-reconnect-enabled(bool);
     callback set-auto-reconnect-max-attempts(int);
     callback set-auto-reconnect-interval(int);
+    callback set-editor-embedded(bool);
     callback set-collapse-sidebar-default(bool);
     callback set-collapse-sftp-default(bool);
     callback set-sync-upload-enabled(bool);
@@ -509,6 +533,9 @@ export component InterfacePanel inherits Rectangle {
     callback add-wsl-profile(string, string, string);
     callback remove-wsl-profile(string);
     callback pick-wsl-directory();
+    callback add-custom-agent(string /* name */, string /* command */, string /* directory */);
+    callback remove-custom-agent(string /* id */);
+    callback pick-agent-directory();
 
     HorizontalLayout {
         // --- Left nav ------------------------------------------------------
@@ -524,8 +551,8 @@ export component InterfacePanel inherits Rectangle {
             nav-scroll := ScrollView {
                 width: 100%;
                 height: 100%;
-                viewport-width: self.visible-width;
-                viewport-height: max(self.visible-height, nav-items.preferred-height);
+                content-width: self.visible-width;
+                content-height: max(self.visible-height, nav-items.preferred-height);
                 nav-items := VerticalLayout {
                     width: nav-scroll.visible-width;
                     padding: 10px;
@@ -567,6 +594,11 @@ export component InterfacePanel inherits Rectangle {
                     clicked => { root.ifd-page = "wsl"; }
                 }
                 NavItem {
+                    icon: "\u{F06C}"; label: root.lang-en ? "AI agents" : "AI 智能体";
+                    active: root.ifd-page == "agents";
+                    clicked => { root.ifd-page = "agents"; }
+                }
+                NavItem {
                     icon: "\u{E5CB}"; label: root.lang-en ? "Sidebars" : "侧栏";
                     active: root.ifd-page == "sidebar";
                     clicked => { root.ifd-page = "sidebar"; }
@@ -602,7 +634,7 @@ export component InterfacePanel inherits Rectangle {
                     clicked => { root.ifd-page = "mcp"; }
                 }
                 NavItem {
-                    icon: "\u{E923}"; label: root.lang-en ? "Update check" : "新版本提示";
+                    icon: "\u{E923}"; label: root.lang-en ? "Updates" : "软件更新";
                     active: root.ifd-page == "update";
                     clicked => { root.ifd-page = "update"; }
                 }
@@ -620,8 +652,8 @@ export component InterfacePanel inherits Rectangle {
             settings-scroll := ScrollView {
                 width: 100%;
                 height: 100%;
-                viewport-width: self.visible-width;
-                viewport-height: max(self.visible-height, settings-pages.preferred-height);
+                content-width: self.visible-width;
+                content-height: max(self.visible-height, settings-pages.preferred-height);
 
                 settings-pages := VerticalLayout {
                     width: settings-scroll.visible-width;
@@ -1141,8 +1173,8 @@ export component InterfacePanel inherits Rectangle {
                 builtin-wallpapers-scroll := ScrollView {
                     height: 106px;
                     width: 100%;
-                    viewport-width: max(self.visible-width, builtin-wallpapers-row.preferred-width);
-                    viewport-height: self.visible-height;
+                    content-width: max(self.visible-width, builtin-wallpapers-row.preferred-width);
+                    content-height: self.visible-height;
 
                     builtin-wallpapers-row := HorizontalLayout {
                         spacing: 11px;
@@ -1459,13 +1491,14 @@ export component InterfacePanel inherits Rectangle {
                     }
                 }
                 SettingRow {
-                    label: root.lang-en ? "Editor syntax highlighting" : "编辑器语法高亮";
+                    label: root.lang-en ? "Open files in a tab" : "在标签页中打开文件";
                     desc: root.lang-en
-                        ? "Colour keywords, strings, numbers and comments when viewing or editing remote text files. Files over 2000 lines stay plain."
-                        : "查看/编辑远端文本文件时为关键字、字符串、数字和注释着色。超过 2000 行的文件保持纯文本。";
+                        ? "On: text files open as editor tabs in the main window (drag a tab to split it). Off: they open in a separate editor window."
+                        : "开启:文本文件以编辑器标签页在主界面中打开(拖动标签可分屏)。关闭:在单独的编辑器窗口中打开。";
+                    show-divider: false;
                     Switch {
-                        on: root.editor-hl-enabled;
-                        toggled(v) => { root.editor-hl-enabled = v; root.set-editor-highlight(v); }
+                        on: root.editor-embedded;
+                        toggled(v) => { root.editor-embedded = v; root.set-editor-embedded(v); }
                     }
                 }
                 SectionHeader { text: root.lang-en ? "TRANSFER QUEUE" : "传输队列"; height: 24px; }
@@ -1523,6 +1556,7 @@ export component InterfacePanel inherits Rectangle {
                     Switch {
                         on: root.sftp-preserve-mtime;
                         toggled(v) => { root.sftp-preserve-mtime = v; root.set-sftp-preserve-mtime(v); }
+                    }
                     }
                 }
             }
@@ -1600,6 +1634,90 @@ export component InterfacePanel inherits Rectangle {
                         GhostButton {
                             text: root.lang-en ? "Remove" : "删除";
                             clicked => { root.remove-wsl-profile(profile.id); }
+                        }
+                    }
+                }
+            }
+
+            // --- AI agents page (#427) ---------------------------------
+            if root.ifd-page == "agents" : VerticalLayout {
+                padding-left: 20px;
+                padding-right: 20px;
+                padding-top: 14px;
+                spacing: 8px;
+                alignment: start;
+                SectionHeader { text: root.lang-en ? "AI AGENTS" : "AI 智能体"; height: 24px; }
+                Text {
+                    text: root.is-windows
+                        ? (root.lang-en
+                            ? "Installed agents such as Claude Code, Codex and Gemini CLI are found automatically. Add any other agent here: the command runs in PowerShell, e.g. kiro-cli chat or & 'C:\\Tools\\My Agent\\agent.exe' --fast."
+                            : "Claude Code、Codex、Gemini CLI 等已安装的智能体会被自动识别。其他智能体可在此添加：命令在 PowerShell 中运行，例如 kiro-cli chat 或 & 'C:\\Tools\\My Agent\\agent.exe' --fast。")
+                        : (root.lang-en
+                            ? "Installed agents such as Claude Code, Codex and Gemini CLI are found automatically. Add any other agent here: the command runs in your login shell, e.g. kiro-cli chat."
+                            : "Claude Code、Codex、Gemini CLI 等已安装的智能体会被自动识别。其他智能体可在此添加：命令在登录 shell 中运行，例如 kiro-cli chat。");
+                    color: Theme.text-muted;
+                    font-size: 11px * Theme.panel-font;
+                    wrap: word-wrap;
+                }
+                LabeledInput {
+                    label: root.lang-en ? "Display name" : "显示名称";
+                    placeholder: "Kiro";
+                    value <=> root.agent-new-name;
+                }
+                LabeledInput {
+                    label: root.lang-en ? "Command" : "启动命令";
+                    placeholder: "kiro-cli chat";
+                    value <=> root.agent-new-command;
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    LabeledInput {
+                        horizontal-stretch: 1;
+                        label: root.lang-en ? "Start folder (optional)" : "启动目录（可选）";
+                        placeholder: root.is-windows ? "D:\\Projects\\app" : "~/projects/app";
+                        value <=> root.agent-new-directory;
+                    }
+                    VerticalLayout {
+                        alignment: end;
+                        GhostButton {
+                            text: root.lang-en ? "Browse…" : "选择目录…";
+                            clicked => { root.pick-agent-directory(); }
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    alignment: end;
+                    PrimaryButton {
+                        text: root.lang-en ? "Add agent" : "添加智能体";
+                        clicked => {
+                            root.add-custom-agent(root.agent-new-name, root.agent-new-command,
+                                root.agent-new-directory);
+                        }
+                    }
+                }
+                Rectangle { height: 1px; background: Theme.border-subtle; }
+                if root.custom-agents.length == 0 : Text {
+                    text: root.lang-en ? "No custom agents yet." : "暂无自定义智能体。";
+                    color: Theme.text-muted;
+                    font-size: 11px * Theme.panel-font;
+                }
+                for agent in root.custom-agents : Rectangle {
+                    height: 54px;
+                    border-radius: Theme.radius-sm;
+                    background: Theme.bg-elevated;
+                    HorizontalLayout {
+                        padding-left: 10px; padding-right: 8px; spacing: 8px;
+                        VerticalLayout {
+                            horizontal-stretch: 1; alignment: center;
+                            Text { text: agent.name; color: Theme.text-primary; font-size: 13px * Theme.panel-font; }
+                            Text {
+                                text: agent.command + (agent.directory == "" ? "" : "  ·  " + agent.directory);
+                                color: Theme.text-muted; font-size: 11px * Theme.panel-font; overflow: elide;
+                            }
+                        }
+                        GhostButton {
+                            text: root.lang-en ? "Remove" : "删除";
+                            clicked => { root.remove-custom-agent(agent.id); }
                         }
                     }
                 }
@@ -2097,24 +2215,72 @@ export component InterfacePanel inherits Rectangle {
                 }
             }
 
-            // --- Update check page (#184) ------------------------------
+            // --- Updates -----------------------------------------------
             if root.ifd-page == "update" : VerticalLayout {
                 padding-left: 20px;
                 padding-right: 20px;
                 padding-top: 14px;
                 spacing: 0;
                 alignment: start;
-                SectionHeader { text: root.lang-en ? "UPDATE CHECK" : "新版本提示"; height: 24px; }
+                SectionHeader { text: root.lang-en ? "UPDATES" : "软件更新"; height: 24px; }
                 SettingRow {
                     label: root.lang-en ? "Check for new versions on startup" : "启动时检查新版本";
                     desc: root.lang-en
-                        ? "Off: meatshell no longer queries GitHub for releases and the update banner won't appear (takes effect next launch)."
-                        : "关闭后:不再向 GitHub 查询新版本,也不会弹出更新提示(下次启动生效)。";
+                        ? "Check automatically on startup. You can also check manually below."
+                        : "启动时自动查询新版本，也可随时在下方手动检查。";
                     show-divider: false;
                     Switch {
                         on: root.update-check-enabled;
                         toggled(v) => { root.update-check-enabled = v; root.set-update-check-enabled(v); }
                     }
+                }
+                Rectangle { height: 16px; }
+                if root.update-version != "" : Text {
+                    text: (root.lang-en ? "Available version: " : "可用版本：") + root.update-version;
+                    color: Theme.text-primary;
+                    font-size: Theme.fs-md;
+                }
+                Text {
+                    text: root.update-status;
+                    color: root.update-error ? #e57373 : Theme.text-muted;
+                    font-size: Theme.fs-sm;
+                    wrap: word-wrap;
+                }
+                Rectangle { height: 12px; }
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: start;
+                    PrimaryButton {
+                        text: root.lang-en ? "Check for updates" : "检查更新";
+                        disabled: root.update-busy;
+                        clicked => { root.check-for-updates(); }
+                    }
+                    if root.update-version != "" && root.update-install-supported : PrimaryButton {
+                        text: root.update-action-label;
+                        disabled: root.update-busy;
+                        clicked => { root.update-action(); }
+                    }
+                }
+                Rectangle { height: 8px; }
+                HorizontalLayout {
+                    alignment: start;
+                    GhostButton {
+                        text: root.lang-en ? "Release page" : "发布页面";
+                        clicked => { root.open-update-url(); }
+                    }
+                }
+                Rectangle { height: 12px; }
+                Text {
+                    text: root.update-install-supported
+                        ? (root.lang-en
+                            ? "Downloads are verified before installation. Installing closes all windows and connections, then reopens MeatShell. Temporary packages are removed afterwards."
+                            : "安装前会校验下载文件。安装时关闭所有窗口和连接，完成后重新打开 MeatShell，并清理临时安装包。")
+                        : (root.lang-en
+                            ? "Use the release page for this installation. In-app installation is available for the Windows x64 MSI edition."
+                            : "此安装方式请通过发布页面更新。Windows x64 MSI 安装版支持在软件内安装更新。");
+                    color: Theme.text-muted;
+                    font-size: Theme.fs-sm;
+                    wrap: word-wrap;
                 }
             }
 
@@ -2122,4 +2288,3 @@ export component InterfacePanel inherits Rectangle {
             }
         }
     }
-}

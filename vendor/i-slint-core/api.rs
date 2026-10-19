@@ -7,11 +7,13 @@ This module contains types that are public and re-exported in the slint-rs as we
 
 #![warn(missing_docs)]
 
-use crate::input::{InternalKeyEvent, KeyEventType, MouseEvent, TouchPhase};
+use crate::input::{BackendMouseEvent, InternalKeyEvent, KeyEventType, MouseEvent, TouchPhase};
+use crate::platform::WindowEventDispatchResult;
 use crate::window::{WindowAdapter, WindowInner};
 use alloc::boxed::Box;
 use alloc::string::String;
 
+pub use crate::data_transfer::DataTransfer;
 #[cfg(target_has_atomic = "ptr")]
 pub use crate::future::*;
 pub use crate::graphics::{
@@ -275,39 +277,39 @@ pub enum GraphicsAPI<'a> {
         /// `getContext` function on the HTML Canvas element.
         context_type: &'a str,
     },
-    /// The rendering is based on WGPU 27.x. Use the provided fields to submit commits to the provided
+    /// The rendering is based on WGPU 29.x. Use the provided fields to submit commits to the provided
     /// WGPU command queue.
     ///
-    /// *Note*: This function is behind the [`unstable-wgpu-27` feature flag](slint:rust:slint/docs/cargo_features/#backends)
+    /// *Note*: This function is behind the [`unstable-wgpu-29` feature flag](slint:rust:slint/docs/cargo_features/#backends)
     ///         and may be removed or changed in future minor releases, as new major WGPU releases become available.
     ///
-    /// See also the [`slint::wgpu_27`](slint:rust:slint/wgpu_27) module.
-    #[cfg(feature = "unstable-wgpu-27")]
+    /// See also the [`slint::wgpu_29`](slint:rust:slint/wgpu_29) module.
+    #[cfg(feature = "unstable-wgpu-29")]
     #[non_exhaustive]
-    WGPU27 {
+    WGPU29 {
         /// The WGPU instance used for rendering.
-        instance: wgpu_27::Instance,
+        instance: wgpu_29::Instance,
         /// The WGPU device used for rendering.
-        device: wgpu_27::Device,
+        device: wgpu_29::Device,
         /// The WGPU queue for used for command submission.
-        queue: wgpu_27::Queue,
+        queue: wgpu_29::Queue,
     },
-    /// The rendering is based on WGPU 28.x. Use the provided fields to submit commits to the provided
+    /// The rendering is based on WGPU 30.x. Use the provided fields to submit commits to the provided
     /// WGPU command queue.
     ///
-    /// *Note*: This function is behind the [`unstable-wgpu-28` feature flag](slint:rust:slint/docs/cargo_features/#backends)
+    /// *Note*: This function is behind the [`unstable-wgpu-30` feature flag](slint:rust:slint/docs/cargo_features/#backends)
     ///         and may be removed or changed in future minor releases, as new major WGPU releases become available.
     ///
-    /// See also the [`slint::wgpu_28`](slint:rust:slint/wgpu_28) module.
-    #[cfg(feature = "unstable-wgpu-28")]
+    /// See also the [`slint::wgpu_30`](slint:rust:slint/wgpu_30) module.
+    #[cfg(feature = "unstable-wgpu-30")]
     #[non_exhaustive]
-    WGPU28 {
+    WGPU30 {
         /// The WGPU instance used for rendering.
-        instance: wgpu_28::Instance,
+        instance: wgpu_30::Instance,
         /// The WGPU device used for rendering.
-        device: wgpu_28::Device,
+        device: wgpu_30::Device,
         /// The WGPU queue for used for command submission.
-        queue: wgpu_28::Queue,
+        queue: wgpu_30::Queue,
     },
 }
 
@@ -318,10 +320,10 @@ impl core::fmt::Debug for GraphicsAPI<'_> {
             GraphicsAPI::WebGL { context_type, .. } => {
                 write!(f, "GraphicsAPI::WebGL(context_type = {context_type})")
             }
-            #[cfg(feature = "unstable-wgpu-27")]
-            GraphicsAPI::WGPU27 { .. } => write!(f, "GraphicsAPI::WGPU27"),
-            #[cfg(feature = "unstable-wgpu-28")]
-            GraphicsAPI::WGPU28 { .. } => write!(f, "GraphicsAPI::WGPU28"),
+            #[cfg(feature = "unstable-wgpu-29")]
+            GraphicsAPI::WGPU29 { .. } => write!(f, "GraphicsAPI::WGPU29"),
+            #[cfg(feature = "unstable-wgpu-30")]
+            GraphicsAPI::WGPU30 { .. } => write!(f, "GraphicsAPI::WGPU30"),
         }
     }
 }
@@ -592,7 +594,7 @@ impl Window {
         self.0.is_minimized()
     }
 
-    /// Minimize or unminimze the window.
+    /// Minimize or unminimize the window.
     pub fn set_minimized(&self, minimized: bool) {
         self.0.set_minimized(minimized);
     }
@@ -626,10 +628,10 @@ impl Window {
     /// the top left corner of the window.
     ///
     /// This function panics if there is an error processing the event.
-    /// Use [`Self::try_dispatch_event()`] to handle the error.
+    /// Use [`Self::dispatch_event_with_result()`] to handle the error.
     #[track_caller]
     pub fn dispatch_event(&self, event: crate::platform::WindowEvent) {
-        self.try_dispatch_event(event).unwrap()
+        self.dispatch_event_with_result(event).unwrap();
     }
 
     /// Dispatch a window event to the scene.
@@ -638,68 +640,107 @@ impl Window {
     ///
     /// Any position fields in the event must be in the logical pixel coordinate system relative to
     /// the top left corner of the window.
+    #[deprecated(note = "use `dispatch_event_with_result` instead")]
     pub fn try_dispatch_event(
         &self,
         event: crate::platform::WindowEvent,
     ) -> Result<(), PlatformError> {
-        match event {
-            crate::platform::WindowEvent::PointerPressed { position, button } => {
-                self.0.process_mouse_input(MouseEvent::Pressed {
+        self.dispatch_event_with_result(event).map(|_| ())
+    }
+
+    /// Dispatch a window event to the scene.
+    ///
+    /// Use this when you're implementing your own backend and want to forward user input events.
+    ///
+    /// Any position fields in the event must be in the logical pixel coordinate system relative to
+    /// the top left corner of the window.
+    ///
+    /// Returns a [`WindowEventDispatchResult`] indicating how the event was handled.
+    pub fn dispatch_event_with_result(
+        &self,
+        event: crate::platform::WindowEvent,
+    ) -> Result<WindowEventDispatchResult, PlatformError> {
+        // Only clone the event when a hook is installed to avoid allocation on the hot path.
+        // Events a backend delivers in the internal representation are reported as the public
+        // event they correspond to, if there is one.
+        let hook_installed =
+            self.0.try_context().is_some_and(|ctx| ctx.0.window_event_hook.borrow().is_some());
+        let event_for_hook = hook_installed
+            .then(|| match &event {
+                crate::platform::WindowEvent::Internal(event) => event.public_representation(),
+                event => Some(event.clone()),
+            })
+            .flatten();
+        let dispatch_result = match event {
+            crate::platform::WindowEvent::PointerPressed { position, button } => self
+                .0
+                .process_mouse_input(MouseEvent::Pressed {
                     position: position.to_euclid().cast(),
                     button,
                     click_count: 0,
-                    is_touch: false,
-                });
-            }
-            crate::platform::WindowEvent::PointerReleased { position, button } => {
-                self.0.process_mouse_input(MouseEvent::Released {
+                    touch_finger_id: 0,
+                })
+                .into(),
+            crate::platform::WindowEvent::PointerReleased { position, button } => self
+                .0
+                .process_mouse_input(MouseEvent::Released {
                     position: position.to_euclid().cast(),
                     button,
                     click_count: 0,
-                    is_touch: false,
-                });
-            }
-            crate::platform::WindowEvent::PointerMoved { position } => {
-                self.0.process_mouse_input(MouseEvent::Moved {
+                    touch_finger_id: 0,
+                })
+                .into(),
+            crate::platform::WindowEvent::PointerMoved { position } => self
+                .0
+                .process_mouse_input(MouseEvent::Moved {
                     position: position.to_euclid().cast(),
-                    is_touch: false,
-                });
-            }
-            crate::platform::WindowEvent::PointerScrolled { position, delta_x, delta_y } => {
-                self.0.process_mouse_input(MouseEvent::Wheel {
+                    touch_finger_id: 0,
+                })
+                .into(),
+            crate::platform::WindowEvent::PointerScrolled { position, delta_x, delta_y } => self
+                .0
+                .process_mouse_input(MouseEvent::Wheel {
                     position: position.to_euclid().cast(),
                     delta_x: delta_x as _,
                     delta_y: delta_y as _,
                     phase: TouchPhase::Cancelled,
-                });
-            }
+                })
+                .into(),
             crate::platform::WindowEvent::PointerExited => {
-                self.0.process_mouse_input(MouseEvent::Exit)
+                // Teardown event — the runtime always acts on it (clears hover/grab state
+                // and dispatches Exit to the item stack), so report Accepted unconditionally
+                // rather than asking the hit-test whether anything consumed it.
+                self.0.process_mouse_input(MouseEvent::Exit);
+                WindowEventDispatchResult::Accepted
             }
 
-            crate::platform::WindowEvent::KeyPressed { text } => {
-                self.0.process_key_input(InternalKeyEvent {
+            crate::platform::WindowEvent::KeyPressed { text } => self
+                .0
+                .process_key_input(InternalKeyEvent {
                     event_type: KeyEventType::KeyPressed,
                     key_event: crate::input::KeyEvent { text, ..Default::default() },
                     ..Default::default()
-                });
-            }
-            crate::platform::WindowEvent::KeyPressRepeated { text } => {
-                self.0.process_key_input(InternalKeyEvent {
+                })
+                .into(),
+            crate::platform::WindowEvent::KeyPressRepeated { text } => self
+                .0
+                .process_key_input(InternalKeyEvent {
                     event_type: KeyEventType::KeyPressed,
                     key_event: crate::input::KeyEvent { text, repeat: true, ..Default::default() },
                     ..Default::default()
-                });
-            }
-            crate::platform::WindowEvent::KeyReleased { text } => {
-                self.0.process_key_input(InternalKeyEvent {
+                })
+                .into(),
+            crate::platform::WindowEvent::KeyReleased { text } => self
+                .0
+                .process_key_input(InternalKeyEvent {
                     event_type: KeyEventType::KeyReleased,
                     key_event: crate::input::KeyEvent { text, ..Default::default() },
                     ..Default::default()
-                });
-            }
+                })
+                .into(),
             crate::platform::WindowEvent::ScaleFactorChanged { scale_factor } => {
                 self.0.set_scale_factor(scale_factor);
+                WindowEventDispatchResult::Accepted
             }
             crate::platform::WindowEvent::Resized { size } => {
                 self.0.set_window_item_geometry(size.to_euclid());
@@ -707,15 +748,44 @@ impl Window {
                 if let Some(item_rc) = self.0.focus_item.borrow().upgrade() {
                     item_rc.try_scroll_into_visible();
                 }
+                WindowEventDispatchResult::Accepted
             }
             crate::platform::WindowEvent::CloseRequested => {
                 if self.0.request_close() {
                     self.hide()?;
+                    WindowEventDispatchResult::Accepted
+                } else {
+                    WindowEventDispatchResult::Rejected
                 }
             }
-            crate::platform::WindowEvent::WindowActiveChanged(bool) => self.0.set_active(bool),
+            crate::platform::WindowEvent::WindowActiveChanged(bool) => {
+                self.0.set_active(bool);
+                WindowEventDispatchResult::Accepted
+            }
+            crate::platform::WindowEvent::Internal(event) => match event.into_inner() {
+                crate::platform::InternalEvent::Mouse(BackendMouseEvent::Exit) => {
+                    // Teardown event, always accepted like `WindowEvent::PointerExited`.
+                    self.0.process_mouse_input(MouseEvent::Exit);
+                    WindowEventDispatchResult::Accepted
+                }
+                crate::platform::InternalEvent::Mouse(event) => {
+                    self.0.process_mouse_input(event.into()).into()
+                }
+                crate::platform::InternalEvent::Key(event) => {
+                    self.0.process_key_input(event).into()
+                }
+                crate::platform::InternalEvent::Touch { id, position, phase } => {
+                    self.0.process_touch_input(id, position, phase).into()
+                }
+            },
         };
-        Ok(())
+        if let Some(event_for_hook) = event_for_hook
+            && let Some(ctx) = self.0.try_context()
+            && let Some(hook) = ctx.0.window_event_hook.borrow().as_ref()
+        {
+            hook(&self.0.window_adapter(), &event_for_hook, dispatch_result.clone());
+        }
+        Ok(dispatch_result)
     }
 
     /// Returns true if there is an animation currently active on any property in the Window; false otherwise.
@@ -762,6 +832,9 @@ impl Window {
     /// Takes a snapshot of the window contents and returns it as RGBA8 encoded pixel buffer.
     ///
     /// Note that this function may be slow to call as it may need to re-render the scene.
+    ///
+    /// Only available with the `std` feature.
+    #[cfg(feature = "std")]
     pub fn take_snapshot(&self) -> Result<SharedPixelBuffer<Rgba8Pixel>, PlatformError> {
         self.0.window_adapter().renderer().take_snapshot()
     }
@@ -1179,15 +1252,11 @@ mod weak_handle {
 
 pub use weak_handle::*;
 
-/// This trait provides the necessary functionality for allowing creating strongly-referenced
-/// clones and conversion into a weak pointer for a Global slint component.
-///
-/// This trait is implemented by the [generated component](index.html#generated-components)
 /// Adds the specified function to an internal queue, notifies the event loop to wake up.
-/// Once woken up, any queued up functors will be invoked.
+/// Once woken up, any queued up functions will be invoked.
 ///
 /// This function is thread-safe and can be called from any thread, including the one
-/// running the event loop. The provided functors will only be invoked from the thread
+/// running the event loop. The provided functions will only be invoked from the thread
 /// that started the event loop.
 ///
 /// You can use this to set properties or use any other Slint APIs from other threads,
@@ -1230,7 +1299,7 @@ pub fn invoke_from_event_loop(func: impl FnOnce() + Send + 'static) -> Result<()
 /// This function can be called from any thread
 ///
 /// Any previously queued events may or may not be processed before the loop terminates.
-/// This is platform dependent behaviour.
+/// This is platform dependent behavior.
 pub fn quit_event_loop() -> Result<(), EventLoopError> {
     crate::platform::with_event_loop_proxy(|proxy| {
         proxy.ok_or(EventLoopError::NoEventLoopProvider)?.quit_event_loop()
@@ -1281,6 +1350,7 @@ pub enum PlatformError {
     /// or call [`platform::set_platform()`](crate::platform::set_platform)
     /// before running the event loop
     NoPlatform,
+
     /// The Slint Platform does not provide an event loop.
     ///
     /// The [`Platform::run_event_loop`](crate::platform::Platform::run_event_loop)
@@ -1295,9 +1365,9 @@ pub enum PlatformError {
 
     /// Another platform-specific error occurred
     Other(String),
+
     /// Another platform-specific error occurred.
-    #[cfg(feature = "std")]
-    OtherError(Box<dyn std::error::Error + Send + Sync>),
+    OtherError(Box<dyn core::error::Error + Send + Sync>),
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1329,7 +1399,6 @@ impl core::fmt::Display for PlatformError {
                 f.write_str("The operation is not supported by the current platform")
             }
             PlatformError::Other(str) => f.write_str(str),
-            #[cfg(feature = "std")]
             PlatformError::OtherError(error) => error.fmt(f),
         }
     }

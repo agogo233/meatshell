@@ -17,7 +17,8 @@ use crate::sftp::{SftpHandles, SftpLastCwd};
 use crate::ssh::SessionHandle;
 use crate::terminal::{RenderGates, TermBuffers};
 use crate::ui::{
-    AppWindow, PaneInfo, ProcWindow, SplitterInfo, SystemInfoWindow, TabInfo, TerminalState,
+    AppWindow, EditorWindow, PaneInfo, ProcWindow, SplitterInfo, SystemInfoWindow, TabInfo,
+    TerminalState,
 };
 
 /// Where a tab's session events are currently delivered. Session pump
@@ -29,6 +30,9 @@ use crate::ui::{
 #[derive(Clone)]
 pub struct TabRoute {
     pub window: slint::Weak<AppWindow>,
+    /// The owning window's detached editor (#494): SFTP-driven editor opens
+    /// must land there when the pump thread wakes up on this route.
+    pub editor: slint::Weak<EditorWindow>,
     pub window_id: u64,
     pub bufs: TermBuffers,
     pub gates: RenderGates,
@@ -49,6 +53,9 @@ pub type TabRoutes = Arc<Mutex<HashMap<String, Arc<Mutex<TabRoute>>>>>;
 #[derive(Clone)]
 pub struct WindowState {
     pub weak: slint::Weak<AppWindow>,
+    /// Strong handle to the window itself (the tray's restore/quit paths
+    /// need the component, not just the weak registry entry).
+    pub main_win: AppWindow,
     pub handles: Rc<RefCell<HashMap<String, SessionHandle>>>,
     pub bufs: TermBuffers,
     pub gates: RenderGates,
@@ -76,6 +83,8 @@ pub struct WindowState {
     /// `forget_window_state` drops this entry on close.
     pub proc_win: Rc<ProcWindow>,
     pub sys_win: Rc<SystemInfoWindow>,
+    /// Detached built-in editor window of this window (#70/#494).
+    pub editor_win: Rc<EditorWindow>,
     pub proc_weak: slint::Weak<ProcWindow>,
     pub sys_weak: slint::Weak<SystemInfoWindow>,
 }
@@ -120,7 +129,6 @@ impl<H: Clone> WindowRegistry<H> {
         self.windows.borrow().len()
     }
 
-    #[cfg(test)]
     pub fn for_each<F: FnMut(&H)>(&self, mut f: F) {
         for h in self.windows.borrow().values() {
             f(h);
@@ -167,6 +175,7 @@ pub struct AppCore {
     /// `registry.count() == 1` would re-fire after close-then-open.
     /// UI-thread-only, like the rest of this struct.
     pub first_window_done: Cell<bool>,
+    pub update: RefCell<super::update::State>,
 }
 
 #[cfg(test)]

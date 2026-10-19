@@ -5,8 +5,16 @@ export struct TabInfo {
     id: string,
     title: string,
     title_len: int,
-    kind: string,   // "welcome" | "terminal"
+    kind: string,   // "welcome" | "terminal" | "editor" (#494)
+    // terminal: session connected. editor: no unsaved edits.
     connected: bool,
+}
+
+// One entry of the new-tab launch menu (#427): a local shell ("system:…") or
+// an installed agent CLI ("agent:…"), opened through connect-session.
+export struct LaunchItem {
+    id: string,
+    name: string,
 }
 
 // --- SingleTab -------------------------------------------------------------
@@ -105,7 +113,7 @@ component SingleTab inherits Rectangle {
             }
         }
         double-clicked => {
-            if (root.info.kind != "welcome") { root.duplicated(); }
+            if (root.info.kind == "terminal") { root.duplicated(); }
         }
     }
 
@@ -120,7 +128,9 @@ component SingleTab inherits Rectangle {
             width: 8px; height: 8px;
             y: (parent.height - self.height) / 2;
             border-radius: 4px;
+            // Editor tabs (#494): accent while there are unsaved edits.
             background: info.kind == "welcome" ? Theme.text-muted
+                : info.kind == "editor" ? (info.connected ? Theme.text-muted : Theme.accent)
                 : (info.connected ? Theme.success : Theme.warning);
         }
 
@@ -147,6 +157,58 @@ component SingleTab inherits Rectangle {
         }
     }
 
+}
+
+// --- New-tab launch menu item (#427) ----------------------------------------
+component LaunchMenuItem inherits Rectangle {
+    in property <string> glyph;   // Material Icons codepoint
+    in property <string> label;
+    callback clicked();
+    height: 30px;
+    border-radius: Theme.radius-sm;
+    background: ta.has-hover ? Theme.bg-hover : transparent;
+    accessible-role: button;
+    accessible-label: root.label;
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 10px;
+        Text {
+            width: 16px;
+            text: root.glyph;
+            font-family: "Material Icons";
+            color: Theme.text-secondary;
+            font-size: Theme.fs-md;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.label;
+            color: Theme.text-primary;
+            font-size: Theme.fs-sm;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Muted section heading inside the launch menu.
+component LaunchMenuHeading inherits HorizontalLayout {
+    in property <string> text;
+    height: 24px;
+    padding-left: 10px;
+    Text {
+        text: root.text;
+        color: Theme.text-muted;
+        font-size: Theme.fs-xs;
+        font-weight: 600;
+        vertical-alignment: center;
+    }
 }
 
 // --- Tab context-menu item -------------------------------------------------
@@ -180,6 +242,11 @@ export component TabBar inherits Rectangle {
     in property <[TabInfo]> tabs;
     in property <string> active-id;
     in property <bool> show-new-tab: true;
+    // Warp-style launch menu next to "+" (#427): local shells, then the agent
+    // CLIs installed on this machine. Shown even when "+" is hidden (welcome
+    // page docked as a sidebar), since it is the only way to start them there.
+    in property <[LaunchItem]> launch-shells;
+    in property <[LaunchItem]> launch-agents;
     in property <bool> can-merge-pane: false;
     // Keep this much clear on the right so tabs don't slide under the app's
     // top-right toolbar icons, which are positioned over the tab row (#122).
@@ -197,6 +264,9 @@ export component TabBar inherits Rectangle {
     callback tab-selected(string);
     callback tab-closed(string);
     callback new-tab();
+    callback launch(string /* session id */);
+    // "Customize…" in the launch menu: open Settings → AI agents (#427).
+    callback customize-agents();
     // Drag-to-reorder (#408), committed exactly once on drop: move the tab at
     // `from` to `to`, where `to` is the insertion index AFTER `from` has been
     // removed from the list.
@@ -225,6 +295,7 @@ export component TabBar inherits Rectangle {
     property <length> menu-x;
     property <length> menu-y;
     property <string> menu-target;
+    property <string> menu-target-kind;
 
     height: 36px;
     background: Theme.bg-panel-alt;
@@ -256,12 +327,12 @@ export component TabBar inherits Rectangle {
     // Cursor in strip-content space: past the bar's 3px padding and through the
     // scroll offset. A binding, not a stored value, so edge auto-scrolling keeps
     // the ghost and the insertion index live while the pointer stands still.
-    property <length> content-x: root.cursor-x - 3px - flick.viewport-x;
+    property <length> content-x: root.cursor-x - 3px - flick.content-x;
     // Ghost's left edge, clamped to the visible part of the strip so it can never
     // be dragged out of sight. Only ever evaluated while a drag is live.
     property <length> ghost-x: clamp(root.content-x - root.grab-offset,
-        -flick.viewport-x,
-        max(-flick.viewport-x, -flick.viewport-x + flick.width - root.drag-width));
+        -flick.content-x,
+        max(-flick.content-x, -flick.content-x + flick.width - root.drag-width));
 
     function begin-drag(index: int, offset: length, slot-width: length) {
         root.drag-from = index;
@@ -325,7 +396,7 @@ export component TabBar inherits Rectangle {
 
     // --- Insertion index for a tab dragged in from another pane (#408) ------
     property <bool> ext-hover: root.ext-drag-over && !root.drag-active;
-    property <length> ext-content-x: root.ext-drag-x - 3px - flick.viewport-x;
+    property <length> ext-content-x: root.ext-drag-x - 3px - flick.content-x;
     property <int> ext-index: -1;
     changed ext-hover => {
         root.ext-index = root.ext-hover ? 0 : -1;
@@ -355,8 +426,8 @@ export component TabBar inherits Rectangle {
         interval: 16ms;
         running: root.edge-step != 0px;
         triggered => {
-            flick.viewport-x = clamp(flick.viewport-x - root.edge-step,
-                min(0px, flick.width - flick.viewport-width), 0px);
+            flick.content-x = clamp(flick.content-x - root.edge-step,
+                min(0px, flick.width - flick.content-width), 0px);
         }
     }
 
@@ -375,8 +446,8 @@ export component TabBar inherits Rectangle {
             // arrows below remain.
             interactive: false;
             horizontal-stretch: 1;
-            viewport-height: self.height;
-            viewport-width: max(self.width, strip.preferred-width);
+            content-height: self.height;
+            content-width: max(self.width, strip.preferred-width);
             strip := HorizontalLayout {
                 spacing: 2px;
                 alignment: start;
@@ -436,6 +507,7 @@ export component TabBar inherits Rectangle {
                         duplicated => { root.tab-duplicate(tab.id); }
                         context-requested(ax, ay) => {
                             root.menu-target = tab.id;
+                            root.menu-target-kind = tab.kind;
                             root.menu-x = ax - root.absolute-position.x;
                             root.menu-y = ay - root.absolute-position.y;
                             tab-menu.show();
@@ -454,6 +526,21 @@ export component TabBar inherits Rectangle {
                     size: 28px;
                     y: (parent.height - self.height) / 2;
                     clicked => { root.new-tab(); }
+                }
+                IconButton {
+                    glyph: "\u{E5CF}";   // expand_more
+                    font-family: "Material Icons";
+                    width: 20px;
+                    height: 28px;
+                    y: (parent.height - self.height) / 2;
+                    accessible-role: button;
+                    accessible-label: @tr("Open a terminal or AI agent");
+                    clicked => {
+                        root.launch-menu-x = self.absolute-position.x - root.absolute-position.x;
+                        root.launch-menu-y = self.absolute-position.y - root.absolute-position.y
+                            + self.height + 2px;
+                        launch-menu.show();
+                    }
                 }
             }
 
@@ -486,7 +573,7 @@ export component TabBar inherits Rectangle {
         background: Theme.bg-panel-alt;
         IconButton {
             glyph: "<"; size: 24px;
-            clicked => { flick.viewport-x = min(0px, flick.viewport-x + 120px); }
+            clicked => { flick.content-x = min(0px, flick.content-x + 120px); }
         }
     }
     if root.tab-overflow : Rectangle {
@@ -497,12 +584,64 @@ export component TabBar inherits Rectangle {
         IconButton {
             glyph: ">"; size: 24px;
             clicked => {
-                flick.viewport-x = max(flick.width - flick.viewport-width, flick.viewport-x - 120px);
+                flick.content-x = max(flick.width - flick.content-width, flick.content-x - 120px);
             }
         }
     }
     // Right-click context menu (v0.5): split this pane by peeling the clicked tab
     // into a new pane. Splitting needs at least two tabs so the source pane survives.
+    property <length> launch-menu-x;
+    property <length> launch-menu-y;
+    launch-menu := PopupWindow {
+        x: root.launch-menu-x;
+        y: root.launch-menu-y;
+        width: 220px;
+        height: launch-list.preferred-height;
+        Rectangle {
+            background: Theme.popup-bg;
+            border-radius: Theme.radius-sm;
+            border-width: 1px;
+            border-color: Theme.border-strong;
+            drop-shadow-blur: 12px;
+            drop-shadow-color: #00000060;
+            launch-list := VerticalLayout {
+                padding: 4px;
+                spacing: 1px;
+                if root.launch-shells.length > 0 : LaunchMenuHeading {
+                    text: @tr("Terminal");
+                }
+                for shell in root.launch-shells : LaunchMenuItem {
+                    glyph: "\u{EB8E}";   // terminal
+                    label: shell.name;
+                    clicked => { root.launch(shell.id); }
+                }
+                if root.launch-shells.length > 0 : Rectangle {
+                    height: 9px;
+                    Rectangle {
+                        y: 4px;
+                        height: 1px;
+                        background: Theme.border-subtle;
+                    }
+                }
+                LaunchMenuHeading {
+                    text: @tr("AI agents");
+                }
+                for agent in root.launch-agents : LaunchMenuItem {
+                    glyph: "\u{F06C}";   // smart_toy
+                    label: agent.name;
+                    clicked => { root.launch(agent.id); }
+                }
+                // Always offered, so an agent meatshell does not detect can
+                // be added by hand.
+                LaunchMenuItem {
+                    glyph: "\u{E8B8}";   // settings
+                    label: @tr("Customize…");
+                    clicked => { root.customize-agents(); }
+                }
+            }
+        }
+    }
+
     tab-menu := PopupWindow {
         x: root.menu-x;
         y: root.menu-y;
@@ -520,12 +659,12 @@ export component TabBar inherits Rectangle {
                 spacing: 1px;
                 TabMenuItem {
                     label: @tr("Duplicate connection");
-                    enabled: root.menu-target != "welcome";
+                    enabled: root.menu-target-kind == "terminal";
                     clicked => { root.tab-duplicate(root.menu-target); }
                 }
                 TabMenuItem {
                     label: @tr("Rename");
-                    enabled: root.menu-target != "welcome";
+                    enabled: root.menu-target-kind == "terminal";
                     clicked => { root.tab-rename-request(root.menu-target); }
                 }
                 Rectangle { height: 1px; background: Theme.border-subtle; }

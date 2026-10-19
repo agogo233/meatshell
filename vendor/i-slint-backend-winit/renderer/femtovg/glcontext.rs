@@ -3,6 +3,7 @@
 
 use std::{num::NonZeroU32, sync::Arc};
 
+use crate::winit_compat::WindowSurfaceSizeExt;
 use glutin::{
     config::GlConfig,
     context::{ContextApi, ContextAttributesBuilder},
@@ -152,7 +153,7 @@ impl OpenGLContext {
             format!("Failed to retrieve a window handle for window we just created: {err:?}")
         })?;
 
-        let size: winit::dpi::PhysicalSize<u32> = window.inner_size();
+        let size: winit::dpi::PhysicalSize<u32> = window.surface_size();
 
         let width: std::num::NonZeroU32 = size.width.try_into().map_err(|_| {
             format!(
@@ -202,19 +203,6 @@ impl OpenGLContext {
         {
             let ns_view: &objc2_app_kit::NSView = unsafe { ns_view.cast().as_ref() };
             ns_view.setLayerContentsPlacement(objc2_app_kit::NSViewLayerContentsPlacement::TopLeft);
-        }
-
-        // Sanity check, as all this might succeed on Windows without working GL drivers, but this will fail:
-        if context
-            .display()
-            .get_proc_address(&std::ffi::CString::new("glCreateShader").unwrap())
-            .is_null()
-        {
-            return Err(
-                "Failed to initialize OpenGL driver: Could not locate glCreateShader symbol"
-                    .to_string()
-                    .into(),
-            );
         }
 
         // Try to default to vsync and ignore if the driver doesn't support it.

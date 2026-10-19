@@ -5,8 +5,8 @@ use std::rc::{Rc, Weak};
 
 use i_slint_core::timers::{Timer, TimerMode};
 
-#[cfg(target_os = "macos")]
-mod macos_display_link;
+#[cfg(target_vendor = "apple")]
+mod apple_display_link;
 
 use crate::winitwindowadapter::WinitWindowAdapter;
 
@@ -18,9 +18,12 @@ pub fn create_frame_throttle(
     if _is_wayland {
         WinitBasedFrameThrottle::create()
     } else {
-        // AppKit's displayLinkWithTarget:selector: is unavailable on older
-        // macOS releases. Avoid the upstream runtime probe entirely and use
-        // the timer fallback so WinitView cannot receive that selector.
+        #[cfg(target_vendor = "apple")]
+        if let Some(throttle) =
+            apple_display_link::try_create(window_adapter.clone(), _winit_window)
+        {
+            return throttle;
+        }
         TimerBasedFrameThrottle::create(window_adapter)
     }
 }

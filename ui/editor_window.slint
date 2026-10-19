@@ -1,0 +1,232 @@
+import { Theme } from "theme.slint";
+import { ModalScope } from "modal.slint";
+import { ConfirmDialog } from "confirm_dialog.slint";
+import { EditorPane, EditorFindResult } from "editor_pane.slint";
+
+// Detached top-level editor window. The editor body itself is the shared
+// EditorPane, which the main window also embeds when the user prefers a
+// docked editor (#494).
+export component EditorWindow inherits Window {
+    title: "meatshell — " + root.editor-name;
+    icon: @image-url("../assets/icon.png");
+    // Follows the main window's pin so it is not hidden behind it (#450).
+    in property <bool> pinned: false;
+    always-on-top: root.pinned;
+
+    in-out property <bool> dark-mode <=> Theme.dark;
+    in-out property <float> ui-scale <=> Theme.ui-scale;
+    in-out property <string> ui-font-family <=> Theme.ui-font-family;
+    in-out property <image> wallpaper-img <=> Theme.wallpaper;
+    in-out property <bool> wallpaper-active <=> Theme.wallpaper-active;
+    in-out property <color> wp-accent <=> Theme.wp-accent;
+    in-out property <color> wp-tint <=> Theme.wp-tint;
+    default-font-family: Theme.ui-font-family;
+
+    in-out property <string> editor-name;
+    in-out property <string> editor-tab-id;
+    in-out property <string> editor-path;
+    in-out property <string> editor-content;
+    in-out property <bool> editor-readonly;
+    in-out property <bool> editor-dirty: false;
+    in-out property <bool> editor-open: false;
+    in-out property <bool> discard-confirm-open: false;
+    public function request-close() {
+        if root.editor-dirty && !root.editor-readonly {
+            root.discard-confirm-open = true;
+        } else { root.close-editor(); }
+    }
+    property <bool> editor-focus-pending: false;
+    in-out property <string> editor-syntax-source;
+    in-out property <string> editor-syntax-spans;
+    in-out property <string> editor-language;
+    in-out property <string> editor-find-query;
+    in-out property <string> editor-replace-text;
+    in-out property <int> editor-match-count: 0;
+    in-out property <int> editor-find-position: -1;
+
+    callback save-file();
+    callback close-editor();
+    callback editor-highlight(string);
+    callback editor-count-matches(string, string) -> int;
+    callback editor-find-step(string, string, int, bool) -> EditorFindResult;
+    callback editor-replace-all(string, string);
+    callback win-drag();
+    callback win-resize-se();
+
+    no-frame: root.custom-titlebar;
+    in property <bool> is-mac: false;
+    in property <bool> custom-titlebar: true;
+    min-width: 420px;
+    min-height: 280px;
+    preferred-width: 760px;
+    preferred-height: 560px;
+    background: Theme.window-base;
+
+    if Theme.wallpaper-active : Image {
+        x: 0; y: 0;
+        width: parent.width;
+        height: parent.height;
+        source: Theme.wallpaper;
+        image-fit: cover;
+    }
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: Theme.bg-panel;
+    }
+
+    editor-scope := ModalScope {
+        active: root.editor-open && !root.discard-confirm-open;
+        is-mac: root.is-mac;
+        cancel-requested => { root.request-close(); }
+        focus-initial => { pane.focus-editor(); }
+        width: parent.width;
+        height: parent.height;
+        focus-on-click: false;
+        VerticalLayout {
+            spacing: 0;
+
+            if root.custom-titlebar : Rectangle {
+                height: 36px;
+                background: Theme.bg-elevated;
+                title-drag := TouchArea {
+                    pointer-event(e) => {
+                        if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                            root.win-drag();
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    padding-left: 12px;
+                    spacing: 4px;
+                    Rectangle {
+                        width: 20px;
+                        height: 36px;
+                        Image {
+                            x: 2px;
+                            y: (parent.height - self.height) / 2;
+                            width: 16px;
+                            height: 16px;
+                            source: @image-url("../assets/icon.png");
+                        }
+                    }
+                    Text {
+                        text: root.editor-name + "  ·  " + root.editor-language
+                            + (root.editor-readonly
+                                ? "  ·  " + @tr("Read-only")
+                                : (root.editor-dirty ? "  ·  " + @tr("Modified") : ""));
+                        color: Theme.text-secondary;
+                        font-size: Theme.fs-sm;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    if !root.editor-readonly : Rectangle {
+                        width: 76px;
+                        height: 28px;
+                        y: (parent.height - self.height) / 2;
+                        border-radius: Theme.radius-sm;
+                        background: save-ta.has-hover ? Theme.accent-hover : Theme.accent;
+                        save-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.save-file(); }
+                        }
+                        Text { text: @tr("Save"); color: #ffffff; font-size: Theme.fs-sm;
+                               horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                    Rectangle {
+                        width: 46px; height: 36px;
+                        background: close-ta.has-hover ? #e81123 : transparent;
+                        close-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.request-close(); }
+                        }
+                        Text { text: "\u{E5CD}"; font-family: "Material Icons";
+                               color: close-ta.has-hover ? white : Theme.text-secondary;
+                               font-size: 16px; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                }
+            }
+            Rectangle { height: 1px; background: Theme.border-subtle; }
+            pane := EditorPane {
+                vertical-stretch: 1;
+                active: root.editor-open;
+                editor-name: root.editor-name;
+                editor-content <=> root.editor-content;
+                editor-readonly: root.editor-readonly;
+                editor-dirty: root.editor-dirty;
+                content-changed => { root.editor-dirty = true; }
+                editor-syntax-source: root.editor-syntax-source;
+                editor-syntax-spans: root.editor-syntax-spans;
+                editor-language: root.editor-language;
+                editor-find-query <=> root.editor-find-query;
+                editor-replace-text <=> root.editor-replace-text;
+                editor-match-count <=> root.editor-match-count;
+                editor-find-position <=> root.editor-find-position;
+                save-file => { root.save-file(); }
+                request-close => { root.request-close(); }
+                editor-highlight(text) => { root.editor-highlight(text); }
+                editor-count-matches(content, query) => { return root.editor-count-matches(content, query); }
+                editor-find-step(content, query, current, reverse) => {
+                    return root.editor-find-step(content, query, current, reverse);
+                }
+                editor-replace-all(query, replacement) => { root.editor-replace-all(query, replacement); }
+            }
+        }
+        Rectangle {
+            x: parent.width - 18px;
+            y: parent.height - 18px;
+            width: 18px;
+            height: 18px;
+            resize-ta := TouchArea {
+                mouse-cursor: nwse-resize;
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                        root.win-resize-se();
+                    }
+                }
+            }
+            // Draw the resize grip with rectangles instead of a Unicode glyph. The
+            // latter renders as a tofu box on systems without that character.
+            Rectangle {
+                x: 3px; y: 12px; width: 3px; height: 1px;
+                background: resize-ta.has-hover ? Theme.text-secondary : Theme.text-muted;
+            }
+            Rectangle {
+                x: 6px; y: 10px; width: 3px; height: 1px;
+                background: resize-ta.has-hover ? Theme.text-secondary : Theme.text-muted;
+            }
+            Rectangle {
+                x: 9px; y: 8px; width: 3px; height: 1px;
+                background: resize-ta.has-hover ? Theme.text-secondary : Theme.text-muted;
+            }
+            Rectangle {
+                x: 12px; y: 5px; width: 3px; height: 1px;
+                background: resize-ta.has-hover ? Theme.text-secondary : Theme.text-muted;
+            }
+        }
+
+        init => { root.editor-focus-pending = true; }
+        focus-timer := Timer {
+            interval: 0ms;
+            running: root.editor-focus-pending;
+            triggered => {
+                root.editor-focus-pending = false;
+                pane.focus-editor();
+            }
+        }
+    }
+    ConfirmDialog {
+        is-open <=> root.discard-confirm-open;
+        is-mac: root.is-mac;
+        dismiss-on-backdrop: false;
+        title: @tr("Discard unsaved changes?");
+        message: @tr("This file has unsaved changes. Close without saving?");
+        confirm-label: @tr("Discard and close");
+        confirm => {
+            root.discard-confirm-open = false;
+            root.close-editor();
+        }
+        cancel => { root.discard-confirm-open = false; }
+    }
+}
