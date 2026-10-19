@@ -54,8 +54,9 @@ pub type TabRoutes = Arc<Mutex<HashMap<String, Arc<Mutex<TabRoute>>>>>;
 pub struct WindowState {
     pub weak: slint::Weak<AppWindow>,
     /// Strong handle to the window itself (the tray's restore/quit paths
-    /// need the component, not just the weak registry entry).
-    pub main_win: AppWindow,
+    /// need the component, not just the weak registry entry). Slint 1.18 no
+    /// longer derives Clone on components, so the strong handle is an Rc.
+    pub main_win: Rc<AppWindow>,
     pub handles: Rc<RefCell<HashMap<String, SessionHandle>>>,
     pub bufs: TermBuffers,
     pub gates: RenderGates,

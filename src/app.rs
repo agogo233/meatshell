@@ -399,7 +399,7 @@ struct WinCtx {
     handles: Rc<RefCell<HashMap<String, SessionHandle>>>,
     sftp_handles: SftpHandles,
     bufs: TermBuffers,
-    window: AppWindow,
+    window: Rc<AppWindow>,
     proc_win: Rc<ProcWindow>,
     sys_win: Rc<SystemInfoWindow>,
     editor_win: Rc<EditorWindow>,
@@ -796,7 +796,7 @@ fn open_window(
     let last_term_size: Arc<Mutex<(u32, u32)>> = Arc::new(Mutex::new((80, 24)));
 
     // --- Build window + models ------------------------------------------
-    let window = AppWindow::new().context("failed to build Slint window")?;
+    let window = Rc::new(AppWindow::new().context("failed to build Slint window")?);
     // Cascade origin must be captured *before* registering: once registered,
     // registry.newest() is this window itself. Registration itself is deferred
     // until after the last fallible construction below, so a failed monitor
@@ -885,7 +885,7 @@ fn open_window(
         // ✕ hides the window (data keeps flowing into the shared model).
         let weak = proc_win.as_weak();
         let main_weak = window.as_weak();
-        proc_win.on_close(move || {
+        proc_win.on_close_window(move || {
             if let Some(main) = main_weak.upgrade() {
                 main.set_process_window_open(false);
             }
@@ -961,7 +961,7 @@ fn open_window(
     {
         let weak = sys_win.as_weak();
         let main_weak = window.as_weak();
-        sys_win.on_close(move || {
+        sys_win.on_close_window(move || {
             if let Some(main) = main_weak.upgrade() {
                 main.set_system_info_window_open(false);
             }
@@ -4992,8 +4992,8 @@ fn wire_session_callbacks(
     tab_routes: TabRoutes,
     tab_titles: Rc<RefCell<HashMap<String, String>>>,
     bundle_mailbox: BundleMailbox,
-    /// Detached editor window of this window (#494): connects pass it down to
-    /// the session event pump through `ConnectCtx`.
+    // Detached editor window of this window (#494): connects pass it down to
+    // the session event pump through `ConnectCtx`.
     editor: slint::Weak<EditorWindow>,
 ) {
     // Working set of port forwards (#56) for the session being created/edited.
@@ -6012,6 +6012,7 @@ fn wire_session_callbacks(
                 kind,
                 local_distribution: String::new(),
                 local_working_dir: String::new(),
+                local_command: String::new(),
                 serial_port: draft.serial_port.to_string(),
                 baud_rate: if draft.baud_rate <= 0 {
                     115_200
@@ -6028,6 +6029,8 @@ fn wire_session_callbacks(
                 forwards,
                 triggers,
                 disable_shell_integration: draft.disable_shell_integration,
+                sftp_mode: String::new(),
+                sftp_command: String::new(),
                 note: draft.note.to_string(),
                 jump_session_id: String::new(),
                 allow_secret_reveal: draft.allow_secret_reveal,
