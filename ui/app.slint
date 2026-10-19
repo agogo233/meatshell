@@ -2517,8 +2517,8 @@ export component AppWindow inherits Window {
                         sftp-edit-external(path) => { root.sftp-edit-external(term.id, path); }
                         sftp-sort-request(key) => { root.sftp-sort-request(term.id, key); }
                         sftp-clear-sort() => { root.sftp-clear-sort(term.id); }
-                        tunnel-add(name, kind, bind, bind-port, host, host-port, save, auto-start) => {
-                            root.tunnel-add(term.id, name, kind, bind, bind-port, host, host-port, save, auto-start);
+                        tunnel-add(name, kind, bind, bind-port, host, host-port) => {
+                            root.tunnel-add(term.id, name, kind, bind, bind-port, host, host-port);
                         }
                         tunnel-stop(id) => { root.tunnel-stop(term.id, id); }
                         tunnel-start(id) => { root.tunnel-start(term.id, id); }

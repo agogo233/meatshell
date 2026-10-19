@@ -372,8 +372,8 @@ export component AIPanel inherits Rectangle {
             background: Theme.bg-root;
             clip: true;
             ai-scroll := Flickable {
-                viewport-width: self.width;
-                viewport-height: max(self.height, ai-list.preferred-height);
+                content-width: self.width;
+                content-height: max(self.height, ai-list.preferred-height);
                 ai-list := VerticalLayout {
                     padding: 8px; spacing: 8px; alignment: start;
                     if root.messages.length == 0 : Text {
@@ -420,8 +420,8 @@ export component AIPanel inherits Rectangle {
                     background: Theme.bg-root;
                     clip: true;
                     Flickable {
-                        viewport-width: self.width;
-                        viewport-height: max(self.height, ai-input.preferred-height + 10px);
+                        content-width: self.width;
+                        content-height: max(self.height, ai-input.preferred-height + 10px);
                         ai-input := TextInput {
                             x: 8px; y: 5px;
                             width: parent.width - 16px;
@@ -449,7 +449,7 @@ export component AIPanel inherits Rectangle {
                         mouse-cursor: pointer;
                         clicked => {
                             if (root.busy) { root.stop(); }
-                            else { root.send(); ai-scroll.viewport-y = max(0px, ai-scroll.viewport-height - ai-scroll.height); root.prev-bottom = ai-scroll.viewport-height - ai-scroll.height; }
+                            else { root.send(); ai-scroll.content-y = max(0px, ai-scroll.content-height - ai-scroll.height); root.prev-bottom = ai-scroll.content-height - ai-scroll.height; }
                         }
                     }
                     Text {
@@ -470,17 +470,17 @@ export component AIPanel inherits Rectangle {
         interval: 250ms;
         running: root.busy;
         triggered => {
-            if (ai-scroll.viewport-y >= root.prev-bottom - 8px) {
-                ai-scroll.viewport-y = ai-scroll.viewport-height - ai-scroll.height;
+            if (ai-scroll.content-y >= root.prev-bottom - 8px) {
+                ai-scroll.content-y = ai-scroll.content-height - ai-scroll.height;
             }
-            root.prev-bottom = ai-scroll.viewport-height - ai-scroll.height;
+            root.prev-bottom = ai-scroll.content-height - ai-scroll.height;
         }
     }
     // busy true→(reply starting/ending) also re-anchors the view so freshly
     // pushed rows (user message, error bubbles) stay visible.
     changed busy => {
-        ai-scroll.viewport-y = max(0px, ai-scroll.viewport-height - ai-scroll.height);
-        root.prev-bottom = ai-scroll.viewport-height - ai-scroll.height;
+        ai-scroll.content-y = max(0px, ai-scroll.content-height - ai-scroll.height);
+        root.prev-bottom = ai-scroll.content-height - ai-scroll.height;
     }
     changed draft-revision => {
         root.focus-pending = true;

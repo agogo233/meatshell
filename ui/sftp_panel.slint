@@ -272,16 +272,16 @@ export component SftpPanel inherits Rectangle {
     }
 
     // Bring the type-ahead target into view. Rows are a fixed 24px tall, so the
-    // needed scroll is pure arithmetic on the ScrollView's viewport-y (mirrors
+    // needed scroll is pure arithmetic on the ScrollView's content-y (mirrors
     // the `bring-into-view` trick the std ListView uses; Slint has no scroll-to
     // API). Multiplied out so `+=` isn't needed in this expression language.
     changed jump-target => {
         if (root.jump-target >= 0 && root.jump-target < root.entries.length) {
-            let item-top = file-scroll-view.viewport-y + root.jump-target * 24px;
+            let item-top = file-scroll-view.content-y + root.jump-target * 24px;
             if (item-top < 0px) {
-                file-scroll-view.viewport-y = file-scroll-view.viewport-y - item-top;
+                file-scroll-view.content-y = file-scroll-view.content-y - item-top;
             } else if (item-top + 24px > file-scroll-view.visible-height) {
-                file-scroll-view.viewport-y = file-scroll-view.viewport-y - (item-top + 24px - file-scroll-view.visible-height);
+                file-scroll-view.content-y = file-scroll-view.content-y - (item-top + 24px - file-scroll-view.visible-height);
             }
         }
     }
@@ -563,8 +563,8 @@ export component SftpPanel inherits Rectangle {
                             drop-shadow-color: #00000060;
                             ScrollView {
                                 width: parent.width; height: parent.height;
-                                viewport-width: self.visible-width;
-                                viewport-height: max(self.visible-height, bm-body.preferred-height);
+                                content-width: self.visible-width;
+                                content-height: max(self.visible-height, bm-body.preferred-height);
                                 bm-body := VerticalLayout {
                                     padding: 4px;
                                     spacing: 1px;
@@ -1218,6 +1218,7 @@ export component SftpPanel inherits Rectangle {
                                         root.jump-target = idx2;
                                     }
                                 }
+                                accept
                             } else {
                                 reject
                             }
