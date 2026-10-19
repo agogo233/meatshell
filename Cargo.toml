@@ -250,3 +250,4 @@ opt-level = 1
 i-slint-backend-winit = { path = "vendor/i-slint-backend-winit" }
 # Native colour spans and a virtual line-number gutter; see vendor/EDITOR_PATCH.md.
 i-slint-core = { path = "vendor/i-slint-core" }
+i-slint-compiler = { path = "vendor/i-slint-compiler" }
