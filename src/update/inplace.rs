@@ -91,8 +91,13 @@ fn classify(
             Method::InPlace(Target::WindowsPortable { exe: exe.to_path_buf() })
         }
         "linux" => {
-            // /usr/local is install-linux.sh's root-owned copy, not a package.
-            let packaged = exe.starts_with("/usr") && !exe.starts_with("/usr/local");
+            // /usr/local is install-linux.sh's root-owned copy, not a package, and
+            // the app cannot sudo: it needs the release page. Checked outright so
+            // the classification does not depend on /usr/local being writable.
+            if exe.starts_with("/usr/local") {
+                return Method::Manual;
+            }
+            let packaged = exe.starts_with("/usr");
             if flatpak || exe.starts_with("/app") || packaged {
                 return Method::PackageManager;
             }
