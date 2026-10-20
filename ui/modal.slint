@@ -11,6 +11,9 @@ export component ModalScope inherits FocusScope {
     in property <bool> is-mac: false;
     in property <bool> confirm-on-enter: false;
     in property <bool> confirm-on-space: false;
+    // While true, Tab/Shift+Tab are not used for focus traversal so a child
+    // can capture them (the Shortcuts dialog recording a new chord).
+    in property <bool> raw-keys: false;
     callback cancel-requested();
     callback confirm-requested();
     callback focus-initial();
@@ -37,7 +40,7 @@ export component ModalScope inherits FocusScope {
                 && !event.modifiers.alt && !event.modifiers.shift && !event.modifiers.meta)) {
             root.cancel-requested();
             accept
-        } else if root.active && root.has-focus
+        } else if root.active && root.has-focus && !root.raw-keys
             && (event.text == Key.Backtab || (event.text == Key.Tab && event.modifiers.shift)) {
             // Start reverse traversal from the end, never behind the modal.
             tab-end.focus();
@@ -51,7 +54,7 @@ export component ModalScope inherits FocusScope {
             || (root.confirm-on-space && event.text == " ") {
             root.confirm-requested();
             accept
-        } else if event.text == Key.Tab || event.text == Key.Backtab {
+        } else if !root.raw-keys && (event.text == Key.Tab || event.text == Key.Backtab) {
             reject // let Slint move focus among the dialog's children
         } else { accept }
     }
@@ -76,6 +79,7 @@ export component ModalLayer inherits Rectangle {
     in property <bool> dismiss-on-backdrop: false;
     in property <bool> confirm-on-enter: false;
     in property <bool> confirm-on-space: false;
+    in property <bool> raw-keys: false;
     callback cancel-requested();
     callback confirm-requested();
     visible: root.is-open && !root.covered;
@@ -89,6 +93,7 @@ export component ModalLayer inherits Rectangle {
         is-mac: root.is-mac;
         confirm-on-enter: root.confirm-on-enter;
         confirm-on-space: root.confirm-on-space;
+        raw-keys: root.raw-keys;
         cancel-requested => { root.cancel-requested(); }
         confirm-requested => { root.confirm-requested(); }
         @children

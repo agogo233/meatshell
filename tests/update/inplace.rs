@@ -104,25 +104,110 @@ fn asset_names_match_the_release_workflow() {
     let exe = PathBuf::from("meatshell");
     let tarball = Target::LinuxTarball { exe: exe.clone() };
     assert_eq!(
-        asset_name(&Target::WindowsPortable { exe: exe.clone() }, "v0.7.8", "x86_64", None),
-        "meatshell-v0.7.8-windows-x86_64.zip"
+        asset_names(&Target::WindowsPortable { exe: exe.clone() }, "v0.7.8", "x86_64", None),
+        ["meatshell-v0.7.8-windows-x86_64.zip"]
     );
     assert_eq!(
-        asset_name(&Target::AppImage { file: exe.clone() }, "v0.7.8", "x86_64", None),
-        "meatshell-v0.7.8-linux-x86_64.AppImage"
+        asset_names(&Target::AppImage { file: exe.clone() }, "v0.7.8", "x86_64", None),
+        ["meatshell-v0.7.8-linux-x86_64.AppImage"]
     );
     assert_eq!(
-        asset_name(&tarball, "v0.7.8", "aarch64", None),
-        "meatshell-v0.7.8-linux-aarch64.tar.gz"
+        asset_names(&tarball, "v0.7.8", "aarch64", None),
+        ["meatshell-v0.7.8-linux-aarch64.tar.gz"]
     );
     assert_eq!(
-        asset_name(&tarball, "v0.7.8", "x86_64", Some("glibc228")),
-        "meatshell-v0.7.8-linux-x86_64-glibc228.tar.gz"
+        asset_names(&tarball, "v0.7.8", "x86_64", Some("glibc228")),
+        ["meatshell-v0.7.8-linux-x86_64-glibc228.tar.gz"]
     );
+    // macOS: the .dmg first (#503), the .zip as the fallback.
     assert_eq!(
-        asset_name(&Target::MacApp { bundle: exe }, "v0.7.8", "aarch64", None),
-        "meatshell-v0.7.8-macos-aarch64.zip"
+        asset_names(&Target::MacApp { bundle: exe }, "v0.7.8", "aarch64", None),
+        ["meatshell-v0.7.8-macos-aarch64.dmg", "meatshell-v0.7.8-macos-aarch64.zip"]
     );
+}
+
+/// A release offering `files` (name → has a SHA-256 digest).
+fn release_with(files: &[(&str, bool)]) -> Release {
+    let assets: Vec<_> = files
+        .iter()
+        .map(|(name, digest)| {
+            serde_json::json!({
+                "name": name,
+                "browser_download_url":
+                    format!("https://github.com/yituorou/meatshell/releases/download/v0.8.0/{name}"),
+                "size": 1234,
+                "digest": digest.then(|| format!("sha256:{}", "a".repeat(64))),
+            })
+        })
+        .collect();
+    serde_json::from_value(serde_json::json!({ "tag_name": "v0.8.0", "assets": assets })).unwrap()
+}
+
+#[test]
+fn mac_updates_prefer_the_dmg_and_fall_back_to_the_zip() {
+    let mac = Target::MacApp { bundle: PathBuf::from("meatshell.app") };
+    let names = asset_names(&mac, "v0.8.0", "aarch64", None);
+    let dmg = "meatshell-v0.8.0-macos-aarch64.dmg";
+    let zip = "meatshell-v0.8.0-macos-aarch64.zip";
+    let picked = |release: &Release| -> Vec<String> {
+        usable_assets(release, &names)
+            .unwrap()
+            .into_iter()
+            .map(|(_, name)| name.to_string())
+            .collect()
+    };
+
+    // Both published: dmg first, zip kept as the in-run fallback.
+    assert_eq!(picked(&release_with(&[(zip, true), (dmg, true)])), [dmg, zip]);
+    // Releases from before the .dmg existed: the zip.
+    assert_eq!(picked(&release_with(&[(zip, true)])), [zip]);
+    // A dmg without a checksum is never used.
+    assert_eq!(picked(&release_with(&[(dmg, false), (zip, true)])), [zip]);
+    // dmg-only releases (after the zip is retired) work too.
+    assert_eq!(picked(&release_with(&[(dmg, true)])), [dmg]);
+    // Nothing usable: the error names the zip, the long-standing file.
+    let error = usable_assets(&release_with(&[]), &names).unwrap_err().to_string();
+    assert!(error.contains(zip), "{error}");
+}
+
+#[test]
+fn disk_images_are_refused_off_macos() {
+    if cfg!(target_os = "macos") {
+        return;
+    }
+    let dir = TempDir::new();
+    let error = copy_app_from_dmg(&dir.0.join("x.dmg"), &dir.0.join("mnt"), &dir.0.join("new"))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("only supported on macOS"), "{error}");
+}
+
+/// Installed macOS builds from v0.7.8 until the .dmg-aware updater only know
+/// `meatshell-<tag>-macos-<arch>.zip`. The release workflow must keep
+/// producing and attaching that zip next to the .dmg (#503) until those
+/// builds are gone — dropping it would break their one-click updates.
+#[test]
+fn release_workflow_keeps_the_macos_update_zip() {
+    let workflow = include_str!("../../.github/workflows/release.yml");
+    // Matrix names produce meatshell-<tag>-macos-<arch>.
+    assert!(workflow.contains("name: macos-aarch64"));
+    assert!(workflow.contains("name: macos-x86_64"));
+    assert!(workflow.contains(r#"STAGE="meatshell-${VERSION}-${{ matrix.name }}""#));
+    // The macOS branch packs the bundle into that zip and hands it to the
+    // mandatory attach step.
+    let mac = &workflow[workflow.find(r#"if [ "${{ runner.os }}" = "macOS" ]; then"#).unwrap()..];
+    let mac = &mac[..mac.find("elif").unwrap()];
+    assert!(mac.contains(r#"ditto -c -k --keepParent "$APP" "${STAGE}.zip""#));
+    assert!(mac.contains(r#"echo "ASSET=${STAGE}.zip" >> "$GITHUB_ENV""#));
+    // The step from its own "- name:" up to the next step's.
+    let start = workflow.find("- name: Attach to GitHub Release").unwrap();
+    let end = start + 1 + workflow[start + 1..].find("- name:").unwrap();
+    let attach = &workflow[start..end];
+    assert!(attach.contains("files: ${{ env.ASSET }}"));
+    assert!(attach.contains("fail_on_unmatched_files: true"));
+    // The .dmg is an extra, best-effort file.
+    assert!(workflow.contains("- name: Build DMG (macOS)"));
+    assert!(workflow.contains("files: ${{ env.DMG }}"));
 }
 
 /// Build `<root>/meatshell-v9.9.9-linux-x86_64/{meatshell,README.md,docs/REMOTE_MCP.md}` as a .tar.gz.
@@ -162,7 +247,7 @@ fn tarball_update_replaces_program_files_and_keeps_user_data() {
     let mut prepared = Prepared::stage(&target).unwrap();
     let package = prepared.work.join("package");
     tarball(&package);
-    prepared.unpack(&package).unwrap();
+    prepared.unpack(&package, false).unwrap();
     let work = prepared.work.clone();
 
     assert_eq!(prepared.install().unwrap(), exe);
@@ -194,7 +279,7 @@ fn a_binary_outside_a_release_folder_gets_only_the_binary_replaced() {
     let mut prepared = Prepared::stage(&target).unwrap();
     let package = prepared.work.join("package");
     tarball(&package);
-    prepared.unpack(&package).unwrap();
+    prepared.unpack(&package, false).unwrap();
     prepared.install().unwrap();
     drop(prepared);
     assert_eq!(read(&exe), "new binary");
@@ -242,7 +327,7 @@ fn portable_zip_update_unpacks_with_the_system_tar() {
         .status()
         .unwrap();
     assert!(status.success());
-    prepared.unpack(&zip).unwrap();
+    prepared.unpack(&zip, false).unwrap();
 
     prepared.install().unwrap();
     drop(prepared);
@@ -298,7 +383,7 @@ fn appimage_update_replaces_the_file() {
     let mut prepared = Prepared::stage(&target).unwrap();
     let package = prepared.work.join("package");
     write(&package, "new image");
-    prepared.unpack(&package).unwrap();
+    prepared.unpack(&package, false).unwrap();
     assert_eq!(prepared.install().unwrap(), file);
     assert_eq!(read(&file), "new image");
 }

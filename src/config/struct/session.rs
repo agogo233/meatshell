@@ -68,6 +68,32 @@ fn default_vt100_drawing() -> bool {
     false
 }
 
+/// Terminal type reported to the server (#498): the SSH `pty-req` TERM, the
+/// Telnet TERMINAL-TYPE reply (RFC 1091) and `$TERM` for local shells.
+pub const DEFAULT_TERM_TYPE: &str = "xterm-256color";
+
+fn default_term_type() -> String {
+    DEFAULT_TERM_TYPE.to_string()
+}
+
+/// A usable terminal type, or the default. Terminfo names are short ASCII
+/// words (`xterm-256color`, `vt100`, `screen.xterm-256color`); anything else —
+/// empty, oversized, spaces or control bytes from a hand-edited config — falls
+/// back to the default rather than being sent to the server.
+pub fn normalize_term_type(raw: &str) -> &str {
+    let term = raw.trim();
+    let valid = !term.is_empty()
+        && term.len() <= 64
+        && term
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'+'));
+    if valid {
+        term
+    } else {
+        DEFAULT_TERM_TYPE
+    }
+}
+
 fn default_rdp_width() -> u16 {
     1280
 }
@@ -253,6 +279,12 @@ pub struct Session {
     #[serde(default = "default_vt100_drawing")]
     pub vt100_drawing: bool,
 
+    /// Terminal type (`TERM`) announced to the server (#498). Some programs
+    /// (e.g. older telnet targets) only work with plain `xterm`. Absent in
+    /// older configs → `xterm-256color`, the value always used before.
+    #[serde(default = "default_term_type")]
+    pub term_type: String,
+
     /// Record this session's terminal output to a log file (#265):
     /// follow the global setting, or force on/off.
     #[serde(default)]
@@ -368,7 +400,54 @@ mod session_log_mode_tests {
     }
 }
 
+#[cfg(test)]
+mod term_type_tests {
+    use super::*;
+
+    #[test]
+    fn keeps_valid_terminfo_names() {
+        for term in [
+            "xterm",
+            "xterm-256color",
+            "vt100",
+            "screen.xterm-256color",
+            "rxvt-unicode+x",
+        ] {
+            assert_eq!(normalize_term_type(term), term);
+        }
+        assert_eq!(normalize_term_type("  xterm  "), "xterm");
+    }
+
+    #[test]
+    fn falls_back_to_default_for_unusable_values() {
+        let long = "x".repeat(65);
+        for term in [
+            "",
+            "   ",
+            "xterm 256",
+            "x\u{1b}term",
+            "xterm;rm",
+            long.as_str(),
+        ] {
+            assert_eq!(normalize_term_type(term), DEFAULT_TERM_TYPE);
+        }
+    }
+
+    #[test]
+    fn missing_field_deserializes_as_default() {
+        let mut value = serde_json::to_value(Session::new_empty()).unwrap();
+        value.as_object_mut().unwrap().remove("term_type");
+        let session: Session = serde_json::from_value(value).unwrap();
+        assert_eq!(session.term_type, DEFAULT_TERM_TYPE);
+    }
+}
+
 impl Session {
+    /// The terminal type to announce for this session (#498).
+    pub fn effective_term_type(&self) -> &str {
+        normalize_term_type(&self.term_type)
+    }
+
     pub fn new_empty() -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
@@ -403,6 +482,7 @@ impl Session {
             rdp_height: default_rdp_height(),
             encoding: default_encoding(),
             vt100_drawing: default_vt100_drawing(),
+            term_type: default_term_type(),
             session_log: SessionLogMode::Default,
             forwards: Vec::new(),
             triggers: Vec::new(),

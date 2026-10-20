@@ -81,8 +81,84 @@ pub enum SftpCommand {
     OpenOrDownload { remote: String },
     /// Overwrite a remote file with text from the built-in editor (#70).
     WriteText { remote: String, content: String },
+    /// Drag-out to the OS file manager (#504): stat `roots` and walk any
+    /// folders, replying with every file/folder to create on the local side.
+    WalkForExport {
+        roots: Vec<String>,
+        reply: std::sync::mpsc::Sender<Result<Vec<ExportEntry>, String>>,
+    },
+    /// Drag-out (#504): stream one remote file's bytes, in order, into the
+    /// bounded `chunks` channel. The stream ends when the sender is dropped;
+    /// an `Err` chunk reports a failure. Dropping the receiver cancels it.
+    StreamFile {
+        remote: String,
+        chunks: tokio::sync::mpsc::Sender<Result<Vec<u8>, String>>,
+        /// The drag this file belongs to: one Transfers-panel row per drag.
+        progress: Arc<DragTransfer>,
+    },
+    /// Drag-out finished (Explorer released the data): report the drag's
+    /// final state in the Transfers panel.
+    FinishDragTransfer(Arc<DragTransfer>),
     /// Gracefully shut down the SFTP worker.
     Close,
+}
+
+/// One item to materialise when remote files are dragged out (#504).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExportEntry {
+    /// Absolute remote path.
+    pub remote: String,
+    /// Path relative to the drop target, `/`-separated, starting with the
+    /// dragged item's own name (`logs/2026/app.log`).
+    pub relative: String,
+    pub is_dir: bool,
+    pub size: u64,
+    /// Unix seconds; 0 when unknown.
+    pub mtime: u64,
+}
+
+/// Progress of one drag-out (#504), shown as a single row in the Transfers
+/// panel however many files Explorer pulls. Shared between the UI-side data
+/// object (which creates and finishes it) and the worker's stream tasks
+/// (which add bytes and emit progress).
+#[derive(Debug)]
+pub struct DragTransfer {
+    pub id: String,
+    pub name: String,
+    /// Sum of all file sizes in the drag.
+    pub total: u64,
+    /// Bytes delivered so far, across all files.
+    pub done: std::sync::atomic::AtomicU64,
+    /// Flipped by the panel's Cancel button (registered as a transfer id).
+    pub cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// A file stopped before its end (Explorer cancelled / skipped it).
+    pub interrupted: std::sync::atomic::AtomicBool,
+    pub(crate) report: Mutex<DragReport>,
+}
+
+/// Emission bookkeeping for [`DragTransfer`].
+#[derive(Debug, Default)]
+pub(crate) struct DragReport {
+    /// A row exists in the panel (some bytes were requested).
+    pub started: bool,
+    /// The final state was emitted; later progress is ignored.
+    pub finished: bool,
+    pub error: Option<String>,
+    pub last_emit: Option<std::time::Instant>,
+}
+
+impl DragTransfer {
+    pub fn new(id: String, name: String, total: u64) -> Self {
+        Self {
+            id,
+            name,
+            total,
+            done: Default::default(),
+            cancel: Default::default(),
+            interrupted: Default::default(),
+            report: Default::default(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

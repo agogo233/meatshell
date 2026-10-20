@@ -5,9 +5,37 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ## [0.7.9] - 2026-10-19
 
+- **SFTP 文件和文件夹可直接拖到 Windows 资源管理器（#504）。** 在 SFTP 文件列表中按住某一行拖出窗口，即可放到资源管理器或桌面；若该行是多个勾选项之一，则拖出所有勾选项。文件由资源管理器直接从 SFTP 读取并显示其自带的进度与取消界面，不会先下载到临时目录；文件夹会连同子目录一并复制，保留文件大小和修改时间。拷贝期间界面保持流畅。每次拖动在“传输管理”中显示为一行，结束时标记为完成、失败或已取消，也可在其中取消。目前仅支持 Windows。
+- **Drag SFTP files and folders straight into Windows Explorer (#504).** Drag a row out of the SFTP file list onto Explorer or the desktop; if the row is one of several checked rows, all checked items go. Explorer reads the files directly over SFTP with its own progress and cancel dialog, nothing is staged in a temp folder first, and folders arrive with their subfolders, file sizes and modification times. The UI stays responsive during the copy. Each drag shows up as one row in the Transfers manager, which ends as done, failed or cancelled and can be cancelled from there. Windows only for now.
+
+- **支持自定义快捷键。** “快捷键”对话框中的所有快捷键（切换标签页、新建窗口、专注模式、全屏、复制、粘贴、查找、命令历史、字体缩放等）均可修改：点击按键，按下新的组合键即可。冲突的组合键和不带修饰键的按键会被拒绝；绑定普通的 Ctrl+字母时会提示该按键将不再发送到终端；可以单独或全部恢复默认，修改会自动保存。Ctrl+C 也作为“中断当前命令（发送 ^C）”列出，可将其改绑到其他组合键，再把 Ctrl+C 留给“复制”。
+- **Customisable keyboard shortcuts.** Every shortcut in the Shortcuts dialog (tab switching, new window, zen mode, fullscreen, copy, paste, find, command history, font zoom, …) can be changed: click the key chip and press the new combination. Combinations already in use and keys without a modifier are refused, binding a plain Ctrl+letter warns that the shell will no longer receive it, and each shortcut or all of them can be reset to the defaults; changes are saved automatically. Ctrl+C is also listed as "Interrupt running command (send ^C)", so it can be moved to another combination to free Ctrl+C for Copy.
+
+- **SFTP 路径书签和最近访问目录（#500）。** 路径栏旁新增 ☆ 按钮，可收藏当前目录；旁边的菜单列出该会话的书签和最近打开的 15 个目录，点击即可跳转，也可删除书签或清除最近访问。书签和最近访问按会话保存，同一会话的多个标签页共享；只有目录真正打开成功后才会记入最近访问。
+- **SFTP path bookmarks and recent folders (#500).** A ☆ button next to the path bar bookmarks the current folder, and the menu beside it lists the session's bookmarks and its 15 most recently opened folders: click one to jump there, remove a bookmark, or clear the recent list. Both are saved per session and shared by every tab of that session; a folder only counts as recent once it has actually opened.
+
+- **Alt+Enter 切换终端全屏（#495）。** Alt+Enter（macOS 为 ⌥↩）将窗口切换为无边框全屏，并隐藏标题栏、标签栏、工具栏、停靠面板和状态栏，让终端占满屏幕，效果类似 Xshell 的全屏模式。仅在终端标签页中可进入；切换到非终端标签或系统退出全屏时自动退出。
+- **Alt+Enter toggles terminal fullscreen (#495).** Alt+Enter (⌥↩ on macOS) switches the window to borderless fullscreen and hides the title bar, tab strips, toolbar, docked panels and status strip so the terminal fills the screen, like Xshell's full-screen view. It only starts from a terminal tab and ends automatically when the active tab is no longer a terminal or the OS leaves fullscreen.
+
+- **支持按会话选择终端类型（#498）。** SSH 和 Telnet 会话的高级设置中新增“终端类型”选项（默认 xterm-256color，可选 xterm、vt100、screen-256color 等）。SSH 在申请 PTY 时发送该类型，Telnet 会按 RFC 1091 响应服务器的 TERMINAL-TYPE 请求，本地终端将其设为 TERM 环境变量。现有会话行为不变。
+- **Per-session terminal type (#498).** SSH and Telnet sessions get a "Terminal type" option under Advanced (xterm-256color by default; xterm, vt100, screen-256color, …). SSH sends it in the PTY request, Telnet answers the server's TERMINAL-TYPE request (RFC 1091) with it, and local shells export it as TERM. Existing sessions are unchanged.
+
+- **SFTP 文件列表支持按住 Shift 点击进行范围多选。** 按住 Shift 点击某行或其复选框，会勾选从上一次点击的行到当前行之间的所有条目，并像文件管理器一样替换之前的选择。
+- **Shift+click range selection in the SFTP file list.** Shift+clicking a row or its checkbox checks every entry between the last clicked row and this one, replacing the previous selection like a file manager does.
+
+- **macOS 版本额外提供 .dmg 安装包，一键更新优先使用 .dmg（#503）。** 每个版本除 .zip 外还会发布可拖入“应用程序”文件夹的 .dmg。从本版本起，一键更新会优先下载 .dmg，失败时自动改用 .zip；.zip 仍会继续发布，0.7.8 及更早的版本照常更新。安装到“应用程序”文件夹后，一键更新也能直接替换应用。
+- **macOS releases add a .dmg, and one-click updates prefer it (#503).** Each release now ships a drag-to-Applications .dmg alongside the .zip. From this version, one-click updates download the .dmg first and fall back to the .zip if anything goes wrong; the .zip keeps being published, so 0.7.8 and earlier update as before. Installing into Applications also lets one-click updates replace the app in place.
+
+- **修复传输结束后 CPU 占用一直居高不下的问题（#499）。** 传输按钮的呼吸灯动画在第一次传输（例如“外部编辑”背后的下载和回传）结束后不会停止，导致窗口持续重绘；使用 GPU 渲染、配置较低的电脑上尤为明显，直到关闭程序才恢复。现在动画只在有传输进行时运行，结束后窗口不再重绘。
+- **Fix CPU usage staying high after a transfer (#499).** The Transfers button's pulse animation never stopped after the first transfer (for example the download and re-upload behind "Edit externally"), so the window kept redrawing; this was most noticeable with GPU rendering on modest hardware and lasted until the app was closed. The animation now only runs while a transfer is active, and the window goes back to idle afterwards.
+
+- **Linux .deb 安装包按其他发布文件的格式命名。** 文件名改为 `meatshell-<版本>-linux-<架构>.deb`，包版本即发布版本（0.7.9，而不是 0.7.9-1）。
+- **Linux .deb packages are named like the other release files.** They are now `meatshell-<tag>-linux-<arch>.deb`, and the package version is the release version (0.7.9, not 0.7.9-1).
 - **修复内置编辑器中拖选文字时滚轮失效的问题（#388）。** 此前在编辑器里按住鼠标拖拽选择文字的过程中转动滚轮会毫无反应，查看长文档必须松开鼠标、滚动、再重新拖选。现在拖选过程中可以直接用滚轮翻页，内容随之滚动，选区继续跟随鼠标延伸；之前为绕开该问题加的临时兜底滚动逻辑保留不变。
 - **Fix wheel scrolling while dragging a selection in the editor (#388).** While holding the mouse down to select text in the built-in editor, the wheel did nothing, so reading long files required releasing the mouse, scrolling, and dragging again. The wheel now scrolls the editor mid-drag and the selection keeps following the pointer; the earlier fallback scroll workaround is left in place unchanged.
 
+- **停靠面板支持同边堆叠与拖动排序。** 侧栏、欢迎页、快捷指令、AI 对话、SFTP 面板可以停靠在同一条窗口边缘上上下堆叠，面板之间的分隔条可拖动调整各自占比；在堆叠内按住面板标题拖动，还能按松手位置直接交换顺序。堆叠的成员、顺序与比例按会话持久保存。
+- **Stacked dock panels sharing one window edge.** Sidebar, welcome, quick commands, AI panel and SFTP panel can dock to the same window edge and stack along it, with draggable dividers resizing each share; dragging a panel header within its stack reorders the stack by where it lands. Members, order and ratios persist per session.
 ## [0.7.8] - 2026-10-18
 
 - **应用内一键更新（#390、#497）。** 检测到新版本后，“设置”中的更新按钮可直接下载并安装：先下载并校验 SHA-256，再点击“安装并重启”，程序会关闭所有窗口、替换为新版本并自动重新打开。MSI 安装版交由 Windows Installer 升级（感谢 @yanmuq，#497）；Windows 便携版（.zip）、Linux AppImage 与 .tar.gz、macOS .app 会直接替换自身文件，替换失败时自动回滚。便携版的 `config/` 与 `log/` 数据目录不会被改动。通过 .deb、Flatpak 或 AUR 安装的版本会提示使用系统包管理器更新；安装在无写入权限位置（如 Program Files、`/usr/local/bin`）的版本仍打开发布页面。

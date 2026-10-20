@@ -543,6 +543,7 @@ pub(super) fn session_from_draft(
         flow_control: draft.flow_control.to_string(),
         encoding: draft.encoding.to_string(),
         vt100_drawing: draft.vt100_drawing,
+        term_type: crate::config::normalize_term_type(&draft.term_type).to_string(),
         session_log: SessionLogMode::from_str(draft.session_log.as_str()),
         forwards,
         triggers,

@@ -546,6 +546,42 @@ pub(super) fn wire_sftp_callbacks(
             }
         });
     }
+    // SFTP multi-select: Shift+click range. Like a file manager, the checked
+    // set becomes exactly rows `from..=to` (either order); everything else is
+    // unchecked.
+    {
+        let weak = window.as_weak();
+        window.on_sftp_select_range(move |tab_id: SharedString, from: i32, to: i32| {
+            let Some(w) = weak.upgrade() else { return };
+            let terminals = w.get_terminals();
+            let Some(tm) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>() else {
+                return;
+            };
+            for ti in 0..tm.row_count() {
+                let Some(row) = tm.row_data(ti) else { continue };
+                if row.id.as_str() != tab_id.as_str() {
+                    continue;
+                }
+                if let Some(em) = row
+                    .sftp_entries
+                    .as_any()
+                    .downcast_ref::<VecModel<SftpEntry>>()
+                {
+                    let n = apply_range_selection(em, from, to);
+                    let mut r = row.clone();
+                    r.sftp_selected_count = n as i32;
+                    tm.set_row_data(ti, r);
+                }
+                break;
+            }
+        });
+    }
+    // Drag rows out of the file list into the OS file manager (#504).
+    // Windows only for now; elsewhere the gesture is ignored.
+    if cfg!(windows) {
+        let sftp_handles = sftp_handles.clone();
+        let weak = window.as_weak();
+    }
     // SFTP multi-select: download all checked entries into one folder (#100).
     {
         let sftp_handles = sftp_handles.clone();

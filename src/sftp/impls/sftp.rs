@@ -1609,12 +1609,284 @@ async fn run_sftp(
                     }
                 }
             }
+            // Drag-out to the OS file manager (#504). Both run on their own
+            // task so the panel keeps listing while Explorer copies.
+            SftpCommand::WalkForExport { roots, reply } => {
+                let sftp = sftp.clone();
+                transfers.spawn(async move {
+                    let result = walk_for_export(&sftp, &roots)
+                        .await
+                        .map_err(|e| format!("{e:#}"));
+                    let _ = reply.send(result);
+                });
+            }
+            SftpCommand::StreamFile { remote, chunks, progress } => {
+                // One Transfers row per drag; its Cancel button flips this flag.
+                cancels
+                    .lock()
+                    .unwrap()
+                    .entry(progress.id.clone())
+                    .or_insert_with(|| progress.cancel.clone());
+                progress.emit_progress(&events, true);
+                let handle = handle.clone();
+                let events = events.clone();
+                transfers.spawn(async move {
+                    if let Err(e) =
+                        stream_file_impl(&handle, &remote, &chunks, &progress, &events).await
+                    {
+                        let message = format!("{e:#}");
+                        if !progress.cancel.load(Ordering::Relaxed) {
+                            progress.fail(format!("{}: {message}", base_name(&remote)));
+                        }
+                        let _ = chunks.send(Err(message)).await;
+                    }
+                });
+            }
+            SftpCommand::FinishDragTransfer(progress) => {
+                cancels.lock().unwrap().remove(&progress.id);
+                progress.emit_final(&events);
+            }
         }
     }
 
     transfers.abort_all();
     while transfers.join_next().await.is_some() {}
     crate::ssh::disconnect_ssh(&handle, "bye").await;
+    Ok(())
+}
+
+/// Upper bounds for one drag-out (#504), so dropping `/` by accident cannot
+/// make the walk run (and the UI wait) forever.
+const MAX_EXPORT_ENTRIES: usize = 50_000;
+const MAX_EXPORT_DEPTH: usize = 64;
+
+/// Stat the dragged `roots` and walk folders depth-first, returning every
+/// folder before its contents. Relative paths start at each root's own name.
+async fn walk_for_export(
+    sftp: &SftpSession,
+    roots: &[String],
+) -> Result<Vec<super::transfer::ExportEntry>> {
+    use super::transfer::ExportEntry;
+    let is_dir = |perms: Option<u32>| (perms.unwrap_or(0) & 0o170_000) == 0o040_000;
+    let mut out = Vec::new();
+    for root in roots {
+        let meta = sftp
+            .metadata(root)
+            .await
+            .with_context(|| format!("stat {root}"))?;
+        let name = base_name(root);
+        let root_is_dir = is_dir(meta.permissions);
+        out.push(ExportEntry {
+            remote: root.clone(),
+            relative: name.clone(),
+            is_dir: root_is_dir,
+            size: if root_is_dir { 0 } else { meta.size.unwrap_or(0) },
+            mtime: meta.mtime.unwrap_or(0) as u64,
+        });
+        if !root_is_dir {
+            continue;
+        }
+        let mut stack = vec![(root.clone(), name, 1usize)];
+        while let Some((dir, rel, depth)) = stack.pop() {
+            if depth > MAX_EXPORT_DEPTH {
+                anyhow::bail!("{dir}: {}", t("目录层级过深", "folder nesting is too deep"));
+            }
+            let mut children = list_dir_impl(sftp, &dir)
+                .await
+                .with_context(|| format!("list {dir}"))?;
+            // Stable, readable order in Explorer's progress dialog.
+            children.sort_by(|a, b| a.name.cmp(&b.name));
+            for child in children {
+                if out.len() >= MAX_EXPORT_ENTRIES {
+                    anyhow::bail!(
+                        "{} ({MAX_EXPORT_ENTRIES}+)",
+                        t("文件数量过多", "too many files")
+                    );
+                }
+                let child_rel = format!("{rel}/{}", child.name);
+                out.push(ExportEntry {
+                    remote: child.full_path.clone(),
+                    relative: child_rel.clone(),
+                    is_dir: child.is_dir,
+                    size: if child.is_dir { 0 } else { child.size },
+                    mtime: child.modified as u64,
+                });
+                if child.is_dir {
+                    stack.push((child.full_path, child_rel, depth + 1));
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Transfer state codes understood by the Transfers panel.
+const TRANSFER_ACTIVE: u8 = 0;
+const TRANSFER_DONE: u8 = 1;
+const TRANSFER_FAILED: u8 = 2;
+const TRANSFER_CANCELLED: u8 = 4;
+
+impl super::transfer::DragTransfer {
+    /// Bytes to show as an in-progress row, or `None` when nothing should be
+    /// emitted (finished already, or throttled to one update per 150 ms).
+    pub(crate) fn progress_update(&self, force: bool) -> Option<u64> {
+        let mut report = self.report.lock().unwrap();
+        if report.finished {
+            return None;
+        }
+        let now = Instant::now();
+        if !force
+            && report
+                .last_emit
+                .is_some_and(|t| now.duration_since(t) < Duration::from_millis(150))
+        {
+            return None;
+        }
+        report.last_emit = Some(now);
+        report.started = true;
+        Some(self.done.load(Ordering::Relaxed))
+    }
+
+    /// The row's final `(state, bytes, message)`, once. `None` if the drag
+    /// never transferred anything (no row was created) or already finished.
+    pub(crate) fn final_update(&self) -> Option<(u8, u64, String)> {
+        let mut report = self.report.lock().unwrap();
+        if report.finished {
+            return None;
+        }
+        report.finished = true;
+        if !report.started {
+            return None;
+        }
+        let done = self.done.load(Ordering::Relaxed);
+        Some(if let Some(error) = &report.error {
+            (TRANSFER_FAILED, done, error.clone())
+        } else if self.cancel.load(Ordering::Relaxed) || self.interrupted.load(Ordering::Relaxed) {
+            (TRANSFER_CANCELLED, done, String::new())
+        } else {
+            (TRANSFER_DONE, self.total.max(done), String::new())
+        })
+    }
+
+    /// Remember the first failure; it decides the final row.
+    pub(crate) fn fail(&self, message: String) {
+        let mut report = self.report.lock().unwrap();
+        if report.error.is_none() {
+            report.error = Some(message);
+        }
+    }
+
+    fn emit_progress(&self, events: &UnboundedSender<SessionEvent>, force: bool) {
+        if let Some(done) = self.progress_update(force) {
+            emit_transfer(events, &self.id, &self.name, false, done, self.total, TRANSFER_ACTIVE, "");
+        }
+    }
+
+    fn emit_final(&self, events: &UnboundedSender<SessionEvent>) {
+        if let Some((state, done, message)) = self.final_update() {
+            emit_transfer(events, &self.id, &self.name, false, done, self.total, state, &message);
+        }
+    }
+}
+
+/// Stream `remote` into `chunks` in file order over a dedicated SFTP
+/// channel, keeping up to ~1 MB of READ requests in flight like
+/// `download_impl`. Delivered bytes count toward the drag's Transfers row.
+/// Stops when the receiver goes away (Explorer cancelled) or the row's
+/// Cancel button is pressed.
+async fn stream_file_impl(
+    handle: &SftpLink,
+    remote: &str,
+    chunks: &tokio::sync::mpsc::Sender<std::result::Result<Vec<u8>, String>>,
+    progress: &super::transfer::DragTransfer,
+    events: &UnboundedSender<SessionEvent>,
+) -> Result<()> {
+    use futures::stream::FuturesOrdered;
+
+    const CHUNK: usize = 32 * 1024;
+    const MAX_INFLIGHT: usize = 32;
+
+    let stream = handle
+        .elevation
+        .open_stream(&handle.handle)
+        .await
+        .context("open sftp channel")?;
+    let raw = Arc::new(RawSftpSession::new(stream));
+    raw.init().await.context("sftp handshake")?;
+    let total = raw
+        .stat(remote)
+        .await
+        .ok()
+        .and_then(|a| a.attrs.size)
+        .unwrap_or(0);
+    let fhandle = raw
+        .open(remote, OpenFlags::READ, FileAttributes::default())
+        .await
+        .with_context(|| format!("open remote {remote}"))?
+        .handle;
+
+    // Fixed-size reads in order. When the size is unknown (or the file grew),
+    // keep reading past `total` until a short/empty read signals EOF.
+    let mut next_off = 0u64;
+    let mut eof = false;
+    let mut inflight = FuturesOrdered::new();
+    loop {
+        while !eof && inflight.len() < MAX_INFLIGHT && (total == 0 || next_off < total) {
+            let off = next_off;
+            let want = if total == 0 {
+                CHUNK
+            } else {
+                ((total - off) as usize).min(CHUNK)
+            };
+            next_off += want as u64;
+            let raw = raw.clone();
+            let h = fhandle.clone();
+            inflight.push_back(async move {
+                let mut data = Vec::with_capacity(want);
+                let mut o = off;
+                let end = off + want as u64;
+                while o < end {
+                    match raw.read(h.clone(), o, (end - o) as u32).await {
+                        Ok(d) if d.data.is_empty() => break,
+                        Ok(d) => {
+                            o += d.data.len() as u64;
+                            data.extend_from_slice(&d.data);
+                        }
+                        Err(SftpError::Status(s)) if s.status_code == StatusCode::Eof => break,
+                        Err(e) => return Err(anyhow!("read remote: {e}")),
+                    }
+                }
+                Ok::<(Vec<u8>, bool), anyhow::Error>((data, (o - off) < want as u64))
+            });
+            // Unknown size: one request at a time is enough to find EOF.
+            if total == 0 {
+                break;
+            }
+        }
+        if progress.cancel.load(Ordering::Relaxed) {
+            let _ = raw.close(fhandle).await;
+            anyhow::bail!("{}", t("已取消", "Cancelled"));
+        }
+        let Some(result) = inflight.next().await else { break };
+        let (data, short) = result?;
+        let n = data.len() as u64;
+        if !data.is_empty() {
+            if chunks.send(Ok(data)).await.is_err() {
+                // Receiver dropped: Explorer cancelled or skipped this file.
+                progress.interrupted.store(true, Ordering::Relaxed);
+                break;
+            }
+            progress.done.fetch_add(n, Ordering::Relaxed);
+            progress.emit_progress(events, false);
+        }
+        if short {
+            eof = true;
+            if inflight.is_empty() {
+                break;
+            }
+        }
+    }
+    let _ = raw.close(fhandle).await;
     Ok(())
 }
 

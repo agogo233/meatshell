@@ -42,18 +42,25 @@ fn scrollback_transition_reclaims_the_hidden_ime_anchor_on_the_next_ui_turn() {
 
 #[test]
 fn ctrl_v_pastes_locally_except_on_the_alternate_screen() {
+    // The chord rules themselves (plain Ctrl+V yields to vim on the alt
+    // screen; Ctrl+Shift+V / Shift+Insert always paste) live in the
+    // customisable keymap and are unit-tested in tests/app/shortcuts. Here we
+    // only check the terminal hands the alt-screen state to that matcher and
+    // dispatches its "paste" action before the PTY fallback.
     let source = include_str!("../ui/terminal_view.slint");
-    let paste_start = source.find("// ── Paste:").expect("paste key routing");
-    let paste_end = source[paste_start..]
-        .find("// ── Paste: Shift+Insert")
-        .expect("Shift+Insert routing")
-        + paste_start;
-    let paste = &source[paste_start..paste_end];
+    let match_start = source
+        .find("let act = root.match-shortcut(event.text")
+        .expect("keymap lookup in the terminal key handler");
+    let fallback = source[match_start..]
+        .find("// ── All other keys")
+        .expect("PTY fallback branch")
+        + match_start;
+    let routing = &source[match_start..fallback];
 
-    assert!(paste.contains("event.modifiers.control && event.modifiers.shift"));
-    assert!(paste.contains("!root.is-alt-screen"));
-    assert!(paste.contains("!event.modifiers.shift"));
-    assert!(source[paste_end..].contains("root.send-key(event.text"));
+    assert!(routing.contains("root.is-alt-screen);"));
+    assert!(routing.contains("} else if (act == \"paste\") {"));
+    assert!(routing.contains("root.paste-from-clipboard();"));
+    assert!(source[fallback..].contains("root.send-key(event.text"));
 }
 
 #[test]

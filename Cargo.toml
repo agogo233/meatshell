@@ -1,6 +1,6 @@
 [package]
 name = "meatshell"
-version = "0.7.8"
+version = "0.7.9"
 edition = "2021"
 authors = ["meatshell contributors"]
 description = "A lightweight FinalShell-style SSH/terminal client written in Rust + Slint"
@@ -207,12 +207,22 @@ winresource = "0.1"
 # transitive deps, keeping the lock diff minimal.
 [target.'cfg(windows)'.dependencies]
 mimalloc = "0.1"
+# `#[implement]` (COM objects for SFTP drag-out, #504) expands to paths in
+# `windows_core`; same 0.58 already in Cargo.lock.
+windows-core = "0.58"
 windows = { version = "0.58", features = [
+    "implement",
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
     "Win32_Storage_EnhancedStorage",
     "Win32_System_Com",
+    "Win32_System_Com_Marshal",
     "Win32_System_Com_StructuredStorage",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
     "Win32_System_Registry",
+    "Win32_System_SystemServices",
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",
     "Win32_UI_Shell_PropertiesSystem",

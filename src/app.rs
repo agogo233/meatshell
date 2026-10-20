@@ -6086,6 +6086,7 @@ fn wire_session_callbacks(
                 flow_control: draft.flow_control.to_string(),
                 encoding: draft.encoding.to_string(),
                 vt100_drawing: draft.vt100_drawing,
+                term_type: crate::config::normalize_term_type(&draft.term_type).to_string(),
                 session_log: SessionLogMode::from_str(draft.session_log.as_str()),
                 forwards,
                 triggers,
@@ -6778,6 +6779,17 @@ fn wire_session_callbacks(
                     ModelRc::from(std::rc::Rc::new(VecModel::from(v)))
                 },
                 sftp_available: has_sftp,
+                sftp_recent: {
+                    let v: Vec<slint::SharedString> = store
+                        .borrow()
+                        .sftp_places(&conn_label)
+                        .recent
+                        .iter()
+                        .map(|p| p.as_str().into())
+                        .collect();
+                    ModelRc::from(std::rc::Rc::new(VecModel::from(v)))
+                },
+                sftp_bookmarked: false,
                 font_size: 0,
                 tunnels: ModelRc::from(std::rc::Rc::new(VecModel::<TunnelInfo>::default())),
                 sftp_collapsed: !has_sftp || sftp_collapsed_default,

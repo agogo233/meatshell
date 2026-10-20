@@ -95,7 +95,7 @@ async fn run_local(
             cmd.cwd(dir);
         }
     }
-    cmd.env("TERM", "xterm-256color");
+    cmd.env("TERM", session.effective_term_type());
 
     let child = pair
         .slave

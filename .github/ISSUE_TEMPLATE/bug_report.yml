@@ -1,4 +1,4 @@
-name: 问题反馈 / Bug report
+name: 问题反馈（中文）
 description: 报告 MeatShell 中可复现的问题，并提供定位问题所需的环境信息
 title: "[Bug]: "
 body:

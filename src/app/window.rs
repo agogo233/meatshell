@@ -299,6 +299,45 @@ pub(super) fn refresh_revealed_main_window(weak: slint::Weak<AppWindow>) {
 #[path = "../../tests/app/window_geometry/mod.rs"]
 mod mixed_dpi_window_tests;
 
+/// Terminal fullscreen (#495) may only be entered while the active tab is a
+/// terminal session (SSH, local shell, serial, …) — not the welcome page or an
+/// editor tab, which would leave a chromeless window with nothing to show.
+pub(super) fn term_fullscreen_allowed<'a>(
+    active_tab: &str,
+    mut terminal_ids: impl Iterator<Item = &'a str>,
+) -> bool {
+    !active_tab.is_empty() && active_tab != "welcome" && terminal_ids.any(|id| id == active_tab)
+}
+
+fn active_tab_is_terminal(win: &AppWindow) -> bool {
+    let active = win.get_active_tab_id();
+    let terms = win.get_terminals();
+    let ids: Vec<SharedString> = (0..terms.row_count())
+        .filter_map(|i| terms.row_data(i))
+        .map(|t| t.id)
+        .collect();
+    term_fullscreen_allowed(active.as_str(), ids.iter().map(|id| id.as_str()))
+}
+
+/// Enter/leave terminal fullscreen (#495): borderless OS fullscreen plus the
+/// `term-fullscreen` flag that hides all window chrome in app.slint. Entering
+/// is refused unless a terminal tab is active.
+pub(super) fn set_term_fullscreen(win: &AppWindow, on: bool) {
+    if on && !active_tab_is_terminal(win) {
+        return;
+    }
+    if win.get_term_fullscreen() != on {
+        win.set_term_fullscreen(on);
+    }
+    if win.window().is_fullscreen() != on {
+        win.window().set_fullscreen(on);
+    }
+}
+
+#[cfg(test)]
+#[path = "../../tests/app/term_fullscreen/mod.rs"]
+mod term_fullscreen_tests;
+
 #[cfg(target_os = "linux")]
 pub(super) fn schedule_slint_pointer_ungrab<T>(weak: slint::Weak<T>)
 where
@@ -383,5 +422,243 @@ pub(super) fn setup_macos_platform(renderer_mode: &str) {
         Err(e) => {
             tracing::warn!("winit backend build failed ({e}); immersive macOS titlebar disabled")
         }
+    }
+}
+
+/// Center the window on the primary monitor's work area (Windows).
+#[cfg(windows)]
+pub(super) fn center_window(win: &AppWindow) {
+    #[repr(C)]
+    struct Rect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn SystemParametersInfoW(action: u32, uiparam: u32, pvparam: *mut Rect, winini: u32)
+            -> i32;
+    }
+    const SPI_GETWORKAREA: u32 = 0x0030;
+
+    let size = win.window().size(); // physical pixels
+    let mut wa = Rect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    let ok = unsafe { SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut wa, 0) };
+    if ok == 0 {
+        return;
+    }
+    let area_w = (wa.right - wa.left).max(0) as u32;
+    let area_h = (wa.bottom - wa.top).max(0) as u32;
+    let x = wa.left + ((area_w.saturating_sub(size.width)) / 2) as i32;
+    let y = wa.top + ((area_h.saturating_sub(size.height)) / 2) as i32;
+    win.window()
+        .set_position(slint::PhysicalPosition::new(x, y));
+}
+
+#[cfg(not(windows))]
+pub(super) fn center_window(_win: &AppWindow) {}
+
+/// Bring a window to the front and give it keyboard focus: un-minimize it
+/// and ask the OS for focus. Used when an OS entry point (taskbar jump list,
+/// Dock menu, desktop action) opens a window while the app is sitting in the
+/// background. Best effort — strict environments (Wayland, the Windows
+/// foreground lock) may degrade to a taskbar flash.
+pub(super) fn raise_to_front(win: &AppWindow) {
+    let _ = win.window().with_winit_window(|w| {
+        w.set_minimized(false);
+        w.focus_window();
+    });
+}
+
+/// Confirm-close dialog and custom title-bar window controls (#119).
+pub(super) fn wire_window_controls(
+    ctx: &WinCtx,
+    dock_stacks: &Rc<RefCell<DockStacks>>,
+    exit_confirmed: &Rc<Cell<bool>>,
+) {
+    let WinCtx {
+        core,
+        store,
+        registry,
+        handles,
+        sftp_handles,
+        window,
+        proc_win,
+        sys_win,
+        editor_win,
+        ..
+    } = ctx;
+    let window_id = ctx.window_id;
+    // Confirm-close dialog "Close" → actually quit the event loop (#88).
+    {
+        let weak = window.as_weak();
+        let proc_weak = proc_win.as_weak();
+        let sys_weak = sys_win.as_weak();
+        let cc_store = store.clone();
+        let cc_ds = dock_stacks.clone();
+        let close_handles = handles.clone();
+        let close_sftp_handles = sftp_handles.clone();
+        let editor_weak = editor_win.as_weak();
+        let close_exit_confirmed = exit_confirmed.clone();
+        let close_registry = registry.clone();
+        let close_core = core.clone();
+        window.on_confirm_close_yes(move || {
+            // Guard against a double click and against another close request
+            // arriving from Windows Installer while shutdown is in progress.
+            if close_exit_confirmed.replace(true) {
+                return;
+            }
+            if let Some(w) = weak.upgrade() {
+                w.set_confirm_close_open(false);
+                save_layout(&w, &cc_store, &cc_ds);
+                clear_zen_on_close(&w, &cc_store);
+                let _ = w.hide();
+            }
+            // Ask every worker to stop before the runtime/event loop is torn
+            // down, and hide the detachable monitor windows. Clearing the maps
+            // also makes any repeated close request see no live sessions and
+            // pass through immediately.
+            teardown_window(
+                window_id,
+                &close_handles,
+                &close_sftp_handles,
+                &proc_weak,
+                &sys_weak,
+                &editor_weak,
+            );
+            if close_registry.unregister(window_id) {
+                let _ = slint::quit_event_loop();
+            }
+            forget_window_state(&close_core, window_id);
+        });
+    }
+
+    // --- Custom title-bar window controls (#119) --------------------------
+    {
+        let weak = window.as_weak();
+        window.on_win_minimize(move || {
+            if let Some(w) = weak.upgrade() {
+                w.window().with_winit_window(|ww| ww.set_minimized(true));
+            }
+        });
+    }
+    {
+        let weak = window.as_weak();
+        window.on_win_maximize_toggle(move || {
+            if let Some(w) = weak.upgrade() {
+                let now = w.window().with_winit_window(|ww| {
+                    let m = !ww.is_maximized();
+                    ww.set_maximized(m);
+                    m
+                });
+                if let Some(m) = now {
+                    w.set_window_maximized(m);
+                }
+            }
+        });
+    }
+    // --- Terminal fullscreen (#495) ----------------------------------------
+    {
+        let weak = window.as_weak();
+        window.on_toggle_term_fullscreen(move || {
+            if let Some(w) = weak.upgrade() {
+                set_term_fullscreen(&w, !w.get_term_fullscreen());
+            }
+        });
+    }
+    {
+        let weak = window.as_weak();
+        window.on_term_fullscreen_check(move || {
+            if let Some(w) = weak.upgrade() {
+                if w.get_term_fullscreen() && !active_tab_is_terminal(&w) {
+                    set_term_fullscreen(&w, false);
+                }
+            }
+        });
+    }
+    {
+        let weak = window.as_weak();
+        let close_handles = handles.clone();
+        let close_sftp_handles = sftp_handles.clone();
+        let wc_proc_weak = proc_win.as_weak();
+        let wc_sys_weak = sys_win.as_weak();
+        let wc_editor_weak = editor_win.as_weak();
+        let wc_store = store.clone();
+        let wc_ds = dock_stacks.clone();
+        let wc_exit_confirmed = exit_confirmed.clone();
+        let wc_registry = registry.clone();
+        let wc_core = core.clone();
+        window.on_win_close(move || {
+            if let Some(w) = weak.upgrade() {
+                if tray::available() {
+                    save_layout(&w, &wc_store, &wc_ds);
+                    tray::hide_window(&wc_core, window_id, &w);
+                    return;
+                }
+                // Mirror the native-X behaviour: confirm if sessions are open.
+                if !should_block_close(wc_exit_confirmed.get(), !close_handles.borrow().is_empty())
+                {
+                    wc_exit_confirmed.set(true);
+                    save_layout(&w, &wc_store, &wc_ds);
+                    clear_zen_on_close(&w, &wc_store);
+                    // Tear down this window's workers and hide its monitor
+                    // windows; quit only if it was the last one.
+                    teardown_window(
+                        window_id,
+                        &close_handles,
+                        &close_sftp_handles,
+                        &wc_proc_weak,
+                        &wc_sys_weak,
+                        &wc_editor_weak,
+                    );
+                    let _ = w.hide();
+                    if wc_registry.unregister(window_id) {
+                        let _ = slint::quit_event_loop();
+                    }
+                    forget_window_state(&wc_core, window_id);
+                } else {
+                    w.set_confirm_close_open(true);
+                }
+            }
+        });
+    }
+    {
+        let weak = window.as_weak();
+        window.on_win_drag(move || {
+            if let Some(w) = weak.upgrade() {
+                w.window().with_winit_window(|ww| {
+                    let _ = ww.drag_window();
+                });
+                schedule_slint_pointer_ungrab(weak.clone());
+            }
+        });
+    }
+    {
+        use i_slint_backend_winit::winit::window::ResizeDirection;
+        let weak = window.as_weak();
+        window.on_win_resize(move |dir: i32| {
+            if let Some(w) = weak.upgrade() {
+                let d = match dir {
+                    0 => ResizeDirection::North,
+                    1 => ResizeDirection::South,
+                    2 => ResizeDirection::East,
+                    3 => ResizeDirection::West,
+                    4 => ResizeDirection::NorthEast,
+                    5 => ResizeDirection::NorthWest,
+                    6 => ResizeDirection::SouthEast,
+                    _ => ResizeDirection::SouthWest,
+                };
+                w.window().with_winit_window(|ww| {
+                    let _ = ww.drag_resize_window(d);
+                });
+                schedule_slint_pointer_ungrab(weak.clone());
+            }
+        });
     }
 }

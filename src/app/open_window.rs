@@ -172,6 +172,7 @@ pub(super) fn open_window(
         store.borrow().sftp_follow_cd(),
     ));
     wire_interface_toggles(&ctx, &sftp_follow_cd);
+    super::shortcuts::wire_shortcuts(&ctx);
     wire_session_log_settings(&ctx);
 
     // Interface setting: collapse the sidebars by default (#78). Seed the
@@ -705,6 +706,7 @@ pub(super) fn open_window(
         sftp_handles.clone(),
         sftp_last_cwd.clone(),
     );
+    super::sftp_places::wire_sftp_places(&window, store.clone(), tab_statuses.clone());
     wire_editor_tabs(
         &window,
         EditorTabModels {

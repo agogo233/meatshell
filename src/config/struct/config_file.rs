@@ -283,6 +283,16 @@ pub struct ConfigFile {
     /// enabled for existing users (#300).
     #[serde(default)]
     pub extra_paste_shortcuts_disabled: bool,
+    /// User-customised keyboard shortcuts: action id → chord string such as
+    /// "Ctrl+Shift+C". Only overrides are stored; an action missing here uses
+    /// its built-in (platform-specific) default, so "reset all" is just
+    /// clearing the map.
+    #[serde(default)]
+    pub keybindings: std::collections::BTreeMap<String, String>,
+    /// SFTP path bookmarks + recent folders, keyed by session id (#500).
+    /// Sessions with nothing saved are pruned.
+    #[serde(default)]
+    pub sftp_places: std::collections::BTreeMap<String, super::SftpPlaces>,
     /// Open SFTP text files in a panel docked inside the main window instead of
     /// the detached editor window. Defaults to false (#494).
     #[serde(default)]

@@ -1,0 +1,45 @@
+name: Feature request (English)
+description: Suggest a new feature or an improvement to an existing one
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve MeatShell! Please search existing issues before submitting to avoid duplicate suggestions.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Use case
+      description: Describe the need you have, or what's inconvenient about how things work today.
+      placeholder: When I ..., I'd like to be able to ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: How would you like MeatShell to implement or improve this?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other workarounds you've tried, or different ways this could be implemented.
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional context
+      description: Screenshots, mockups or anything else that helps explain the suggestion.
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Before submitting
+      options:
+        - label: I have searched existing issues and found no identical or very similar suggestion.
+          required: true

@@ -162,12 +162,6 @@ msgstr "Cancel"
 msgid "Save"
 msgstr "Save"
 
-msgid "Saved"
-msgstr "Saved"
-
-msgid "Save failed"
-msgstr "Save failed"
-
 msgid "Create"
 msgstr "Create"
 
@@ -261,6 +255,9 @@ msgstr "Octal mode, e.g. 755"
 msgid "Read-only"
 msgstr "Read-only"
 
+msgid "Modified"
+msgstr "Modified"
+
 msgid "View"
 msgstr "View"
 
@@ -317,9 +314,6 @@ msgstr "Clear buffer"
 
 msgid "Find"
 msgstr "Find"
-
-msgid "Add as quick command"
-msgstr "Add as quick command"
 
 msgid "Processes"
 msgstr "Processes"
@@ -383,6 +377,12 @@ msgstr "Terminal character encoding"
 
 msgid "Use GBK for servers configured for GB2312 or GBK output."
 msgstr "Use GBK for servers configured for GB2312 or GBK output."
+
+msgid "Terminal type"
+msgstr "Terminal type"
+
+msgid "Sent to the server as TERM. Try xterm if a program fails to start or shows garbled output."
+msgstr "Sent to the server as TERM. Try xterm if a program fails to start or shows garbled output."
 
 msgid "Enable VT100 line drawing even in UTF-8 mode"
 msgstr "Enable VT100 line drawing even in UTF-8 mode"
@@ -600,6 +600,9 @@ msgstr "No matching sessions"
 msgid "Clear search"
 msgstr "Clear search"
 
+msgid "新建窗口"
+msgstr "New Window"
+
 msgid "Session name"
 msgstr "Session name"
 
@@ -627,23 +630,15 @@ msgstr "Add trigger"
 msgid "When expected text appears, send the response automatically. Responses are stored encrypted."
 msgstr "When expected text appears, send the response automatically. Responses are stored encrypted."
 
-msgid "Large-output protection active"
-msgstr "Large-output protection active"
-
-msgid "Only 127.0.0.1 / localhost / ::1 is allowed — other addresses would expose the tunnel to your whole network"
-msgstr "Only 127.0.0.1 / localhost / ::1 is allowed — other addresses would expose the tunnel to your whole network"
-
-msgid "Bookmark current path"
-msgstr "Bookmark current path"
-
-msgid "No bookmarks for this server"
-msgstr "No bookmarks for this server"
-
 msgid "DOMAIN\\user or user@domain"
 msgstr "DOMAIN\\user or user@domain"
 
 msgid "Domain (optional)"
 msgstr "Domain (optional)"
+
+
+
+
 
 msgid "Resolution"
 msgstr "Resolution"
@@ -663,119 +658,6 @@ msgstr "Height"
 msgid "Remote desktop size. In full screen, Ctrl+Alt+Enter switches back to a window."
 msgstr "Remote desktop size. In full screen, Ctrl+Alt+Enter switches back to a window."
 
-msgid "Send to AI"
-msgstr "Send to AI"
-
-msgid "AI assistant"
-msgstr "AI assistant"
-
-msgid "Ask about terminal output, errors, or commands"
-msgstr "Ask about terminal output, errors, or commands"
-
-msgid "Ask the AI… (terminal selections arrive here)"
-msgstr "Ask the AI… (terminal selections arrive here)"
-
-msgid "Files"
-msgstr "Files"
-
-msgid "Tunnels"
-msgstr "Tunnels"
-
-msgid "SFTP"
-msgstr "SFTP"
-
-msgid "Paste and go"
-msgstr "Paste and go"
-
-msgid "No tunnels"
-msgstr "No tunnels"
-
-msgid "Stop"
-msgstr "Stop"
-
-msgid "No match"
-msgstr "No match"
-
-msgid "Merge panes"
-msgstr "Merge panes"
-
-msgid "Replace"
-msgstr "Replace"
-
-msgid "Replace all"
-msgstr "Replace all"
-
-msgid "System information"
-msgstr "System information"
-
-msgid "No data"
-msgstr "No data"
-
-msgid "Overview"
-msgstr "Overview"
-
-msgid "Cores"
-msgstr "Cores"
-
-msgid "Frequency"
-msgstr "Frequency"
-
-msgid "Cache"
-msgstr "Cache"
-
-msgid "Vendor"
-msgstr "Vendor"
-
-msgid "Driver"
-msgstr "Driver"
-
-msgid "CPU usage"
-msgstr "CPU usage"
-
-msgid "System"
-msgstr "System"
-
-msgid "Idle"
-msgstr "Idle"
-
-msgid "Total"
-msgstr "Total"
-
-msgid "Used"
-msgstr "Used"
-
-msgid "Free"
-msgstr "Free"
-
-msgid "Usage"
-msgstr "Usage"
-
-msgid "Network interfaces"
-msgstr "Network interfaces"
-
-msgid "Sent"
-msgstr "Sent"
-
-msgid "Received"
-msgstr "Received"
-
-msgid "Send speed"
-msgstr "Send speed"
-
-msgid "Receive speed"
-msgstr "Receive speed"
-
-msgid "Filesystems"
-msgstr "Filesystems"
-
-msgid "Mount point"
-msgstr "Mount point"
-
-msgid "Available"
-msgstr "Available"
-
-msgid "-L: local port → target reached from the server; -R: server port → target reached from here; -D: local SOCKS5 proxy"
-msgstr "-L: local port → target reached from the server; -R: server port → target reached from here; -D: local SOCKS5 proxy"
 msgid "Hide secret"
 msgstr "Hide secret"
 
@@ -851,26 +733,17 @@ msgstr "Save session"
 msgid "Create session"
 msgstr "Create session"
 
-msgid "Upload…"
-msgstr "Upload…"
+msgid "Bookmarks"
+msgstr "Bookmarks"
 
-msgid "Generate keypair…"
-msgstr "Generate keypair…"
+msgid "None yet. Click ☆ to bookmark the current folder."
+msgstr "None yet. Click ☆ to bookmark the current folder."
 
-msgid "Start"
-msgstr "Start"
+msgid "Recent"
+msgstr "Recent"
 
-msgid "Server listen address"
-msgstr "Server listen address"
+msgid "Folders you open will show up here."
+msgstr "Folders you open will show up here."
 
-msgid "Local listen address"
-msgstr "Local listen address"
-
-msgid "Start automatically when connecting"
-msgstr "Start automatically when connecting"
-
-msgid "Ed25519"
-msgstr "Ed25519"
-
-msgid "RSA"
-msgstr "RSA"
+msgid "Clear recent"
+msgstr "Clear recent"

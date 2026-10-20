@@ -912,6 +912,35 @@ impl ConfigStore {
 
     pub fn remove(&mut self, id: &str) {
         self.cache.sessions.retain(|s| s.id != id);
+        self.cache.sftp_places.remove(id);
+    }
+
+    /// SFTP bookmarks / recent folders saved for a session (#500).
+    pub fn sftp_places(&self, session_id: &str) -> crate::config::SftpPlaces {
+        self.cache
+            .sftp_places
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Edit a session's SFTP places; empty entries are dropped so the config
+    /// only carries sessions that actually have something saved.
+    pub fn update_sftp_places<R>(
+        &mut self,
+        session_id: &str,
+        f: impl FnOnce(&mut crate::config::SftpPlaces) -> R,
+    ) -> R {
+        let places = self
+            .cache
+            .sftp_places
+            .entry(session_id.to_string())
+            .or_default();
+        let out = f(places);
+        if places.is_empty() {
+            self.cache.sftp_places.remove(session_id);
+        }
+        out
     }
 
     pub fn get(&self, id: &str) -> Option<&Session> {
@@ -1052,6 +1081,27 @@ impl ConfigStore {
 
     pub fn set_extra_paste_shortcuts_enabled(&mut self, enabled: bool) {
         self.cache.extra_paste_shortcuts_disabled = !enabled;
+    }
+
+    /// Customised shortcut overrides (action id → chord string).
+    pub fn keybindings(&self) -> &std::collections::BTreeMap<String, String> {
+        &self.cache.keybindings
+    }
+
+    /// Set (`Some`) or drop back to the default (`None`) one action's chord.
+    pub fn set_keybinding(&mut self, action: &str, chord: Option<String>) {
+        match chord {
+            Some(c) => {
+                self.cache.keybindings.insert(action.to_string(), c);
+            }
+            None => {
+                self.cache.keybindings.remove(action);
+            }
+        }
+    }
+
+    pub fn reset_keybindings(&mut self) {
+        self.cache.keybindings.clear();
     }
 
     pub fn editor_embedded(&self) -> bool {
@@ -3668,6 +3718,30 @@ SubRep=上海机房\r\n\
             Some("名称=生产")
         );
     }
+    fn issue_500_sftp_places_are_per_session_pruned_and_persisted() {
+        let mut store = temp_store();
+        // Legacy configs have no places.
+        store.cache = serde_json::from_str("{}").unwrap();
+        assert!(store.sftp_places("a").is_empty());
+
+        assert!(store.update_sftp_places("a", |p| p.toggle_bookmark("/var/log/")));
+        store.update_sftp_places("a", |p| p.record_visit("/etc"));
+        store.update_sftp_places("b", |p| p.record_visit("/srv"));
+        assert_eq!(store.sftp_places("a").bookmarks, ["/var/log"]);
+        assert_eq!(store.sftp_places("b").recent, ["/srv"]);
+
+        // Emptied entries are dropped rather than left as `{}` in the file.
+        store.update_sftp_places("b", |p| p.clear_recent());
+        assert!(!store.cache.sftp_places.contains_key("b"));
+
+        // Round-trips through the on-disk JSON.
+        let json = serde_json::to_string(&store.cache).unwrap();
+        let back: ConfigFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.sftp_places.get("a").unwrap().recent, ["/etc"]);
+
+        // Deleting the session deletes its places.
+        store.remove("a");
+        assert!(store.sftp_places("a").is_empty());    }
 
     #[test]
     fn issue_300_interface_defaults_and_ranges_are_safe() {

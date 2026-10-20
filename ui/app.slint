@@ -41,6 +41,16 @@ export { SessionInfo, LaunchItem, SessionDraft, JumpHop, TabInfo, SftpEntry, Sft
 // TerminalState carries the streaming log + status line. Kept as a parallel
 // model so opening/closing tabs doesn't churn the log strings.
 // One file-transfer record shown in the download manager.
+// One rebindable action in the Shortcuts dialog. `header` is non-empty on
+// the first row of each section.
+export struct ShortcutBinding {
+    id: string,
+    header: string,
+    desc: string,
+    keys: string,
+    is-default: bool,
+}
+
 export struct TransferInfo {
     id: string,
     name: string,
@@ -85,6 +95,9 @@ export struct TerminalState {
     sftp-sort-dir: int,         // 0 default / 1 asc / -1 desc (#248)
     sftp-bookmarks: [string],   // saved paths for this tab's server (bookmark menu)
     sftp-available: bool,       // false for local/serial/telnet sessions
+    sftp-bookmarks: [string],   // this session's bookmarked folders (#500)
+    sftp-recent: [string],      // recently visited folders, newest first (#500)
+    sftp-bookmarked: bool,      // current sftp-path is bookmarked (#500)
     font-size: int,             // per-session zoom override in px (0 = follow window)
     tunnels: [TunnelInfo],      // runtime SSH tunnels (#206)
     sftp-collapsed: bool,       // SFTP panel minimised — per session (#v0.5)
@@ -248,33 +261,31 @@ component IconBtn inherits Rectangle {
     // active = the picture's dominant colour) so the pulse reads as the
     // toolbar accent instead of an alert strobe, and follows the active theme.
     //
-    // WHY `visible` + `opacity` binding instead of `if root.breathe {…}`:
-    //   Slint's `animate` only fires on a *property change of an already-alive
-    //   element*. An element created by `if` appears with its initial opacity
-    //   already set, which is NOT a change, so the looping animation never
-    //   starts — that is exactly why "有传输任务却看不到脉冲" happened (the
-    //   layer was a static 0.5 square, never animating). Keeping the layer
-    //   always alive and flipping `visible` + `opacity` from false→true makes
-    //   opacity go 0 → 0.55, which *is* a change and starts the loop.
-    //   `visible: root.breathe` then hides it again when there is no transfer
-    //   so the (now-invisible) loop can't show through. Geometry is identical
-    //   to static-bg (Layer 1) so the pulse footprint equals the hover
-    //   footprint (#breathe-size-match).
+    // WHY `animation-tick()` instead of `animate opacity { iteration-count: -1 }`
+    // (#499): an infinite `animate` never finishes. Every later change of the
+    // property — including breathe → false at the end of a transfer — just
+    // restarts it with the same infinite settings, so after the first
+    // transfer the hidden layer kept the animation driver requesting a new
+    // frame forever. With the GPU renderer every frame is a full-window
+    // repaint, so CPU stayed high until the app was closed (seen after
+    // "Edit externally", whose download/re-upload are transfers).
+    // `animation-tick()` only drives frames while the binding actually reads
+    // it: once `breathe` is false the conditional below stops reading it and
+    // the window goes back to idle with zero redraws.
+    // Geometry is identical to static-bg (Layer 1) so the pulse footprint
+    // equals the hover footprint (#breathe-size-match).
     breathe-layer := Rectangle {
         x: 0px; y: 0px;
         width: 100%; height: 100%;
         border-radius: Theme.radius-sm;
         background: Theme.accent;
         visible: root.breathe;
-        opacity: root.breathe ? 0.55 : 0;
-        // 0.55 keeps the "low" end of the pulse unmistakably tinted without
-        // ever hitting full-saturation accent; direction: alternate ping-pongs
-        // 0 ↔ 0.55 → reads as a gentle breath, not a strobe (#v8-accent-breathe).
-        animate opacity {
-            duration: 1400ms;
-            iteration-count: -1;
-            direction: alternate;
-        }
+        // Smooth 0 ↔ 0.55 ping-pong, 1.4 s each way: a gentle breath, not a
+        // strobe; 0.55 keeps the peak short of full-saturation accent
+        // (#v8-accent-breathe).
+        opacity: root.breathe
+            ? 0.275 - 0.275 * cos(animation-tick() / 1400ms * 180deg)
+            : 0;
     }
     ta := TouchArea {
         mouse-cursor: pointer;
@@ -378,6 +389,85 @@ component ShortcutRow inherits Rectangle {
     }
 }
 
+// A rebindable row in the Shortcuts dialog: click the chip to record a new
+// chord; customised entries show their chip in the accent colour plus a
+// per-row reset button.
+component EditableShortcutRow inherits Rectangle {
+    in property <string> keys;
+    in property <string> desc;
+    in property <bool> recording;
+    in property <bool> is-default;
+    in property <bool> lang-en;
+    callback start-record();
+    callback reset();
+    height: 28px;
+    HorizontalLayout {
+        spacing: 10px;
+        Rectangle {
+            width: 132px;
+            chip := Rectangle {
+                x: 0;
+                y: (parent.height - self.height) / 2;
+                width: min(parent.width, ekt.preferred-width + 16px);
+                height: 20px;
+                background: root.recording ? Theme.bg-active
+                    : (chip-ta.has-hover ? Theme.bg-hover : Theme.bg-root);
+                border-radius: Theme.radius-sm;
+                border-width: 1px;
+                border-color: root.recording || chip-ta.has-hover || !root.is-default
+                    ? Theme.accent : Theme.border-strong;
+                ekt := Text {
+                    text: root.recording
+                        ? (root.lang-en ? "Press keys…" : "按下快捷键…")
+                        : root.keys;
+                    color: root.recording ? Theme.text-secondary
+                        : (root.is-default ? Theme.text-primary : Theme.accent);
+                    font-family: Theme.font-mono;
+                    font-size: Theme.fs-xs;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    width: parent.width;
+                    height: parent.height;
+                }
+                chip-ta := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.start-record(); }
+                }
+            }
+        }
+        Text {
+            text: root.desc;
+            color: Theme.text-secondary;
+            font-size: Theme.fs-sm;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        // Reset to default — only for customised rows.
+        Rectangle {
+            width: 22px;
+            if !root.is-default : Rectangle {
+                y: (parent.height - self.height) / 2;
+                width: 22px; height: 22px;
+                border-radius: Theme.radius-sm;
+                background: rst-ta.has-hover ? Theme.bg-hover : transparent;
+                rst-ta := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.reset(); }
+                }
+                Text {
+                    text: "\u{E166}"; // undo
+                    font-family: "Material Icons";
+                    color: Theme.text-secondary;
+                    font-size: Theme.fs-sm;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
 export component AppWindow inherits Window {
     title: "meatshell";
     icon: @image-url("../assets/icon.png");
@@ -435,7 +525,7 @@ export component AppWindow inherits Window {
     // macOS immersive title bar: Rust makes the native bar transparent and lets
     // content render under it, so we reserve this much space at the top for the
     // traffic-light buttons + a clean drag strip (0 elsewhere). See setup_macos_platform.
-    property <length> titlebar-inset: root.is-mac ? 28px : 0px;
+    property <length> titlebar-inset: root.is-mac && !root.term-fullscreen ? 28px : 0px;
     in-out property <bool> window-maximized: false;
     // Rust disables live model updates while the native window is unfocused,
     // minimized or occluded. Cached samples are applied when it becomes active.
@@ -488,6 +578,28 @@ export component AppWindow inherits Window {
     in-out property <bool> about-open: false;     // centered About dialog
     callback open-repo();                          // open the project's GitHub page
     in-out property <bool> shortcuts-open: false; // centered keyboard-shortcuts dialog (#103)
+    // Customisable shortcuts: rows set by Rust; `shortcut-recording` is the
+    // action id waiting for a new chord ("" = not recording).
+    in-out property <[ShortcutBinding]> shortcut-bindings;
+    in-out property <string> shortcut-recording: "";
+    in-out property <string> shortcut-status: "";
+    in-out property <bool> shortcut-status-error: false;
+    // Key event → action id ("" = not a shortcut). Implemented in Rust
+    // (src/app/shortcuts.rs) so every handler shares one keymap.
+    callback match-shortcut(string /* text */, bool /* control */, bool /* meta */,
+                            bool /* alt */, bool /* shift */, bool /* alt-screen */) -> string;
+    callback shortcut-record(string /* id */, string /* text */, bool /* control */,
+                             bool /* meta */, bool /* alt */, bool /* shift */);
+    callback shortcut-reset(string /* id */);
+    callback shortcut-reset-all();
+    callback shortcuts-refresh();
+    // Opening the dialog: fresh rows (the language may have changed) and no
+    // leftover recording / status from last time.
+    changed shortcuts-open => {
+        root.shortcut-recording = "";
+        root.shortcut-status = "";
+        if (root.shortcuts-open) { root.shortcuts-refresh(); }
+    }
     in property <string> download-dir;      // preset SFTP download folder ("" = ask)
     // Download (Transfers) popup size + resize-drag state. The popup is an
     // embedded Rectangle (not a top-level window), so its resize is driven in
@@ -749,6 +861,25 @@ export component AppWindow inherits Window {
     // two-way binding) must re-run the dock geometry — one hook covers them all
     // (#dock-stack).
     changed zen-mode => { root.dock-layout-changed(); }
+    // Terminal fullscreen (#495): Alt+Enter puts the window into borderless
+    // OS fullscreen and drops every piece of chrome (title bar, tab strips,
+    // toolbar, docked panels, status strip) so the terminal gets the whole
+    // screen — like Xshell's full-screen view. Transient per window, never
+    // persisted. Rust owns the toggle: it only enters while a terminal tab is
+    // active and keeps this flag in sync with the native window state.
+    in-out property <bool> term-fullscreen: false;
+    callback toggle-term-fullscreen();
+    // Leave fullscreen if the active tab is no longer a terminal (Rust check).
+    callback term-fullscreen-check();
+    // Everything zen hides is hidden in terminal fullscreen too.
+    property <bool> hide-panels: root.zen-mode || root.term-fullscreen;
+    changed term-fullscreen => {
+        if (root.term-fullscreen) {
+            root.settings-open = false;
+            root.download-open = false;
+        }
+        root.dock-layout-changed();
+    }
     // Collapse-by-default settings + shared SFTP collapse state (#78).
     in-out property <bool> collapse-sidebar-default: false;
     callback set-collapse-sidebar-default(bool);   // apply + persist
@@ -1094,6 +1225,7 @@ export component AppWindow inherits Window {
     in-out property <string> dialog-rdp-height: "720";
     in-out property <string> dialog-encoding: "UTF-8";
     in-out property <bool> dialog-vt100-drawing: false;
+    in-out property <string> dialog-term-type: "xterm-256color";
     in-out property <string> dialog-session-log: "default";
     in-out property <bool> dialog-disable-shell-integration: false;
     in-out property <string> dialog-sftp-mode: "";
@@ -1259,6 +1391,10 @@ export component AppWindow inherits Window {
         if (root.active-tab-id == "welcome" && root.terminals.length == 0) {
             shortcut-scope.focus();
         }
+        // Terminal fullscreen only makes sense on a terminal tab (#495).
+        if (root.term-fullscreen) {
+            root.term-fullscreen-check();
+        }
     }
 
     // Raw keystroke forwarding: Rust converts key+modifiers to PTY bytes.
@@ -1282,6 +1418,14 @@ export component AppWindow inherits Window {
     callback sftp-tree-expand(string /* tab-id */, string /* path */);
     callback sftp-delete(string /* tab-id */, string /* path */);
     callback sftp-toggle-select(string /* tab-id */, int /* row */);   // (#100)
+    callback sftp-select-range(string /* tab-id */, int /* from */, int /* to */); // Shift+click
+    // SFTP path bookmarks + recent folders (#500), stored per session.
+    callback sftp-record-visit(string /* tab-id */, string /* path */);
+    callback sftp-toggle-bookmark(string /* tab-id */, string /* path */);
+    callback sftp-remove-bookmark(string /* tab-id */, string /* path */);
+    callback sftp-clear-recent(string /* tab-id */);
+    callback sftp-places-refresh(string /* tab-id */);
+    callback sftp-drag-out(string /* tab-id */, int /* row */);   // to Explorer (#504)
     callback sftp-download-selected(string /* tab-id */);              // (#100)
     callback sftp-delete-selected(string /* tab-id */);               // (#100)
     callback sftp-copy-to-target(string /* tab-id */, string /* remote-path */, string /* target-tab-id */);
@@ -1408,42 +1552,28 @@ export component AppWindow inherits Window {
             }
         }
         key-pressed(e) => {
-            // New window: ⌘⇧N / Ctrl+Shift+N (#multi-window). On macOS Slint
-            // maps `control` to Cmd (#158), so this single condition yields ⌘⇧N
-            // there and Ctrl+Shift+N elsewhere — identical to the TerminalView
-            // branch. \u{000e} is the Ctrl-N control char some backends send.
-            if (e.modifiers.control && e.modifiers.shift
-                    && (e.text == "n" || e.text == "N"
-                        || e.text == "\u{000e}")) {
+            // Window-wide fallback for the (customisable) window shortcuts:
+            // new window, font zoom, zen, terminal fullscreen. A focused
+            // terminal consumes these itself (terminal_view.slint), so there
+            // is no double-fire; this catches them when focus sits elsewhere
+            // (welcome page, sidebars, a hidden tab's view).
+            let act = root.match-shortcut(e.text, e.modifiers.control, e.modifiers.meta,
+                                          e.modifiers.alt, e.modifiers.shift, false);
+            if (act == "new-window") {
                 root.new-window-clicked();
                 accept
-            // Font zoom: Ctrl+= / Ctrl+- / Ctrl+0 zooms the active session;
-            // adding Alt zooms every session in this window (Alt, not Shift:
-            // Ctrl+Shift is the IME-switch hotkey on Chinese Windows). Same
-            // keys as the focused-terminal branch (terminal_view.slint); a
-            // focused terminal consumes them itself, so no double-fire.
-            // Ctrl+- arrives as \u{001f} (^_) on some backends.
-            } else if (e.modifiers.control && e.modifiers.alt
-                    && (e.text == "=" || e.text == "+" || e.text == "-"
-                        || e.text == "\u{001f}" || e.text == "0")) {
+            } else if (act == "zoom-in" || act == "zoom-out" || act == "zoom-reset"
+                    || act == "zoom-in-all" || act == "zoom-out-all" || act == "zoom-reset-all") {
                 root.zoom-term-font(root.active-tab-id,
-                    e.text == "-" || e.text == "\u{001f}" ? -1
-                        : e.text == "0" ? 0 : 1, true);
+                    (act == "zoom-in" || act == "zoom-in-all") ? 1
+                        : (act == "zoom-out" || act == "zoom-out-all") ? -1 : 0,
+                    act == "zoom-in-all" || act == "zoom-out-all" || act == "zoom-reset-all");
                 accept
-            } else if (e.modifiers.control && (e.text == "=" || e.text == "+")) {
-                root.zoom-term-font(root.active-tab-id, 1, false);
-                accept
-            } else if (e.modifiers.control && (e.text == "-" || e.text == "\u{001f}")) {
-                root.zoom-term-font(root.active-tab-id, -1, false);
-                accept
-            } else if (e.modifiers.control && e.text == "0") {
-                root.zoom-term-font(root.active-tab-id, 0, false);
-                accept
-            // Zen (focus) mode: Ctrl+Alt+Z toggles, same as the terminal
-            // branch below (#zen).
-            } else if (e.modifiers.control && e.modifiers.alt
-                    && (e.text == "z" || e.text == "Z" || e.text == "\u{001a}")) {
+            } else if (act == "zen") {
                 root.toggle-zen-key();
+                accept
+            } else if (act == "fullscreen") {
+                root.toggle-term-fullscreen();
                 accept
             } else {
                 reject
@@ -1468,7 +1598,7 @@ export component AppWindow inherits Window {
             // (move window / double-click to maximize), then the toolbar icons and
             // window controls on the right. macOS keeps its native title bar and
             // shows the toolbar icons via the overlay further below.
-            if root.custom-titlebar : Rectangle {
+            if root.custom-titlebar && !root.term-fullscreen : Rectangle {
                 height: 38px;
                 background: Theme.bg-panel;
                 tb-drag := TouchArea {
@@ -1529,11 +1659,11 @@ export component AppWindow inherits Window {
             // Collapsed-only (M5): the icon strip shows only while collapsed; the
             // panel itself (welcome-w) only while expanded — one or the other.
             property <bool> sidebar-strip-outside:
-                !root.zen-mode && root.welcome-as-sidebar && !root.welcome-collapsed
+                !root.hide-panels && root.welcome-as-sidebar && !root.welcome-collapsed
                 && root.sidebar-collapsed && root.sidebar-dock == root.welcome-sidebar-dock;
             property <length> sidebar-outside-strip: dock-area.sidebar-strip-outside ? 36px : 0px;
-            property <length> welcome-strip: (!root.zen-mode && root.welcome-as-sidebar && root.welcome-collapsed) ? 36px : 0px;
-            property <length> welcome-size: (!root.zen-mode && root.welcome-as-sidebar && !root.welcome-collapsed) ? root.welcome-sidebar-width : 0px;
+            property <length> welcome-strip: (!root.hide-panels && root.welcome-as-sidebar && root.welcome-collapsed) ? 36px : 0px;
+            property <length> welcome-size: (!root.hide-panels && root.welcome-as-sidebar && !root.welcome-collapsed) ? root.welcome-sidebar-width : 0px;
             property <length> welcome-taken: welcome-strip + welcome-size + sidebar-outside-strip;
             property <bool> welcome-horizontal: root.welcome-sidebar-horizontal;
             property <bool> welcome-sidebar-dragging;
@@ -1552,7 +1682,7 @@ export component AppWindow inherits Window {
                 && !dock-area.quick-merge-welcome && root.sidebar-collapsed
                 && root.quick-panel-dock == root.sidebar-dock;
             property <length> quick-outer-strip:
-                !root.zen-mode && root.quick-panel-open && root.quick-panel-collapsed
+                !root.hide-panels && root.quick-panel-open && root.quick-panel-collapsed
                     && !dock-area.quick-merge-welcome && !dock-area.quick-merge-sidebar
                     ? 36px : 0px;
             property <bool> quick-outer-horizontal:
@@ -1821,7 +1951,7 @@ export component AppWindow inherits Window {
             // Collapsed resource panel → a ToolStrip icon bar at the same docked
             // edge (M5), anchored to the OUTER edge of dock-area so it lines up
             // with the 36px band the Rust dock engine reserves for it (#dock-stack).
-            if !root.zen-mode && root.sidebar-collapsed && !dock-area.combine-collapsed-tools && !dock-area.sidebar-strip-outside : ToolStrip {
+            if !root.hide-panels && root.sidebar-collapsed && !dock-area.combine-collapsed-tools && !dock-area.sidebar-strip-outside : ToolStrip {
                 x: root.sidebar-horizontal
                     ? (root.sidebar-dock == "right"
                         ? parent.width - 36px - (parent.quick-right + parent.ai-right)
@@ -2084,9 +2214,9 @@ export component AppWindow inherits Window {
             // A shared ToolStrip is already reserved outside `rest` while the
             // welcome panel is expanded, or by the merged welcome strip while both
             // panels are collapsed. Do not reserve the same 36px a second time.
-            property <length> sb-w: root.zen-mode ? 0px
+            property <length> sb-w: root.hide-panels ? 0px
                 : root.sidebar-collapsed ? 36px : 0px;
-            property <length> sb-h: root.zen-mode ? 0px
+            property <length> sb-h: root.hide-panels ? 0px
                 : root.sidebar-collapsed ? 36px : 0px;
             property <length> sp: 0px;
             // The collapsed bar (sb-h) already reserves the bottom strip now.
@@ -2274,7 +2404,9 @@ export component AppWindow inherits Window {
                     VerticalLayout {
                     spacing: 0;
 
-                    HorizontalLayout {
+                    // Terminal fullscreen hides every tab strip (#495); Ctrl+Tab
+                    // still cycles tabs.
+                    if !root.term-fullscreen : HorizontalLayout {
                     spacing: 0;
                     // (Collapsed resource panel now reserves its own ToolStrip slot in
                     // `rest`, so the tab strip no longer needs a spacer for it.)
@@ -2396,6 +2528,9 @@ export component AppWindow inherits Window {
                         delete-group(name) => { root.delete-group(name); }
                         remove-session(id) => { root.remove-session(id); }
                         cycle-tab(reverse) => { root.cycle-tab(reverse); }
+                        match-shortcut(t, c, m, a, s, alt-screen) => {
+                            return root.match-shortcut(t, c, m, a, s, alt-screen);
+                        }
                     }
 
                     // Terminal tabs — one TerminalView per terminal state. Only
@@ -2405,7 +2540,8 @@ export component AppWindow inherits Window {
                     for term[i] in root.terminals : TerminalView {
                         visible: term.id == pane.active-id;
                         active: term.id == root.active-tab-id;
-                        zen-mode: root.zen-mode;
+                        // Fullscreen also hides the status strip (#495).
+                        zen-mode: root.hide-panels;
                         width: term.id == pane.active-id ? parent.width : 0px;
                         height: term.id == pane.active-id ? parent.height : 0px;
                         tab-id: term.id;
@@ -2488,9 +2624,13 @@ export component AppWindow inherits Window {
                             root.diagnose-key-event(term.id, key, control, meta, alt, shift);
                         }
                         cycle-tab(reverse) => { root.cycle-tab(reverse); }
+                        match-shortcut(t, c, m, a, s, alt-screen) => {
+                            return root.match-shortcut(t, c, m, a, s, alt-screen);
+                        }
                         new-window-key() => { root.new-window-clicked(); }
                         zoom-key(direction, window-wide) => { root.zoom-term-font(term.id, direction, window-wide); }
                         zen-key() => { root.toggle-zen-key(); }
+                        fullscreen-key() => { root.toggle-term-fullscreen(); }
                         term-font-size-px: term.font-size > 0 ? term.font-size * 1.0 : root.term-font-size / 1px;
                         terminal-resize(w, h) => { root.terminal-resize(term.id, w, h) }
                         sftp-navigate(path) => { root.sftp-navigate(term.id, path); }
@@ -2500,6 +2640,15 @@ export component AppWindow inherits Window {
                         sftp-refresh(path) => { root.sftp-refresh(term.id, path); }
                         sftp-tree-expand(path) => { root.sftp-tree-expand(term.id, path); }
                         sftp-toggle-select(i) => { root.sftp-toggle-select(term.id, i); }
+                        sftp-select-range(a, b) => { root.sftp-select-range(term.id, a, b); }
+                        sftp-bookmarks: term.sftp-bookmarks;
+                        sftp-recent: term.sftp-recent;
+                        sftp-bookmarked: term.sftp-bookmarked;
+                        sftp-toggle-bookmark(path) => { root.sftp-toggle-bookmark(term.id, path); }
+                        sftp-remove-bookmark(path) => { root.sftp-remove-bookmark(term.id, path); }
+                        sftp-clear-recent() => { root.sftp-clear-recent(term.id); }
+                        sftp-places-refresh() => { root.sftp-places-refresh(term.id); }
+                        sftp-drag-out(row) => { root.sftp-drag-out(term.id, row); }
                         sftp-download-selected() => { root.sftp-download-selected(term.id); }
                         sftp-copy-to-target(path, target) => { root.sftp-copy-to-target(term.id, path, target); }
                         sftp-copy-selected-to-target(target) => { root.sftp-copy-selected-to-target(term.id, target); }
@@ -3345,6 +3494,7 @@ export component AppWindow inherits Window {
     // at the very top on macOS where the native title bar is separate (#119).
     IconBtn {
         x: root.width - 34px - root.toolbar-x-off; y: root.toolbar-y;
+        visible: !root.term-fullscreen;
         icon: "\u{E8B8}";
         tooltip: root.lang-en ? "Settings" : "设置";
         active: root.settings-open;
@@ -3352,6 +3502,7 @@ export component AppWindow inherits Window {
     }
     IconBtn {
         x: root.width - 64px - root.toolbar-x-off; y: root.toolbar-y;
+        visible: !root.term-fullscreen;
         icon: "\u{E8D5}";   // Material "swap_vert" — symmetrical up+down arrows, clearer "transfer" semantic
         tooltip: @tr("Transfers manager");
         active: root.download-open;
@@ -3367,6 +3518,7 @@ export component AppWindow inherits Window {
     // icon stays clean and no stray dot shows over the toolbar (#breathing-light).
     IconBtn {
         x: root.width - 94px - root.toolbar-x-off; y: root.toolbar-y;
+        visible: !root.term-fullscreen;
         icon: Theme.dark ? "\u{E518}" : "\u{E51C}";
         icon-color: Theme.dark ? #f5c542 : #5856d6;
         tooltip: root.lang-en ? "Toggle theme" : "切换主题";
@@ -3374,6 +3526,7 @@ export component AppWindow inherits Window {
     }
     IconBtn {
         x: root.width - 124px - root.toolbar-x-off; y: root.toolbar-y;
+        visible: !root.term-fullscreen;
         icon: "\u{E627}";
         icon-color: root.sync-input ? Theme.accent : Theme.text-secondary;
         active: root.sync-input;
@@ -3384,6 +3537,7 @@ export component AppWindow inherits Window {
     }
     IconBtn {
         x: root.width - 154px - root.toolbar-x-off; y: root.toolbar-y;
+        visible: !root.term-fullscreen;
         icon: "\u{E86F}";   // Material "code" — command bar
         active: !root.cmd-bar-hidden;
         tooltip: root.lang-en
@@ -3393,6 +3547,7 @@ export component AppWindow inherits Window {
     }
     IconBtn {
         x: root.width - 184px - root.toolbar-x-off; y: root.toolbar-y;
+        visible: !root.term-fullscreen;
         icon: "\u{F10D}";   // Material "push_pin" — always on top (#450)
         icon-color: root.pinned ? Theme.accent : Theme.text-secondary;
         active: root.pinned;
@@ -3404,7 +3559,7 @@ export component AppWindow inherits Window {
 
     // Frameless resize edges (#119): thin hit-zones that start an OS-level
     // resize via winit. Hidden when maximized.
-    if root.custom-titlebar && !root.window-maximized : Rectangle {
+    if root.custom-titlebar && !root.window-maximized && !root.term-fullscreen : Rectangle {
         width: 100%;
         height: 100%;
         TouchArea {  // top
@@ -4927,15 +5082,24 @@ export component AppWindow inherits Window {
         is-open: root.shortcuts-open;
         is-mac: root.is-mac;
         covered: root.active-modal != ModalKind.shortcuts;
-        cancel-requested => { root.shortcuts-open = false; }
+        // While recording, Tab / Shift+Tab are part of the chord being
+        // captured, and Esc cancels the recording instead of the dialog.
+        raw-keys: root.shortcut-recording != "";
+        cancel-requested => {
+            if (root.shortcut-recording != "") {
+                root.shortcut-recording = "";
+            } else {
+                root.shortcuts-open = false;
+            }
+        }
         background: #00000080;
         dismiss-on-backdrop: true;
 
         Rectangle {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
-            width: 424px;
-            height: 432px;
+            width: min(480px, parent.width - 32px);
+            height: min(560px, parent.height - 32px);
             background: Theme.popup-bg;
             border-radius: Theme.radius-md;
             border-width: 1px;
@@ -4977,30 +5141,32 @@ export component AppWindow inherits Window {
                     VerticalLayout {
                         spacing: 5px;
 
-                Text { text: root.lang-en ? "Tabs" : "标签页";
-                       color: Theme.text-muted; font-size: Theme.fs-xs; }
-                ShortcutRow { keys: root.is-mac ? "⌃Tab" : "Ctrl+Tab"; desc: root.lang-en ? "Next tab" : "下一个标签页"; }
-                ShortcutRow { keys: root.is-mac ? "⌃⇧Tab" : "Ctrl+Shift+Tab"; desc: root.lang-en ? "Previous tab" : "上一个标签页"; }
+                // Rebindable actions, grouped by section (rows from Rust).
+                for b[bi] in root.shortcut-bindings : VerticalLayout {
+                    spacing: 5px;
+                    if b.header != "" && bi > 0 : Rectangle { height: 6px; }
+                    if b.header != "" : Text {
+                        text: b.header;
+                        color: Theme.text-muted; font-size: Theme.fs-xs;
+                    }
+                    EditableShortcutRow {
+                        keys: b.keys;
+                        desc: b.desc;
+                        is-default: b.is-default;
+                        recording: root.shortcut-recording == b.id;
+                        lang-en: root.lang-en;
+                        start-record => {
+                            root.shortcut-status = "";
+                            root.shortcut-recording = b.id;
+                            sc-recorder.focus();
+                        }
+                        reset => { root.shortcut-reset(b.id); }
+                    }
+                }
 
                 Rectangle { height: 6px; }
-                Text { text: root.lang-en ? "Window" : "窗口";
+                Text { text: root.lang-en ? "Mouse" : "鼠标";
                        color: Theme.text-muted; font-size: Theme.fs-xs; }
-                ShortcutRow { keys: root.is-mac ? "⌘⇧N" : "Ctrl+Shift+N"; desc: root.lang-en ? "New window" : "新建窗口"; }
-                ShortcutRow { keys: root.is-mac ? "⌘⌥Z" : "Ctrl+Alt+Z"; desc: root.lang-en ? "Toggle zen (focus) mode" : "切换专注模式"; }
-
-                Rectangle { height: 6px; }
-                Text { text: root.lang-en ? "Terminal" : "终端";
-                       color: Theme.text-muted; font-size: Theme.fs-xs; }
-                ShortcutRow { keys: root.is-mac ? "⌘C" : "Ctrl+Shift+C"; desc: root.lang-en ? "Copy selection" : "复制选中内容"; }
-                ShortcutRow { keys: root.is-mac ? "⌘V" : "Ctrl+V"; desc: root.lang-en ? "Paste" : "粘贴"; }
-                ShortcutRow { keys: root.is-mac ? "⌘F" : "Ctrl+F"; desc: root.lang-en ? "Find in terminal" : "查找"; }
-                ShortcutRow { keys: root.is-mac ? "⌘⇧R" : "Ctrl+Shift+R"; desc: root.lang-en ? "Jump to command history search" : "跳到命令历史搜索"; }
-                ShortcutRow { keys: root.is-mac ? "⌘=" : "Ctrl+="; desc: root.lang-en ? "Enlarge terminal font (this session)" : "放大终端字体（当前会话）"; }
-                ShortcutRow { keys: root.is-mac ? "⌘-" : "Ctrl+-"; desc: root.lang-en ? "Shrink terminal font (this session)" : "缩小终端字体（当前会话）"; }
-                ShortcutRow { keys: root.is-mac ? "⌘0" : "Ctrl+0"; desc: root.lang-en ? "Reset terminal font size (this session)" : "重置终端字体大小（当前会话）"; }
-                ShortcutRow { keys: root.is-mac ? "⌘⌥=" : "Ctrl+Alt+="; desc: root.lang-en ? "Enlarge terminal font (all sessions in window)" : "放大终端字体（本窗口所有会话）"; }
-                ShortcutRow { keys: root.is-mac ? "⌘⌥-" : "Ctrl+Alt+-"; desc: root.lang-en ? "Shrink terminal font (all sessions in window)" : "缩小终端字体（本窗口所有会话）"; }
-                ShortcutRow { keys: root.is-mac ? "⌘⌥0" : "Ctrl+Alt+0"; desc: root.lang-en ? "Reset terminal font size (all sessions in window)" : "重置终端字体大小（本窗口所有会话）"; }
                 ShortcutRow { keys: root.lang-en ? "Drag" : "鼠标拖动"; desc: root.lang-en ? "Select text" : "选择文本"; }
                 ShortcutRow { keys: root.lang-en ? "Wheel / Scrollbar" : "滚轮 / 滚动条"; desc: root.lang-en ? "Scroll history" : "滚动历史"; }
 
@@ -5016,6 +5182,57 @@ export component AppWindow inherits Window {
                 ShortcutRow { keys: root.is-mac ? "⌃K" : "Ctrl+K"; desc: root.lang-en ? "Delete to end of line" : "删除到行尾"; }
                 ShortcutRow { keys: root.is-mac ? "⌃U" : "Ctrl+U"; desc: root.lang-en ? "Delete to start of line" : "删除到行首"; }
                         Rectangle { height: 2px; }
+                    }
+                }
+
+                // Result of the last recording: a rejection (conflict / no
+                // modifier) in red, or a side-effect note in amber.
+                if root.shortcut-status != "" : Text {
+                    text: root.shortcut-status;
+                    color: root.shortcut-status-error ? Theme.danger : Theme.warning;
+                    font-size: Theme.fs-xs;
+                    wrap: word-wrap;
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    padding-top: 6px;
+                    Text {
+                        text: root.shortcut-recording != ""
+                            ? (root.lang-en ? "Press the new shortcut, or Esc to cancel."
+                                            : "按下新的快捷键，或按 Esc 取消。")
+                            : (root.lang-en ? "Click a shortcut to change it. Changes are saved automatically."
+                                            : "点击快捷键即可修改，更改会自动保存。");
+                        color: Theme.text-muted;
+                        font-size: Theme.fs-xs;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        wrap: word-wrap;
+                    }
+                    GhostButton {
+                        text: root.lang-en ? "Reset all" : "全部恢复默认";
+                        clicked => {
+                            root.shortcut-recording = "";
+                            root.shortcut-reset-all();
+                        }
+                    }
+                }
+            }
+
+            // Captures the next chord while a row is recording. Stays enabled
+            // for the dialog's lifetime so focus never falls out of the modal.
+            sc-recorder := FocusScope {
+                width: 0px; height: 0px;
+                enabled: root.shortcuts-open;
+                focus-on-click: false;
+                key-pressed(e) => {
+                    if (root.shortcut-recording == "") {
+                        reject
+                    } else {
+                        root.shortcut-record(root.shortcut-recording, e.text,
+                            e.modifiers.control, e.modifiers.meta,
+                            e.modifiers.alt, e.modifiers.shift);
+                        accept
                     }
                 }
             }
@@ -5195,6 +5412,7 @@ export component AppWindow inherits Window {
         draft-rdp-height <=> root.dialog-rdp-height;
         draft-encoding <=> root.dialog-encoding;
         draft-vt100-drawing <=> root.dialog-vt100-drawing;
+        draft-term-type <=> root.dialog-term-type;
         draft-session-log <=> root.dialog-session-log;
         draft-disable-shell-integration <=> root.dialog-disable-shell-integration;
         draft-sftp-mode <=> root.dialog-sftp-mode;
@@ -5883,7 +6101,7 @@ export component AppWindow inherits Window {
     // same visual affordance + drag-resize behavior when the OS title bar is
     // hidden (custom-titlebar mode). Only rendered in frameless mode; otherwise
     // the OS frame already provides this corner.
-    if root.custom-titlebar : Rectangle {
+    if root.custom-titlebar && !root.term-fullscreen : Rectangle {
         width: 16px;
         height: 16px;
         x: root.width - self.width;

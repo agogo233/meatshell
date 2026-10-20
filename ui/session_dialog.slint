@@ -60,6 +60,9 @@ export struct SessionDraft {
     // Honor VT100 line drawing (DEC Special Graphics) even in UTF-8 mode (#376),
     // like PuTTY's Window → Translation option. On by default.
     vt100-drawing: bool,
+    // Terminal type announced to the server (#498): SSH pty-req TERM and the
+    // Telnet TERMINAL-TYPE reply. Default "xterm-256color".
+    term-type: string,
     // Session logging override (#265): "default" | "on" | "off".
     session-log: string,
     // Skip shell-integration setup for Windows / pwsh servers or interactive
@@ -668,6 +671,36 @@ component EncodingPicker inherits VerticalLayout {
     Rectangle { height: 6px; }
 }
 
+// Terminal type picker (#498): the TERM sent in the SSH PTY request and the
+// Telnet TERMINAL-TYPE reply. Some targets (e.g. a telnet app reached from the
+// SSH shell) only accept plain "xterm". A value not in the list (hand-edited
+// config) still shows as the current one.
+component TermTypePicker inherits VerticalLayout {
+    in-out property <string> value: "xterm-256color";
+    spacing: 4px;
+    Text {
+        text: @tr("Terminal type");
+        color: Theme.text-secondary;
+        font-size: Theme.fs-sm;
+    }
+    ComboBox {
+        model: [
+            "xterm-256color", "xterm", "xterm-color", "xterm-16color",
+            "screen-256color", "tmux-256color", "linux", "vt100", "vt102",
+            "vt220", "ansi", "dumb",
+        ];
+        current-value: root.value;
+        selected(value) => { root.value = value; }
+    }
+    Text {
+        text: @tr("Sent to the server as TERM. Try xterm if a program fails to start or shows garbled output.");
+        color: Theme.text-muted;
+        font-size: Theme.fs-xs;
+        wrap: word-wrap;
+    }
+    Rectangle { height: 6px; }
+}
+
 // A fixed-height row keeps the drop position independent of text length.
 export component JumpRow inherits Rectangle {
     in property <JumpHop> hop;
@@ -787,6 +820,7 @@ export component SessionDialog inherits ModalLayer {
     in-out property <string> draft-rdp-height: "720";
     in-out property <string> draft-encoding: "UTF-8";
     in-out property <bool> draft-vt100-drawing: false;
+    in-out property <string> draft-term-type: "xterm-256color";
     in-out property <string> draft-session-log: "default";
     in-out property <bool> draft-disable-shell-integration: false;
     in-out property <string> draft-sftp-mode: "";
@@ -861,6 +895,7 @@ export component SessionDialog inherits ModalLayer {
             rdp-height: root.draft-rdp-height.to-float(),
             encoding: root.draft-encoding,
             vt100-drawing: root.draft-vt100-drawing,
+            term-type: root.draft-term-type,
             session-log: root.draft-session-log,
             disable-shell-integration: root.draft-disable-shell-integration,
             sftp-mode: root.draft-sftp-mode,
@@ -1562,6 +1597,11 @@ export component SessionDialog inherits ModalLayer {
                 value <=> root.draft-encoding;
             }
 
+            // ── Terminal type (SSH / Telnet) (#498) ─────────────────────────
+            if root.show-advanced && (root.draft-kind == "ssh" || root.draft-kind == "telnet") : TermTypePicker {
+                value <=> root.draft-term-type;
+            }
+
             // ── VT100 line drawing (all session kinds) (#376) ───────────────
             // Mirror of PuTTY's "Enable VT100 line drawing even in UTF-8 mode":
             // honor ESC(0 / SO-SI charset switches and map DEC Special Graphics
@@ -1855,6 +1895,7 @@ export component SessionDialog inherits ModalLayer {
                             rdp-height: root.draft-rdp-height.to-float(),
                             encoding: root.draft-encoding,
                             vt100-drawing: root.draft-vt100-drawing,
+                            term-type: root.draft-term-type,
                             session-log: root.draft-session-log,
                             disable-shell-integration: root.draft-disable-shell-integration,
                             sftp-mode: root.draft-sftp-mode,

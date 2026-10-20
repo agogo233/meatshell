@@ -85,3 +85,33 @@ fn sftp_metadata_columns_sort_without_breaking_directory_grouping() {
     sort_sftp_entries(&mut entries, "permissions", 1);
     assert_eq!(sftp_names(&entries), vec!["a-dir", "z-file", "a-file"]);
 }
+
+fn checked(model: &VecModel<SftpEntry>) -> Vec<usize> {
+    (0..model.row_count())
+        .filter(|&i| model.row_data(i).map(|e| e.selected).unwrap_or(false))
+        .collect()
+}
+
+#[test]
+fn sftp_shift_click_range_selects_exactly_the_span() {
+    let model = VecModel::from(
+        (0..6)
+            .map(|i| sftp_entry(&format!("f{i}"), false))
+            .collect::<Vec<_>>(),
+    );
+    // Pre-existing check outside the range gets cleared.
+    let mut e = model.row_data(5).unwrap();
+    e.selected = true;
+    model.set_row_data(5, e);
+
+    assert_eq!(apply_range_selection(&model, 1, 3), 3);
+    assert_eq!(checked(&model), vec![1, 2, 3]);
+
+    // Reverse direction (anchor below the clicked row).
+    assert_eq!(apply_range_selection(&model, 4, 2), 3);
+    assert_eq!(checked(&model), vec![2, 3, 4]);
+
+    // Out-of-range indices are clamped.
+    assert_eq!(apply_range_selection(&model, -3, 99), 6);
+    assert_eq!(checked(&model), vec![0, 1, 2, 3, 4, 5]);
+}

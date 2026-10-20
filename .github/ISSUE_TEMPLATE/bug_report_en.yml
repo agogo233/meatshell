@@ -1,0 +1,150 @@
+name: Bug report (English)
+description: Report a reproducible problem in MeatShell, with the environment details needed to track it down
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve MeatShell!
+
+        Please search existing issues before submitting to avoid duplicates. Do not paste passwords, private keys, access tokens or other secrets, and redact any sensitive content in logs and screenshots.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Description
+      description: What actually happened, and what did you expect to happen?
+      placeholder: |
+        Actual result:
+
+        Expected result:
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Complete steps that reliably trigger the problem.
+      placeholder: |
+        1. Open ...
+        2. Click ...
+        3. Type ...
+        4. See ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: How often does it happen?
+      options:
+        - Every time
+        - Often
+        - Occasionally
+        - Only once
+    validations:
+      required: true
+
+  - type: input
+    id: meatshell_version
+    attributes:
+      label: MeatShell version
+      description: Shown in the bottom-right corner of the window, or run `meatshell --version`.
+      placeholder: "e.g. 0.6.7"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: operating_system
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - macOS
+        - Linux
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: operating_system_version
+    attributes:
+      label: OS version
+      placeholder: "e.g. Windows 11 24H2, Ubuntu 24.04, macOS 15.5"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: installation
+    attributes:
+      label: Installation method
+      options:
+        - Windows installer
+        - Windows portable
+        - AUR
+        - Cargo or built from source
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: affected_feature
+    attributes:
+      label: Affected feature
+      options:
+        - SSH terminal
+        - Local terminal
+        - Serial port
+        - Telnet
+        - SFTP
+        - Quick commands
+        - Settings or UI
+        - Startup or rendering
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: renderer
+    attributes:
+      label: Renderer
+      description: If you're not sure, choose "Not sure".
+      options:
+        - Auto or default
+        - GPU
+        - Software
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Paste relevant logs, or drag a log file here. Remove passwords, private keys, tokens, internal addresses and other sensitive information first.
+      placeholder: If no logs are available, write "None".
+    validations:
+      required: true
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots or recordings
+      description: For UI problems, drag screenshots or screen recordings here.
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional context
+      description: Recent configuration changes, whether it reproduces reliably, or anything else that might help.
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Before submitting
+      options:
+        - label: I have searched existing issues and found no identical or very similar report.
+          required: true
+        - label: I have removed passwords, private keys, tokens and other sensitive information from logs and screenshots.
+          required: true

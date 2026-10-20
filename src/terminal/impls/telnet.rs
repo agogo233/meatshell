@@ -9,7 +9,8 @@
 //! * answers option negotiation with a minimal, conservative policy (let the
 //!   server echo and run in character mode; advertise our window size),
 //! * doubles `0xFF` bytes in user input as the protocol requires,
-//! * re-sends NAWS (window size) on every terminal resize.
+//! * re-sends NAWS (window size) on every terminal resize,
+//! * reports the session's terminal type on request (TERMINAL-TYPE, RFC 1091).
 //!
 //! There is no SFTP and no resource monitor — a Telnet console is a raw pipe.
 
@@ -34,7 +35,15 @@ const SE: u8 = 240;
 // Options we care about.
 const OPT_ECHO: u8 = 1;
 const OPT_SGA: u8 = 3; // suppress go-ahead → character-at-a-time mode
+const OPT_TTYPE: u8 = 24; // terminal type (RFC 1091)
 const OPT_NAWS: u8 = 31; // negotiate about window size
+
+// TERMINAL-TYPE subnegotiation commands (RFC 1091).
+const TTYPE_IS: u8 = 0;
+const TTYPE_SEND: u8 = 1;
+/// Longest subnegotiation payload we keep; we only parse `TTYPE SEND`, so
+/// anything longer (e.g. a server's own option payloads) is simply dropped.
+const MAX_SUB_PAYLOAD: usize = 64;
 
 pub fn spawn_telnet_session(
     runtime: &tokio::runtime::Handle,
@@ -75,9 +84,19 @@ pub fn spawn_telnet_session(
 enum TnState {
     Data,
     Iac,
-    Opt(u8), // saw IAC <DO/DONT/WILL/WONT>, awaiting option byte
-    Sub,     // inside subnegotiation, awaiting IAC
-    SubIac,  // inside subnegotiation, saw IAC (awaiting SE)
+    Opt(u8),         // saw IAC <DO/DONT/WILL/WONT>, awaiting option byte
+    Sub(Vec<u8>),    // inside subnegotiation (payload so far), awaiting IAC
+    SubIac(Vec<u8>), // inside subnegotiation, saw IAC (awaiting SE)
+}
+
+/// `IAC SB TERMINAL-TYPE IS <term> IAC SE` — our answer to `TTYPE SEND`.
+fn ttype_is_subneg(term: &str) -> Vec<u8> {
+    let mut v = vec![IAC, SB, OPT_TTYPE, TTYPE_IS];
+    // Terminal types are plain ASCII (see `normalize_term_type`), so no byte
+    // here can be IAC and nothing needs doubling.
+    v.extend_from_slice(term.as_bytes());
+    v.extend_from_slice(&[IAC, SE]);
+    v
 }
 
 fn naws_subneg(cols: u32, rows: u32) -> Vec<u8> {
@@ -153,6 +172,7 @@ async fn run_telnet(
     wr.flush().await.ok();
 
     let mut state = TnState::Data;
+    let term_type = session.effective_term_type().to_string();
     let mut buf = [0u8; 4096];
     // Per-session character set (#435): GBK console gear, Big5, etc. The
     // decoder is stateful so a multibyte char split across reads survives.
@@ -204,7 +224,7 @@ async fn run_telnet(
                     Ok(n) => {
                         let mut data = Vec::with_capacity(n);
                         let mut replies: Vec<u8> = Vec::new();
-                        process_incoming(&buf[..n], &mut state, &mut data, &mut replies);
+                        process_incoming(&buf[..n], &mut state, &term_type, &mut data, &mut replies);
                         if !replies.is_empty() {
                             let _ = wr.write_all(&replies).await;
                             let _ = wr.flush().await;
@@ -234,48 +254,68 @@ async fn run_telnet(
 
 /// Feed `input` through the IAC state machine: plain bytes accumulate into
 /// `data`, and any negotiation responses we owe go into `replies`.
-fn process_incoming(input: &[u8], state: &mut TnState, data: &mut Vec<u8>, replies: &mut Vec<u8>) {
+/// `term_type` answers a server's TERMINAL-TYPE request (#498).
+fn process_incoming(
+    input: &[u8],
+    state: &mut TnState,
+    term_type: &str,
+    data: &mut Vec<u8>,
+    replies: &mut Vec<u8>,
+) {
     for &b in input {
-        match *state {
+        let next = match std::mem::replace(state, TnState::Data) {
             TnState::Data => {
                 if b == IAC {
-                    *state = TnState::Iac;
+                    TnState::Iac
                 } else {
                     data.push(b);
+                    TnState::Data
                 }
             }
             TnState::Iac => match b {
                 IAC => {
                     // Escaped 0xFF literal in the data stream.
                     data.push(IAC);
-                    *state = TnState::Data;
+                    TnState::Data
                 }
-                DO | DONT | WILL | WONT => *state = TnState::Opt(b),
-                SB => *state = TnState::Sub,
+                DO | DONT | WILL | WONT => TnState::Opt(b),
+                SB => TnState::Sub(Vec::new()),
                 // Standalone commands (GA, NOP, DM, …) — ignore.
-                _ => *state = TnState::Data,
+                _ => TnState::Data,
             },
             TnState::Opt(cmd) => {
                 respond_negotiation(cmd, b, replies);
-                *state = TnState::Data;
+                TnState::Data
             }
-            TnState::Sub => {
-                // Skip subnegotiation payload until IAC SE.
+            TnState::Sub(payload) => {
                 if b == IAC {
-                    *state = TnState::SubIac;
-                }
-            }
-            TnState::SubIac => {
-                // IAC SE ends the block; IAC IAC is an escaped data byte we drop
-                // (we don't interpret any subnegotiation payloads).
-                if b == SE {
-                    *state = TnState::Data;
+                    TnState::SubIac(payload)
                 } else {
-                    *state = TnState::Sub;
+                    TnState::Sub(push_sub_byte(payload, b))
                 }
             }
-        }
+            TnState::SubIac(payload) => match b {
+                // IAC SE ends the block: answer the one payload we understand.
+                SE => {
+                    if payload == [OPT_TTYPE, TTYPE_SEND] {
+                        replies.extend_from_slice(&ttype_is_subneg(term_type));
+                    }
+                    TnState::Data
+                }
+                // IAC IAC is an escaped 0xFF payload byte.
+                IAC => TnState::Sub(push_sub_byte(payload, IAC)),
+                _ => TnState::Sub(payload),
+            },
+        };
+        *state = next;
     }
+}
+
+fn push_sub_byte(mut payload: Vec<u8>, b: u8) -> Vec<u8> {
+    if payload.len() < MAX_SUB_PAYLOAD {
+        payload.push(b);
+    }
+    payload
 }
 
 /// Conservative negotiation policy. Returns nothing; appends a 3-byte reply.
@@ -283,7 +323,7 @@ fn respond_negotiation(cmd: u8, opt: u8, replies: &mut Vec<u8>) {
     match cmd {
         // Server asks us to enable an option.
         DO => {
-            let accept = matches!(opt, OPT_SGA | OPT_NAWS);
+            let accept = matches!(opt, OPT_SGA | OPT_NAWS | OPT_TTYPE);
             replies.extend_from_slice(&[IAC, if accept { WILL } else { WONT }, opt]);
         }
         // Server tells us to disable — always agree.
@@ -297,5 +337,51 @@ fn respond_negotiation(cmd: u8, opt: u8, replies: &mut Vec<u8>) {
         // Server says it won't — acknowledge.
         WONT => replies.extend_from_slice(&[IAC, DONT, opt]),
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn feed(input: &[u8]) -> (Vec<u8>, Vec<u8>) {
+        let mut state = TnState::Data;
+        let (mut data, mut replies) = (Vec::new(), Vec::new());
+        process_incoming(input, &mut state, "xterm", &mut data, &mut replies);
+        (data, replies)
+    }
+
+    #[test]
+    fn agrees_to_report_terminal_type() {
+        let (_, replies) = feed(&[IAC, DO, OPT_TTYPE]);
+        assert_eq!(replies, [IAC, WILL, OPT_TTYPE]);
+    }
+
+    #[test]
+    fn answers_terminal_type_send_with_session_type() {
+        let (data, replies) = feed(&[b'a', IAC, SB, OPT_TTYPE, TTYPE_SEND, IAC, SE, b'b']);
+        assert_eq!(data, b"ab");
+        let mut expected = vec![IAC, SB, OPT_TTYPE, TTYPE_IS];
+        expected.extend_from_slice(b"xterm");
+        expected.extend_from_slice(&[IAC, SE]);
+        assert_eq!(replies, expected);
+    }
+
+    #[test]
+    fn answers_a_request_split_across_reads() {
+        let mut state = TnState::Data;
+        let (mut data, mut replies) = (Vec::new(), Vec::new());
+        for chunk in [&[IAC, SB][..], &[OPT_TTYPE], &[TTYPE_SEND, IAC], &[SE]] {
+            process_incoming(chunk, &mut state, "vt100", &mut data, &mut replies);
+        }
+        assert!(data.is_empty());
+        assert!(replies.ends_with(b"vt100\xff\xf0"));
+    }
+
+    #[test]
+    fn ignores_other_subnegotiations() {
+        let (data, replies) = feed(&[IAC, SB, OPT_NAWS, 0, 80, 0, 24, IAC, SE, b'z']);
+        assert_eq!(data, b"z");
+        assert!(replies.is_empty());
     }
 }

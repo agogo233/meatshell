@@ -390,6 +390,8 @@ export component Welcome inherits Rectangle {
     callback remove-session(string);
     callback search-changed(string);
     callback cycle-tab(bool /* reverse */);
+    // Customisable shortcuts: key event → action id (see shortcuts.rs).
+    callback match-shortcut(string, bool, bool, bool, bool, bool) -> string;
     // Compact mode (welcome-as-sidebar): drop the big title/tagline header and
     // tighten padding so the session list fits a narrow docked panel (#v0.5).
     in property <bool> compact;
@@ -421,9 +423,10 @@ export component Welcome inherits Rectangle {
             }
         }
         key-pressed(event) => {
-            if ((Theme.is-mac ? event.modifiers.meta : event.modifiers.control)
-                    && (event.text == Key.Tab || event.text == Key.Backtab)) {
-                root.cycle-tab(event.modifiers.shift || event.text == Key.Backtab);
+            let act = root.match-shortcut(event.text, event.modifiers.control,
+                event.modifiers.meta, event.modifiers.alt, event.modifiers.shift, false);
+            if (act == "next-tab" || act == "prev-tab") {
+                root.cycle-tab(act == "prev-tab");
                 accept
             } else {
                 reject

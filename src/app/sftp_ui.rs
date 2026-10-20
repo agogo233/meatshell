@@ -200,6 +200,38 @@ pub(super) fn collect_sftp_selected(
     paths
 }
 
+
+/// Shift+click range selection: make the checked set exactly the rows between
+/// `from` and `to` inclusive (either order, clamped to the list). Only rows
+/// whose state changes are written back, so large listings don't re-render
+/// every row. Returns the resulting checked count.
+pub(super) fn apply_range_selection(entries: &VecModel<SftpEntry>, from: i32, to: i32) -> usize {
+    let len = entries.row_count();
+    if len == 0 {
+        return 0;
+    }
+    let clamp = |v: i32| (v.max(0) as usize).min(len - 1);
+    let (lo, hi) = {
+        let (a, b) = (clamp(from), clamp(to));
+        (a.min(b), a.max(b))
+    };
+    let mut n = 0;
+    for i in 0..len {
+        let Some(mut e) = entries.row_data(i) else {
+            continue;
+        };
+        let want = (lo..=hi).contains(&i);
+        if want {
+            n += 1;
+        }
+        if e.selected != want {
+            e.selected = want;
+            entries.set_row_data(i, e);
+        }
+    }
+    n
+}
+
 /// Uncheck every SFTP entry for a tab and reset its selected-count (#100).
 pub(super) fn clear_sftp_selection(terminals: &VecModel<TerminalState>, tab_id: &str) {
     for ti in 0..terminals.row_count() {

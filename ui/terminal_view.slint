@@ -614,6 +614,8 @@ export component TerminalView inherits Rectangle {
     // Temporary on-device diagnostics for #312. Rust redacts printable text.
     callback diagnose-key-event(string, bool, bool, bool, bool);
     callback cycle-tab(bool /* reverse */);
+    // Customisable shortcuts: key event → action id ("" = send to shell).
+    callback match-shortcut(string, bool, bool, bool, bool, bool) -> string;
     // Ctrl+Shift+N (⌘⇧N on macOS) — open a new application window (#multi-window).
     callback new-window-key();
     // Font zoom: Ctrl+= / Ctrl+- / Ctrl+0 (⌘ on macOS). Direction:
@@ -621,6 +623,8 @@ export component TerminalView inherits Rectangle {
     callback zoom-key(int /* direction */, bool /* window-wide */);
     // Ctrl+Alt+Z (⌘⌥Z on macOS) — toggle zen (focus) mode.
     callback zen-key();
+    // Alt+Enter (⌥↩ on macOS) — toggle terminal fullscreen (#495).
+    callback fullscreen-key();
     callback terminal-resize(float, float);
     callback sftp-navigate(string);
     callback sftp-download(string);
@@ -631,6 +635,15 @@ export component TerminalView inherits Rectangle {
     callback sftp-delete(string);
     in property <int> sftp-selected-count;          // checked-entry count (#100)
     callback sftp-toggle-select(int);               // toggle a row's checkbox (#100)
+    callback sftp-select-range(int, int);           // Shift+click range select
+    // Path bookmarks + recent folders (#500).
+    in property <[string]> sftp-recent;
+    in property <bool> sftp-bookmarked;
+    callback sftp-toggle-bookmark(string);
+    callback sftp-remove-bookmark(string);
+    callback sftp-clear-recent();
+    callback sftp-places-refresh();
+    callback sftp-drag-out(int);                    // drag rows to Explorer (#504)
     callback sftp-download-selected();              // download checked entries (#100)
     callback sftp-delete-selected();                // delete checked entries (#100)
     callback sftp-copy-to-target(string, string);
@@ -1498,99 +1511,64 @@ export component TerminalView inherits Rectangle {
                     // So `control` already gives ⌘ shortcuts on macOS for free, and
                     // the physical Ctrl (meta on macOS) is what must reach the shell
                     // so ^C/^X work in nano/vim (#158).
-                    // ── Cycle tabs: Ctrl+Tab / Ctrl+Shift+Tab (#294) ──
-                    // On macOS Slint reports the physical Ctrl key as `meta`.
-                    if ((Theme.is-mac ? event.modifiers.meta : event.modifiers.control)
-                            && (event.text == Key.Tab || event.text == Key.Backtab)) {
-                        root.cycle-tab(event.modifiers.shift || event.text == Key.Backtab);
+                    //
+                    // App shortcuts are user-customisable: Rust resolves the
+                    // event against the keymap (src/app/shortcuts.rs) and
+                    // returns an action id, or "" when the key belongs to the
+                    // shell. That includes the alt-screen rule (plain Ctrl+V
+                    // reaches vim) and the extra paste chords (#300).
+                    let act = root.match-shortcut(event.text, event.modifiers.control,
+                        event.modifiers.meta, event.modifiers.alt, event.modifiers.shift,
+                        root.is-alt-screen);
+                    // Hidden (inactive tab) views that still hold focus reject
+                    // the window-scoped actions so the window-level fallback
+                    // applies them to the visible session (#zoom, #zen).
+                    if (!root.visible && (act == "zen" || act == "fullscreen"
+                            || act == "zoom-in" || act == "zoom-out" || act == "zoom-reset"
+                            || act == "zoom-in-all" || act == "zoom-out-all"
+                            || act == "zoom-reset-all")) {
+                        reject
+                    } else if (act == "next-tab" || act == "prev-tab") {
+                        root.cycle-tab(act == "prev-tab");
                         accept
-                    // ── Find: ⌘F / Ctrl+F (mirrors right-click → Find) ──
-                    } else if (event.modifiers.control && !event.modifiers.shift
-                            && (event.text == "f" || event.text == "F"
-                                || event.text == "\u{0006}")) {
+                    } else if (act == "find") {
                         root.find-active = true;
                         accept
-                    // ── Jump to command-history search: ⌘⇧R / Ctrl+Shift+R (#140) ──
-                    } else if (event.modifiers.control && event.modifiers.shift
-                            && (event.text == "r" || event.text == "R"
-                                || event.text == "\u{0012}")) {
+                    } else if (act == "history-search") {
                         root.history-open = true;
                         accept
-                    // ── New window: ⌘⇧N / Ctrl+Shift+N (#multi-window) ──
-                    // `control` is Cmd on macOS (Slint modifier swap, #158), so
-                    // this single condition gives ⌘⇧N there and Ctrl+Shift+N
-                    // elsewhere. Intercepted here — before send-key — so the
-                    // keystroke never reaches the remote shell.
-                    } else if (event.modifiers.control && event.modifiers.shift
-                            && (event.text == "n" || event.text == "N"
-                                || event.text == "\u{000e}")) {
+                    // Intercepted before send-key so the keystroke never
+                    // reaches the remote shell.
+                    } else if (act == "new-window") {
                         root.new-window-key();
                         accept
-                    // ── Zen (focus) mode: Ctrl+Alt+Z toggles (#zen). Hidden
-                    // views reject it so the window-level fallback handles it.
-                    } else if (root.visible && event.modifiers.control && event.modifiers.alt
-                            && (event.text == "z" || event.text == "Z"
-                                || event.text == "\u{001a}")) {
+                    } else if (act == "zen") {
                         root.zen-key();
                         accept
-                    // ── Font zoom: Ctrl+= / Ctrl+- / Ctrl+0 (⌘ on macOS) ──
-                    // Zooms this session only; adding Alt zooms every session
-                    // in the window. Alt (not Shift) because Ctrl+Shift is the
-                    // IME-switch hotkey on Chinese Windows and gets swallowed.
-                    // A hidden (inactive tab) view that still holds focus
-                    // rejects these so the window-level fallback zooms the
-                    // visible session (#zoom).
-                    } else if (root.visible && event.modifiers.control && event.modifiers.alt
-                            && (event.text == "=" || event.text == "+"
-                                || event.text == "-" || event.text == "\u{001f}"
-                                || event.text == "0")) {
-                        root.zoom-key(event.text == "-" || event.text == "\u{001f}" ? -1
-                            : event.text == "0" ? 0 : 1, true);
+                    } else if (act == "fullscreen") {
+                        root.fullscreen-key();
                         accept
-                    } else if (root.visible && event.modifiers.control
-                            && (event.text == "=" || event.text == "+")) {
-                        root.zoom-key(1, false);
+                    } else if (act == "zoom-in" || act == "zoom-out" || act == "zoom-reset"
+                            || act == "zoom-in-all" || act == "zoom-out-all"
+                            || act == "zoom-reset-all") {
+                        root.zoom-key(
+                            (act == "zoom-in" || act == "zoom-in-all") ? 1
+                                : (act == "zoom-out" || act == "zoom-out-all") ? -1 : 0,
+                            act == "zoom-in-all" || act == "zoom-out-all"
+                                || act == "zoom-reset-all");
                         accept
-                    } else if (root.visible && event.modifiers.control
-                            && (event.text == "-" || event.text == "\u{001f}")) {
-                        root.zoom-key(-1, false);
+                    // ^C to the PTY — the same bytes as the physical Ctrl+C,
+                    // whichever chord the user bound it to.
+                    } else if (act == "interrupt") {
+                        root.send-key("c", true, false, false);
                         accept
-                    } else if (root.visible && event.modifiers.control && event.text == "0") {
-                        root.zoom-key(0, false);
-                        accept
-                    // ── Copy: ⌘C (macOS, no Shift) / Ctrl+Shift+C ──
-                    } else if (event.modifiers.control
-                            && (!event.modifiers.alt || root.extra-paste-shortcuts-enabled)
-                            && (Theme.is-mac ? !event.modifiers.shift : event.modifiers.shift)
-                            && (event.text == "c" || event.text == "C"
-                                || event.text == "\u{0003}")) {
+                    } else if (act == "copy") {
                         root.copy-terminal-text();
                         accept
-                    // ── Paste: Ctrl+Shift+V / ⌘Shift+V ──
-                    } else if (event.modifiers.control && event.modifiers.shift
-                            && (event.text == "v" || event.text == "V"
-                                || event.text == "\u{0016}")) {
+                    } else if (act == "paste") {
                         root.paste-from-clipboard();
                         // Clipboard access on Windows can deliver WM_KILLFOCUS.
                         // Restore focus explicitly so the cursor keeps blinking.
-                        ime-input.focus();
-                        accept
-                    // ── Paste: ⌘V / Ctrl+V on the normal screen ──
-                    // On macOS `control` represents Cmd; preserve Cmd+V even
-                    // in Vim, while physical Ctrl (`meta`) falls through to PTY.
-                    } else if (event.modifiers.control && !event.modifiers.shift
-                            && (Theme.is-mac || !root.is-alt-screen)
-                            && (event.text == "v" || event.text == "V"
-                                || event.text == "\u{0016}")) {
-                        root.paste-from-clipboard();
-                        // Clipboard access on Windows can deliver WM_KILLFOCUS.
-                        // Restore focus explicitly so the cursor keeps blinking.
-                        ime-input.focus();
-                        accept
-                    // ── Paste: Shift+Insert (the X11 / xterm paste convention) (#144) ──
-                    } else if (root.extra-paste-shortcuts-enabled
-                            && event.modifiers.shift && event.text == Key.Insert) {
-                        root.paste-from-clipboard();
                         ime-input.focus();
                         accept
                     // ── macOS: swallow any other ⌘ combo (control == Cmd here) so it
@@ -1963,9 +1941,15 @@ export component TerminalView inherits Rectangle {
                                 // (#140). Esc closes it / returns to terminal. (The
                                 // Ctrl+E/K/U line-editing below stays on Ctrl — those
                                 // are the standard readline bindings on macOS too.)
-                                } else if ((Theme.is-mac ? e.modifiers.meta : e.modifiers.control)
-                                        && (e.text == Key.Tab || e.text == Key.Backtab)) {
-                                    root.cycle-tab(e.modifiers.shift || e.text == Key.Backtab);
+                                } else if (root.match-shortcut(e.text, e.modifiers.control,
+                                                e.modifiers.meta, e.modifiers.alt,
+                                                e.modifiers.shift, false) == "next-tab") {
+                                    root.cycle-tab(false);
+                                    accept
+                                } else if (root.match-shortcut(e.text, e.modifiers.control,
+                                                e.modifiers.meta, e.modifiers.alt,
+                                                e.modifiers.shift, false) == "prev-tab") {
+                                    root.cycle-tab(true);
                                     accept
                                 } else if ((Theme.is-mac ? e.modifiers.meta : e.modifiers.control)
                                         && (e.text == "r" || e.text == "R" || e.text == "\u{0012}")) {

@@ -147,18 +147,47 @@ fn dir_is_writable(dir: &Path) -> bool {
     }
 }
 
-/// The release file for `target`. A Linux .tar.gz fetches the same variant this
-/// build came from (`MEATSHELL_RELEASE_VARIANT`, e.g. `glibc228`, set in CI).
-fn asset_name(target: &Target, tag: &str, arch: &str, variant: Option<&str>) -> String {
+/// The release files that can update `target`, most preferred first. A Linux
+/// .tar.gz fetches the same variant this build came from
+/// (`MEATSHELL_RELEASE_VARIANT`, e.g. `glibc228`, set in CI).
+///
+/// macOS prefers the .dmg (#503) and falls back to the .zip. The .zip must
+/// stay in releases for as long as builds that only know the .zip (v0.7.8
+/// up to the first build with this fallback) are still around.
+fn asset_names(target: &Target, tag: &str, arch: &str, variant: Option<&str>) -> Vec<String> {
     match target {
-        Target::WindowsPortable { .. } => format!("meatshell-{tag}-windows-x86_64.zip"),
-        Target::AppImage { .. } => format!("meatshell-{tag}-linux-x86_64.AppImage"),
-        Target::LinuxTarball { .. } => match variant {
+        Target::WindowsPortable { .. } => vec![format!("meatshell-{tag}-windows-x86_64.zip")],
+        Target::AppImage { .. } => vec![format!("meatshell-{tag}-linux-x86_64.AppImage")],
+        Target::LinuxTarball { .. } => vec![match variant {
             Some(variant) => format!("meatshell-{tag}-linux-{arch}-{variant}.tar.gz"),
             None => format!("meatshell-{tag}-linux-{arch}.tar.gz"),
-        },
-        Target::MacApp { .. } => format!("meatshell-{tag}-macos-{arch}.zip"),
+        }],
+        Target::MacApp { .. } => vec![
+            format!("meatshell-{tag}-macos-{arch}.dmg"),
+            format!("meatshell-{tag}-macos-{arch}.zip"),
+        ],
     }
+}
+
+/// The files among `names` this release offers that also pass the download
+/// checks in [`Release::asset`] (official URL, non-empty, SHA-256), in
+/// preference order. If none qualifies, the last name's error explains why.
+fn usable_assets<'a>(
+    release: &'a Release,
+    names: &'a [String],
+) -> Result<Vec<(&'a Asset, &'a str)>> {
+    let mut usable = Vec::new();
+    let mut last_error = None;
+    for name in names {
+        match release.asset(name) {
+            Ok(asset) => usable.push((asset, name.as_str())),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    if usable.is_empty() {
+        return Err(last_error.unwrap_or_else(|| anyhow::anyhow!("No update file for this build")));
+    }
+    Ok(usable)
 }
 
 impl Target {
@@ -192,18 +221,41 @@ pub struct Prepared {
     installed: bool,
 }
 
-/// Download, verify and unpack the update for `target`.
+/// Download, verify and unpack the update for `target`. When the preferred
+/// file (the macOS .dmg) fails to download or unpack, the next one (the
+/// .zip) is tried before giving up, so a problem with the newer format can
+/// never block an update the older format could deliver.
 pub fn prepare(
     release: &Release,
     target: &Target,
-    progress: impl FnMut(u64, u64),
+    mut progress: impl FnMut(u64, u64),
 ) -> Result<Prepared> {
-    let asset = release.asset(&asset_name(
+    let names = asset_names(
         target,
         &release.tag_name,
         std::env::consts::ARCH,
         option_env!("MEATSHELL_RELEASE_VARIANT"),
-    ))?;
+    );
+    let candidates = usable_assets(release, &names)?;
+    let last = candidates.len() - 1;
+    for (i, (asset, name)) in candidates.into_iter().enumerate() {
+        match prepare_from(target, asset, name.ends_with(".dmg"), &mut progress) {
+            Ok(prepared) => return Ok(prepared),
+            Err(error) if i < last => {
+                tracing::warn!("update: {name} failed ({error:#}); trying the next package");
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("usable_assets returns at least one candidate")
+}
+
+fn prepare_from(
+    target: &Target,
+    asset: &Asset,
+    disk_image: bool,
+    progress: impl FnMut(u64, u64),
+) -> Result<Prepared> {
     let mut prepared = Prepared::stage(target)?;
     let part = prepared.work.join("package.part");
     let mut output = File::create(&part).context("Could not save the update")?;
@@ -212,7 +264,7 @@ pub fn prepare(
     drop(output);
     let package = prepared.work.join("package");
     fs::rename(&part, &package)?;
-    prepared.unpack(&package)?;
+    prepared.unpack(&package, disk_image)?;
     Ok(prepared)
 }
 
@@ -231,9 +283,14 @@ impl Prepared {
     }
 
     /// Unpack the verified `package` and locate the new build inside it.
-    fn unpack(&mut self, package: &Path) -> Result<()> {
+    /// `disk_image`: the package is a macOS .dmg rather than a .zip.
+    fn unpack(&mut self, package: &Path, disk_image: bool) -> Result<()> {
         let extract = self.work.join("new");
         self.payload = match &self.target {
+            Target::MacApp { .. } if disk_image => {
+                copy_app_from_dmg(package, &self.work.join("mnt"), &extract)?;
+                single_app_bundle(&extract)?
+            }
             Target::WindowsPortable { .. } => {
                 unzip(package, &extract)?;
                 single_dir_containing(&extract, "meatshell.exe")?
@@ -436,6 +493,69 @@ fn unzip(package: &Path, extract: &Path) -> Result<()> {
         );
         Ok(())
     }
+}
+
+/// Copy the `.app` out of a verified macOS disk image (#503) into `extract`.
+/// The image is mounted read-only at `mount` (hidden from Finder, no
+/// auto-open) and always detached again, forcibly if a normal detach fails,
+/// so a failed update never leaves a stray volume behind. `ditto` keeps the
+/// bundle's symlinks, permissions and signature, as with the .zip.
+fn copy_app_from_dmg(package: &Path, mount: &Path, extract: &Path) -> Result<()> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (package, mount, extract);
+        bail!("Disk image updates are only supported on macOS");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        fs::create_dir_all(extract)?;
+        run(Command::new("/usr/bin/hdiutil")
+            .args(["attach", "-nobrowse", "-readonly", "-noautoopen", "-quiet", "-mountpoint"])
+            .arg(mount)
+            .arg(package))
+        .context("Could not open the update disk image")?;
+
+        /// Detaches the image on every exit path.
+        struct Mounted<'a>(&'a Path);
+        impl Drop for Mounted<'_> {
+            fn drop(&mut self) {
+                let detach = |force: bool| {
+                    let mut command = Command::new("/usr/bin/hdiutil");
+                    command.arg("detach").arg("-quiet");
+                    if force {
+                        command.arg("-force");
+                    }
+                    run(command.arg(self.0)).is_ok()
+                };
+                if !detach(false) && !detach(true) {
+                    tracing::warn!("update: could not detach {}", self.0.display());
+                }
+            }
+        }
+        let _mounted = Mounted(mount);
+
+        // The image holds the .app plus an /Applications shortcut.
+        let app = single_app_bundle(mount)?;
+        let name = app.file_name().context("The update package has no app")?;
+        run(Command::new("/usr/bin/ditto").arg(&app).arg(extract.join(name)))
+            .context("Could not copy the app out of the update disk image")?;
+        Ok(())
+    }
+}
+
+/// Run a helper tool, turning a non-zero exit into an error with its stderr.
+#[cfg(target_os = "macos")]
+fn run(command: &mut Command) -> Result<()> {
+    let output = command
+        .stdin(Stdio::null())
+        .output()
+        .context("Could not start a system tool")?;
+    ensure!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(())
 }
 
 /// Unpack a .tar.gz. The `tar` crate refuses entries that would land outside
