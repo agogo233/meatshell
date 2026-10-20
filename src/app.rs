@@ -2576,6 +2576,67 @@ fn open_window(
                 }
             },
         );
+        // Drop a panel back into its own stack: reorder it within the edge by
+        // where the pointer landed (#dock-reorder). Only the stacking axis
+        // decides the slot; the other axis is a guard, so dragging the panel
+        // across the window (a re-dock in progress) can never reorder it.
+        let weak5 = window.as_weak();
+        let ds5 = dock_stacks.clone();
+        let pm5 = dock_panels_model.clone();
+        let dm5 = dock_dividers_model.clone();
+        let da5 = da_size.clone();
+        window.on_stack_reorder(move |edge: SharedString, kind: SharedString, nx: f32, ny: f32| {
+            let edge = edge.to_string();
+            let kind = kind.to_string();
+            let (w, h) = da5.get();
+            let side = matches!(edge.as_str(), "left" | "right");
+            // Side stacks split the y axis; top/bottom stacks split the x axis.
+            let (axis_pos, guard_pos) = if side {
+                (ny * h, nx * w)
+            } else {
+                (nx * w, ny * h)
+            };
+            let mut midpoints = Vec::new();
+            let mut own_band: Option<(f32, f32)> = None;
+            for i in 0..pm5.row_count() {
+                let Some(p) = pm5.row_data(i) else {
+                    continue;
+                };
+                if p.edge.as_str() != edge.as_str() {
+                    continue;
+                }
+                let (a0, a1, g0, g1) = if side {
+                    (p.y, p.y + p.h, p.x, p.x + p.w)
+                } else {
+                    (p.x, p.x + p.w, p.y, p.y + p.h)
+                };
+                if p.kind.as_str() == kind.as_str() {
+                    // Skip the dragged panel's own centre, or a small nudge
+                    // past it would already count as a swap.
+                    own_band = Some((g0, g1));
+                    continue;
+                }
+                midpoints.push((a0 + a1) / 2.0);
+            }
+            let Some((band_lo, band_hi)) = own_band else {
+                return;
+            };
+            // 40px of leeway so a slightly sideways wobble while dragging along
+            // the stacking axis still counts as a reorder, not a re-dock attempt.
+            if guard_pos < band_lo - 40.0 || guard_pos > band_hi + 40.0 {
+                return;
+            }
+            if midpoints.is_empty() {
+                return;
+            }
+            let target = insertion_index(&midpoints, axis_pos);
+            let moved = ds5.borrow_mut().move_to_index(&edge, &kind, target);
+            if moved {
+                if let Some(win) = weak5.upgrade() {
+                    refresh_dock(&win, &ds5, &pm5, &dm5, da5.get());
+                }
+            }
+        });
     }
     // Snapshot the layout and drop the RefCell guard before mutating Slint
     // models: a model change can synchronously run binding callbacks, and one

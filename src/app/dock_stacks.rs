@@ -56,6 +56,15 @@ pub fn area_is_noise(prev: (f32, f32), next: (f32, f32), eps: f32) -> bool {
     (next.0 - prev.0).abs() <= eps && (next.1 - prev.1).abs() <= eps
 }
 
+/// Slot index a drop should land at: the number of stacked panels whose
+/// stacking-axis midpoint is at or above the pointer. Slot indices grow along
+/// the stacking axis, so that count is exactly the dragged panel's destination
+/// slot. `midpoints` must exclude the dragged panel itself, or a small nudge
+/// past its own centre would already swap it with its neighbour.
+pub fn insertion_index(midpoints: &[f32], axis_pos: f32) -> usize {
+    midpoints.iter().filter(|&&m| m <= axis_pos).count()
+}
+
 /// Absolute rectangle in dock-area logical px.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct RectGeom {
@@ -206,6 +215,32 @@ impl DockStacks {
             }
             rebalance(t);
         }
+    }
+
+    /// Move `kind` to slot `target` (an index into the table *before* the
+    /// move) within its `edge` stack. Every slot keeps its own ratio, so a
+    /// reorder never changes how much space anyone gets — only who is where.
+    /// Returns `true` when the order actually changed.
+    pub fn move_to_index(&mut self, edge: &str, kind: &str, target: usize) -> bool {
+        let Some(t) = self.table_mut(edge) else {
+            return false;
+        };
+        if t.len() < 2 {
+            return false;
+        }
+        let Some(cur) = t.iter().position(|s| s.kind == kind) else {
+            return false;
+        };
+        let target = target.min(t.len() - 1);
+        if target == cur {
+            return false;
+        }
+        let slot = t.remove(cur);
+        // `target` is already the slot the panel should occupy afterwards:
+        // `remove` + `insert(target, ..)` puts it there regardless of whether
+        // it moved up or down.
+        t.insert(target, slot);
+        true
     }
 
     /// Serialize the current stacks for config persistence (2+ slots only).
@@ -641,6 +676,87 @@ mod tests {
         s.dock_to("left", "quick");
         s.dock_to("left", "quick");
         assert_eq!(s.left.len(), 1);
+    }
+
+    #[test]
+    fn move_to_index_moves_slot_and_keeps_its_ratio() {
+        let mut s = DockStacks::default();
+        s.dock_to("left", "sidebar");
+        s.dock_to("left", "quick");
+        s.dock_to("left", "ai");
+        s.set_ratio("left", 1, 0.4);
+        let (a, b, c) = (s.left[0].ratio, s.left[1].ratio, s.left[2].ratio);
+        assert!(s.move_to_index("left", "ai", 0));
+        assert_eq!(
+            s.left.iter().map(|x| x.kind).collect::<Vec<_>>(),
+            vec!["ai", "sidebar", "quick"]
+        );
+        // Ratios travel with their slot: nobody lost or gained space.
+        assert_eq!(
+            s.left.iter().map(|x| x.ratio).collect::<Vec<_>>(),
+            vec![c, a, b]
+        );
+    }
+
+    #[test]
+    fn move_to_index_noop_when_unmoved_or_unknown() {
+        let mut s = DockStacks::default();
+        s.dock_to("left", "sidebar");
+        s.dock_to("left", "quick");
+        // Same slot: nothing to do.
+        assert!(!s.move_to_index("left", "sidebar", 0));
+        assert!(!s.move_to_index("left", "quick", 1));
+        // Panel on another edge, on an empty edge, or not docked at all.
+        assert!(!s.move_to_index("right", "sidebar", 0));
+        assert!(!s.move_to_index("nope", "sidebar", 0));
+        assert!(!s.move_to_index("left", "sftp", 0));
+        assert_eq!(s.left.len(), 2);
+    }
+
+    #[test]
+    fn move_to_index_clamps_past_the_last_slot() {
+        let mut s = DockStacks::default();
+        s.dock_to("bottom", "quick");
+        s.dock_to("bottom", "sftp");
+        assert!(s.move_to_index("bottom", "quick", 99));
+        assert_eq!(s.bottom[1].kind, "quick");
+    }
+
+    #[test]
+    fn move_to_index_moves_a_middle_slot_both_ways() {
+        let mut s = DockStacks::default();
+        s.dock_to("left", "sidebar");
+        s.dock_to("left", "quick");
+        s.dock_to("left", "ai");
+        assert!(s.move_to_index("left", "quick", 0));
+        assert_eq!(
+            s.left.iter().map(|x| x.kind).collect::<Vec<_>>(),
+            vec!["quick", "sidebar", "ai"]
+        );
+        // Back to the tail: `target` is the final slot, not an offset.
+        assert!(s.move_to_index("left", "quick", 2));
+        assert_eq!(
+            s.left.iter().map(|x| x.kind).collect::<Vec<_>>(),
+            vec!["sidebar", "ai", "quick"]
+        );
+    }
+
+    #[test]
+    fn move_to_index_refuses_a_single_slot_stack() {
+        let mut s = DockStacks::default();
+        s.dock_to("left", "sidebar");
+        assert!(!s.move_to_index("left", "sidebar", 0));
+    }
+
+    #[test]
+    fn insertion_index_counts_panels_above_the_pointer() {
+        let midpoints = [50.0, 150.0, 250.0];
+        assert_eq!(insertion_index(&midpoints, 0.0), 0);
+        assert_eq!(insertion_index(&midpoints, 50.0), 1);
+        assert_eq!(insertion_index(&midpoints, 100.0), 1);
+        assert_eq!(insertion_index(&midpoints, 150.0), 2);
+        assert_eq!(insertion_index(&midpoints, 999.0), 3);
+        assert_eq!(insertion_index(&[], 0.0), 0);
     }
 
     #[test]

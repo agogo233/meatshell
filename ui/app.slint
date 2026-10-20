@@ -1032,6 +1032,13 @@ export component AppWindow inherits Window {
     // the index into dock-panels; `pos` is the cursor's distance from the
     // panel's outer edge along the dock normal (the new extent, px).
     callback panel-extent-drag(int /* panel index */, float /* pos */);
+    // Drop a panel back into its own stack: reorder it within the edge by the
+    // pointer's position along the stacking axis (#dock-reorder). `nx`/`ny`
+    // are the pointer's fraction of the dock area (0..1), dock-area relative;
+    // Rust ignores whichever axis the edge does not stack along and rejects the
+    // drop when the pointer has left the stack's thickness band.
+    callback stack-reorder(string /* edge */, string /* kind */,
+                           float /* nx */, float /* ny */);
     in-out property <string> active-tab-id: "welcome";
     in property <[TerminalState]> terminals;
 
@@ -2887,10 +2894,20 @@ export component AppWindow inherits Window {
                         root.drag-ny = (ay - dock-area.absolute-position.y) / dock-area.height;
                     }
                     dock-drag-end() => {
-                        if (root.dock-target != "") {
+                        if (root.dock-target != "" && root.dock-target != root.sidebar-dock) {
                             root.sidebar-dock = root.dock-target;
                             root.persist-sidebar-dock(root.sidebar-dock);
                             root.dock-layout-changed();
+                        } else if (root.panel-dragging) {
+                            // A real drag that landed back on its own edge (or
+                            // mid-window): drop the panel where it landed. A
+                            // plain header click must never reorder — drag-nx /
+                            // drag-ny still hold the previous drag's pointer.
+                            // Clear the grab first so the reorder's refresh
+                            // isn't deferred by panel-dragging.
+                            root.panel-dragging = false;
+                            root.stack-reorder(root.sidebar-dock, "sidebar",
+                                               root.drag-nx, root.drag-ny);
                         }
                         root.panel-dragging = false;
                     }
@@ -2921,10 +2938,18 @@ export component AppWindow inherits Window {
                         root.drag-ny = (ay - dock-area.absolute-position.y) / dock-area.height;
                     }
                     dock-drag-end() => {
-                        if (root.dock-target != "") {
+                        if (root.dock-target != "" && root.dock-target != root.welcome-sidebar-dock) {
                             root.welcome-sidebar-dock = root.dock-target;
                             root.persist-welcome-sidebar-dock(root.welcome-sidebar-dock);
                             root.dock-layout-changed();
+                        } else if (root.panel-dragging) {
+                            // A real drag that landed back on its own edge (or
+                            // mid-window): drop the panel where it landed. A
+                            // plain header click must never reorder — drag-nx /
+                            // drag-ny still hold the previous drag's pointer.
+                            root.panel-dragging = false;
+                            root.stack-reorder(root.welcome-sidebar-dock, "welcome",
+                                               root.drag-nx, root.drag-ny);
                         }
                         root.panel-dragging = false;
                     }
@@ -2979,9 +3004,17 @@ export component AppWindow inherits Window {
                         root.drag-ny = (ay - dock-area.absolute-position.y) / dock-area.height;
                     }
                     dock-drag-end => {
-                        if (root.dock-target != "") {
+                        if (root.dock-target != "" && root.dock-target != root.quick-panel-dock) {
                             root.quick-panel-dock = root.dock-target;
                             root.dock-layout-changed();
+                        } else if (root.panel-dragging) {
+                            // A real drag that landed back on its own edge (or
+                            // mid-window): drop the panel where it landed. A
+                            // plain header click must never reorder — drag-nx /
+                            // drag-ny still hold the previous drag's pointer.
+                            root.panel-dragging = false;
+                            root.stack-reorder(root.quick-panel-dock, "quick",
+                                               root.drag-nx, root.drag-ny);
                         }
                         root.panel-dragging = false;
                     }
@@ -3004,10 +3037,18 @@ export component AppWindow inherits Window {
                         root.drag-ny = (ay - dock-area.absolute-position.y) / dock-area.height;
                     }
                     dock-drag-end => {
-                        if (root.dock-target != "") {
+                        if (root.dock-target != "" && root.dock-target != root.ai-panel-dock) {
                             root.ai-panel-dock = root.dock-target;
                             root.set-ai-panel-dock(root.ai-panel-dock);
                             root.dock-layout-changed();
+                        } else if (root.panel-dragging) {
+                            // A real drag that landed back on its own edge (or
+                            // mid-window): drop the panel where it landed. A
+                            // plain header click must never reorder — drag-nx /
+                            // drag-ny still hold the previous drag's pointer.
+                            root.panel-dragging = false;
+                            root.stack-reorder(root.ai-panel-dock, "ai",
+                                               root.drag-nx, root.drag-ny);
                         }
                         root.panel-dragging = false;
                     }
@@ -3058,9 +3099,17 @@ export component AppWindow inherits Window {
                         root.drag-ny = (ay - dock-area.absolute-position.y) / dock-area.height;
                     }
                     dock-drag-end => {
-                        if (root.dock-target != "") {
+                        if (root.dock-target != "" && root.dock-target != root.sftp-dock) {
                             root.sftp-dock = root.dock-target;
                             root.dock-layout-changed();
+                        } else if (root.panel-dragging) {
+                            // A real drag that landed back on its own edge (or
+                            // mid-window): drop the panel where it landed. A
+                            // plain header click must never reorder — drag-nx /
+                            // drag-ny still hold the previous drag's pointer.
+                            root.panel-dragging = false;
+                            root.stack-reorder(root.sftp-dock, "sftp",
+                                               root.drag-nx, root.drag-ny);
                         }
                         root.panel-dragging = false;
                     }
