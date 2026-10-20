@@ -3,6 +3,11 @@
 All notable changes are documented here. 本文件记录所有重要变更。
 中英对照（中文在前，English after）.
 
+## [0.7.9] - 2026-10-19
+
+- **修复内置编辑器中拖选文字时滚轮失效的问题（#388）。** 此前在编辑器里按住鼠标拖拽选择文字的过程中转动滚轮会毫无反应，查看长文档必须松开鼠标、滚动、再重新拖选。现在拖选过程中可以直接用滚轮翻页，内容随之滚动，选区继续跟随鼠标延伸；之前为绕开该问题加的临时兜底滚动逻辑保留不变。
+- **Fix wheel scrolling while dragging a selection in the editor (#388).** While holding the mouse down to select text in the built-in editor, the wheel did nothing, so reading long files required releasing the mouse, scrolling, and dragging again. The wheel now scrolls the editor mid-drag and the selection keeps following the pointer; the earlier fallback scroll workaround is left in place unchanged.
+
 ## [0.7.8] - 2026-10-18
 
 - **应用内一键更新（#390、#497）。** 检测到新版本后，“设置”中的更新按钮可直接下载并安装：先下载并校验 SHA-256，再点击“安装并重启”，程序会关闭所有窗口、替换为新版本并自动重新打开。MSI 安装版交由 Windows Installer 升级（感谢 @yanmuq，#497）；Windows 便携版（.zip）、Linux AppImage 与 .tar.gz、macOS .app 会直接替换自身文件，替换失败时自动回滚。便携版的 `config/` 与 `log/` 数据目录不会被改动。通过 .deb、Flatpak 或 AUR 安装的版本会提示使用系统包管理器更新；安装在无写入权限位置（如 Program Files、`/usr/local/bin`）的版本仍打开发布页面。

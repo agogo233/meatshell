@@ -29,6 +29,12 @@ Changes from upstream:
   baseline of each paragraph. The gutter uses the same source, font, width,
   height and wrapping as the editable input and is clipped by its narrow
   parent. Only numbers inside the clip are shaped and drawn.
+- `i-slint-core/input.rs` (`handle_mouse_grab`): a wheel held by the mouse grab is first
+  offered to the grabber and, when the grabber ignores it, to the items below it in the grab
+  stack, so the scrollable area behind a text input being dragged can scroll (#388). The grab
+  is kept for the whole wheel, so the selection keeps following the pointer; only wheel events
+  are forwarded, the grabber is never invoked twice, and when nothing accepts the wheel the
+  upstream behaviour (end the grab, return a move event) is preserved.
 
 Dropped when rebasing from 1.16.1, because Slint 1.18 does it upstream: the
 per-item editor layout cache (now `TextLayoutCache`), drawing the selection
@@ -61,4 +67,7 @@ render test compares plain/highlighted geometry at two wrapping widths, checks
 selection precedence, verifies stale spans cannot affect edits, exercises the
 gutter, and prints 10,000-line first/cached paint timings. Its screenshots go to
 `target/editor-*.png`. Run this test when rebasing the patch, in addition to
-checking IME behavior on the target desktop platforms.
+checking IME behavior on the target desktop platforms. The same filter also runs
+the drag-scroll test, which presses, drags and wheels inside a grabbed editor and
+requires both the scroll offset to move and the selection drag to survive the
+wheel: that is what keeps the `handle_mouse_grab` change honest.

@@ -1519,6 +1519,74 @@ fn offer_native_drag(
     state.arm_in_window_drag(drag_area, source, seed_position);
 }
 
+/// MeatShell editor patch: deliver a grabbed wheel to the item holding the mouse grab and,
+/// when that item ignores it, to the items below it in the grab stack, without ever dropping
+/// the grab. Returns whether the wheel was accepted, or whether nothing accepted it; in both
+/// cases the caller must not deliver the wheel again.
+///
+/// Only wheel events are handled; anything else is left to the usual grab handling. The
+/// grabber is always consulted first and is never invoked twice, so a grabber that accepts
+/// the wheel (like the terminal's TouchArea) keeps exactly one `scroll-event` call.
+fn forward_grabbed_wheel(
+    wheel: &MouseEvent,
+    window_adapter: &Rc<dyn WindowAdapter>,
+    mouse_input_state: &mut MouseInputState,
+) -> Option<bool> {
+    // Only wheel events are forwarded: any other grabbed event must go through the usual grab
+    // handling, otherwise a pressed mouse button could be left stuck.
+    if !matches!(wheel, MouseEvent::Wheel { .. }) {
+        return None;
+    }
+    let mut event = wheel.clone();
+    event.translate(-mouse_input_state.offset.to_vector());
+    let stack = mouse_input_state.item_stack.clone();
+    let stack_len = stack.len();
+    let mut targets = Vec::new();
+    for (index, it) in stack.into_iter().enumerate() {
+        // A dead item in the stack is cleaned up by the upstream handling, so leave the event
+        // to it.
+        let Some(item) = it.0.upgrade() else { return None };
+        let g = item.geometry();
+        event.translate(-g.origin.to_vector());
+        if window_adapter.renderer().supports_transformations()
+            && let Some(inverse_transform) = item.inverse_children_transform()
+        {
+            event.transform(inverse_transform);
+        }
+        // The grabber (the last entry) is always a target and is consulted first, like the
+        // usual grab handling would. The other items are only targeted when their filter does
+        // not opt them out.
+        if index + 1 == stack_len {
+            targets.push((Some(item), event.clone()));
+        } else {
+            let ignore = item.borrow().as_ref().input_event_filter_before_children(
+                &event,
+                window_adapter,
+                &item,
+                &mut mouse_input_state.cursor,
+            ) == InputEventFilterResult::ForwardAndIgnore;
+            targets.push(((!ignore).then_some(item), event.clone()));
+        }
+    }
+    // Deliver bottom-up: the grabber keeps first dibs on the wheel.
+    for (item, event) in targets.into_iter().rev() {
+        let Some(item) = item else { continue };
+        match item.borrow().as_ref().input_event(
+            &event,
+            window_adapter,
+            &item,
+            &mut mouse_input_state.cursor,
+        ) {
+            InputEventResult::EventIgnored => continue,
+            // StartDrag only concerns pressed/moved events; leave such an unexpected answer to
+            // the upstream handling.
+            InputEventResult::StartDrag => return None,
+            InputEventResult::EventAccepted | InputEventResult::GrabMouse => return Some(true),
+        }
+    }
+    Some(false)
+}
+
 /// Try to handle the mouse grabber.
 pub(crate) fn handle_mouse_grab(
     mouse_event: &MouseEvent,
@@ -1528,6 +1596,27 @@ pub(crate) fn handle_mouse_grab(
     if !mouse_input_state.grabbed || mouse_input_state.item_stack.is_empty() {
         return MouseGrabResult { event: Some(mouse_event.clone()), accepted: false };
     };
+
+    // MeatShell editor patch: a wheel the grabber ignores would otherwise be turned into a
+    // synthetic move, so the scrollable area behind a text input being dragged never scrolls
+    // (#388). Hand it to the grabber and, when the grabber ignores it, to the items below it,
+    // keeping the grab so the selection keeps following the pointer.
+    match forward_grabbed_wheel(mouse_event, window_adapter, mouse_input_state) {
+        Some(true) => return MouseGrabResult { event: None, accepted: true },
+        Some(false) => {
+            // Nothing accepted the wheel. Keep the upstream behaviour for an ignored wheel: end
+            // the grab and return a move event so that the new position is registered properly.
+            // The grabber was already consulted above and is not invoked again.
+            mouse_input_state.grabbed = false;
+            return MouseGrabResult {
+                event: Some(mouse_event.position().map_or(MouseEvent::Exit, |position| {
+                    MouseEvent::Moved { position, touch_finger_id: mouse_event.touch_finger_id() }
+                })),
+                accepted: false,
+            };
+        }
+        None => {}
+    }
 
     let mut event = mouse_event.clone();
     let mut intercept = false;
