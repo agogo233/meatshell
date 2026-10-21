@@ -7732,6 +7732,22 @@ fn wire_key_input(
             }
         });
     }
+    {
+        let handles_rc = handles.clone();
+        window.on_tunnel_start(move |tab_id: SharedString, tunnel_id: SharedString| {
+            if let Some(handle) = handles_rc.borrow().get(tab_id.as_str()) {
+                handle.start_tunnel(tunnel_id.to_string());
+            }
+        });
+    }
+    {
+        let handles_rc = handles.clone();
+        window.on_tunnel_delete(move |tab_id: SharedString, tunnel_id: SharedString| {
+            if let Some(handle) = handles_rc.borrow().get(tab_id.as_str()) {
+                handle.delete_tunnel(tunnel_id.to_string());
+            }
+        });
+    }
 
     // --- Command bar (#55): run command + quick-command management ---------
     {
