@@ -209,13 +209,16 @@ jump-host references are remapped to the new IDs, including forward references a
 references to skipped duplicates. `--dry-run` validates and reports counts without
 changing saved sessions; normal profile initialization may create the directory/key.
 
-The limit is 16 MiB. MeatShell portable exports (`meatshell_export: 1`, including
-`enc:exp:v1:` credentials), FinalShell exports, and native JSON profiles are supported.
+The limit is 16 MiB. MeatShell portable bundles (Argon2id passphrase +
+ChaCha20-Poly1305, `.mpack`), legacy `meatshell_export: 1` JSON exports
+(including their `enc:exp:v1:` fixed-key credentials — still read for
+compatibility, no longer written), FinalShell exports, and native JSON profiles
+are supported.
 Native profiles import sessions only. Machine-local `enc:v1:` credentials require the
 matching profile key; undecryptable secrets and invalid jump chains reject the entire
 import. A key-file path is preserved but its file is not copied: make that key available
-on the destination separately. Portable export encryption is reversible with a built-in
-key, so treat an export as a credential-bearing file and keep it private.
+on the destination separately. Treat any export as a credential-bearing file and keep it
+private.
 
 MCP exposes `import_sessions` with `local_path` and optional `dry_run` (default `true`).
 It returns only `added`, `skipped`, and `dry_run`. The existing MCP enable/file-transfer

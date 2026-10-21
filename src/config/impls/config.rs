@@ -425,10 +425,15 @@ impl ConfigStore {
     const ENC_PREFIX: &'static str = "enc:v1:";
 
     /// Marks a password encrypted with the **portable export key** (issue #46).
+    /// Legacy read-only format: the writer (`export_json`) is gone — the UI
+    /// exports Argon2id portable bundles (`on_export_sessions`), and the fixed
+    /// key is kept solely so old `enc:exp:v1:` files still import and load.
     const EXPORT_PREFIX: &'static str = "enc:exp:v1:";
 
-    /// Fixed 32-byte key for portable exports. Baked into the binary so an
-    /// exported file decrypts on any machine. Obfuscation only — see `ExportFile`.
+    /// Fixed 32-byte key used by the legacy portable export format (#46).
+    /// Kept ONLY to decrypt `enc:exp:v1:` blobs written by older versions
+    /// (import path + `open_secret` re-seal at load); nothing writes this
+    /// format anymore — see `EXPORT_PREFIX` and `docs` in README.
     const EXPORT_KEY: [u8; 32] = *b"meatshell.export.portable.key.01";
 
     // ── Encryption helpers ────────────────────────────────────────────────
@@ -2548,23 +2553,9 @@ impl ConfigStore {
 
     // ── Portable export / import (issue #46) ──────────────────────────────
 
-    /// Encrypt a password with the portable export key → `"enc:exp:v1:<b64>"`.
-    fn encrypt_export(plaintext: &str) -> Result<String> {
-        let cipher = ChaCha20Poly1305::new((&Self::EXPORT_KEY).into());
-        let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
-        let ciphertext = cipher
-            .encrypt(&nonce, plaintext.as_bytes())
-            .map_err(|e| anyhow::anyhow!("export encrypt error: {e}"))?;
-        let mut blob = nonce.to_vec();
-        blob.extend_from_slice(&ciphertext);
-        Ok(format!(
-            "{}{}",
-            Self::EXPORT_PREFIX,
-            URL_SAFE_NO_PAD.encode(&blob)
-        ))
-    }
-
-    /// Decrypt a value produced by [`Self::encrypt_export`]; `None` if it isn't one.
+    /// Decrypt a `enc:exp:v1:` value written by a legacy portable export
+    /// (fixed-key format, pre-Argon2id bundles); `None` if it isn't one.
+    /// Read-only compatibility: new exports never produce this prefix.
     fn decrypt_export(s: &str) -> Option<String> {
         let b64 = s.strip_prefix(Self::EXPORT_PREFIX)?;
         let blob = URL_SAFE_NO_PAD.decode(b64).ok()?;
@@ -2577,47 +2568,6 @@ impl ConfigStore {
         let plain = cipher.decrypt(nonce, ciphertext).ok()?;
         String::from_utf8(plain).ok()
     }
-
-    /// Export all sessions to a portable JSON file. Passwords, inline keys and
-    /// proxy credentials are re-encrypted with the built-in export key;
-    /// everything else stays plaintext so the file is human-readable and
-    /// editable. Returns the number of sessions.
-    ///
-    /// The UI exports encrypted bundles now; this legacy writer stays (and
-    /// stays tested) because [`Self::import_json`] still reads its format.
-    #[allow(dead_code)]
-    pub fn export_json(&self) -> Result<(String, usize)> {
-        let mut out = ExportFile {
-            meatshell_export: 1,
-            sessions: self.cache.sessions.clone(),
-        };
-        for s in &mut out.sessions {
-            // `cache` holds plaintext credentials; obfuscate them with the
-            // export key so a proxy password isn't naked in the file either.
-            if !s.password.is_empty() {
-                let enc = Self::encrypt_export(s.password.as_str())?;
-                s.password = Secret::new(enc);
-            }
-            if !s.private_key_inline.is_empty() {
-                let enc = Self::encrypt_export(s.private_key_inline.as_str())?;
-                s.private_key_inline = Secret::new(enc);
-            }
-            if !s.proxy.is_empty() {
-                let enc = Self::encrypt_export(s.proxy.as_str())?;
-                s.proxy = Secret::new(enc);
-            }
-            for trigger in &mut s.triggers {
-                if !trigger.response.is_empty() {
-                    let enc = Self::encrypt_export(trigger.response.as_str())?;
-                    trigger.response = Secret::new(enc);
-                }
-            }
-            // `last_used` is machine-local noise — don't carry it across.
-            s.last_used = None;
-        }
-        Ok((serde_json::to_string_pretty(&out)?, out.sessions.len()))
-    }
-
 
 
     /// Decode a GBK/GB2312 byte stream only when the bytes actually look
@@ -2832,15 +2782,6 @@ impl ConfigStore {
             .with_context(|| format!("failed to read {}", path.display()))?;
         self.quick_commands_import_json(&raw)
     }
-
-    /// Export all sessions to a portable JSON file. Passwords are re-encrypted
-    /// with the built-in export key; everything else stays plaintext so the
-    /// file is human-readable and editable. Returns the number of sessions.
-    pub fn export_to(&self, path: &Path) -> Result<usize> {
-        let (raw, count) = self.export_json()?;
-        fs::write(path, raw).with_context(|| format!("failed to write {}", path.display()))?;
-        Ok(count)
-    }
 }
 
 /// Isolated fixture for controller tests; never resolves the user's profile.
@@ -2867,6 +2808,21 @@ mod tests {
             lost_secrets: 0,
             recovered_secrets: 0,
         }
+    }
+
+    /// One credential encrypted exactly like the removed legacy writer did:
+    /// `enc:exp:v1:` = ChaCha20-Poly1305 under the built-in (fixed) export key.
+    /// Pins the reader against that format — if the key or construction ever
+    /// changes, the calling test fails deliberately.
+    fn enc_exp_v1_fixture(plain: &str) -> String {
+        let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
+        let mut blob = nonce.to_vec();
+        blob.extend_from_slice(
+            &ChaCha20Poly1305::new((&ConfigStore::EXPORT_KEY).into())
+                .encrypt(&nonce, plain.as_bytes())
+                .unwrap(),
+        );
+        format!("enc:exp:v1:{}", URL_SAFE_NO_PAD.encode_string(&blob))
     }
 
     /// A store seeded like a brand-new install. `temp_store` uses the derived
@@ -3491,7 +3447,7 @@ mod tests {
     }
 
     #[test]
-    fn export_import_roundtrip_preserves_password() {
+    fn legacy_export_import_roundtrip_preserves_password() {
         let mut a = temp_store();
         a.cache.sessions.push(Session {
             name: "pve".into(),
@@ -3504,8 +3460,20 @@ mod tests {
         });
 
         let export_path = std::env::temp_dir().join(format!("ms-exp-{}.json", Uuid::new_v4()));
-        let (raw, count) = a.export_json().unwrap();
-        assert_eq!(count, 1);
+        // Hand-built legacy fixture: the fixed-key writer (`export_json` /
+        // `export_to`) is gone — the UI exports Argon2id bundles — but the
+        // reader must keep opening old portable exports, so pin it here.
+        let mut exported = a.cache.sessions.clone();
+        for s in &mut exported {
+            s.password = Secret::new(enc_exp_v1_fixture(s.password.as_str()));
+            s.proxy = Secret::new(enc_exp_v1_fixture(s.proxy.as_str()));
+            s.last_used = None;
+        }
+        let raw = serde_json::to_string_pretty(&serde_json::json!({
+            "meatshell_export": 1,
+            "sessions": exported,
+        }))
+        .unwrap();
         std::fs::write(&export_path, &raw).unwrap();
 
         // The file keeps host/user plaintext but the credentials are obfuscated.
@@ -3539,7 +3507,7 @@ mod tests {
             name: "legacy".into(),
             host: "192.168.100.3".into(),
             user: "ops".into(),
-            password: Secret::new(ConfigStore::encrypt_export("exported-secret").unwrap()),
+            password: Secret::new(enc_exp_v1_fixture("exported-secret")),
             ..Session::new_empty()
         });
         cfg.webdav_password = Secret::new(ConfigStore::encrypt(&key, "dav-secret").unwrap());

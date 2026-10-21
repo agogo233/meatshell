@@ -458,23 +458,8 @@ pub struct ConfigFile {
     pub dock_stacks: Vec<DockEdgeSer>,
 }
 
-/// Portable export file (issue #46): sessions with everything in plaintext
-/// **except** passwords, inline private keys and proxy credentials, which are
-/// encrypted with a fixed key baked into the binary so the file opens on *any*
-/// machine running meatshell.
-///
-/// Security note: a built-in key in open-source code is **obfuscation, not real
-/// security** — anyone with the source can derive it. It only stops a casual
-/// over-the-shoulder read of the file, same level as FinalShell's export.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ExportFile {
-    /// Format marker / version so the schema can evolve later.
-    pub(crate) meatshell_export: u32,
-    pub(crate) sessions: Vec<Session>,
-}
-
 /// Portable quick-commands export (#55 companion): names, commands and group
-/// names only — no secrets, so unlike [`ExportFile`] the JSON stays plaintext.
+/// names only — no secrets, so the JSON stays plaintext.
 /// `groups` preserves *empty* groups too (a command's own `group` field only
 /// covers non-empty ones).
 #[derive(Debug, Clone, Serialize, Deserialize)]

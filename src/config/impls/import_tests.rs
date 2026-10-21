@@ -17,6 +17,32 @@ fn native(sessions: Vec<Session>) -> String {
     serde_json::json!({"sessions": sessions}).to_string()
 }
 
+/// Legacy portable-export fixture (`meatshell_export: 1`, plaintext fields).
+/// The fixed-key writer (`ConfigStore::export_json`) was removed — the UI
+/// exports Argon2id bundles now — but `import_json` still READS this format,
+/// so the round-trip tests build fixtures by hand.
+fn legacy_export(sessions: Vec<Session>) -> String {
+    serde_json::json!({"meatshell_export": 1, "sessions": sessions}).to_string()
+}
+
+/// One credential encrypted exactly like the removed legacy writer did:
+/// `enc:exp:v1:` = ChaCha20-Poly1305 under the built-in (fixed) export key.
+/// Pins the reader against that format — if the key or construction ever
+/// changes, the caller's test fails deliberately.
+fn enc_exp_v1(plain: &str) -> String {
+    let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
+    let mut blob = nonce.to_vec();
+    blob.extend_from_slice(
+        &ChaCha20Poly1305::new((&ConfigStore::EXPORT_KEY).into())
+            .encrypt(&nonce, plain.as_bytes())
+            .unwrap(),
+    );
+    format!(
+        "enc:exp:v1:{}",
+        URL_SAFE_NO_PAD.encode_string(&blob)
+    )
+}
+
 fn snapshot(store: &ConfigStore) -> serde_json::Value {
     serde_json::to_value(&store.cache).unwrap()
 }
@@ -48,15 +74,7 @@ fn portable_roundtrip_remaps_both_jump_formats_and_preserves_all_other_fields() 
     target.note = "Synthetic note".into();
     target.allow_secret_reveal = true;
     source.cache.sessions = vec![target.clone(), inner, outer];
-    let (export, _) = source.export_json().unwrap();
-    assert!(export.contains("enc:exp:v1:"));
-    for secret in [
-        "synthetic-password",
-        "synthetic-inline-key",
-        "synthetic-trigger-response",
-    ] {
-        assert!(!export.contains(secret));
-    }
+    let export = legacy_export(source.cache.sessions.clone());
 
     let mut destination = temp_store();
     destination.key = [9; 32]; // Different local profile key, as on another machine.
@@ -420,7 +438,7 @@ fn decoded_literal_ciphertext_prefixes_are_encrypted_on_import() {
         ..SessionTrigger::default()
     });
     source.cache.sessions.push(imported);
-    let (export, _) = source.export_json().unwrap();
+    let export = legacy_export(source.cache.sessions.clone());
     let mut destination = temp_store();
     destination.key = [9; 32];
     assert_eq!(destination.import_json(&export).unwrap(), (1, 0));
@@ -442,6 +460,30 @@ fn decoded_literal_ciphertext_prefixes_are_encrypted_on_import() {
 }
 
 #[test]
+fn legacy_export_key_credentials_still_import_and_reseal_locally() {
+    // Reading the removed fixed-key format must keep working: an old portable
+    // export carries `enc:exp:v1:` credentials that only the built-in key
+    // opens. On the destination they are re-sealed with the LOCAL profile key.
+    let literal = "synthetic-legacy-export-password";
+    let mut source = temp_store();
+    let mut imported = session("legacy-export-key");
+    imported.password = Secret::new(enc_exp_v1(literal));
+    source.cache.sessions.push(imported);
+    let export = legacy_export(source.cache.sessions.clone());
+    let mut destination = temp_store();
+    destination.key = [9; 32]; // different machine / profile key
+    assert_eq!(destination.import_json(&export).unwrap(), (1, 0));
+    assert_eq!(destination.sessions()[0].password.as_str(), literal);
+    let disk: ConfigFile =
+        serde_json::from_str(&fs::read_to_string(&destination.path).unwrap()).unwrap();
+    assert_eq!(
+        ConfigStore::try_decrypt(&destination.key, disk.sessions[0].password.as_str()).as_deref(),
+        Some(literal)
+    );
+    remove_fixture(&destination);
+}
+
+#[test]
 fn literal_encryption_prefix_stays_protected_across_load_and_ordinary_saves() {
     let literal = "enc:v1:synthetic-literal-credential";
     let mut store = temp_store();
@@ -455,7 +497,7 @@ fn literal_encryption_prefix_stays_protected_across_load_and_ordinary_saves() {
     });
     let mut source = temp_store();
     source.cache.sessions.push(imported);
-    let (export, _) = source.export_json().unwrap();
+    let export = legacy_export(source.cache.sessions.clone());
     store.import_json(&export).unwrap();
     for _ in 0..2 {
         let raw = fs::read_to_string(&store.path).unwrap();
