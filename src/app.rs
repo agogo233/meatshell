@@ -6908,6 +6908,18 @@ fn wire_session_callbacks(
                         .collect();
                     ModelRc::from(std::rc::Rc::new(VecModel::from(v)))
                 },
+                // #500 per-session bookmarks live in their own field: the row's
+                // `sftp_bookmarks` belongs to the older per-server menu.
+                sftp_places_bookmarks: {
+                    let v: Vec<slint::SharedString> = store
+                        .borrow()
+                        .sftp_places(&conn_label)
+                        .bookmarks
+                        .iter()
+                        .map(|p| p.as_str().into())
+                        .collect();
+                    ModelRc::from(std::rc::Rc::new(VecModel::from(v)))
+                },
                 sftp_bookmarked: false,
                 font_size: 0,
                 tunnels: ModelRc::from(std::rc::Rc::new(VecModel::<TunnelInfo>::default())),
