@@ -11,8 +11,11 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# Least privilege by default: only the jobs that attach assets to the GitHub
+# Release escalate to `contents: write` (job level below). Previously the
+# top-level write was inherited by every job, including check-version.
 permissions:
-  contents: write   # needed to create / update the GitHub Release
+  contents: read
 
 jobs:
   check-version:
@@ -51,6 +54,8 @@ jobs:
     name: ${{ matrix.name }}
     needs: check-version
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -367,6 +372,8 @@ jobs:
     name: linux-x86_64-flatpak
     needs: [check-version, build]
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write
     container:
       image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
       options: --privileged
@@ -414,6 +421,8 @@ jobs:
     name: linux-aarch64-glibc228
     needs: check-version
     runs-on: ubuntu-22.04-arm
+    permissions:
+      contents: write
     container: debian:10
 
     steps:
@@ -509,6 +518,8 @@ jobs:
     name: linux-x86_64-glibc228
     needs: check-version
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write
     container: debian:10
 
     steps:

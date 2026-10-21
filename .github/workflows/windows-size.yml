@@ -7,8 +7,21 @@ name: Build (Windows x86_64)
 # unique per build.
 
 on:
-  # Rebuild on every push to any branch/tag — used as the CI gate.
+  # PRs get the size report; pushes to main keep the artifact. A bare
+  # un-filtered `push` used to fire this windows-latest fat-LTO build on every
+  # branch and tag push (~hours of CI minutes for a report with no threshold).
   push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "src/**"
+      - "ui/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "build.rs"
+      - "vendor/**"
+      - "assets/**"
+      - ".github/workflows/windows-size.yml"
   workflow_dispatch:
 
 concurrency:
@@ -19,6 +32,7 @@ jobs:
   windows-x86_64-size:
     name: windows-x86_64
     runs-on: windows-latest
+    timeout-minutes: 60
     permissions:
       contents: read
     steps:
