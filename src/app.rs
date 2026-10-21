@@ -42,12 +42,18 @@ mod window;
 // session_callbacks/settings_callbacks/misc_callbacks/tunnel_callbacks/
 // window_events/key_input/hit_test/file_drop/fonts/helpers/term_output/
 // session_editor 等子模块；本 fork 保留 app.rs 单文件实现（含本地 dock/
-// ai/sftp/editor 独有逻辑），故不声明这些拆分模块，对应功能由本地版承载。
+// ai/sftp/editor 独有逻辑）。
 // [merge-2026-10] 采纳上游编辑器标签页形态（#494）：启用上游新模块
 // editor_host / editor_tabs / editor_syntax（语法 span 喂给 vendored
-// i-slint-core 的原生 colour spans）、agents / update / tray，以及可定制
-// 快捷键体系 shortcuts（Chord 解析 / Keymap 匹配 / 快捷键对话框）；
-// 其余旧拆分模块仍不启用，其函数以 app.rs 单文件内的本地实现为准。
+// i-slint-core 的原生 colour spans）、agents / update / tray、可定制快捷键
+// shortcuts、SFTP places 书签 sftp_places，以及副窗接线 aux_windows。
+// [attic-2026-10] 其余未接线拆分模块不在此处声明，已移入 src/attic/
+// （open_window / session_callbacks / settings_callbacks / misc_callbacks /
+// helpers / drag_out / session_test / editor）。移出 src/ 后它们不再参与
+// 任何编译单元 —— rustc 对未引用模块零告警，这正是此前"上游改动静默
+// 丢失"的机制；attic 使未来的取用变成显式决策（git mv 回来 + 加 mod），
+// 上游对这些文件的改动也会以"文件被移动"的形式显性冲突而非静默合并。
+// 仍编译的拆分模块（含 shortcuts）以本文件及对应模块的本地实现为准。
 
 use self::ai::*;
 use self::auth_dialogs::*;

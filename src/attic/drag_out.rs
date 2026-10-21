@@ -783,6 +783,8 @@ mod imp {
     }
 }
 
+// [attic] 该文件与测试均已移出编译单元（见 src/attic/README.md）。
+// 路径随移动一并更正；本模块当前无人声明，故不参与编译。
 #[cfg(test)]
-#[path = "../../tests/app/drag_out/mod.rs"]
+#[path = "tests/drag_out.rs"]
 mod tests;
