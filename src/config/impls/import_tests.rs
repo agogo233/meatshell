@@ -3,6 +3,16 @@ use super::super::tests::temp_store;
 use super::super::{ConfigFile, SessionTrigger};
 use super::*;
 
+// The legacy `enc:exp:v1:` fixture helper needs the same crypto stack the
+// removed writer used. These are NOT reachable through `use super::*` here:
+// the glob only covers `import`'s own namespace (see import.rs imports).
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use chacha20poly1305::{
+    aead::{Aead, AeadCore},
+    ChaCha20Poly1305,
+};
+use rand::rngs::OsRng;
+
 fn session(id: &str) -> Session {
     Session {
         id: id.into(),

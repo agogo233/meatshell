@@ -6191,9 +6191,13 @@ fn wire_session_callbacks(
         let active_test = active_test.clone();
         // Replace any in-flight test with this one (upstream
         // `EditorTest::begin` semantics without the draft snapshot).
-        let begin_test = |runtime: &tokio::runtime::Runtime,
-                          active_test: &Rc<RefCell<Option<ActiveTest>>>,
-                          task: impl std::future::Future<Output = ()> + Send + 'static| {
+        // A plain fn, not a closure: `impl Trait` parameters are only allowed
+        // on functions/methods, not closure parameters.
+        fn begin_test(
+            runtime: &tokio::runtime::Runtime,
+            active_test: &Rc<RefCell<Option<ActiveTest>>>,
+            task: impl std::future::Future<Output = ()> + Send + 'static,
+        ) {
             if let Some(old) = active_test.borrow_mut().take() {
                 if !old.handle.is_finished() {
                     old.handle.abort();
@@ -6201,7 +6205,7 @@ fn wire_session_callbacks(
             }
             let handle = runtime.spawn(task);
             *active_test.borrow_mut() = Some(ActiveTest { handle });
-        };
+        }
         window.on_session_dialog_test(move |draft: SessionDraft| {
             let kind = draft.kind.to_string();
             if kind == "serial" {
@@ -7397,6 +7401,13 @@ fn sync_active_sftp_to_root(win: &AppWindow, terminals: &VecModel<TerminalState>
         win.set_sftp_bookmarks(ModelRc::from(std::rc::Rc::new(
             VecModel::<slint::SharedString>::default(),
         )));
+        win.set_sftp_places_bookmarks(ModelRc::from(std::rc::Rc::new(
+            VecModel::<slint::SharedString>::default(),
+        )));
+        win.set_sftp_recent(ModelRc::from(std::rc::Rc::new(
+            VecModel::<slint::SharedString>::default(),
+        )));
+        win.set_sftp_bookmarked(false);
         win.set_sftp_tunnels(ModelRc::from(std::rc::Rc::new(
             VecModel::<TunnelInfo>::default(),
         )));
@@ -7415,6 +7426,9 @@ fn sync_active_sftp_to_root(win: &AppWindow, terminals: &VecModel<TerminalState>
     win.set_sftp_entries(row.sftp_entries.clone());
     win.set_sftp_tree_nodes(row.sftp_tree_nodes.clone());
     win.set_sftp_bookmarks(row.sftp_bookmarks.clone());
+    win.set_sftp_places_bookmarks(row.sftp_places_bookmarks.clone());
+    win.set_sftp_recent(row.sftp_recent.clone());
+    win.set_sftp_bookmarked(row.sftp_bookmarked);
     win.set_sftp_tunnels(row.tunnels.clone());
     win.set_sftp_current_tab_id(row.id.clone());
     // Panel extent follows the active tab's remembered size (#v0.5 keeps these
@@ -8788,21 +8802,28 @@ fn wire_key_input(
     // holding the terminal lock, so every keystroke used to block the UI thread
     // and the PTY ingest behind the same mutex. Buffer mode only scans the
     // visible window and stays immediate; the scan only covers the *changed*
-    // query, so coalescing keystrokes never loses input: the timer always runs
-    // with the latest (tab, query) pair.
+    // query, so coalescing keystrokes never loses input: each timer runs with
+    // the latest (tab, query) pair, and a tab's edits while another tab is
+    // being scanned are queued instead of overwritten.
     {
         let bufs_find = bufs.clone();
         let weak = window.as_weak();
-        // Latest (tab-id, query) awaiting the debounced history scan. Empty id
-        // = nothing pending (already consumed by a timer). All fields Send so
-        // the timer callback stays Send (slint::Timer requires it — plain Rc
-        // types cannot cross into the timer closure).
-        let pending_scan: Arc<Mutex<(String, String)>> = Arc::default();
+        // FIFO of (tab-id, query) awaiting the debounced history scan. Every
+        // field is Send so the timer callback stays Send (slint::Timer requires
+        // it — plain Rc types cannot cross into the timer closure).
+        let pending_scan: Arc<Mutex<VecDeque<(String, String)>>> = Arc::default();
         window.on_find_query_changed(move |tab_id: SharedString, query: SharedString| {
             let tid = tab_id.to_string();
             let q = query.to_string();
             let history_mode = with_term_buf(&bufs_find, &tid, |buf| {
                 buf.find_query = q.clone();
+                if buf.search_history_mode {
+                    // The positions were computed for the previous query: mark
+                    // the index dirty so an Enter (find-navigate) landing before
+                    // the debounced scan re-computes instead of advancing a
+                    // stale index.
+                    buf.find_dirty = true;
+                }
                 buf.search_history_mode
             })
             .unwrap_or(false);
@@ -8830,29 +8851,39 @@ fn wire_key_input(
                 return;
             }
             // History mode: debounce the full scrollback scan (#find-debounce).
-            *lock_or_recover(&pending_scan) = (tid, q);
+            lock_or_recover(&pending_scan).push_back((tid, q));
             let bufs_scan = bufs_find.clone();
             let weak_scan = weak.clone();
             let pending = pending_scan.clone();
             slint::Timer::single_shot(std::time::Duration::from_millis(150), move || {
-                let (tid, _q) = std::mem::take(&mut *lock_or_recover(&pending));
-                if tid.is_empty() {
-                    return; // consumed by a newer keystroke's timer
+                // Drain everything queued so far; only the LATEST entry per
+                // tab is worth scanning (earlier ones describe a stale query).
+                let batch = std::mem::take(&mut *lock_or_recover(&pending));
+                if batch.is_empty() {
+                    return;
                 }
-                with_term_buf(&bufs_scan, &tid, |buf| {
-                    buf.recompute_find_positions();
-                    if !buf.find_positions.is_empty() {
-                        let (abs_row, _, _) = buf.find_positions[0];
-                        if buf.scroll_to_abs_row(abs_row) {
-                            buf.render();
-                        }
+                let mut latest: VecDeque<(String, String)> = VecDeque::new();
+                for entry in batch.into_iter().rev() {
+                    if !latest.iter().any(|(t, _)| *t == entry.0) {
+                        latest.push_front(entry);
                     }
-                });
-                if let Some(win) = weak_scan.upgrade() {
-                    // History mode always rebuilds: the tab display carries the
-                    // "n/total" match counter fed from `find_positions`, which
-                    // changed even when the view did not scroll.
-                    rebuild_tab_display(&win, &bufs_scan, &tid);
+                }
+                for (tid, _q) in latest {
+                    let _ = with_term_buf(&bufs_scan, &tid, |buf| {
+                        buf.recompute_find_positions();
+                        if !buf.find_positions.is_empty() {
+                            let (abs_row, _, _) = buf.find_positions[0];
+                            if buf.scroll_to_abs_row(abs_row) {
+                                buf.render();
+                            }
+                        }
+                    });
+                    if let Some(win) = weak_scan.upgrade() {
+                        // History mode always rebuilds: the tab display carries
+                        // the "n/total" match counter fed from `find_positions`,
+                        // which changed even when the view did not scroll.
+                        rebuild_tab_display(&win, &bufs_scan, &tid);
+                    }
                 }
             });
         });

@@ -203,11 +203,12 @@ meatshell --data-dir /absolute/path/to/profile cli import ./meatshell-connection
 跳板引用会映射到新的会话 ID，支持前向引用和指向已存在重复会话的引用。
 `--dry-run` 只校验并返回计数，不改变已保存会话；常规初始化可能创建配置目录和加密密钥。
 
-文件上限为 16 MiB。兼容 MeatShell 便携导出（`meatshell_export: 1`，包括
-`enc:exp:v1:` 凭据）、FinalShell 导出和原生 JSON 配置。原生配置只导入会话，
+文件上限为 16 MiB。兼容 MeatShell 口令加密便携包（Argon2id + ChaCha20-Poly1305，
+`.mpack`）、旧版 `meatshell_export: 1` JSON 导出（含 `enc:exp:v1:` 固定密钥凭据——
+仍可读取、但新版本不再产出）、FinalShell 导出和原生 JSON 配置。原生配置只导入会话，
 其中机器本地 `enc:v1:` 凭据需要匹配的配置密钥；无法解密的凭据或无效跳板链路会中止整个导入。
 私钥文件路径原样保留，不复制私钥文件，需要另外在目标机器准备对应文件。
-便携导出的加密使用内置密钥可还原，因此应按含有凭据的敏感文件保管。
+任何导出都应按含有凭据的敏感文件保管。
 
 MCP 新增 `import_sessions`，参数为 `local_path` 和可选的 `dry_run`（默认 `true`），
 只返回 `added`、`skipped`、`dry_run`。沿用 MCP 启用和文件传输权限；实际写入还需
