@@ -643,7 +643,10 @@ export component TerminalView inherits Rectangle {
     callback sftp-remove-bookmark(string);
     callback sftp-clear-recent();
     callback sftp-places-refresh();
-    callback sftp-drag-out(int);                    // drag rows to Explorer (#504)
+    // #504 "drag rows to Explorer": 决策为暂不实现 —— UI 侧从未接线
+    // （无 DragArea、无调用方），Windows OLE 实现保留在 attic/drag_out.rs
+    // 供未来取用；此回调与 app.slint 的转发绑定仅作上游结构对照。
+    callback sftp-drag-out(int);
     callback sftp-download-selected();              // download checked entries (#100)
     callback sftp-delete-selected();                // delete checked entries (#100)
     callback sftp-copy-to-target(string, string);
