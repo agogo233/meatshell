@@ -19,9 +19,7 @@ pub(super) fn string_model(items: &[String]) -> ModelRc<SharedString> {
 }
 
 fn session_of(statuses: &TabStatuses, tab_id: &str) -> Option<String> {
-    statuses
-        .lock()
-        .unwrap()
+    lock_or_recover(statuses)
         .get(tab_id)
         .map(|s| s.session_id.clone())
         .filter(|id| !id.is_empty())
@@ -34,9 +32,7 @@ fn apply_to_tabs(
     session_id: &str,
     places: &SftpPlaces,
 ) {
-    let tabs: Vec<String> = statuses
-        .lock()
-        .unwrap()
+    let tabs: Vec<String> = lock_or_recover(statuses)
         .iter()
         .filter(|(_, st)| st.session_id == session_id)
         .map(|(tab, _)| tab.clone())

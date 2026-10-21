@@ -24,6 +24,7 @@ mod session_models;
 mod session_runtime;
 mod shortcuts;
 mod sftp_callbacks;
+mod sftp_places;
 mod sftp_ui;
 mod sidebar;
 mod single_instance;
@@ -3651,6 +3652,10 @@ fn open_window(
         store.clone(),
         connect_ctx.clone(),
     );
+
+    // SFTP path bookmarks + recent folders (#500): per-session places stored
+    // in the config store and mirrored into every open tab of that session.
+    sftp_places::wire_sftp_places(&window, store.clone(), tab_statuses.clone());
 
     // ── Grace auto-reconnect (#P3-H) ──────────────────────────────────────
     // Periodic scan: reconnect dropped (non-local) tabs in place, up to
