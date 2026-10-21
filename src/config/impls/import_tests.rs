@@ -441,10 +441,13 @@ fn decoded_literal_ciphertext_prefixes_are_encrypted_on_import() {
     let literal = "enc:v1:synthetic-literal-password-not-ciphertext";
     let mut source = temp_store();
     let mut imported = session("literal-prefix");
-    imported.password = Secret::new(literal);
-    imported.private_key_inline = Secret::new(literal);
+    // The removed writer sealed every secret with the fixed export key; a
+    // fixture that keeps `enc:`-prefixed values plaintext would be rejected by
+    // `decode_import_secret` as an unopenable blob.
+    imported.password = Secret::new(enc_exp_v1(literal));
+    imported.private_key_inline = Secret::new(enc_exp_v1(literal));
     imported.triggers.push(SessionTrigger {
-        response: Secret::new(literal),
+        response: Secret::new(enc_exp_v1(literal)),
         ..SessionTrigger::default()
     });
     source.cache.sessions.push(imported);
@@ -499,10 +502,12 @@ fn literal_encryption_prefix_stays_protected_across_load_and_ordinary_saves() {
     let mut store = temp_store();
     store.cache.webdav_password = Secret::new(literal);
     let mut imported = session("repeated-save");
-    imported.password = Secret::new(literal);
-    imported.private_key_inline = Secret::new(literal);
+    // Same as the other literal fixture: the old writer sealed secrets with
+    // the fixed export key, so an `enc:`-prefixed plaintext would be rejected.
+    imported.password = Secret::new(enc_exp_v1(literal));
+    imported.private_key_inline = Secret::new(enc_exp_v1(literal));
     imported.triggers.push(SessionTrigger {
-        response: Secret::new(literal),
+        response: Secret::new(enc_exp_v1(literal)),
         ..SessionTrigger::default()
     });
     let mut source = temp_store();

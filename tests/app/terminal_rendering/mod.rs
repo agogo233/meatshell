@@ -143,9 +143,9 @@ fn history_search_cjk_queries_report_char_columns() {
     buffer.find_query = "提示".to_string();
     buffer.recompute_find_positions();
     assert_eq!(buffer.find_positions.len(), 4);
-    // Row 0: two hits at char columns 0 and 4 ("aa" = 2 chars, "提示" = 2).
-    assert_eq!(buffer.find_positions[0], (0, 0, 2));
-    assert_eq!(buffer.find_positions[1], (0, 4, 2));
+    // Row 0: two hits at char columns 2 and 6 ("aa" = 2 chars, "提示" = 2).
+    assert_eq!(buffer.find_positions[0], (0, 2, 2));
+    assert_eq!(buffer.find_positions[1], (0, 6, 2));
     // Row 1 at column 0; the live row follows the history (abs index 2).
     assert_eq!(buffer.find_positions[2], (1, 0, 2));
     assert_eq!(buffer.find_positions[3], (2, 0, 2));

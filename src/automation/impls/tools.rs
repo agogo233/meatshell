@@ -376,7 +376,10 @@ mod tests {
         };
         let mut hidden = Session::new_empty();
         hidden.mcp_access = false;
-        let shown = Session::new_empty();
+        // Opted in explicitly: a fresh session now defaults to unexposed
+        // (fail-closed), so "shown" must tick the box itself.
+        let mut shown = Session::new_empty();
+        shown.mcp_access = true;
         assert!(!exposed_to(&hidden, mcp));
         assert!(exposed_to(&shown, mcp));
         assert!(exposed_to(&hidden, Frontend::Cli));

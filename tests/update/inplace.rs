@@ -134,7 +134,7 @@ fn release_with(files: &[(&str, bool)]) -> Release {
             serde_json::json!({
                 "name": name,
                 "browser_download_url":
-                    format!("https://github.com/yituorou/meatshell/releases/download/v0.8.0/{name}"),
+                    format!("https://github.com/agogo233/meatshell/releases/download/v0.8.0/{name}"),
                 "size": 1234,
                 "digest": digest.then(|| format!("sha256:{}", "a".repeat(64))),
             })

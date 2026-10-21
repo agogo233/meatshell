@@ -5,7 +5,7 @@ fn release_body() -> serde_json::Value {
         "tag_name": "v0.8.0", "draft": false, "prerelease": false,
         "assets": [{
             "name": "meatshell-v0.8.0-windows-x86_64.msi",
-            "browser_download_url": "https://github.com/yituorou/meatshell/releases/download/v0.8.0/meatshell-v0.8.0-windows-x86_64.msi",
+            "browser_download_url": "https://github.com/agogo233/meatshell/releases/download/v0.8.0/meatshell-v0.8.0-windows-x86_64.msi",
             "size": 3,
             "digest": format!("sha256:{:x}", Sha256::digest(b"abc"))
         }]
@@ -58,10 +58,10 @@ fn selects_the_matching_official_msi_and_requires_a_digest() {
 #[test]
 fn rejects_unexpected_download_origins_and_release_paths() {
     for url in [
-        "http://github.com/yituorou/meatshell/releases/download/v0.8.0/meatshell-v0.8.0-windows-x86_64.msi",
+        "http://github.com/agogo233/meatshell/releases/download/v0.8.0/meatshell-v0.8.0-windows-x86_64.msi",
         "https://github.com.evil.test/yituorou/meatshell/releases/download/v0.8.0/meatshell-v0.8.0-windows-x86_64.msi",
         "https://github.com/someone/other/releases/download/v0.8.0/meatshell-v0.8.0-windows-x86_64.msi",
-        "https://github.com/yituorou/meatshell/releases/download/v0.7.0/meatshell-v0.8.0-windows-x86_64.msi",
+        "https://github.com/agogo233/meatshell/releases/download/v0.7.0/meatshell-v0.8.0-windows-x86_64.msi",
     ] {
         let mut body = release_body();
         body["assets"][0]["browser_download_url"] = url.into();
