@@ -747,3 +747,162 @@ msgstr "Folders you open will show up here."
 
 msgid "Clear recent"
 msgstr "Clear recent"
+
+msgid "-L: local port → target reached from the server; -R: server port → target reached from here; -D: local SOCKS5 proxy"
+msgstr "-L: local port → target reached from the server; -R: server port → target reached from here; -D: local SOCKS5 proxy"
+
+msgid "AI assistant"
+msgstr "AI assistant"
+
+msgid "Add as quick command"
+msgstr "Add as quick command"
+
+msgid "Ask about terminal output, errors, or commands"
+msgstr "Ask about terminal output, errors, or commands"
+
+msgid "Ask the AI… (terminal selections arrive here)"
+msgstr "Ask the AI… (terminal selections arrive here)"
+
+msgid "Available"
+msgstr "Available"
+
+msgid "Bookmark current path"
+msgstr "Bookmark current path"
+
+msgid "CPU usage"
+msgstr "CPU usage"
+
+msgid "Cache"
+msgstr "Cache"
+
+msgid "Connection closed"
+msgstr "Connection closed"
+
+msgid "Cores"
+msgstr "Cores"
+
+msgid "Driver"
+msgstr "Driver"
+
+msgid "Ed25519"
+msgstr "Ed25519"
+
+msgid "Files"
+msgstr "Files"
+
+msgid "Filesystems"
+msgstr "Filesystems"
+
+msgid "Free"
+msgstr "Free"
+
+msgid "Frequency"
+msgstr "Frequency"
+
+msgid "Generate keypair…"
+msgstr "Generate keypair…"
+
+msgid "Idle"
+msgstr "Idle"
+
+msgid "Large-output protection active"
+msgstr "Large-output protection active"
+
+msgid "Local listen address"
+msgstr "Local listen address"
+
+msgid "Merge panes"
+msgstr "Merge panes"
+
+msgid "Mount point"
+msgstr "Mount point"
+
+msgid "Network interfaces"
+msgstr "Network interfaces"
+
+msgid "No bookmarks for this server"
+msgstr "No bookmarks for this server"
+
+msgid "No data"
+msgstr "No data"
+
+msgid "No match"
+msgstr "No match"
+
+msgid "No tunnels"
+msgstr "No tunnels"
+
+msgid "Only 127.0.0.1 / localhost / ::1 is allowed — other addresses would expose the tunnel to your whole network"
+msgstr "Only 127.0.0.1 / localhost / ::1 is allowed — other addresses would expose the tunnel to your whole network"
+
+msgid "Overview"
+msgstr "Overview"
+
+msgid "Paste and go"
+msgstr "Paste and go"
+
+msgid "RSA"
+msgstr "RSA"
+
+msgid "Receive speed"
+msgstr "Receive speed"
+
+msgid "Received"
+msgstr "Received"
+
+msgid "Replace"
+msgstr "Replace"
+
+msgid "Replace all"
+msgstr "Replace all"
+
+msgid "SFTP"
+msgstr "SFTP"
+
+msgid "Send speed"
+msgstr "Send speed"
+
+msgid "Send to AI"
+msgstr "Send to AI"
+
+msgid "Sent"
+msgstr "Sent"
+
+msgid "Server listen address"
+msgstr "Server listen address"
+
+msgid "Start"
+msgstr "Start"
+
+msgid "Start automatically when connecting"
+msgstr "Start automatically when connecting"
+
+msgid "Stop"
+msgstr "Stop"
+
+msgid "System"
+msgstr "System"
+
+msgid "System information"
+msgstr "System information"
+
+msgid "Total"
+msgstr "Total"
+
+msgid "Tunnels"
+msgstr "Tunnels"
+
+msgid "Upload…"
+msgstr "Upload…"
+
+msgid "Usage"
+msgstr "Usage"
+
+msgid "Used"
+msgstr "Used"
+
+msgid "Vendor"
+msgstr "Vendor"
+
+msgid "DOMAIN\\user or user@domain"
+msgstr "DOMAIN\\user or user@domain"
