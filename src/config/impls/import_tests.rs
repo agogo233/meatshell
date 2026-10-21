@@ -49,7 +49,7 @@ fn enc_exp_v1(plain: &str) -> String {
     );
     format!(
         "enc:exp:v1:{}",
-        String::from_utf8(URL_SAFE_NO_PAD.encode(&blob)).unwrap()
+        URL_SAFE_NO_PAD.encode(&blob)
     )
 }
 
