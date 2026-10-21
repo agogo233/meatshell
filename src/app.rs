@@ -7,6 +7,7 @@
 //!   * Route Slint callbacks to the right domain module.
 mod agents;
 mod auth_dialogs;
+mod aux_windows;
 mod ai;
 pub(crate) mod core;
 mod editor_host;
@@ -3202,6 +3203,13 @@ fn open_window(
     // `match-shortcut`; without this wiring every chord fell through to the
     // terminal as raw input.
     shortcuts::wire_shortcuts(&agent_ctx);
+
+    // Editor window chrome (frameless drag + resize grip) and always-on-top
+    // pin propagation (#450): a pinned main window must not cover its own
+    // monitor / editor windows. Main-window process/system-info callbacks are
+    // registered inline above (this window's single-file equivalents).
+    aux_windows::wire_editor_window_chrome(&agent_ctx);
+    aux_windows::wire_pin_on_top(&agent_ctx);
 
     // Recompute the sidebar whenever the active tab changes (fired from Slint's
     // `changed active-tab-id`).
