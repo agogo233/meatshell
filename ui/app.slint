@@ -95,7 +95,7 @@ export struct TerminalState {
     sftp-sort-dir: int,         // 0 default / 1 asc / -1 desc (#248)
     sftp-bookmarks: [string],   // saved paths for this tab's server (bookmark menu)
     sftp-available: bool,       // false for local/serial/telnet sessions
-    sftp-bookmarks: [string],   // this session's bookmarked folders (#500)
+    sftp-places-bookmarks: [string], // this session's bookmarked folders (#500)
     sftp-recent: [string],      // recently visited folders, newest first (#500)
     sftp-bookmarked: bool,      // current sftp-path is bookmarked (#500)
     font-size: int,             // per-session zoom override in px (0 = follow window)
@@ -944,6 +944,11 @@ export component AppWindow inherits Window {
     in-out property <string> sftp-sort-key: "";
     in-out property <int> sftp-sort-dir: 0;
     in-out property <[string]> sftp-bookmarks;
+    // Per-session SFTP places (#500): bookmarks + recently visited folders
+    // mirrored from the active tab's row, like the per-server bookmarks above.
+    in-out property <[string]> sftp-places-bookmarks;
+    in-out property <[string]> sftp-recent;
+    in-out property <bool> sftp-bookmarked: false;
     in-out property <[TunnelInfo]> sftp-tunnels;
     in-out property <string> sftp-current-tab-id: "";
     // Confirm-before-close when there are live session tabs (#88): a stray
@@ -3230,6 +3235,9 @@ export component AppWindow inherits Window {
                     tree-width: root.sftp-tree-width;
                     persist-tree-width(v) => { root.persist-sftp-tree-width(v); }
                     bookmarks: root.sftp-bookmarks;
+                    places-bookmarks: root.sftp-places-bookmarks;
+                    places-recent: root.sftp-recent;
+                    places-bookmarked: root.sftp-bookmarked;
                     tunnels: root.sftp-tunnels;
                     collapsed: false;
                     compact: false;
@@ -3266,6 +3274,12 @@ export component AppWindow inherits Window {
                     bookmark-add() => { root.sftp-bookmark-add(root.sftp-current-tab-id); }
                     bookmark-jump(path) => { root.sftp-navigate(root.sftp-current-tab-id, path); }
                     bookmark-remove(path) => { root.sftp-bookmark-remove(root.sftp-current-tab-id, path); }
+                    // Per-session places (#500): the star toggles / drops
+                    // bookmarks, navigation reuses the same sftp-navigate path.
+                    places-toggle-bookmark(path) => { root.sftp-toggle-bookmark(root.sftp-current-tab-id, path); }
+                    places-remove-bookmark(path) => { root.sftp-remove-bookmark(root.sftp-current-tab-id, path); }
+                    places-clear-recent() => { root.sftp-clear-recent(root.sftp-current-tab-id); }
+                    places-refresh() => { root.sftp-places-refresh(root.sftp-current-tab-id); }
                     download(path) => { root.sftp-download(root.sftp-current-tab-id, path); }
                     open-file(path) => { root.sftp-open-file(root.sftp-current-tab-id, path); }
                     upload-clicked(dir, folder) => { root.sftp-upload-clicked(root.sftp-current-tab-id, dir, folder); }

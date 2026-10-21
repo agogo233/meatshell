@@ -247,6 +247,16 @@ export component SftpPanel inherits Rectangle {
     callback bookmark-add();
     callback bookmark-jump(string /* path */);
     callback bookmark-remove(string /* path */);
+    // Per-session places (#500): bookmark star + recently visited folders.
+    // Navigation reuses `bookmark-jump` — jumping to a path is data-source
+    // agnostic; only the list the user picks from differs.
+    in property <[string]> places-bookmarks: [];
+    in property <[string]> places-recent: [];
+    in property <bool> places-bookmarked: false;
+    callback places-toggle-bookmark(string /* path */);
+    callback places-remove-bookmark(string /* path */);
+    callback places-clear-recent();
+    callback places-refresh();
     callback new-folder(string /* parent dir */);
     callback new-file(string /* parent dir */);
     // Drag-to-dock: empty areas of the panel are a grab handle; coordinates are
@@ -614,6 +624,135 @@ export component SftpPanel inherits Rectangle {
                                                 Text { text: "×"; color: Theme.danger; font-size: Theme.fs-md;
                                                        horizontal-alignment: center; vertical-alignment: center; }
                                             }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Places (#500): this session's bookmarked folders + recently
+                    // visited folders, one star button that also toggles the
+                    // current path. Per-server bookmarks keep their own menu.
+                    if root.panel-mode == "files" : Rectangle {
+                        width: 24px; height: 22px;
+                        border-radius: Theme.radius-sm;
+                        background: pm-ta.has-hover ? Theme.bg-hover : transparent;
+                        pm-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                // Re-sync from the store: another window may have
+                                // changed this session's places since we last drew.
+                                root.places-refresh();
+                                places-menu.show();
+                            }
+                        }
+                        Text { text: root.places-bookmarked ? "\u{E838}" : "\u{E83A}"; font-family: "Material Icons";
+                               color: root.places-bookmarked ? Theme.accent : Theme.text-secondary;
+                               font-size: Theme.fs-sm;
+                               horizontal-alignment: center;
+                               vertical-alignment: center; }
+                        places-menu := PopupWindow {
+                            x: max(parent.width - self.width, -(parent.absolute-position.x - root.absolute-position.x));
+                            y: parent.height + 2px;
+                            width: min(300px, max(112px, root.width - 8px));
+                            height: (2 + min(root.places-bookmarks.length, 6) + 1 + min(root.places-recent.length, 6)) * 27px + 8px;
+                            Rectangle {
+                                background: Theme.popup-bg;
+                                border-radius: Theme.radius-sm;
+                                border-width: 1px;
+                                border-color: Theme.border-strong;
+                                drop-shadow-blur: 12px;
+                                drop-shadow-color: #00000060;
+                                ScrollView {
+                                    width: parent.width; height: parent.height;
+                                    content-width: self.visible-width;
+                                    content-height: max(self.visible-height, pm-body.preferred-height);
+                                    pm-body := VerticalLayout {
+                                        padding: 4px;
+                                        spacing: 1px;
+                                        SftpMenuItem {
+                                            label: root.places-bookmarked
+                                                ? @tr("Remove current path from bookmarks")
+                                                : @tr("Bookmark current path");
+                                            clicked => { root.places-toggle-bookmark(root.current-path); }
+                                        }
+                                        if root.places-bookmarks.length == 0 : Text {
+                                            text: @tr("No bookmarks for this session");
+                                            color: Theme.text-muted;
+                                            font-size: Theme.fs-sm;
+                                            height: 26px; vertical-alignment: center;
+                                            padding-left: 10px;
+                                        }
+                                        for bm in root.places-bookmarks : Rectangle {
+                                            height: 26px;
+                                            border-radius: Theme.radius-sm;
+                                            background: pm-row-ta.has-hover ? Theme.bg-hover : transparent;
+                                            pm-row-ta := TouchArea {
+                                                mouse-cursor: pointer;
+                                                clicked => { root.bookmark-jump(bm); }
+                                            }
+                                            HorizontalLayout {
+                                                padding-left: 10px;
+                                                padding-right: 4px;
+                                                spacing: 2px;
+                                                Text {
+                                                    horizontal-stretch: 1;
+                                                    text: bm;
+                                                    color: Theme.text-primary;
+                                                    font-size: Theme.fs-sm;
+                                                    vertical-alignment: center;
+                                                    overflow: elide;
+                                                }
+                                                Rectangle {
+                                                    width: 20px; height: 20px;
+                                                    border-radius: 3px;
+                                                    background: pm-del-ta.has-hover ? Theme.danger.with-alpha(0.25) : transparent;
+                                                    pm-del-ta := TouchArea {
+                                                        mouse-cursor: pointer;
+                                                        clicked => { root.places-remove-bookmark(bm); }
+                                                    }
+                                                    Text { text: "×"; color: Theme.danger; font-size: Theme.fs-md;
+                                                           horizontal-alignment: center; vertical-alignment: center; }
+                                                }
+                                            }
+                                        }
+                                        Rectangle { height: 1px; background: Theme.border-subtle; }
+                                        Text {
+                                            text: @tr("Recent");
+                                            color: Theme.text-muted;
+                                            font-size: Theme.fs-xs;
+                                            height: 22px; vertical-alignment: center;
+                                            padding-left: 10px;
+                                        }
+                                        if root.places-recent.length == 0 : Text {
+                                            text: @tr("No recent folders");
+                                            color: Theme.text-muted;
+                                            font-size: Theme.fs-sm;
+                                            height: 26px; vertical-alignment: center;
+                                            padding-left: 10px;
+                                        }
+                                        for rc in root.places-recent : Rectangle {
+                                            height: 26px;
+                                            border-radius: Theme.radius-sm;
+                                            background: rc-row-ta.has-hover ? Theme.bg-hover : transparent;
+                                            rc-row-ta := TouchArea {
+                                                mouse-cursor: pointer;
+                                                clicked => { root.bookmark-jump(rc); }
+                                            }
+                                            Text {
+                                                x: 10px;
+                                                width: parent.width - 20px;
+                                                text: rc;
+                                                color: Theme.text-secondary;
+                                                font-size: Theme.fs-sm;
+                                                vertical-alignment: center;
+                                                overflow: elide;
+                                            }
+                                        }
+                                        SftpMenuItem {
+                                            label: @tr("Clear recent");
+                                            clicked => { root.places-clear-recent(); }
                                         }
                                     }
                                 }

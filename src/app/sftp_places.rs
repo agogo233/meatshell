@@ -26,6 +26,10 @@ fn session_of(statuses: &TabStatuses, tab_id: &str) -> Option<String> {
 }
 
 /// Push `places` into every open tab (in this window) of `session_id`.
+///
+/// `sftp_bookmarks` on the tab row belongs to the older per-server menu; the
+/// #500 per-session list lives in its own `sftp_places_bookmarks` field so the
+/// two systems never fight over one model.
 fn apply_to_tabs(
     window: &AppWindow,
     statuses: &TabStatuses,
@@ -46,11 +50,20 @@ fn apply_to_tabs(
         if !tabs.iter().any(|t| t == row.id.as_str()) {
             continue;
         }
-        row.sftp_bookmarks = string_model(&places.bookmarks);
+        row.sftp_places_bookmarks = string_model(&places.bookmarks);
         row.sftp_recent = string_model(&places.recent);
         row.sftp_bookmarked = places.is_bookmarked(row.sftp_path.as_str());
         tm.set_row_data(i, row);
     }
+    mirror_places_to_panel(window, tm);
+}
+
+/// Re-mirror the active tab's places onto AppWindow's properties: these
+/// callbacks fire without an intervening session event, so without this the
+/// docked SftpPanel would keep showing stale stars / lists until the next tab
+/// switch or directory navigation.
+fn mirror_places_to_panel(window: &AppWindow, terminals: &VecModel<TerminalState>) {
+    super::sync_active_sftp_to_root(window, terminals);
 }
 
 /// Change one session's places, persist, and refresh its open tabs.
@@ -79,6 +92,13 @@ fn edit_places(
     } else {
         // Nothing to persist, but the star still has to follow the path.
         set_bookmarked_flag(window, tab_id, &places);
+        let terminals = window.get_terminals();
+        if let Some(tm) = terminals
+            .as_any()
+            .downcast_ref::<VecModel<TerminalState>>()
+        {
+            mirror_places_to_panel(window, tm);
+        }
     }
 }
 

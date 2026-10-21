@@ -906,3 +906,15 @@ msgstr "Vendor"
 
 msgid "DOMAIN\\user or user@domain"
 msgstr "DOMAIN\\user or user@domain"
+msgid "Remove current path from bookmarks"
+msgstr "Remove current path from bookmarks"
+
+msgid "No bookmarks for this session"
+msgstr "No bookmarks for this session"
+
+msgid "Recent"
+msgstr "Recent"
+
+msgid "No recent folders"
+msgstr "No recent folders"
+

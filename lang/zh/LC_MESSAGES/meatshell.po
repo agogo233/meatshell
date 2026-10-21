@@ -800,7 +800,7 @@ msgid "Generate keypair…"
 msgstr "生成密钥对…"
 
 msgid "Idle"
-msgstr "空闲"
+msgstr "空闲率"
 
 msgid "Large-output protection active"
 msgstr "大输出保护已生效"
@@ -903,3 +903,15 @@ msgstr "厂商"
 
 msgid "DOMAIN\\user or user@domain"
 msgstr "DOMAIN\\user 或 user@domain"
+msgid "Remove current path from bookmarks"
+msgstr "从书签移除当前路径"
+
+msgid "No bookmarks for this session"
+msgstr "该会话暂无书签"
+
+msgid "Recent"
+msgstr "最近访问"
+
+msgid "No recent folders"
+msgstr "暂无最近文件夹"
+
