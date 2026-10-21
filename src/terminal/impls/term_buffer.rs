@@ -68,12 +68,19 @@ fn collect_ci_matches(
     }
     let lower = text.to_lowercase();
     let mut search_from = 0usize;
+    // Running char count of everything before `search_from`. The old code
+    // re-counted `lower[..abs_byte].chars()` per match, which is O(matches x
+    // line); a long tail of hits on one line (repeated tokens) made the CJK
+    // history scan visibly quadratic.
+    let mut char_base = 0usize;
     while out.len() < MAX_FIND_POSITIONS {
         let Some(byte_pos) = lower[search_from..].find(q) else { break };
         let abs_byte = search_from + byte_pos;
-        let char_start = lower[..abs_byte].chars().count();
+        let char_start = char_base + lower[search_from..abs_byte].chars().count();
         out.push((abs_row, char_start, q_chars));
-        search_from = abs_byte + q.len();
+        let next = search_from + byte_pos + q.len();
+        char_base += lower[search_from..next].chars().count();
+        search_from = next;
     }
 }
 

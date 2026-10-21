@@ -8766,48 +8766,78 @@ fn wire_key_input(
     // Context menu → 查找: store the query and recompute highlight rectangles.
     // Buffer mode highlights the visible window (legacy); history mode indexes
     // every match across scrollback + live and scrolls to the first one.
+    //
+    // History mode rescans the whole scrollback (up to MAX_HISTORY rows) while
+    // holding the terminal lock, so every keystroke used to block the UI thread
+    // and the PTY ingest behind the same mutex. Buffer mode only scans the
+    // visible window and stays immediate; the scan only covers the *changed*
+    // query, so coalescing keystrokes never loses input: the timer always runs
+    // with the latest (tab, query) pair.
     {
         let bufs_find = bufs.clone();
         let weak = window.as_weak();
+        // Latest (tab-id, query) awaiting the debounced history scan. Empty id
+        // = nothing pending (already consumed by a timer). All fields Send so
+        // the timer callback stays Send (slint::Timer requires it — plain Rc
+        // types cannot cross into the timer closure).
+        let pending_scan: Arc<Mutex<(String, String)>> = Arc::default();
         window.on_find_query_changed(move |tab_id: SharedString, query: SharedString| {
             let tid = tab_id.to_string();
             let q = query.to_string();
-            let (matches, jumped, history_mode) = with_term_buf(&bufs_find, &tid, |buf| {
+            let history_mode = with_term_buf(&bufs_find, &tid, |buf| {
                 buf.find_query = q.clone();
-                if buf.search_history_mode {
-                    buf.recompute_find_positions();
-                    let scrolled = if buf.find_positions.is_empty() {
-                        false
-                    } else {
-                        let (abs_row, _, _) = buf.find_positions[0];
-                        buf.scroll_to_abs_row(abs_row)
-                    };
-                    if scrolled {
-                        buf.render();
-                    }
-                    let m = compute_find_matches(&buf.displayed_text, &q);
-                    (m, scrolled, true)
-                } else {
+                buf.search_history_mode
+            })
+            .unwrap_or(false);
+            if !history_mode {
+                let (matches, jumped) = with_term_buf(&bufs_find, &tid, |buf| {
                     let mut matches = compute_find_matches(&buf.displayed_text, &q);
                     let jumped = matches.is_empty() && buf.scroll_to_first_find_match(&q);
                     if jumped {
                         buf.render();
                         matches = compute_find_matches(&buf.displayed_text, &q);
                     }
-                    (matches, jumped, false)
+                    (matches, jumped)
+                })
+                .unwrap_or_default();
+                if let Some(win) = weak.upgrade() {
+                    if jumped {
+                        rebuild_tab_display(&win, &bufs_find, &tid);
+                        return;
+                    }
+                    let model = ModelRc::from(Rc::new(VecModel::from(matches)));
+                    set_terminal_row(&win, &tid, |row| {
+                        row.find_matches = model.clone();
+                    });
                 }
-            })
-            .unwrap_or_default();
-            if let Some(win) = weak.upgrade() {
-                if jumped || history_mode {
-                    rebuild_tab_display(&win, &bufs_find, &tid);
-                    return;
-                }
-                let model = ModelRc::from(Rc::new(VecModel::from(matches)));
-                set_terminal_row(&win, &tid, |row| {
-                    row.find_matches = model.clone();
-                });
+                return;
             }
+            // History mode: debounce the full scrollback scan (#find-debounce).
+            *lock_or_recover(&pending_scan) = (tid, q);
+            let bufs_scan = bufs_find.clone();
+            let weak_scan = weak.clone();
+            let pending = pending_scan.clone();
+            slint::Timer::single_shot(std::time::Duration::from_millis(150), move || {
+                let (tid, _q) = std::mem::take(&mut *lock_or_recover(&pending));
+                if tid.is_empty() {
+                    return; // consumed by a newer keystroke's timer
+                }
+                with_term_buf(&bufs_scan, &tid, |buf| {
+                    buf.recompute_find_positions();
+                    if !buf.find_positions.is_empty() {
+                        let (abs_row, _, _) = buf.find_positions[0];
+                        if buf.scroll_to_abs_row(abs_row) {
+                            buf.render();
+                        }
+                    }
+                });
+                if let Some(win) = weak_scan.upgrade() {
+                    // History mode always rebuilds: the tab display carries the
+                    // "n/total" match counter fed from `find_positions`, which
+                    // changed even when the view did not scroll.
+                    rebuild_tab_display(&win, &bufs_scan, &tid);
+                }
+            });
         });
     }
     // Find bar → next / previous (history mode navigation).

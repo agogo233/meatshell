@@ -127,6 +127,31 @@ fn history_search_empty_query_clears_positions() {
 }
 
 #[test]
+fn history_search_cjk_queries_report_char_columns() {
+    // CJK queries take the non-ASCII path: hits must report *character*
+    // columns (highlight geometry), not byte offsets — and the running char
+    // counter must stay correct across repeated hits on one line (the old
+    // implementation re-counted from the line start per match).
+    let mut buffer = make_buf(
+        3,
+        40,
+        &["aa提示aa提示", "提示"],
+        &["提示"],
+        0,
+    );
+    buffer.search_history_mode = true;
+    buffer.find_query = "提示".to_string();
+    buffer.recompute_find_positions();
+    assert_eq!(buffer.find_positions.len(), 4);
+    // Row 0: two hits at char columns 0 and 4 ("aa" = 2 chars, "提示" = 2).
+    assert_eq!(buffer.find_positions[0], (0, 0, 2));
+    assert_eq!(buffer.find_positions[1], (0, 4, 2));
+    // Row 1 at column 0; the live row follows the history (abs index 2).
+    assert_eq!(buffer.find_positions[2], (1, 0, 2));
+    assert_eq!(buffer.find_positions[3], (2, 0, 2));
+}
+
+#[test]
 fn scrollback_navigation_keys_only_handle_a_scrolled_normal_screen() {
     let mut buffer = make_buf(
         3,
