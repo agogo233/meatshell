@@ -150,7 +150,7 @@ pub(super) fn wire_tab_callbacks(
             }
 
             if let Some(h) = crate::app::term_buf(&bufs, id.as_str()) {
-                h.lock().unwrap().release_history_keep_screen();
+                super::lock_or_recover(&h).release_history_keep_screen();
             }
 
             tab_titles.borrow_mut().remove(&id);

@@ -942,6 +942,12 @@ fn to_hl_line(built: &BuiltLine, dark: bool, box_positions: &[usize]) -> HlLine 
             let mut cur = 0usize;
             for p in in_seg {
                 let rel = p - pos;
+                // Width of the boxed character in bytes (1 for ASCII brackets).
+                let boxed_len = text[rel..]
+                    .chars()
+                    .next()
+                    .map(char::len_utf8)
+                    .unwrap_or(1);
                 if rel > cur {
                     segments.push(HlSeg {
                         text: (&text[cur..rel]).into(),
@@ -950,11 +956,16 @@ fn to_hl_line(built: &BuiltLine, dark: bool, box_positions: &[usize]) -> HlLine 
                     });
                 }
                 segments.push(HlSeg {
-                    text: (&text[rel..rel + 1]).into(),
+                    // Split on the char boundary, not a fixed byte: brackets are
+                    // ASCII-only today (bracket.rs OPEN/CLOSE are single-byte
+                    // u8), but a future full-width bracket would make
+                    // `&text[rel..rel+1]` panic — and release builds use
+                    // panic = "abort".
+                    text: (&text[rel..rel + boxed_len]).into(),
                     color: role_color(*role, dark),
                     boxed: true,
                 });
-                cur = rel + 1;
+                cur = rel + boxed_len;
             }
             if cur < len {
                 segments.push(HlSeg {

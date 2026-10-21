@@ -537,7 +537,7 @@ async fn run_sftp(
             // connect-time full getent dump that started above.
             wait_owner_prefetch(&names_ready_rx, Duration::from_secs(3)).await;
             let mut entries = entries;
-            let need = owner_cache.lock().unwrap().apply(&mut entries);
+            let need = lock_or_recover(&owner_cache).apply(&mut entries);
             let _ = events.send(SessionEvent::SftpEntries {
                 path: home.clone(),
                 entries: entries.clone(),
@@ -1643,7 +1643,7 @@ async fn run_sftp(
                 });
             }
             SftpCommand::FinishDragTransfer(progress) => {
-                cancels.lock().unwrap().remove(&progress.id);
+                lock_or_recover(&cancels).remove(&progress.id);
                 progress.emit_final(&events);
             }
         }
@@ -1730,7 +1730,7 @@ impl super::transfer::DragTransfer {
     /// Bytes to show as an in-progress row, or `None` when nothing should be
     /// emitted (finished already, or throttled to one update per 150 ms).
     pub(crate) fn progress_update(&self, force: bool) -> Option<u64> {
-        let mut report = self.report.lock().unwrap();
+        let mut report = lock_or_recover(&self.report);
         if report.finished {
             return None;
         }
@@ -1750,7 +1750,7 @@ impl super::transfer::DragTransfer {
     /// The row's final `(state, bytes, message)`, once. `None` if the drag
     /// never transferred anything (no row was created) or already finished.
     pub(crate) fn final_update(&self) -> Option<(u8, u64, String)> {
-        let mut report = self.report.lock().unwrap();
+        let mut report = lock_or_recover(&self.report);
         if report.finished {
             return None;
         }
@@ -1770,7 +1770,7 @@ impl super::transfer::DragTransfer {
 
     /// Remember the first failure; it decides the final row.
     pub(crate) fn fail(&self, message: String) {
-        let mut report = self.report.lock().unwrap();
+        let mut report = lock_or_recover(&self.report);
         if report.error.is_none() {
             report.error = Some(message);
         }
@@ -2624,7 +2624,7 @@ async fn enrich_entries_with_owners(
     cache: &SharedOwnerCache,
     mut entries: Vec<RemoteEntry>,
 ) -> (Vec<RemoteEntry>, bool) {
-    let need = cache.lock().unwrap().apply(&mut entries);
+    let need = lock_or_recover(&cache).apply(&mut entries);
     if need.is_complete() {
         // Warm cache (or nothing to resolve): names are already in place.
         return (entries, false);
@@ -2634,7 +2634,7 @@ async fn enrich_entries_with_owners(
         OwnerLookup::Parsed { owners, groups } => {
             let gained = !owners.is_empty() || !groups.is_empty();
             {
-                let mut cache = cache.lock().unwrap();
+                let mut cache = lock_or_recover(&cache);
                 cache.absorb_resolved(&need, owners, groups);
                 cache.apply(&mut entries);
             }
@@ -2679,7 +2679,7 @@ getent passwd 2>/dev/null; printf '\\n--MEATSHELL-GROUPS--\\n'; getent group 2>/
         return;
     }
     let (owners, groups) = parse_owner_lookup_output(&output);
-    cache.lock().unwrap().absorb_full_lookup(owners, groups);
+    lock_or_recover(&cache).absorb_full_lookup(owners, groups);
 }
 
 /// Publish a directory listing to the UI with owner names filled in.
@@ -2697,7 +2697,7 @@ async fn publish_dir_entries(
 ) {
     wait_owner_prefetch(names_ready, Duration::from_millis(1500)).await;
     let mut entries = entries;
-    let need = cache.lock().unwrap().apply(&mut entries);
+    let need = lock_or_recover(&cache).apply(&mut entries);
     if need.is_complete() {
         let _ = events.send(SessionEvent::SftpEntries { path, entries });
         return;

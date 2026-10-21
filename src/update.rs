@@ -10,8 +10,11 @@ pub mod inplace;
 #[cfg(windows)]
 pub mod windows;
 
-pub const RELEASE_PAGE: &str = "https://github.com/yituorou/meatshell/releases/latest";
-const RELEASE_API: &str = "https://api.github.com/repos/yituorou/meatshell/releases/latest";
+// Fork distribution point: this build's releases live on the fork (agogo233),
+// not upstream (yituorou) — pointing at upstream would offer users an
+// "upgrade" back to a build without the fork's own fixes (#update-fork-repo).
+pub const RELEASE_PAGE: &str = "https://github.com/agogo233/meatshell/releases/latest";
+const RELEASE_API: &str = "https://api.github.com/repos/agogo233/meatshell/releases/latest";
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Release {
@@ -88,7 +91,7 @@ impl Release {
                 && url.fragment().is_none()
                 && url.path()
                     == format!(
-                        "/yituorou/meatshell/releases/download/{}/{name}",
+                        "/agogo233/meatshell/releases/download/{}/{name}",
                         self.tag_name
                     ),
             "Unexpected installer download URL"

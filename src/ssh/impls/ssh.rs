@@ -1042,6 +1042,13 @@ struct RuntimeForward {
     forward: PortForward,
 }
 
+/// Lock a mutex, recovering the guard from a poisoned lock instead of panicking
+/// (same contract as `app::lock_or_recover`): a panic on the session worker
+/// must not take the whole session down with it.
+fn lock_or_recover<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 type RemoteForwardMap = Arc<std::sync::Mutex<std::collections::HashMap<u32, (String, u16)>>>;
 
 fn normalized_bind_addr(f: &PortForward) -> String {
@@ -1150,7 +1157,7 @@ async fn start_remote_forward(
     let mut info = tunnel_info(id, &forward, false, t("启动失败", "failed"));
     let port = forward.bind_port as u32;
     let bind = info.bind_addr.clone();
-    let duplicate = targets.lock().unwrap().contains_key(&port);
+    let duplicate = lock_or_recover(targets).contains_key(&port);
     if duplicate {
         let _ = events.send(SessionEvent::Output(format!(
             "\r\n[meatshell] -R {bind}:{port} {}\r\n",
@@ -1176,7 +1183,7 @@ async fn start_remote_forward(
                 )));
             }
             Err(error) => {
-                targets.lock().unwrap().remove(&port);
+                lock_or_recover(targets).remove(&port);
                 let _ = events.send(SessionEvent::Output(format!(
                     "\r\n[meatshell] -R {bind}:{port} 请求失败 / request failed: {error}\r\n"
                 )));
@@ -1213,7 +1220,7 @@ async fn stop_runtime_forward(
             )));
             return false;
         }
-        targets.lock().unwrap().remove(&port);
+        lock_or_recover(targets).remove(&port);
     }
     if let Some(task) = entry.task.take() {
         task.abort();

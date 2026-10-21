@@ -103,7 +103,10 @@ impl SystemSampler {
             mem_total_mib: mem_total / 1024 / 1024,
             swap_used_mib: swap_used / 1024 / 1024,
             swap_total_mib: swap_total / 1024 / 1024,
-            net_bytes_per_sec: net_rx_per_sec + net_tx_per_sec,
+            // Saturating like the per-NIC accumulations above: two near-u64::MAX
+            // rates could overflow a plain add (theoretically unreachable, but
+            // the wrap would show a plausible-looking tiny number).
+            net_bytes_per_sec: net_rx_per_sec.saturating_add(net_tx_per_sec),
             net_rx_per_sec,
             net_tx_per_sec,
             disks,

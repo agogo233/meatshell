@@ -1251,9 +1251,10 @@ fn open_window(
                 s.session_log_dir()
             };
             // Apply to tabs that are already open, not only to new ones.
-            let handles: Vec<TermBufferHandle> = bufs.lock().unwrap().values().cloned().collect();
+            let handles: Vec<TermBufferHandle> =
+                lock_or_recover(&bufs).values().cloned().collect();
             for handle in handles {
-                apply_session_log_to_buffer(&mut handle.lock().unwrap(), enabled, &dir);
+                apply_session_log_to_buffer(&mut lock_or_recover(&handle), enabled, &dir);
             }
         });
     }
@@ -2514,6 +2515,12 @@ fn open_window(
         window.on_stack_split_drag(
             move |edge: SharedString, index: i32, pos: f32, axis_start: f32, axis_len: f32| {
                 let edge = edge.to_string();
+                // The index arrives as Slint `int`; a negative value would wrap
+                // to a huge usize and slip past `set_ratio`'s bounds check
+                // (release builds wrap integers instead of panicking).
+                let Ok(index) = usize::try_from(index) else {
+                    return;
+                };
                 let ratio = if axis_len > 0.0 {
                     ((pos - axis_start) / axis_len).clamp(0.02, 0.98)
                 } else {
@@ -2521,7 +2528,7 @@ fn open_window(
                 };
                 {
                     let mut lay = ds2.borrow_mut();
-                    lay.set_ratio(&edge, index as usize, ratio);
+                    lay.set_ratio(&edge, index, ratio);
                 }
                 if let Some(w) = weak2.upgrade() {
                     refresh_dock(&w, &ds2, &pm2, &dm2, da2.get());
