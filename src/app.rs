@@ -6148,6 +6148,19 @@ fn wire_session_callbacks(
         });
     }
 
+    // Active dialog connection test: a spawned runtime task (SSH handshake /
+    // TCP reachability / serial open) with its abort handle, so
+    // `stop-test` / `closed` / `changed` can cancel an in-flight test instead
+    // of leaving a fire-and-forget task whose late host-key / credential / MFA
+    // prompts would pop up against a closed or edited dialog (#276).
+    // A finished handle stays in the slot (aborting it is a no-op); the
+    // lifecycle callbacks check `is_finished` before reporting a cancel so an
+    // already-reported result is never overwritten with "cancelled".
+    struct ActiveTest {
+        handle: tokio::task::JoinHandle<()>,
+    }
+    let active_test: Rc<RefCell<Option<ActiveTest>>> = Rc::new(RefCell::new(None));
+
     // Test connection from the session dialog. SSH tests use the same handshake,
     // host-key verification, proxy/jump routing, and authentication as a real
     // terminal connection (#276). Telnet and serial retain reachability tests.
@@ -6158,6 +6171,20 @@ fn wire_session_callbacks(
         let edit_forwards = edit_forwards.clone();
         let edit_triggers = edit_triggers.clone();
         let edit_trigger_secrets = edit_trigger_secrets.clone();
+        let active_test = active_test.clone();
+        // Replace any in-flight test with this one (upstream
+        // `EditorTest::begin` semantics without the draft snapshot).
+        let begin_test = |runtime: &tokio::runtime::Runtime,
+                          active_test: &Rc<RefCell<Option<ActiveTest>>>,
+                          task: impl std::future::Future<Output = ()> + Send + 'static| {
+            if let Some(old) = active_test.borrow_mut().take() {
+                if !old.handle.is_finished() {
+                    old.handle.abort();
+                }
+            }
+            let handle = runtime.spawn(task);
+            *active_test.borrow_mut() = Some(ActiveTest { handle });
+        };
         window.on_session_dialog_test(move |draft: SessionDraft| {
             let kind = draft.kind.to_string();
             if kind == "serial" {
@@ -6168,7 +6195,7 @@ fn wire_session_callbacks(
                     draft.baud_rate as u32
                 };
                 let weak_done = weak.clone();
-                runtime.spawn(async move {
+                begin_test(&runtime, &active_test, async move {
                     let message = match tokio::task::spawn_blocking(move || {
                         serialport::new(&port_name, baud)
                             .timeout(std::time::Duration::from_millis(800))
@@ -6220,7 +6247,7 @@ fn wire_session_callbacks(
                     }
                 };
                 let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
-                runtime.spawn(async move {
+                begin_test(&runtime, &active_test, async move {
                     let mut test = Box::pin(test_session_auth(session, jump, events_tx));
                     let result = loop {
                         tokio::select! {
@@ -6308,7 +6335,7 @@ fn wire_session_callbacks(
 
             let host = session.host;
             let port = session.port;
-            runtime.spawn(async move {
+            begin_test(&runtime, &active_test, async move {
                 let target = format!("{host}:{port}");
                 let result = tokio::time::timeout(
                     std::time::Duration::from_secs(3),
@@ -6326,6 +6353,56 @@ fn wire_session_callbacks(
                     }
                 });
             });
+        });
+    }
+
+    // Dialog test lifecycle (#276): stop an in-flight connection test when the
+    // user presses "Stop test", closes the dialog, or edits the draft. Without
+    // these the spawned test task kept running fire-and-forget and its late
+    // host-key / credential / MFA prompts popped up against a closed dialog.
+    {
+        let weak = window.as_weak();
+        let active_test = active_test.clone();
+        window.on_session_dialog_stop_test(move || {
+            let old = active_test.borrow_mut().take();
+            let in_flight = old.as_ref().is_some_and(|o| !o.handle.is_finished());
+            if let Some(o) = old {
+                if in_flight {
+                    o.handle.abort();
+                }
+            }
+            if in_flight {
+                if let Some(w) = weak.upgrade() {
+                    w.set_dialog_test_status(t("测试已取消", "Test cancelled").into());
+                }
+            }
+        });
+    }
+    {
+        let weak = window.as_weak();
+        let active_test = active_test.clone();
+        window.on_session_dialog_closed(move || {
+            if let Some(old) = active_test.borrow_mut().take() {
+                if !old.handle.is_finished() {
+                    old.handle.abort();
+                }
+            }
+            if let Some(w) = weak.upgrade() {
+                w.set_dialog_test_status("".into());
+            }
+        });
+    }
+    {
+        // Editing the draft invalidates the running test (its values no longer
+        // match what is being tested). No snapshot matching here: cancelling on
+        // every edit is predictable and cheap — the user re-runs the test.
+        let active_test = active_test.clone();
+        window.on_session_dialog_changed(move || {
+            if let Some(old) = active_test.borrow_mut().take() {
+                if !old.handle.is_finished() {
+                    old.handle.abort();
+                }
+            }
         });
     }
 
