@@ -5594,6 +5594,10 @@ fn wire_session_callbacks(
                 w.set_dialog_key_inline("".into());
                 w.set_dialog_key_inline_mode(!session.private_key_inline.is_empty());
                 w.set_dialog_test_status("".into());
+                // Backfill the MCP-exposure opt-in from the saved session: the
+                // dialog starts unchecked (fail-closed), so without this the
+                // user's existing opt-in would silently flip off on save.
+                w.set_dialog_allow_mcp_access(session.mcp_access);
                 let (proxy_type, proxy_hostport) = split_proxy(session.proxy.as_str());
                 w.set_dialog_proxy_type(proxy_type.into());
                 w.set_dialog_proxy_hostport(proxy_hostport.into());

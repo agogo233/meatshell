@@ -443,10 +443,13 @@ export component InterfacePanel inherits Rectangle {
     callback check-for-updates();
     callback update-action();
     callback open-update-url();
-    in-out property <bool> mcp-enabled: true;
-    in-out property <bool> mcp-use-saved-credentials: true;
-    in-out property <bool> mcp-allow-commands: true;
-    in-out property <bool> mcp-allow-file-transfers: true;
+    // MCP / remote control: fail-closed defaults (see config_file.rs
+    // default_mcp_preview_enabled). The values are pushed from the store
+    // after load; these initial values only matter before the first push.
+    in-out property <bool> mcp-enabled: false;
+    in-out property <bool> mcp-use-saved-credentials: false;
+    in-out property <bool> mcp-allow-commands: false;
+    in-out property <bool> mcp-allow-file-transfers: false;
     in-out property <float> wallpaper-overlay;   // frosted-panel opacity 0.30-1.00
     // Active wallpaper id: "" / "builtin:light" / "builtin:dark" / a file path.
     in property <string> current-wallpaper;

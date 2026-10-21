@@ -206,8 +206,10 @@ pub struct Session {
     pub allow_secret_reveal: bool,
     /// Expose this session to MCP clients (#432). When false, MCP tools treat
     /// it as nonexistent and refuse routes that use it as a jump host. The CLI
-    /// is unaffected. Absent in older configs → true, preserving behaviour.
-    #[serde(default = "default_true")]
+    /// is unaffected. Absent in older configs → false (fail-closed); MCP is an
+    /// opt-in surface, so a config written before this flag existed simply
+    /// stays unexposed until the user ticks it.
+    #[serde(default = "default_false")]
     pub mcp_access: bool,
     #[serde(default)]
     pub last_used: Option<String>,
@@ -368,6 +370,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_false() -> bool {
+    false
+}
+
 #[cfg(test)]
 mod session_log_mode_tests {
     use super::*;
@@ -463,7 +469,10 @@ impl Session {
             jump_session_id: String::new(),
             jump_session_ids: Vec::new(),
             allow_secret_reveal: false,
-            mcp_access: true,
+            // MCP exposure is opt-in (#432): new sessions stay hidden from MCP
+            // clients until the user ticks it, matching the fail-closed
+            // serde default above.
+            mcp_access: false,
             last_used: None,
             group: String::new(),
             kind: SessionKind::Ssh,

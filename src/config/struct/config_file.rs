@@ -42,10 +42,14 @@ fn default_true() -> bool {
     true
 }
 
-// Testing-stage MCP defaults. Switch these serde defaults to false before the
-// feature is promoted from preview to a stable release.
+// MCP / remote-control defaults. Fail-closed: the automation surface (tools
+// gated by these flags) must stay off until the user explicitly enables it,
+// both for new installs and for legacy configs missing the field (serde fills
+// the default). Previously these returned `true` as preview-stage conveniences;
+// the upstream-style note said to flip them before a stable release — that
+// release is this build.
 fn default_mcp_preview_enabled() -> bool {
-    true
+    false
 }
 
 /// Ships with the "幻想 3048" sci-fi wallpaper on by default (a dark theme). New

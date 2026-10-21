@@ -783,7 +783,10 @@ export component SessionDialog inherits ModalLayer {
     in property <[string]> jump-choices;
     in property <[JumpHop]> jumps;
     in-out property <bool> allow-secret-reveal: false;
-    in-out property <bool> allow-mcp-access: true;
+    // MCP exposure is opt-in (#432): unchecked by default for new sessions,
+    // matching the fail-closed store/serde defaults. Editing a saved session
+    // pushes the persisted value here before the dialog shows.
+    in-out property <bool> allow-mcp-access: false;
     property <bool> password-revealed: false;
     property <bool> key-revealed: false;
     callback reveal-secret(bool /* private key */) -> string;

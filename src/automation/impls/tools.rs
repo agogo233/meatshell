@@ -388,17 +388,20 @@ mod tests {
     }
 
     #[test]
-    fn mcp_access_defaults_on_for_new_and_legacy_sessions() {
+    fn mcp_access_defaults_off_for_new_and_legacy_sessions() {
+        // Fail-closed: a fresh session, and a legacy config whose
+        // `mcp_access` field predates the flag, must both stay unexposed
+        // until the user explicitly opts in.
         let session = Session::new_empty();
-        assert!(session.mcp_access);
+        assert!(!session.mcp_access);
         let mut legacy = serde_json::to_value(&session).unwrap();
         legacy.as_object_mut().unwrap().remove("mcp_access");
         let restored: Session = serde_json::from_value(legacy).unwrap();
-        assert!(restored.mcp_access);
-        let mut opted_out = session;
-        opted_out.mcp_access = false;
-        let json = serde_json::to_value(&opted_out).unwrap();
-        assert!(!serde_json::from_value::<Session>(json).unwrap().mcp_access);
+        assert!(!restored.mcp_access);
+        let mut opted_in = session;
+        opted_in.mcp_access = true;
+        let json = serde_json::to_value(&opted_in).unwrap();
+        assert!(serde_json::from_value::<Session>(json).unwrap().mcp_access);
     }
 
     #[test]
