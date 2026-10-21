@@ -22,6 +22,7 @@ mod resource_ui;
 mod session_event;
 mod session_models;
 mod session_runtime;
+mod shortcuts;
 mod sftp_callbacks;
 mod sftp_ui;
 mod sidebar;
@@ -42,8 +43,9 @@ mod window;
 // ai/sftp/editor 独有逻辑），故不声明这些拆分模块，对应功能由本地版承载。
 // [merge-2026-10] 采纳上游编辑器标签页形态（#494）：启用上游新模块
 // editor_host / editor_tabs / editor_syntax（语法 span 喂给 vendored
-// i-slint-core 的原生 colour spans）与 agents / update / tray；旧拆分模块
-// 仍不启用，其函数以 app.rs 单文件内的本地实现为准。
+// i-slint-core 的原生 colour spans）、agents / update / tray，以及可定制
+// 快捷键体系 shortcuts（Chord 解析 / Keymap 匹配 / 快捷键对话框）；
+// 其余旧拆分模块仍不启用，其函数以 app.rs 单文件内的本地实现为准。
 
 use self::ai::*;
 use self::auth_dialogs::*;
@@ -3193,6 +3195,12 @@ fn open_window(
         window_size_tracking_ready: window_size_tracking_ready.clone(),
     };
     agents::wire_agent_launchers(&agent_ctx, &sessions_model);
+
+    // Customisable keyboard shortcuts: match-shortcut dispatch + the Shortcuts
+    // dialog (record / reset / reset all). The Slint handlers already call
+    // `match-shortcut`; without this wiring every chord fell through to the
+    // terminal as raw input.
+    shortcuts::wire_shortcuts(&agent_ctx);
 
     // Recompute the sidebar whenever the active tab changes (fired from Slint's
     // `changed active-tab-id`).
