@@ -2822,7 +2822,7 @@ mod tests {
                 .encrypt(&nonce, plain.as_bytes())
                 .unwrap(),
         );
-        format!("enc:exp:v1:{}", URL_SAFE_NO_PAD.encode_string(&blob))
+        format!("enc:exp:v1:{}", String::from_utf8(URL_SAFE_NO_PAD.encode(&blob)).unwrap())
     }
 
     /// A store seeded like a brand-new install. `temp_store` uses the derived

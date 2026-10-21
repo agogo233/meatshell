@@ -16,6 +16,7 @@ rustc 对没有任何 `mod` 引用的 `.rs` 文件完全无视（零告警、零
 | `drag_out.rs` | #504 拖文件到资源管理器（Windows-only OLE） | 决策为暂不实现；未来取用需先做 UI 接线 |
 | `session_test.rs` | `EditorTest`（上游对话框测试票据机制） | 调用方已在 attic；如未来启用需连同 `session_callbacks` 评估 |
 | `editor/` | 旧编辑器高亮/括号匹配/语言检测（`main.rs` 的 `mod editor` 已移除，外部零引用） | 与 `app::editor_host` 的活跃实现二选一，勿同时启用 |
+| `tests/ui_auth_prompts.rs` | #multi-window 的 prompt 票据/作用域队列测试 | 测的是本地未接线的能力（`*_scoped` 队列与 `abort_test_prompts` 在 auth_dialogs 中不存在）；本批恢复集成测试 CI 时因编译失败归档，接线后取回 |
 
 ## 复活流程（显式决策）
 

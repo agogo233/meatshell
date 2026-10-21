@@ -8,7 +8,7 @@ use super::*;
 // the glob only covers `import`'s own namespace (see import.rs imports).
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chacha20poly1305::{
-    aead::{Aead, AeadCore},
+    aead::{Aead, AeadCore, KeyInit},
     ChaCha20Poly1305,
 };
 use rand::rngs::OsRng;
@@ -49,7 +49,7 @@ fn enc_exp_v1(plain: &str) -> String {
     );
     format!(
         "enc:exp:v1:{}",
-        URL_SAFE_NO_PAD.encode_string(&blob)
+        String::from_utf8(URL_SAFE_NO_PAD.encode(&blob)).unwrap()
     )
 }
 
