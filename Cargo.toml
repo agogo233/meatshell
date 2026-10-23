@@ -1,6 +1,6 @@
 [package]
 name = "meatshell"
-version = "0.7.9"
+version = "0.8.0"
 edition = "2021"
 authors = ["meatshell contributors"]
 description = "A lightweight FinalShell-style SSH/terminal client written in Rust + Slint"
@@ -137,6 +137,9 @@ dark-light = "1"
 # HTTPS release checks and installer downloads run on background threads.
 # rustls provides TLS without requiring a system OpenSSL installation.
 ureq = { version = "2", features = ["tls"] }
+# Update mirrors apply only in a mainland China time zone; this reads the IANA
+# zone name on every OS. Already in the tree through chrono.
+iana-time-zone = "0.1"
 # Unpack the Linux .tar.gz release for one-click in-place updates (#390).
 # Both were already in the dependency tree.
 flate2 = "1"
@@ -173,6 +176,21 @@ jemallocator = "0.5"
 # import library at link time when using the MSVC toolchain (#224).
 [target.'cfg(target_os = "macos")'.dependencies]
 slint = { version = "=1.18.1", default-features = false, features = ["renderer-skia"] }
+# SFTP drag-out to Finder with file promises (#504, src/attic/drag_out_mac.rs).
+# The module is archived and not compiled (see src/attic/README.md); the deps
+# are kept so unwiring needs no Cargo.lock change. Same versions already in
+# Cargo.lock; only the features used are enabled.
+objc2 = "0.6.4"
+block2 = "0.6.2"
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std", "block2", "NSArray", "NSError", "NSGeometry", "NSOperation",
+    "NSProcessInfo", "NSString", "NSURL",
+] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std", "block2", "NSApplication", "NSDragging", "NSDraggingItem",
+    "NSDraggingSession", "NSEvent", "NSFilePromiseProvider", "NSGraphicsContext",
+    "NSImage", "NSPasteboard", "NSResponder", "NSView", "NSWindow", "NSWorkspace",
+] }
 
 # Official MCP HTTP transport and externally issued OAuth JWT verification.
 [dependencies.rmcp]

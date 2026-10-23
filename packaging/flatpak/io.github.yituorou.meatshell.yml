@@ -24,6 +24,10 @@ finish-args:
   - --filesystem=home
   # Required for serial sessions (/dev/ttyUSB*, /dev/ttyACM*, and similar).
   - --device=all
+  # One-click updates of the release bundle: `flatpak-spawn --host` runs the
+  # host's `flatpak install --bundle` and restarts the app (src/update/linux.rs).
+  # A Flathub build would drop this and be updated by Flathub instead.
+  - --talk-name=org.freedesktop.Flatpak
 
 modules:
   # FreeRDP: the RDP session type hands the account to the `xfreerdp3` command

@@ -68,7 +68,11 @@ pub struct Download {
 }
 
 impl Download {
-    pub fn fetch(asset: &Asset, progress: impl FnMut(u64, u64)) -> Result<Self> {
+    pub fn fetch(
+        asset: &Asset,
+        sources: &mirror::Sources,
+        progress: impl FnMut(&str, u64, u64),
+    ) -> Result<Self> {
         let root = cache_dir()?;
         fs::create_dir_all(&root)?;
         let directory = root.join(uuid::Uuid::new_v4().to_string());
@@ -89,7 +93,7 @@ impl Download {
         );
         let part = download.directory.join("installer.part");
         let mut output = File::create(&part)?;
-        asset.download(&mut output, progress)?;
+        asset.download(&mut output, sources, progress)?;
         output.sync_all()?;
         drop(output);
         fs::rename(part, download.directory.join("installer.msi"))?;

@@ -1,7 +1,9 @@
 //! One-click updates for builds that replace their own files (#390): the
 //! Windows portable .zip, the Linux AppImage and .tar.gz, and the macOS .app.
-//! The Windows MSI keeps its Windows Installer handoff (`windows.rs`); Linux
-//! package-manager installs (.deb, Flatpak, AUR) are left to the package manager.
+//! The Windows MSI keeps its Windows Installer handoff (`windows.rs`). Linux
+//! installations the system owns (the .deb, `/usr/local`, the Flatpak bundle)
+//! are downloaded and verified here and installed through the system
+//! (`linux.rs`); the AUR package is updated by the user's AUR helper.
 //!
 //! [`detect`] classifies the running build. [`prepare`] downloads the matching
 //! release file into a hidden staging folder next to the installation (same
@@ -40,6 +42,21 @@ pub enum Target {
     LinuxTarball { exe: PathBuf },
     /// A macOS application bundle.
     MacApp { bundle: PathBuf },
+    /// `/usr/bin/meatshell` from the release .deb: apt installs the new one.
+    Deb { exe: PathBuf },
+    /// install-linux.sh's root-owned `/usr/local/bin/meatshell`.
+    SystemBinary { exe: PathBuf },
+    /// The release Flatpak bundle, installed per user or system-wide.
+    Flatpak { system: bool, instance: String },
+}
+
+/// What to start once an update is installed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Relaunch {
+    /// An executable, AppImage or `.app`.
+    Path(PathBuf),
+    /// `flatpak run`, once this sandbox instance has exited.
+    Flatpak { instance: String },
 }
 
 /// How the running build can be updated.
@@ -50,7 +67,9 @@ pub enum Method {
     Msi(PathBuf),
     /// Replace the build's own files.
     InPlace(Target),
-    /// .deb, Flatpak, AUR …: the package manager owns the files.
+    /// The AUR `meatshell-bin`: a terminal tab runs the user's AUR helper.
+    Aur,
+    /// A distribution package or Flathub: the package manager owns the files.
     PackageManager,
     /// Unknown layout or not writable by this user: use the release page.
     Manual,
@@ -69,12 +88,17 @@ pub fn detect() -> Method {
     let Ok(exe) = std::env::current_exe() else {
         return Method::Manual;
     };
+    let probe = if cfg!(target_os = "linux") {
+        linux::probe(&exe)
+    } else {
+        linux::Probe::default()
+    };
     classify(
         std::env::consts::OS,
         std::env::consts::ARCH,
         &exe,
         std::env::var_os("APPIMAGE").map(PathBuf::from),
-        std::env::var_os("FLATPAK_ID").is_some(),
+        &probe,
     )
 }
 
@@ -83,7 +107,7 @@ fn classify(
     arch: &str,
     exe: &Path,
     appimage: Option<PathBuf>,
-    flatpak: bool,
+    probe: &linux::Probe,
 ) -> Method {
     let parent_writable = |path: &Path| path.parent().is_some_and(dir_is_writable);
     match os {
@@ -97,9 +121,34 @@ fn classify(
             if exe.starts_with("/usr/local") {
                 return Method::Manual;
             }
-            let packaged = exe.starts_with("/usr");
-            if flatpak || exe.starts_with("/app") || packaged {
-                return Method::PackageManager;
+            let release_arch = matches!(arch, "x86_64" | "aarch64");
+            if probe.in_flatpak || exe.starts_with("/app") {
+                // Only our release bundle (x86_64) may talk to the host's
+                // flatpak; a Flathub build is updated by Flathub.
+                return match &probe.flatpak {
+                    Some(info)
+                        if arch == "x86_64"
+                            && info.host_commands
+                            && info.app_id == linux::FLATPAK_APP_ID =>
+                    {
+                        Method::InPlace(Target::Flatpak {
+                            system: info.system,
+                            instance: info.instance.clone(),
+                        })
+                    }
+                    _ => Method::PackageManager,
+                };
+            }
+            if exe.starts_with("/usr") {
+                return match &probe.owner {
+                    Some(linux::Owner::Dpkg(name))
+                        if name == linux::DEB_PACKAGE && release_arch && probe.pkexec =>
+                    {
+                        Method::InPlace(Target::Deb { exe: exe.to_path_buf() })
+                    }
+                    Some(linux::Owner::Pacman(name)) if name == linux::AUR_PACKAGE => Method::Aur,
+                    _ => Method::PackageManager,
+                };
             }
             if let Some(file) = appimage.filter(|file| file.is_file()) {
                 return if arch == "x86_64" && parent_writable(&file) {
@@ -108,8 +157,14 @@ fn classify(
                     Method::Manual
                 };
             }
-            if matches!(arch, "x86_64" | "aarch64") && parent_writable(exe) {
+            if release_arch && parent_writable(exe) {
                 Method::InPlace(Target::LinuxTarball { exe: exe.to_path_buf() })
+            } else if release_arch && probe.pkexec && exe == Path::new(linux::SYSTEM_BINARY) {
+                // Unreachable in this fork: the /usr/local guard above returns
+                // `Manual` for exactly this path first (a GUI app must not rely
+                // on a pkexec prompt). Kept so taking upstream's pkexec route
+                // later is deleting one guard, not re-deriving the machinery.
+                Method::InPlace(Target::SystemBinary { exe: exe.to_path_buf() })
             } else {
                 Method::Manual
             }
@@ -158,7 +213,9 @@ fn asset_names(target: &Target, tag: &str, arch: &str, variant: Option<&str>) ->
     match target {
         Target::WindowsPortable { .. } => vec![format!("meatshell-{tag}-windows-x86_64.zip")],
         Target::AppImage { .. } => vec![format!("meatshell-{tag}-linux-x86_64.AppImage")],
-        Target::LinuxTarball { .. } => vec![match variant {
+        Target::Deb { .. } => vec![format!("meatshell-{tag}-linux-{arch}.deb")],
+        Target::Flatpak { .. } => vec![format!("meatshell-{tag}-linux-x86_64.flatpak")],
+        Target::LinuxTarball { .. } | Target::SystemBinary { .. } => vec![match variant {
             Some(variant) => format!("meatshell-{tag}-linux-{arch}-{variant}.tar.gz"),
             None => format!("meatshell-{tag}-linux-{arch}.tar.gz"),
         }],
@@ -191,22 +248,30 @@ fn usable_assets<'a>(
 }
 
 impl Target {
-    /// The path the update replaces.
-    fn path(&self) -> &Path {
-        match self {
+    /// Staging lives next to the replaced path so the swap is a same-volume
+    /// rename. Installations the system owns stage in the user's cache.
+    fn staging_root(&self) -> Result<PathBuf> {
+        let replaced = match self {
             Target::WindowsPortable { exe } | Target::LinuxTarball { exe } => exe,
             Target::AppImage { file } => file,
             Target::MacApp { bundle } => bundle,
-        }
-    }
-
-    /// Staging lives next to the replaced path so the swap is a same-volume rename.
-    fn staging_root(&self) -> Result<PathBuf> {
-        Ok(self
-            .path()
+            Target::Deb { .. } | Target::SystemBinary { .. } | Target::Flatpak { .. } => {
+                return linux::staging_root();
+            }
+        };
+        Ok(replaced
             .parent()
             .context("The installation has no parent folder")?
             .join(STAGING))
+    }
+
+    /// Installing asks for an administrator password (pkexec or polkit).
+    fn needs_admin(&self) -> bool {
+        match self {
+            Target::Deb { .. } | Target::SystemBinary { .. } => true,
+            Target::Flatpak { system, .. } => *system,
+            _ => false,
+        }
     }
 }
 
@@ -228,7 +293,8 @@ pub struct Prepared {
 pub fn prepare(
     release: &Release,
     target: &Target,
-    mut progress: impl FnMut(u64, u64),
+    sources: &mirror::Sources,
+    mut progress: impl FnMut(&str, u64, u64),
 ) -> Result<Prepared> {
     let names = asset_names(
         target,
@@ -239,7 +305,7 @@ pub fn prepare(
     let candidates = usable_assets(release, &names)?;
     let last = candidates.len() - 1;
     for (i, (asset, name)) in candidates.into_iter().enumerate() {
-        match prepare_from(target, asset, name.ends_with(".dmg"), &mut progress) {
+        match prepare_from(target, asset, name.ends_with(".dmg"), sources, &mut progress) {
             Ok(prepared) => return Ok(prepared),
             Err(error) if i < last => {
                 tracing::warn!("update: {name} failed ({error:#}); trying the next package");
@@ -254,12 +320,13 @@ fn prepare_from(
     target: &Target,
     asset: &Asset,
     disk_image: bool,
-    progress: impl FnMut(u64, u64),
+    sources: &mirror::Sources,
+    progress: impl FnMut(&str, u64, u64),
 ) -> Result<Prepared> {
     let mut prepared = Prepared::stage(target)?;
     let part = prepared.work.join("package.part");
     let mut output = File::create(&part).context("Could not save the update")?;
-    asset.download(&mut output, progress)?;
+    asset.download(&mut output, sources, progress)?;
     output.sync_all()?;
     drop(output);
     let package = prepared.work.join("package");
@@ -295,7 +362,7 @@ impl Prepared {
                 unzip(package, &extract)?;
                 single_dir_containing(&extract, "meatshell.exe")?
             }
-            Target::LinuxTarball { .. } => {
+            Target::LinuxTarball { .. } | Target::SystemBinary { .. } => {
                 untar_gz(package, &extract)?;
                 single_dir_containing(&extract, "meatshell")?
             }
@@ -309,15 +376,45 @@ impl Prepared {
                 self.payload = package.to_path_buf();
                 return Ok(());
             }
+            Target::Deb { .. } | Target::Flatpak { .. } => {
+                // Installed as downloaded; apt recognises a local package by
+                // its .deb extension.
+                let deb = matches!(self.target, Target::Deb { .. });
+                let named = self
+                    .work
+                    .join(if deb { "meatshell.deb" } else { "meatshell.flatpak" });
+                fs::rename(package, &named)?;
+                self.payload = named;
+                return Ok(());
+            }
         };
         let _ = fs::remove_file(package);
         Ok(())
     }
 
-    /// Swap the new build in. Returns what to relaunch (the executable, the
-    /// AppImage or the `.app`). On error the previous build is left in place.
-    pub fn install(&mut self) -> Result<PathBuf> {
+    /// Installing will show the system's administrator password prompt.
+    pub fn needs_admin(&self) -> bool {
+        self.target.needs_admin()
+    }
+
+    /// Swap the new build in. Returns what to relaunch. On error the previous
+    /// build is left in place.
+    pub fn install(&mut self) -> Result<Relaunch> {
         let relaunch = match &self.target {
+            Target::Deb { exe } => {
+                linux::install_deb(&self.payload)?;
+                exe.clone()
+            }
+            Target::SystemBinary { exe } => {
+                linux::install_binary(&self.payload.join("meatshell"), exe)?;
+                exe.clone()
+            }
+            Target::Flatpak { system, instance } => {
+                linux::install_flatpak(&self.payload, *system)?;
+                self.installed = true;
+                let _ = File::create(self.work.join(DONE));
+                return Ok(Relaunch::Flatpak { instance: instance.clone() });
+            }
             Target::WindowsPortable { exe } => {
                 // Windows refuses to overwrite a running .exe but allows renaming
                 // it, so move it aside first and restore it if the swap fails.
@@ -356,7 +453,7 @@ impl Prepared {
         };
         self.installed = true;
         let _ = File::create(self.work.join(DONE));
-        Ok(relaunch)
+        Ok(Relaunch::Path(relaunch))
     }
 }
 
@@ -584,9 +681,13 @@ fn set_executable(path: &Path) -> Result<()> {
 
 /// Start the new build so it waits for this process to exit, keeping the
 /// original arguments (e.g. `--data-dir`) so it opens the same profile.
-pub fn relaunch(path: &Path) -> Result<()> {
-    let pid = std::process::id().to_string();
+pub fn relaunch(what: &Relaunch) -> Result<()> {
     let args = passthrough_args(std::env::args_os().skip(1));
+    let path = match what {
+        Relaunch::Path(path) => path,
+        Relaunch::Flatpak { instance } => return linux::relaunch_flatpak(instance, &args),
+    };
+    let pid = std::process::id().to_string();
     #[cfg(target_os = "macos")]
     let mut command = {
         // `open -n` starts a new instance of the (already replaced) bundle.

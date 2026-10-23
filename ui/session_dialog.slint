@@ -482,7 +482,10 @@ component JumpCombo inherits VerticalLayout {
                         background: c-ta.has-hover ? Theme.bg-hover : transparent;
                         c-ta := TouchArea {
                             mouse-cursor: pointer;
-                            clicked => { root.selected-index = idx; jump-popup.close(); root.selected(idx); }
+                            // Report the choice BEFORE closing: statements after
+                            // close() in a popup's own handler never run, so the
+                            // hop showed as picked but saved empty (#509).
+                            clicked => { root.selected-index = idx; root.selected(idx); jump-popup.close(); }
                         }
                         Text {
                             x: 10px;

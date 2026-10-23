@@ -3,6 +3,35 @@
 All notable changes are documented here. 本文件记录所有重要变更。
 中英对照（中文在前，English after）.
 
+## [0.8.0] - 2026-10-23
+
+- **中国大陆用户可通过下载镜像一键更新。** 界面为中文且系统时区为中国大陆时区（按 Asia/Shanghai 等时区名判断，新加坡、香港、台北等其他 UTC+8 地区仍直连 GitHub）时，一键更新可通过镜像下载。“设置 → 软件更新”新增“下载镜像”列表，内置 v4、v6、cdn、axisnow.gh-proxy.org 四个镜像，可添加或删除，右侧显示各下载源（含 GitHub）的测速结果。默认自动选择最快的源，也可点击某一行固定使用；失败时依次换用其他源，最后回到 GitHub。镜像只负责传输，所有下载仍按 GitHub 发布的 SHA-256 校验。
+- **Download mirrors for one-click updates in mainland China.** With the Chinese UI and a mainland China time zone (matched by name such as Asia/Shanghai, so Singapore, Hong Kong, Taipei and other UTC+8 regions stay on GitHub), one-click updates can download through mirrors. Settings → Updates gains a "下载镜像" list with v4, v6, cdn and axisnow.gh-proxy.org built in; mirrors can be added or removed, and every source, GitHub included, shows its speed-test result. The fastest source is picked automatically, or a row can be clicked to fix it; on failure the other sources are tried in turn, GitHub last. Mirrors only carry bytes: every download is still verified against the SHA-256 published on GitHub.
+
+- **更新提示改为工具栏图标。** 新版本提示条已移除，右上角工具栏新增更新图标：检测到新版本时图标右上角显示红点，点击即打开“设置 → 软件更新”。
+- **Update notice moved to a toolbar icon.** The update banner is gone. A new update icon in the top-right toolbar shows a red dot when a newer version is available, and opens Settings → Updates when clicked.
+
+- **Linux 的 .deb、/usr/local、Flatpak 与 AUR 安装支持一键更新。** .deb 安装包在校验后通过 `pkexec apt-get install` 安装；install-linux.sh 安装到 `/usr/local/bin` 的版本只需一次管理员授权即可替换；Flatpak 包更新后自动重新打开；AUR 的 meatshell-bin 在 AUR 跟上新版本后，于终端标签页中运行 paru、yay 或 makepkg，完成后可直接重启。
+- **One-click updates for Linux .deb, /usr/local, Flatpak and AUR installs.** The .deb is verified and installed with `pkexec apt-get install`; an install-linux.sh copy in `/usr/local/bin` is replaced after a single administrator prompt; the Flatpak bundle reopens itself after updating; and the AUR meatshell-bin package, once the AUR has the release, updates by running paru, yay or makepkg in a terminal tab, followed by a Restart button.
+
+- **macOS 支持将 SFTP 文件拖到访达（#504）。** 与 Windows 版相同：拖出的文件由访达决定保存位置，文件夹连同子目录一并复制并保留修改时间，失败时删除不完整的文件，每次拖动在“传输管理”中显示为一行。
+- **Drag SFTP files out to Finder on macOS (#504).** As on Windows: Finder picks the destination, folders arrive with their subfolders and modification times, partial files are removed on failure, and each drag shows up as one row in the Transfers manager.
+
+- **检查更新不再受 GitHub API 匿名访问限额影响（#512）。** 版本信息改为读取每个版本附带的 `latest.json`，不再占用同一 IP 共享的 GitHub API 查询次数；只有旧版本没有该文件时才查询 API，达到限额时提示可重试的时间，而不是显示“status code 403”。感谢 @yanmuq。
+- **Update checks no longer hit GitHub's anonymous API limit (#512).** Versions are read from the `latest.json` attached to each release, which does not use the GitHub API quota shared by an IP address; the API is only asked for releases without that file, and when it is rate limited the message says when to retry instead of showing "status code 403". Thanks @yanmuq.
+
+- **修复跳板机设置无法保存的问题（#509）。** 新建或编辑会话时选择的跳板机在保存后丢失，连接也不经过跳板机。
+- **Fix jump hosts not being saved (#509).** A jump host picked when creating or editing a session was lost on save, and the connection went direct.
+
+- **修复双击会话会连接两次的问题（#511）。** 双击会话列表中的一行会打开两个终端标签页，或两个完全重叠的远程桌面窗口；在单会话的 Windows 上，其中一个连接还会把另一个挤下线。现在双击只连接一次。
+- **Fix double-clicking a session connecting twice (#511).** Double-clicking a row in the session list opened two terminal tabs, or two RDP windows stacked exactly on top of each other, and on single-session Windows one connection logged the other off. A double-click now connects once.
+
+- **修复 Windows 上远程桌面连接 Ubuntu 时窗口立即关闭的问题。** 已保存的密码改为像远程桌面“记住我”一样存入 Windows 凭据管理器，不再写入 .rdp 文件。此前在 Ubuntu 的 GNOME 远程桌面登录界面之后，连接会被拒绝并立即关闭，而手动输入同一密码却能成功。
+- **Fix RDP windows closing at once when connecting to Ubuntu on Windows.** The saved password is now stored in Windows Credential Manager, as Remote Desktop's own "Remember me" does, instead of in the .rdp file. Previously the connection to Ubuntu's GNOME Remote Desktop was rejected right after its login screen and the window closed, although the same password typed by hand worked.
+
+- **修复 SFTP 面板停靠在左侧或右侧时终端文字被遮挡的问题（#505）。** 终端列数原先按整个终端视图的宽度计算：面板在右侧时文字被面板遮挡，在左侧时文字超出窗口右边缘。现在按终端区域本身的宽度计算。
+- **Fix terminal text hidden when the SFTP panel is docked left or right (#505).** Columns were counted from the whole terminal view's width, so with the panel on the right the text ran under it, and on the left it ran off the window edge. Columns now follow the terminal area itself.
+
 ## [0.7.9] - 2026-10-19
 
 - **SFTP 文件和文件夹可直接拖到 Windows 资源管理器（#504）。** 在 SFTP 文件列表中按住某一行拖出窗口，即可放到资源管理器或桌面；若该行是多个勾选项之一，则拖出所有勾选项。文件由资源管理器直接从 SFTP 读取并显示其自带的进度与取消界面，不会先下载到临时目录；文件夹会连同子目录一并复制，保留文件大小和修改时间。拷贝期间界面保持流畅。每次拖动在“传输管理”中显示为一行，结束时标记为完成、失败或已取消，也可在其中取消。目前仅支持 Windows。

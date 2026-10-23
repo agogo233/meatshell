@@ -3598,7 +3598,7 @@ checksum = "490cc448043f947bae3cbee9c203358d62dbee0db12107a74be5c30ccfd09771"
 
 [[package]]
 name = "meatshell"
-version = "0.7.9"
+version = "0.8.0"
 dependencies = [
  "aes",
  "anyhow",
@@ -3607,6 +3607,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "block2 0.6.2",
  "cbc",
  "chacha20poly1305",
  "chrono",
@@ -3621,12 +3622,16 @@ dependencies = [
  "glob",
  "hmac",
  "i-slint-backend-winit",
+ "iana-time-zone",
  "icu_provider",
  "image",
  "jemallocator",
  "jsonwebtoken",
  "md5",
  "mimalloc",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "portable-pty",
  "rand 0.8.6",
  "raw-window-handle",

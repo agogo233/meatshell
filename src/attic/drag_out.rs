@@ -14,10 +14,41 @@
 //! network never blocks the UI. Bytes come from `SftpCommand::StreamFile`,
 //! the folder listing from `SftpCommand::WalkForExport`.
 //!
-//! macOS / Linux: not supported yet; the gesture does nothing there.
+//! macOS: an AppKit dragging session of *file promises* (`drag_out_mac.rs`).
+//! Finder picks where each dragged item goes and asks us to write it there;
+//! [`PromiseDrag`] does the writing on a background queue, streaming the
+//! same way as on Windows.
+//!
+//! Linux: not supported yet; the gesture does nothing there.
 
-use crate::sftp::{ExportEntry, SftpCommand};
+use crate::sftp::{DragTransfer, ExportEntry, SftpCommand};
+use std::fs::{self, File};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
+
+/// One dragged row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DragItem {
+    /// Absolute remote path.
+    pub remote: String,
+    pub is_dir: bool,
+}
+
+impl DragItem {
+    /// The name the item gets at the drop target.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn name(&self) -> &str {
+        self.remote
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .filter(|name| !name.is_empty())
+            .unwrap_or("download")
+    }
+}
 
 /// Transfers-panel label and byte total for a drag: the dragged item's
 /// name, or "first +N" for several; total = all file sizes.
@@ -105,13 +136,20 @@ pub(crate) struct ChunkReader {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Fill {
     /// `n` bytes copied; `eof` once the stream has ended.
-    Read { n: usize, eof: bool },
+    Read {
+        n: usize,
+        eof: bool,
+    },
     Failed(String),
 }
 
 impl ChunkReader {
     pub(crate) fn new() -> Self {
-        Self { buf: Vec::new(), at: 0, done: false }
+        Self {
+            buf: Vec::new(),
+            at: 0,
+            done: false,
+        }
     }
 
     /// The stream ended and every byte was handed out.
@@ -148,20 +186,283 @@ impl ChunkReader {
                 None => self.done = true,
             }
         }
-        Fill::Read { n, eof: self.at_eof() }
+        Fill::Read {
+            n,
+            eof: self.at_eof(),
+        }
     }
 }
 
-/// Start dragging `roots` (absolute remote paths) out of the window. Blocks
-/// until the drop or cancel. Returns whether something was dropped.
+/// Drag-out is available on this platform.
+pub(crate) const SUPPORTED: bool = cfg!(any(windows, target_os = "macos"));
+
+/// Start dragging `items` out of `window`. On Windows this blocks until the
+/// drop or cancel; on macOS it returns once AppKit's dragging session has
+/// started. Returns whether the drag started (Windows: was dropped).
 #[cfg(windows)]
-pub(crate) fn start(commands: UnboundedSender<SftpCommand>, roots: Vec<String>) -> bool {
-    imp::start(commands, roots)
+pub(crate) fn start(
+    _window: &slint::Window,
+    commands: UnboundedSender<SftpCommand>,
+    items: Vec<DragItem>,
+) -> bool {
+    imp::start(
+        commands,
+        items.into_iter().map(|item| item.remote).collect(),
+    )
 }
 
-#[cfg(not(windows))]
-pub(crate) fn start(_commands: UnboundedSender<SftpCommand>, _roots: Vec<String>) -> bool {
+#[cfg(target_os = "macos")]
+pub(crate) fn start(
+    window: &slint::Window,
+    commands: UnboundedSender<SftpCommand>,
+    items: Vec<DragItem>,
+) -> bool {
+    use i_slint_backend_winit::WinitWindowAccessor;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let view = window
+        .with_winit_window(|ww| match ww.window_handle().ok()?.as_raw() {
+            RawWindowHandle::AppKit(handle) => Some(handle.ns_view),
+            _ => None,
+        })
+        .flatten();
+    match view {
+        Some(view) => mac::begin(view, commands, items),
+        None => false,
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+pub(crate) fn start(
+    _window: &slint::Window,
+    _commands: UnboundedSender<SftpCommand>,
+    _items: Vec<DragItem>,
+) -> bool {
     false
+}
+
+#[cfg(target_os = "macos")]
+#[path = "drag_out_mac.rs"]
+mod mac;
+
+/// How long writing a dropped item may wait for the folder walk.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const WALK_TIMEOUT: Duration = Duration::from_secs(120);
+/// Bytes buffered ahead of the local file per stream: 64 × ~32 KB ≈ 2 MB.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const PROMISE_BUFFER_CHUNKS: usize = 64;
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+enum WalkState {
+    Pending(mpsc::Receiver<Result<Vec<ExportEntry>, String>>),
+    Done(Result<Vec<ExportEntry>, String>),
+}
+
+/// One drag of file promises (macOS): the drop target says where each
+/// dragged item goes, and [`PromiseDrag::write`] creates it there. Shared by
+/// every promise of the drag and called from background threads.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) struct PromiseDrag {
+    /// Dropped once the drag is over, so a finished drag never keeps the
+    /// SFTP worker's channel open.
+    commands: Mutex<Option<UnboundedSender<SftpCommand>>>,
+    walk: Mutex<WalkState>,
+    /// This drag's Transfers-panel row, created by the first write.
+    transfer: Mutex<Option<Arc<DragTransfer>>>,
+    /// Promises not yet written.
+    pending: AtomicUsize,
+    walk_timeout: Duration,
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+impl PromiseDrag {
+    /// Start walking `items` right away; writes wait for what is left of it.
+    pub(crate) fn start(
+        commands: UnboundedSender<SftpCommand>,
+        items: &[DragItem],
+    ) -> Option<Self> {
+        Self::with_timeout(commands, items, WALK_TIMEOUT)
+    }
+
+    fn with_timeout(
+        commands: UnboundedSender<SftpCommand>,
+        items: &[DragItem],
+        walk_timeout: Duration,
+    ) -> Option<Self> {
+        if items.is_empty() {
+            return None;
+        }
+        let (reply, walk) = mpsc::channel();
+        let roots = items.iter().map(|item| item.remote.clone()).collect();
+        commands
+            .send(SftpCommand::WalkForExport { roots, reply })
+            .ok()?;
+        Some(Self {
+            commands: Mutex::new(Some(commands)),
+            walk: Mutex::new(WalkState::Pending(walk)),
+            transfer: Mutex::new(None),
+            pending: AtomicUsize::new(items.len()),
+            walk_timeout,
+        })
+    }
+
+    fn entries(&self) -> Result<Vec<ExportEntry>, String> {
+        let mut walk = self.walk.lock().unwrap();
+        if let WalkState::Pending(rx) = &*walk {
+            let result = rx
+                .recv_timeout(self.walk_timeout)
+                .unwrap_or_else(|_| Err("listing the remote folder timed out".into()));
+            *walk = WalkState::Done(result);
+        }
+        match &*walk {
+            WalkState::Done(result) => result.clone(),
+            WalkState::Pending(_) => unreachable!(),
+        }
+    }
+
+    fn transfer_for(&self, entries: &[ExportEntry]) -> Arc<DragTransfer> {
+        self.transfer
+            .lock()
+            .unwrap()
+            .get_or_insert_with(|| {
+                let (name, total) = transfer_label(entries);
+                Arc::new(DragTransfer::new(
+                    format!("drag-{}", uuid::Uuid::new_v4()),
+                    name,
+                    total,
+                ))
+            })
+            .clone()
+    }
+
+    /// Create `item` at `dest` (the path the drop target chose for it): the
+    /// file, or the folder and everything under it. A failed write removes
+    /// the partial file it was writing. Always counts the promise as done.
+    pub(crate) fn write(&self, item: &DragItem, dest: &Path) -> Result<(), String> {
+        let result = self.write_item(item, dest);
+        if let Err(error) = &result {
+            tracing::warn!("drag-out: {} → {}: {error}", item.remote, dest.display());
+            if let Some(transfer) = self.transfer.lock().unwrap().as_ref() {
+                transfer.interrupted.store(true, Ordering::Relaxed);
+            }
+        }
+        if self.pending.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.finish();
+        }
+        result
+    }
+
+    fn write_item(&self, item: &DragItem, dest: &Path) -> Result<(), String> {
+        let entries = self.entries()?;
+        let commands = self
+            .commands
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| "the drag has ended".to_string())?;
+        let root = entries
+            .iter()
+            .find(|entry| entry.remote == item.remote)
+            .map(|entry| entry.relative.clone())
+            .ok_or_else(|| format!("{} is no longer on the server", item.remote))?;
+        let progress = self.transfer_for(&entries);
+        materialise(dest, &root, &entries, |entry, file| {
+            stream_into(&commands, entry, &progress, file)
+        })
+    }
+
+    /// The drag is over: report the Transfers row (if any bytes were asked
+    /// for) and let go of the SFTP worker. Safe to call more than once.
+    pub(crate) fn finish(&self) {
+        let commands = self.commands.lock().unwrap().take();
+        let transfer = self.transfer.lock().unwrap().take();
+        if let (Some(commands), Some(transfer)) = (commands, transfer) {
+            let _ = commands.send(SftpCommand::FinishDragTransfer(transfer));
+        }
+    }
+}
+
+/// Stream one remote file into `file`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn stream_into(
+    commands: &UnboundedSender<SftpCommand>,
+    entry: &ExportEntry,
+    progress: &Arc<DragTransfer>,
+    file: &mut File,
+) -> Result<(), String> {
+    use std::io::Write;
+    let (tx, mut rx) = tokio::sync::mpsc::channel(PROMISE_BUFFER_CHUNKS);
+    commands
+        .send(SftpCommand::StreamFile {
+            remote: entry.remote.clone(),
+            chunks: tx,
+            progress: progress.clone(),
+        })
+        .map_err(|_| "the SFTP session has closed".to_string())?;
+    // Called on a background queue, never inside the tokio runtime.
+    while let Some(chunk) = rx.blocking_recv() {
+        file.write_all(&chunk?).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Local path of walk entry `relative` when its dragged item `root` is
+/// created at `dest`. `None` for entries of other items, or names that would
+/// leave `dest` (`.`, `..`).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn local_path_under(dest: &Path, root: &str, relative: &str) -> Option<PathBuf> {
+    let rest = if relative == root {
+        ""
+    } else {
+        relative.strip_prefix(root)?.strip_prefix('/')?
+    };
+    let mut path = dest.to_path_buf();
+    for part in rest.split('/').filter(|part| !part.is_empty()) {
+        if part == "." || part == ".." || part.contains('\0') {
+            return None;
+        }
+        path.push(part);
+    }
+    Some(path)
+}
+
+/// Create dragged item `root` at `dest` from the walk `entries`, writing each
+/// file's bytes with `copy`. Entries of other dragged items are skipped.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn materialise(
+    dest: &Path,
+    root: &str,
+    entries: &[ExportEntry],
+    mut copy: impl FnMut(&ExportEntry, &mut File) -> Result<(), String>,
+) -> Result<(), String> {
+    let io = |error: std::io::Error| error.to_string();
+    let mut found = false;
+    for entry in entries {
+        let Some(path) = local_path_under(dest, root, &entry.relative) else {
+            continue;
+        };
+        found = true;
+        if entry.is_dir {
+            fs::create_dir_all(&path).map_err(io)?;
+            continue;
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(io)?;
+        }
+        let mut file = File::create(&path).map_err(io)?;
+        if let Err(error) = copy(entry, &mut file) {
+            drop(file);
+            let _ = fs::remove_file(&path);
+            return Err(error);
+        }
+        if entry.mtime > 0 {
+            let _ = file.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(entry.mtime));
+        }
+    }
+    if found {
+        Ok(())
+    } else {
+        Err(format!("nothing to create for {root}"))
+    }
 }
 
 #[cfg(windows)]
@@ -177,17 +478,17 @@ mod imp {
     use windows::core::{implement, w, Interface, HRESULT};
     use windows::Win32::Foundation::{
         BOOL, DATA_S_SAMEFORMATETC, DV_E_FORMATETC, DV_E_LINDEX, E_FAIL, E_NOTIMPL, E_POINTER,
-        FILETIME, HGLOBAL, OLE_E_ADVISENOTSUPPORTED, S_FALSE, S_OK, STG_E_ACCESSDENIED,
-        STG_E_INVALIDFUNCTION, STG_E_READFAULT,
+        FILETIME, HGLOBAL, OLE_E_ADVISENOTSUPPORTED, STG_E_ACCESSDENIED, STG_E_INVALIDFUNCTION,
+        STG_E_READFAULT, S_FALSE, S_OK,
     };
     use windows::Win32::System::Com::Marshal::CoMarshalInterThreadInterfaceInStream;
     use windows::Win32::System::Com::StructuredStorage::CoGetInterfaceAndReleaseStream;
     use windows::Win32::System::Com::{
         CoInitializeEx, CoTaskMemAlloc, IAdviseSink, IDataObject, IDataObject_Impl, IEnumFORMATETC,
         IEnumSTATDATA, ISequentialStream_Impl, IStream, IStream_Impl, COINIT_MULTITHREADED,
-        DATADIR_GET, DVASPECT_CONTENT, FORMATETC, LOCKTYPE, STATFLAG, STATFLAG_NONAME,
-        STATSTG, STGC, STGMEDIUM, STGMEDIUM_0, STGTY_STREAM, STREAM_SEEK, STREAM_SEEK_CUR,
-        STREAM_SEEK_END, STREAM_SEEK_SET, TYMED_HGLOBAL, TYMED_ISTREAM,
+        DATADIR_GET, DVASPECT_CONTENT, FORMATETC, LOCKTYPE, STATFLAG, STATFLAG_NONAME, STATSTG,
+        STGC, STGMEDIUM, STGMEDIUM_0, STGTY_STREAM, STREAM_SEEK, STREAM_SEEK_CUR, STREAM_SEEK_END,
+        STREAM_SEEK_SET, TYMED_HGLOBAL, TYMED_ISTREAM,
     };
     use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
     use windows::Win32::System::Memory::{
@@ -260,7 +561,10 @@ mod imp {
         // Walk folders in the background right away; the drop only waits
         // for whatever is still left of it.
         let (reply, walk) = mpsc::channel();
-        if commands.send(SftpCommand::WalkForExport { roots, reply }).is_err() {
+        if commands
+            .send(SftpCommand::WalkForExport { roots, reply })
+            .is_err()
+        {
             return false;
         }
         let data: IDataObject = DragData {
@@ -342,7 +646,9 @@ mod imp {
 
         fn finish_transfer(&self) {
             if let Some(transfer) = self.transfer.lock().unwrap().take() {
-                let _ = self.commands.send(SftpCommand::FinishDragTransfer(transfer));
+                let _ = self
+                    .commands
+                    .send(SftpCommand::FinishDragTransfer(transfer));
             }
         }
 
@@ -463,13 +769,20 @@ mod imp {
                         seek: 0,
                     }),
                     size: entry.size,
-                    name: entry.relative.rsplit('/').next().unwrap_or("file").to_string(),
+                    name: entry
+                        .relative
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or("file")
+                        .to_string(),
                     progress,
                 };
                 let proxy = stream_proxy(stream)?;
                 return Ok(STGMEDIUM {
                     tymed: TYMED_ISTREAM.0 as u32,
-                    u: STGMEDIUM_0 { pstm: ManuallyDrop::new(Some(proxy)) },
+                    u: STGMEDIUM_0 {
+                        pstm: ManuallyDrop::new(Some(proxy)),
+                    },
                     pUnkForRelease: ManuallyDrop::new(None),
                 });
             }
@@ -553,7 +866,8 @@ mod imp {
 
     impl IDataObjectAsyncCapability_Impl for DragData_Impl {
         fn SetAsyncMode(&self, fdoopasync: BOOL) -> windows::core::Result<()> {
-            self.async_mode.store(fdoopasync.as_bool(), Ordering::Relaxed);
+            self.async_mode
+                .store(fdoopasync.as_bool(), Ordering::Relaxed);
             Ok(())
         }
         fn GetAsyncMode(&self) -> windows::core::Result<BOOL> {
@@ -707,7 +1021,11 @@ mod imp {
             Err(STG_E_INVALIDFUNCTION.into())
         }
 
-        fn Stat(&self, pstatstg: *mut STATSTG, grfstatflag: &STATFLAG) -> windows::core::Result<()> {
+        fn Stat(
+            &self,
+            pstatstg: *mut STATSTG,
+            grfstatflag: &STATFLAG,
+        ) -> windows::core::Result<()> {
             let out = unsafe { pstatstg.as_mut() }.ok_or(E_POINTER)?;
             *out = STATSTG::default();
             out.r#type = STGTY_STREAM.0 as _;

@@ -2570,7 +2570,10 @@ fn open_window(
                             // SFTP keeps its per-tab size memory (#v0.5): update
                             // the active tab's row too, then mirror both onto the
                             // window so the docked panel + extents stay in sync.
+                            // The width floor is the file list's, not the shared
+                            // panel one (#505).
                             ("sftp", true) => {
+                                let thickness = thickness.max(MIN_SFTP_WIDTH);
                                 w.set_sftp_panel_width(thickness);
                                 let active = w.get_active_tab_id().to_string();
                                 update_terminal_row(&terminals_for_extent, &active, |r| {
@@ -2878,6 +2881,9 @@ fn open_window(
         let dm = dock_dividers_model.clone();
         let da = da_size.clone();
         window.on_set_pane_sftp_width(move |tab_id: SharedString, v: f32| {
+            // The divider drag hands raw logical pixels; hold the file-list
+            // floor here so the stored size and the rendered one agree (#505).
+            let v = v.max(MIN_SFTP_WIDTH);
             update_terminal_row(&terminals_model, &tab_id, |r| r.sftp_panel_width = v);
             if let Some(w) = weak.upgrade() {
                 w.set_sftp_panel_width(v);
@@ -5966,18 +5972,27 @@ fn wire_session_callbacks(
                 let Some(id) = w.get_jump_ids().row_data(choice.max(0) as usize) else {
                     return;
                 };
-                update_jump_rows(&w, |rows| {
-                    if index >= 0 {
-                        if let Some(row) = rows.get_mut(index as usize) {
-                            let placeholder = row.placeholder && id.trim().is_empty();
-                            *row = JumpHop {
-                                id,
-                                choice,
-                                placeholder,
-                            };
-                        }
-                    }
-                });
+                // Mutate the row IN PLACE (set_row_data), not through
+                // `update_jump_rows`: that rebuilds the model, which recreates
+                // the row and destroys the one whose dropdown popup is still
+                // closing (#509). The helper also cleared the test status, so
+                // do that here.
+                let Ok(index) = usize::try_from(index) else {
+                    return;
+                };
+                let rows = w.get_dialog_jumps();
+                if let Some(row) = rows.row_data(index) {
+                    let placeholder = row.placeholder && id.trim().is_empty();
+                    rows.set_row_data(
+                        index,
+                        JumpHop {
+                            id,
+                            choice,
+                            placeholder,
+                        },
+                    );
+                    w.set_dialog_test_status("".into());
+                }
             }
         });
         let weak = window.as_weak();
@@ -7294,7 +7309,10 @@ fn refresh_panes(
                 })
                 .collect();
             // Only the pane touching the top-right corner keeps room for the
-            // floating toolbar icons (#122).
+            // floating toolbar icons (#122). 7 icons at a 30px pitch leave the
+            // rightmost one at width-214px, so 210px keeps the 4px gap the
+            // 6-icon layout (180px ↔ the pin at width-184px) had before the
+            // Updates icon joined the strip.
             let top_right = p.x + p.w >= cw - 0.5 && p.y <= 0.5;
             PaneInfo {
                 id: p.id as i32,
@@ -7304,7 +7322,7 @@ fn refresh_panes(
                 h: p.h,
                 active_id: p.active.clone().into(),
                 focused: p.focused,
-                reserve_right: if top_right { 180.0 } else { 0.0 },
+                reserve_right: if top_right { 210.0 } else { 0.0 },
                 tabs: ModelRc::from(Rc::new(VecModel::from(tabs))),
             }
         })

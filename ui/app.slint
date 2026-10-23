@@ -29,12 +29,12 @@ import { ProcWindow, ProcRow } from "proc_window.slint";
 import { SystemInfoWindow, SysInfoRow, SysMetricRow, SysNetRow } from "system_info_window.slint";
 import { EditorWindow } from "editor_window.slint";
 import { EditorPane, EditorFindResult, EditorDoc } from "editor_pane.slint";
-import { InterfacePanel, OutputRuleItem, WslProfileInfo, CustomAgentInfo } from "interface_panel.slint";
+import { InterfacePanel, OutputRuleItem, WslProfileInfo, CustomAgentInfo, UpdateMirrorRow } from "interface_panel.slint";
 // Re-export so `slint::include_modules!` generates the detached Rust window types.
 export { ProcWindow, SystemInfoWindow, EditorWindow }
 import { ComboBox, SpinBox, LineEdit, Button, ScrollView, CheckBox, Palette } from "std-widgets.slint";
 
-export { SessionInfo, LaunchItem, SessionDraft, JumpHop, TabInfo, SftpEntry, SftpTreeNode, TunnelInfo, QuickCmd, PortFwd, WslProfileInfo, CustomAgentInfo }
+export { SessionInfo, LaunchItem, SessionDraft, JumpHop, TabInfo, SftpEntry, SftpTreeNode, TunnelInfo, QuickCmd, PortFwd, WslProfileInfo, CustomAgentInfo, UpdateMirrorRow }
 
 // --- TerminalState ---------------------------------------------------------
 // Per-terminal view-model exposed to Rust. A TabInfo has the metadata; the
@@ -233,6 +233,9 @@ component IconBtn inherits Rectangle {
     //   independent layers below, with animation only on the breathe layer
     //   and only while `breathe=true` (#breathing-light).
     in property <bool> breathe: false;
+    // `badge=true` draws a small red dot on the top-right corner (the Updates
+    // button uses it to flag a newer release instead of a popup banner).
+    in property <bool> badge: false;
     callback clicked();
     width: 26px;
     height: 26px;
@@ -298,6 +301,17 @@ component IconBtn inherits Rectangle {
         font-size: Theme.fs-md;
         horizontal-alignment: center;
         vertical-alignment: center;
+    }
+    // Ringed in the toolbar background so it reads as a cut-out over the icon.
+    if root.badge : Rectangle {
+        x: parent.width - 10px;
+        y: 2px;
+        width: 8px;
+        height: 8px;
+        border-radius: 4px;
+        background: #e5484d;
+        border-width: 1.5px;
+        border-color: Theme.bg-panel;
     }
     if ta.has-hover && root.tooltip != "" : Rectangle {
         y: parent.height + 5px;
@@ -1063,14 +1077,20 @@ export component AppWindow inherits Window {
     callback set-language(string);           // switch UI language ("zh" / "en")
 
     // --- Updates ----------------------------------------------------------
-    in-out property <bool> update-available: false;
+    in property <bool> update-available: false;   // red dot on the toolbar Updates button
     in property <string> update-version;
     in property <bool> update-busy;
     in property <bool> update-ready;
     in property <bool> update-error;
     in property <bool> update-install-supported;
+    // AUR installs: the update runs in a terminal tab, then MeatShell restarts.
+    in property <bool> update-via-terminal;
     in property <string> update-status;
-    property <string> update-action-label: root.update-ready
+    property <string> update-action-label: root.update-via-terminal
+        ? (root.update-ready
+            ? (root.lang-en ? "Restart" : "重启")
+            : (root.lang-en ? "Update in terminal" : "在终端中更新"))
+        : root.update-ready
         ? (root.lang-en ? "Install and restart" : "安装并重启")
         : root.update-install-supported
             ? (root.lang-en ? "Download update" : "下载更新")
@@ -1078,6 +1098,18 @@ export component AppWindow inherits Window {
     callback check-for-updates();
     callback update-action();
     callback open-update-url();
+    // Download mirrors (Chinese UI only; used in a mainland China time zone).
+    in property <[UpdateMirrorRow]> update-mirrors;
+    in property <bool> update-mirrors-testing;
+    in property <bool> update-china-tz;
+    in property <string> update-mirror-error;
+    callback add-update-mirror(string);
+    callback remove-update-mirror(string);
+    callback reset-update-mirrors();
+    callback test-update-mirrors();
+    in property <bool> update-mirror-auto: true;
+    callback select-update-mirror(string);
+    callback set-update-mirror-auto(bool);
 
     // --- Editor tabs (#70, #494) ------------------------------------------
     // Settings → SFTP: open text files as tabs in this window (true) or in the
@@ -3570,6 +3602,23 @@ export component AppWindow inherits Window {
             : (root.pinned ? "取消置顶" : "窗口置顶");
         clicked => { root.pinned = !root.pinned; root.pinned-changed(root.pinned); }
     }
+    // Updates: a quiet red dot instead of a popup banner when a newer release
+    // is found; clicking opens Settings → Updates, which holds every action.
+    IconBtn {
+        x: root.width - 214px - root.toolbar-x-off; y: root.toolbar-y;
+        visible: !root.term-fullscreen;
+        icon: "\u{E2C0}";   // Material "cloud_download"
+        badge: root.update-available;
+        tooltip: root.update-available
+            ? (root.lang-en ? "Update available: " : "有新版本：") + root.update-version
+            : (root.lang-en ? "Updates" : "软件更新");
+        clicked => {
+            root.settings-open = false;
+            root.download-open = false;
+            root.interface-start-page = "update";
+            root.interface-open = true;
+        }
+    }
 
     // Frameless resize edges (#119): thin hit-zones that start an OS-level
     // resize via winit. Hidden when maximized.
@@ -3615,62 +3664,6 @@ export component AppWindow inherits Window {
             x: parent.width - 8px; y: parent.height - 8px; width: 8px; height: 8px;
             mouse-cursor: nwse-resize;
             pointer-event(e) => { if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) { root.win-resize(6); } }
-        }
-    }
-
-    // A dismissible banner shares update actions with the settings page.
-    if root.update-available : Rectangle {
-        x: (parent.width - self.width) / 2;
-        y: 8px;
-        width: min(560px, parent.width - 16px);
-        height: 44px;
-        background: Theme.accent;
-        border-radius: Theme.radius-md;
-        border-width: 1px;
-        border-color: Theme.border-strong;
-        drop-shadow-blur: 14px;
-        drop-shadow-color: #00000060;
-        HorizontalLayout {
-            padding-left: 12px;
-            padding-right: 6px;
-            spacing: 8px;
-            Text {
-                text: root.update-busy ? root.update-status
-                    : root.update-error ? (root.lang-en ? "Update failed — see Settings" : "更新失败，请查看设置")
-                    : "🎉 " + @tr("Update available:") + " " + root.update-version;
-                color: #ffffff;
-                font-size: Theme.fs-sm;
-                font-family: Theme.ui-font-family;
-                vertical-alignment: center;
-                horizontal-stretch: 1;
-                overflow: elide;
-            }
-            Rectangle {
-                width: root.lang-en ? 142px : 100px; height: 28px;
-                y: (parent.height - self.height) / 2;
-                border-radius: Theme.radius-sm;
-                background: upd-dl-ta.has-hover ? #ffffff45 : #ffffff28;
-                upd-dl-ta := TouchArea {
-                    enabled: !root.update-busy;
-                    mouse-cursor: pointer;
-                    clicked => { root.update-action(); }
-                }
-                opacity: root.update-busy ? 0.55 : 1;
-                Text { text: root.update-action-label; color: #ffffff; font-size: Theme.fs-sm;
-                       horizontal-alignment: center; vertical-alignment: center; }
-            }
-            Rectangle {
-                width: 26px; height: 26px;
-                y: (parent.height - self.height) / 2;
-                border-radius: Theme.radius-sm;
-                background: upd-cl-ta.has-hover ? #ffffff45 : transparent;
-                upd-cl-ta := TouchArea {
-                    mouse-cursor: pointer;
-                    clicked => { root.update-available = false; }
-                }
-                Text { text: "\u{E5CD}"; font-family: "Material Icons"; color: #ffffff;
-                       font-size: Theme.fs-sm; horizontal-alignment: center; vertical-alignment: center; }
-            }
         }
     }
 
@@ -5938,11 +5931,23 @@ export component AppWindow inherits Window {
                     update-busy: root.update-busy;
                     update-error: root.update-error;
                     update-install-supported: root.update-install-supported;
+                    update-via-terminal: root.update-via-terminal;
                     update-status: root.update-status;
                     update-action-label: root.update-action-label;
                     check-for-updates => { root.check-for-updates(); }
                     update-action => { root.update-action(); }
                     open-update-url => { root.open-update-url(); }
+                    update-mirrors: root.update-mirrors;
+                    update-mirrors-testing: root.update-mirrors-testing;
+                    update-china-tz: root.update-china-tz;
+                    update-mirror-error: root.update-mirror-error;
+                    add-update-mirror(url) => { root.add-update-mirror(url); }
+                    remove-update-mirror(url) => { root.remove-update-mirror(url); }
+                    reset-update-mirrors => { root.reset-update-mirrors(); }
+                    test-update-mirrors => { root.test-update-mirrors(); }
+                    update-mirror-auto: root.update-mirror-auto;
+                    select-update-mirror(key) => { root.select-update-mirror(key); }
+                    set-update-mirror-auto(v) => { root.set-update-mirror-auto(v); }
                     mcp-enabled <=> root.mcp-enabled;
                     mcp-use-saved-credentials <=> root.mcp-use-saved-credentials;
                     mcp-allow-commands <=> root.mcp-allow-commands;

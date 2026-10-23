@@ -18,6 +18,34 @@ permissions:
   contents: read
 
 jobs:
+  publish-update-manifest:
+    name: Publish update manifest
+    needs: [check-version, build, build-flatpak, build-linux-aarch64-glibc228, build-linux-x86_64-glibc228]
+    if: ${{ !cancelled() && needs.check-version.result == 'success' && startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    steps:
+      # Read the files actually attached to the release, including their GitHub
+      # SHA-256 digests. A failed optional package must not leave a broken link.
+      - name: Generate and publish latest.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" --jq '
+            .tag_name as $tag |
+            {tag_name, draft, prerelease, assets: [
+              .assets[] | select(.state == "uploaded" and
+                (.name | startswith("meatshell-" + $tag + "-"))) |
+              {name, browser_download_url, size, digest}
+            ]}' > latest.json
+          jq -e '
+            .draft == false and .prerelease == false and
+            (.assets | length > 0) and
+            all(.assets[]; .size > 0 and
+              (.digest // "" | test("^sha256:[0-9a-fA-F]{64}$")))
+          ' latest.json > /dev/null
+          gh release upload "$GITHUB_REF_NAME" latest.json --clobber --repo "$GITHUB_REPOSITORY"
+
   check-version:
     name: Check tag version
     runs-on: ubuntu-latest

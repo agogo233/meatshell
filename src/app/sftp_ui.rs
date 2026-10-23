@@ -200,7 +200,6 @@ pub(super) fn collect_sftp_selected(
     paths
 }
 
-
 /// Shift+click range selection: make the checked set exactly the rows between
 /// `from` and `to` inclusive (either order, clamped to the list). Only rows
 /// whose state changes are written back, so large listings don't re-render

@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "check.rs"]
+mod check;
+
 fn release_body() -> serde_json::Value {
     serde_json::json!({
         "tag_name": "v0.8.0", "draft": false, "prerelease": false,

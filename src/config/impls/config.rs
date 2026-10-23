@@ -1981,6 +1981,26 @@ impl ConfigStore {
     pub fn set_update_check_enabled(&mut self, enabled: bool) {
         self.cache.update_check_disabled = !enabled;
     }
+    /// Update download mirrors; the built-in list until the user edits it.
+    pub fn update_mirrors(&self) -> Vec<String> {
+        self.cache.update_mirrors.clone().unwrap_or_else(|| {
+            crate::update::mirror::DEFAULT_MIRRORS
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        })
+    }
+    /// `None` restores the built-in list.
+    pub fn set_update_mirrors(&mut self, mirrors: Option<Vec<String>>) {
+        self.cache.update_mirrors = mirrors;
+    }
+    /// The picked download source (`""` = GitHub); `None` = fastest, automatically.
+    pub fn update_mirror_choice(&self) -> Option<String> {
+        self.cache.update_mirror_choice.clone()
+    }
+    pub fn set_update_mirror_choice(&mut self, choice: Option<String>) {
+        self.cache.update_mirror_choice = choice;
+    }
     pub fn mcp_enabled(&self) -> bool {
         self.cache.mcp_enabled
     }
@@ -2032,7 +2052,9 @@ impl ConfigStore {
         if w <= 0.0 {
             default_sftp_width()
         } else {
-            w
+            // A saved width from an older layout can be far below what the
+            // file list can render (#505): clamp rather than show a strip.
+            w.max(300.0)
         }
     }
     pub fn set_sftp_panel_width(&mut self, v: f32) {

@@ -26,18 +26,178 @@ fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap()
 }
 
+/// Nothing learned from the system.
+fn none() -> linux::Probe {
+    linux::Probe::default()
+}
+
+/// Inside a Flatpak sandbox with this `/.flatpak-info`.
+fn flatpak(info: Option<linux::FlatpakInfo>) -> linux::Probe {
+    linux::Probe { in_flatpak: true, flatpak: info, ..none() }
+}
+
+fn bundle_info(system: bool, host_commands: bool) -> linux::FlatpakInfo {
+    linux::FlatpakInfo {
+        app_id: linux::FLATPAK_APP_ID.into(),
+        instance: "123456".into(),
+        system,
+        host_commands,
+    }
+}
+
+fn owned_by(owner: linux::Owner, pkexec: bool) -> linux::Probe {
+    linux::Probe { owner: Some(owner), pkexec, ..none() }
+}
+
+#[test]
+fn release_deb_installs_update_through_apt_when_pkexec_exists() {
+    let exe = Path::new("/usr/bin/meatshell");
+    let deb = || linux::Owner::Dpkg("meatshell".into());
+    assert_eq!(
+        classify("linux", "x86_64", exe, None, &owned_by(deb(), true)),
+        Method::InPlace(Target::Deb { exe: exe.into() })
+    );
+    assert_eq!(
+        classify("linux", "aarch64", exe, None, &owned_by(deb(), true)),
+        Method::InPlace(Target::Deb { exe: exe.into() })
+    );
+    // No way to ask for the password: leave it to the package manager.
+    assert_eq!(
+        classify("linux", "x86_64", exe, None, &owned_by(deb(), false)),
+        Method::PackageManager
+    );
+    // A distribution's own package, or one we cannot identify.
+    assert_eq!(
+        classify("linux", "x86_64", exe, None, &owned_by(linux::Owner::Dpkg("other".into()), true)),
+        Method::PackageManager
+    );
+    assert_eq!(classify("linux", "x86_64", exe, None, &none()), Method::PackageManager);
+}
+
+#[test]
+fn aur_installs_update_through_the_aur_helper() {
+    let exe = Path::new("/usr/bin/meatshell");
+    assert_eq!(
+        classify("linux", "x86_64", exe, None, &owned_by(linux::Owner::Pacman("meatshell-bin".into()), false)),
+        Method::Aur
+    );
+    // e.g. a self-built `meatshell-git`: pacman updates it, not us.
+    assert_eq!(
+        classify("linux", "x86_64", exe, None, &owned_by(linux::Owner::Pacman("meatshell-git".into()), false)),
+        Method::PackageManager
+    );
+}
+
+#[test]
+fn install_script_copy_in_usr_local_stays_manual() {
+    // install-linux.sh's /usr/local copy is root-owned and the app cannot
+    // sudo, so it is handed the release page outright: upstream's pkexec
+    // in-place path (SystemBinary) is deliberately not taken, whatever the
+    // probe reports.
+    let exe = Path::new(linux::SYSTEM_BINARY);
+    let pkexec = linux::Probe { pkexec: true, ..none() };
+    assert_eq!(classify("linux", "x86_64", exe, None, &pkexec), Method::Manual);
+    assert_eq!(classify("linux", "x86_64", exe, None, &none()), Method::Manual);
+    // Some other root-owned folder is not ours to replace.
+    assert_eq!(
+        classify("linux", "x86_64", Path::new("/opt/meatshell/meatshell"), None, &pkexec),
+        Method::Manual
+    );
+}
+
+#[test]
+fn only_the_release_flatpak_bundle_with_host_access_updates_itself() {
+    let exe = Path::new("/app/bin/meatshell");
+    assert_eq!(
+        classify("linux", "x86_64", exe, None, &flatpak(Some(bundle_info(false, true)))),
+        Method::InPlace(Target::Flatpak { system: false, instance: "123456".into() })
+    );
+    assert_eq!(
+        classify("linux", "x86_64", exe, None, &flatpak(Some(bundle_info(true, true)))),
+        Method::InPlace(Target::Flatpak { system: true, instance: "123456".into() })
+    );
+    // v0.7.9 bundles lack --talk-name=org.freedesktop.Flatpak.
+    assert_eq!(
+        classify("linux", "x86_64", exe, None, &flatpak(Some(bundle_info(false, false)))),
+        Method::PackageManager
+    );
+    assert_eq!(classify("linux", "x86_64", exe, None, &flatpak(None)), Method::PackageManager);
+    let mut other = bundle_info(false, true);
+    other.app_id = "org.example.Fork".into();
+    assert_eq!(
+        classify("linux", "x86_64", exe, None, &flatpak(Some(other))),
+        Method::PackageManager
+    );
+}
+
+#[test]
+fn system_install_asset_names_match_the_release_workflow() {
+    let exe = PathBuf::from("/usr/bin/meatshell");
+    assert_eq!(
+        asset_names(&Target::Deb { exe: exe.clone() }, "v0.8.0", "aarch64", Some("glibc228")),
+        ["meatshell-v0.8.0-linux-aarch64.deb"]
+    );
+    assert_eq!(
+        asset_names(&Target::SystemBinary { exe }, "v0.8.0", "x86_64", Some("glibc228")),
+        ["meatshell-v0.8.0-linux-x86_64-glibc228.tar.gz"]
+    );
+    assert_eq!(
+        asset_names(&Target::Flatpak { system: false, instance: "1".into() }, "v0.8.0", "x86_64", None),
+        ["meatshell-v0.8.0-linux-x86_64.flatpak"]
+    );
+    let workflow = read(&Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/release.yml"));
+    assert!(workflow.contains("meatshell-${{ github.ref_name }}-linux-x86_64.flatpak"));
+    assert!(workflow.contains(r#"DEB="target/debian/meatshell-${GITHUB_REF_NAME:-dev}-${{ matrix.name }}.deb""#));
+}
+
+#[test]
+fn only_system_wide_installs_ask_for_a_password() {
+    assert!(Target::Deb { exe: "/usr/bin/meatshell".into() }.needs_admin());
+    assert!(Target::SystemBinary { exe: linux::SYSTEM_BINARY.into() }.needs_admin());
+    assert!(Target::Flatpak { system: true, instance: "1".into() }.needs_admin());
+    assert!(!Target::Flatpak { system: false, instance: "1".into() }.needs_admin());
+    assert!(!Target::LinuxTarball { exe: "meatshell".into() }.needs_admin());
+}
+
+#[test]
+fn deb_and_flatpak_packages_are_installed_as_downloaded() {
+    let dir = TempDir::new();
+    for (target, name) in [
+        (Target::Deb { exe: "/usr/bin/meatshell".into() }, "meatshell.deb"),
+        (Target::Flatpak { system: false, instance: "1".into() }, "meatshell.flatpak"),
+    ] {
+        let work = dir.0.join(name);
+        fs::create_dir_all(&work).unwrap();
+        let mut prepared = Prepared { target, work: work.clone(), payload: PathBuf::new(), installed: true };
+        let package = work.join("package");
+        write(&package, "verified bytes");
+        prepared.unpack(&package, false).unwrap();
+        assert_eq!(prepared.payload, work.join(name));
+        assert_eq!(read(&prepared.payload), "verified bytes");
+    }
+}
+
+#[test]
+fn flatpak_manifest_allows_the_host_flatpak_for_updates() {
+    let manifest = read(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("packaging/flatpak/io.github.yituorou.meatshell.yml"),
+    );
+    assert!(manifest.contains("- --talk-name=org.freedesktop.Flatpak"));
+    assert!(manifest.contains(&format!("id: {}", linux::FLATPAK_APP_ID)));
+}
+
 #[test]
 fn classifies_portable_and_tarball_builds_in_writable_folders() {
     let dir = TempDir::new();
     let exe = dir.0.join("meatshell.exe");
     assert_eq!(
-        classify("windows", "x86_64", &exe, None, false),
+        classify("windows", "x86_64", &exe, None, &none()),
         Method::InPlace(Target::WindowsPortable { exe: exe.clone() })
     );
-    assert_eq!(classify("windows", "aarch64", &exe, None, false), Method::Manual);
+    assert_eq!(classify("windows", "aarch64", &exe, None, &none()), Method::Manual);
     let exe = dir.0.join("meatshell");
     assert_eq!(
-        classify("linux", "aarch64", &exe, None, false),
+        classify("linux", "aarch64", &exe, None, &none()),
         Method::InPlace(Target::LinuxTarball { exe: exe.clone() })
     );
 }
@@ -49,29 +209,30 @@ fn classifies_appimage_and_package_manager_installs() {
     write(&file, "appimage");
     let mounted = Path::new("/tmp/.mount_meatsh/usr/bin/meatshell");
     assert_eq!(
-        classify("linux", "x86_64", mounted, Some(file.clone()), false),
+        classify("linux", "x86_64", mounted, Some(file.clone()), &none()),
         Method::InPlace(Target::AppImage { file: file.clone() })
     );
     assert_eq!(
-        classify("linux", "x86_64", Path::new("/usr/bin/meatshell"), None, false),
+        classify("linux", "x86_64", Path::new("/usr/bin/meatshell"), None, &none()),
         Method::PackageManager
     );
     assert_eq!(
-        classify("linux", "x86_64", Path::new("/app/bin/meatshell"), None, false),
+        classify("linux", "x86_64", Path::new("/app/bin/meatshell"), None, &none()),
         Method::PackageManager
     );
-    // install-linux.sh's root-owned copy is not a package; it needs the release page.
+    // install-linux.sh's root-owned copy is not a package; without pkexec it
+    // needs the release page.
     assert_eq!(
-        classify("linux", "x86_64", Path::new("/usr/local/bin/meatshell"), None, false),
+        classify("linux", "x86_64", Path::new("/usr/local/bin/meatshell"), None, &none()),
         Method::Manual
     );
     assert_eq!(
-        classify("linux", "x86_64", &dir.0.join("meatshell"), None, true),
+        classify("linux", "x86_64", &dir.0.join("meatshell"), None, &flatpak(None)),
         Method::PackageManager
     );
     // A stale $APPIMAGE that no longer exists falls back to the executable.
     assert_eq!(
-        classify("linux", "x86_64", &dir.0.join("meatshell"), Some(dir.0.join("gone")), false),
+        classify("linux", "x86_64", &dir.0.join("meatshell"), Some(dir.0.join("gone")), &none()),
         Method::InPlace(Target::LinuxTarball { exe: dir.0.join("meatshell") })
     );
 }
@@ -83,11 +244,11 @@ fn classifies_mac_bundles_only_with_the_bundle_layout() {
     let exe = bundle.join("Contents/MacOS/meatshell");
     write(&exe, "binary");
     assert_eq!(
-        classify("macos", "aarch64", &exe, None, false),
+        classify("macos", "aarch64", &exe, None, &none()),
         Method::InPlace(Target::MacApp { bundle })
     );
     assert_eq!(
-        classify("macos", "aarch64", &dir.0.join("meatshell"), None, false),
+        classify("macos", "aarch64", &dir.0.join("meatshell"), None, &none()),
         Method::Manual
     );
 }
@@ -95,8 +256,8 @@ fn classifies_mac_bundles_only_with_the_bundle_layout() {
 #[test]
 fn unwritable_or_unknown_locations_need_the_release_page() {
     let missing = Path::new("/definitely/not/here/meatshell");
-    assert_eq!(classify("linux", "x86_64", missing, None, false), Method::Manual);
-    assert_eq!(classify("freebsd", "x86_64", missing, None, false), Method::Manual);
+    assert_eq!(classify("linux", "x86_64", missing, None, &none()), Method::Manual);
+    assert_eq!(classify("freebsd", "x86_64", missing, None, &none()), Method::Manual);
 }
 
 #[test]
@@ -250,7 +411,7 @@ fn tarball_update_replaces_program_files_and_keeps_user_data() {
     prepared.unpack(&package, false).unwrap();
     let work = prepared.work.clone();
 
-    assert_eq!(prepared.install().unwrap(), exe);
+    assert_eq!(prepared.install().unwrap(), Relaunch::Path(exe.clone()));
     drop(prepared);
 
     assert_eq!(read(&exe), "new binary");
@@ -368,7 +529,7 @@ fn mac_bundle_swap_keeps_the_old_bundle_until_cleanup() {
     prepared.payload = new_app;
     let work = prepared.work.clone();
 
-    assert_eq!(prepared.install().unwrap(), bundle);
+    assert_eq!(prepared.install().unwrap(), Relaunch::Path(bundle.clone()));
     drop(prepared);
     assert_eq!(read(&bundle.join("Contents/MacOS/meatshell")), "new app");
     assert_eq!(read(&work.join("old.app/Contents/MacOS/meatshell")), "old app");
@@ -384,7 +545,7 @@ fn appimage_update_replaces_the_file() {
     let package = prepared.work.join("package");
     write(&package, "new image");
     prepared.unpack(&package, false).unwrap();
-    assert_eq!(prepared.install().unwrap(), file);
+    assert_eq!(prepared.install().unwrap(), Relaunch::Path(file.clone()));
     assert_eq!(read(&file), "new image");
 }
 

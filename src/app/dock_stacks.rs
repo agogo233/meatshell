@@ -28,6 +28,11 @@ pub const DIVIDER: f32 = 4.0;
 /// Clamp bounds for a stacked panel's thickness along its edge's normal
 /// (its width on a left/right edge, height on a top/bottom one).
 pub const MIN_THICK: f32 = 120.0;
+/// Floor for a side-docked SFTP panel's width. The file list (icon + name +
+/// perms columns) is unreadable below it, and a width saved from an older
+/// layout can be far smaller, so every write path and the config getter hold
+/// this line (#505). `MIN_THICK` stays shared with the other panels.
+pub const MIN_SFTP_WIDTH: f32 = 300.0;
 /// Max share of the dock-area an edge stack may take. Kept well under half so
 /// the terminal never fully disappears even with opposite edges both maxed.
 const MAX_THICK_FRAC: f32 = 0.38;

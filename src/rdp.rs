@@ -5,12 +5,11 @@
 //! domain, resolution — and hands them over, so the session opens in the
 //! client's own native window instead of one of our tabs.
 //!
-//! * Windows: `mstsc`, driven through a generated `.rdp` file, which is the only
-//!   way to pass credentials — `mstsc` deliberately refuses a password on its
-//!   command line. The password goes in DPAPI-encrypted for the current user,
-//!   exactly the format `mstsc` writes when you tick "remember me": only the
-//!   same user on the same machine can decrypt it, and a failed decryption (or
-//!   an unsaved password) just makes the client prompt instead.
+//! * Windows: `mstsc`, driven through a generated `.rdp` file (address, user,
+//!   display). `mstsc` deliberately refuses a password on its command line, so
+//!   the password is saved the way its own "Remember me" saves it: a domain
+//!   credential for `TERMSRV/<host>` in Windows Credential Manager, readable
+//!   only by this Windows user. Without a saved password the client prompts.
 //! * Linux / macOS / BSD: FreeRDP's `xfreerdp3` / `xfreerdp`, with the password
 //!   handed over on stdin so it never shows up in the process list. The Flatpak
 //!   bundle builds FreeRDP into `/app` (see `packaging/flatpak`), so no separate
@@ -100,9 +99,11 @@ fn rdp_file_path(session_id: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("meatshell-rdp-{session_id}.rdp"))
 }
 
-/// Build the `.rdp` payload for `account`.
+/// Build the `.rdp` payload for `account`. The password is never written
+/// into the file: `saved_credential` says whether [`save_credential`] stored
+/// it in Windows Credential Manager, where mstsc picks it up on its own.
 #[cfg(windows)]
-fn rdp_file_contents(account: &Account<'_>) -> String {
+fn rdp_file_contents(account: &Account<'_>, saved_credential: bool) -> String {
     let mut out = String::new();
     out.push_str(&format!(
         "full address:s:{}:{}\r\n",
@@ -114,15 +115,13 @@ fn rdp_file_contents(account: &Account<'_>) -> String {
     if !account.domain.is_empty() {
         out.push_str(&format!("domain:s:{}\r\n", account.domain));
     }
-    match protected_password(account.password) {
-        Some(blob) => {
-            out.push_str(&format!("password 51:b:{blob}\r\n"));
-            // Credentials are complete: do not stop on mstsc's prompt.
-            out.push_str("prompt for credentials:i:0\r\n");
-        }
-        // No stored password (or DPAPI failed): let mstsc ask, so the user can
-        // still save the credentials there.
-        None => out.push_str("prompt for credentials:i:1\r\n"),
+    if saved_credential {
+        // Credentials are complete: do not stop on mstsc's prompt.
+        out.push_str("prompt for credentials:i:0\r\n");
+    } else {
+        // No stored password (or saving it failed): let mstsc ask, so the
+        // user can still save the credentials there.
+        out.push_str("prompt for credentials:i:1\r\n");
     }
     // Display: either full screen — mstsc then uses the local monitor
     // resolution, which is the sharpest option — or a window at the configured
@@ -145,76 +144,141 @@ fn rdp_file_contents(account: &Account<'_>) -> String {
     out
 }
 
-/// Encrypt `plain` into the hex-encoded DPAPI blob an `.rdp` file expects.
-/// `None` means "no password to pass" (empty, or DPAPI is unavailable).
+/// Windows Credential Manager targets mstsc looks up for `host:port`. mstsc
+/// files "Remember me" credentials under `TERMSRV/<host>`; a non-default
+/// port is also covered with `TERMSRV/<host>:<port>`.
 #[cfg(windows)]
-fn protected_password(plain: &str) -> Option<String> {
-    if plain.is_empty() {
-        return None;
+fn credential_targets(host: &str, port: u16) -> Vec<String> {
+    let mut targets = vec![format!("TERMSRV/{host}")];
+    if port != RDP_DEFAULT_PORT {
+        targets.push(format!("TERMSRV/{host}:{port}"));
     }
-    let mut wide: Vec<u16> = plain.encode_utf16().collect();
-    // A terminating NUL is what a C-style reader expects; mstsc accepts both.
-    wide.push(0);
+    targets
+}
+
+/// The user name as mstsc stores it: `DOMAIN\user`, or just `user`.
+#[cfg(windows)]
+fn credential_user(account: &Account<'_>) -> String {
+    if account.domain.is_empty() {
+        account.user.to_string()
+    } else {
+        format!("{}\\{}", account.domain, account.user)
+    }
+}
+
+/// Hand the saved password to mstsc the way its own "Remember me" does: as a
+/// domain credential for `TERMSRV/<host>` in Windows Credential Manager.
+///
+/// Not as a `password 51:b:` line in the `.rdp` file: mstsc keeps sending that
+/// password even after the server redirects the connection with one-time
+/// credentials, which Ubuntu's GNOME Remote Desktop does after its login
+/// screen. The redirected login is then rejected and the window closes at
+/// once, while typed or remembered credentials work.
+///
+/// False when there is nothing to save (no user or password) or Windows
+/// refused, so the caller lets mstsc prompt instead.
+#[cfg(windows)]
+fn save_credential(account: &Account<'_>) -> bool {
+    if account.user.is_empty() || account.password.is_empty() {
+        return false;
+    }
+    let user = credential_user(account);
+    let mut saved = true;
+    for target in credential_targets(account.host, account.port) {
+        if let Err(code) = credman::write_domain_password(&target, &user, account.password) {
+            tracing::warn!("rdp: could not save the credential for {target}: error {code}");
+            saved = false;
+        }
+    }
+    saved
+}
+
+/// Minimal Credential Manager bindings (advapi32), kept local like the rest
+/// of this module's Windows calls.
+#[cfg(windows)]
+mod credman {
+    use std::ptr::{null, null_mut};
+
+    const CRED_TYPE_DOMAIN_PASSWORD: u32 = 2;
+    /// Kept across logons for this Windows user, like mstsc's "Remember me".
+    const CRED_PERSIST_LOCAL_MACHINE: u32 = 2;
 
     #[repr(C)]
-    struct DataBlob {
-        cb_data: u32,
-        pb_data: *mut u8,
+    struct Credential {
+        flags: u32,
+        kind: u32,
+        target_name: *const u16,
+        comment: *const u16,
+        last_written: [u32; 2],
+        credential_blob_size: u32,
+        credential_blob: *const u8,
+        persist: u32,
+        attribute_count: u32,
+        attributes: *mut core::ffi::c_void,
+        target_alias: *const u16,
+        user_name: *const u16,
     }
 
-    #[link(name = "crypt32")]
+    #[link(name = "advapi32")]
     extern "system" {
-        fn CryptProtectData(
-            p_data_in: *const DataBlob,
-            sz_data_descr: *const u16,
-            p_optional_entropy: *const DataBlob,
-            pv_reserved: *mut core::ffi::c_void,
-            p_prompt_struct: *mut core::ffi::c_void,
-            dw_flags: u32,
-            p_data_out: *mut DataBlob,
-        ) -> i32;
-        fn LocalFree(h_mem: *mut core::ffi::c_void) -> *mut core::ffi::c_void;
+        fn CredWriteW(credential: *const Credential, flags: u32) -> i32;
+        #[cfg_attr(not(test), allow(dead_code))]
+        fn CredDeleteW(target_name: *const u16, kind: u32, flags: u32) -> i32;
     }
 
-    let input = DataBlob {
-        cb_data: u32::try_from(wide.len()).ok()? * 2,
-        pb_data: wide.as_mut_ptr().cast::<u8>(),
-    };
-    let mut output = DataBlob {
-        cb_data: 0,
-        pb_data: std::ptr::null_mut(),
-    };
-    // SAFETY: `input` describes a live buffer, `output` is only written by the
-    // call, and both pointers stay valid for its duration. No entropy and no
-    // LOCAL_MACHINE flag: that is exactly what mstsc uses when it decrypts.
-    let ok = unsafe {
-        CryptProtectData(
-            &input,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            0,
-            &mut output,
-        )
-    };
-    if ok == 0 || output.pb_data.is_null() {
-        return None;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetLastError() -> u32;
     }
-    // SAFETY: the call succeeded, so `output` owns `cb_data` readable bytes.
-    let bytes = unsafe { std::slice::from_raw_parts(output.pb_data, output.cb_data as usize) };
-    let hex: String = bytes.iter().map(|byte| format!("{byte:02X}")).collect();
-    // SAFETY: the buffer came from CryptProtectData, which requires LocalFree.
-    unsafe {
-        LocalFree(output.pb_data.cast::<core::ffi::c_void>());
+
+    fn wide(text: &str) -> Vec<u16> {
+        text.encode_utf16().chain(std::iter::once(0)).collect()
     }
-    Some(hex)
+
+    /// Create or replace the domain credential for `target`. The blob is the
+    /// UTF-16 password without a terminating NUL. `Err` is the Win32 error.
+    pub(super) fn write_domain_password(target: &str, user: &str, password: &str) -> Result<(), u32> {
+        let target = wide(target);
+        let user = wide(user);
+        let blob: Vec<u8> = password.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let credential = Credential {
+            flags: 0,
+            kind: CRED_TYPE_DOMAIN_PASSWORD,
+            target_name: target.as_ptr(),
+            comment: null(),
+            last_written: [0, 0],
+            credential_blob_size: u32::try_from(blob.len()).map_err(|_| 87u32)?,
+            credential_blob: blob.as_ptr(),
+            persist: CRED_PERSIST_LOCAL_MACHINE,
+            attribute_count: 0,
+            attributes: null_mut(),
+            target_alias: null(),
+            user_name: user.as_ptr(),
+        };
+        // SAFETY: every pointer refers to a live, NUL-terminated (strings) or
+        // correctly sized (blob) buffer that outlives the call.
+        if unsafe { CredWriteW(&credential, 0) } != 0 {
+            Ok(())
+        } else {
+            // SAFETY: reads the calling thread's last-error value.
+            Err(unsafe { GetLastError() })
+        }
+    }
+
+    /// Remove the domain credential for `target` (used by tests to clean up).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn delete_domain_password(target: &str) -> bool {
+        let target = wide(target);
+        // SAFETY: `target` is a live NUL-terminated buffer.
+        unsafe { CredDeleteW(target.as_ptr(), CRED_TYPE_DOMAIN_PASSWORD, 0) != 0 }
+    }
 }
 
 #[cfg(windows)]
 fn start_client(account: &Account<'_>, session_id: &str) -> Result<String, String> {
+    let saved_credential = save_credential(account);
     let path = rdp_file_path(session_id);
-    std::fs::write(&path, rdp_file_contents(account)).map_err(|err| {
+    std::fs::write(&path, rdp_file_contents(account, saved_credential)).map_err(|err| {
         format!(
             "{} {}: {err}",
             t("无法写入连接文件", "cannot write the connection file"),
@@ -630,7 +694,7 @@ mod tests {
             width: 1920,
             height: 1080,
         };
-        let contents = rdp_file_contents(&account);
+        let contents = rdp_file_contents(&account, false);
         assert!(contents.contains("full address:s:192.168.1.10:3389\r\n"));
         assert!(contents.contains("username:s:alice\r\n"));
         assert!(contents.contains("domain:s:CONTOSO\r\n"));
@@ -658,7 +722,7 @@ mod tests {
             width: 1280,
             height: 720,
         };
-        let contents = rdp_file_contents(&account);
+        let contents = rdp_file_contents(&account, false);
         assert!(contents.contains("screen mode id:i:2\r\n"));
         assert!(!contents.contains("desktopwidth:i:"));
         assert!(!contents.contains("desktopheight:i:"));
@@ -666,33 +730,13 @@ mod tests {
         assert!(!contents.contains("username:s:"));
     }
 
-    /// A stored password must produce a blob mstsc can decrypt, which also
-    /// proves the DPAPI call itself is wired up correctly.
+    /// The password never goes into the `.rdp` file: with a saved credential
+    /// mstsc must not prompt, without one it must.
     #[test]
     #[cfg(windows)]
-    fn stored_password_round_trips_through_dpapi() {
-        #[repr(C)]
-        struct DataBlob {
-            cb_data: u32,
-            pb_data: *mut u8,
-        }
-
-        #[link(name = "crypt32")]
-        extern "system" {
-            fn CryptUnprotectData(
-                p_data_in: *const DataBlob,
-                ppsz_data_descr: *mut *mut u16,
-                p_optional_entropy: *const DataBlob,
-                pv_reserved: *mut core::ffi::c_void,
-                p_prompt_struct: *mut core::ffi::c_void,
-                dw_flags: u32,
-                p_data_out: *mut DataBlob,
-            ) -> i32;
-            fn LocalFree(h_mem: *mut core::ffi::c_void) -> *mut core::ffi::c_void;
-        }
-
+    fn rdp_file_never_contains_the_password() {
         let account = Account {
-            host: "127.0.0.1",
+            host: "server",
             port: 3389,
             user: "alice",
             domain: "",
@@ -701,54 +745,49 @@ mod tests {
             width: 1280,
             height: 720,
         };
-        let contents = rdp_file_contents(&account);
-        let line = contents
-            .lines()
-            .find_map(|line| line.strip_prefix("password 51:b:"))
-            .expect("a stored password must be written");
-        assert!(contents.contains("prompt for credentials:i:0\r\n"));
-
-        let blob: Vec<u8> = (0..line.len() / 2)
-            .map(|i| u8::from_str_radix(&line[i * 2..i * 2 + 2], 16).expect("hex blob"))
-            .collect();
-        let input = DataBlob {
-            cb_data: blob.len() as u32,
-            pb_data: blob.as_ptr() as *mut u8,
-        };
-        let mut output = DataBlob {
-            cb_data: 0,
-            pb_data: std::ptr::null_mut(),
-        };
-        // SAFETY: same contract as the encryption side.
-        let ok = unsafe {
-            CryptUnprotectData(
-                &input,
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                0,
-                &mut output,
-            )
-        };
-        assert_ne!(ok, 0, "the blob must be decryptable by this user");
-        // SAFETY: the call succeeded, so the buffer is readable.
-        let plain = unsafe {
-            std::slice::from_raw_parts(output.pb_data, output.cb_data as usize)
-        };
-        let wide: Vec<u16> = plain
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-            .collect();
-        let decoded = String::from_utf16_lossy(&wide);
-        // SAFETY: the buffer came from CryptUnprotectData.
-        unsafe {
-            LocalFree(output.pb_data.cast::<core::ffi::c_void>());
+        let saved = rdp_file_contents(&account, true);
+        assert!(saved.contains("prompt for credentials:i:0\r\n"));
+        let unsaved = rdp_file_contents(&account, false);
+        assert!(unsaved.contains("prompt for credentials:i:1\r\n"));
+        for contents in [saved, unsaved] {
+            assert!(!contents.contains("password"));
+            assert!(!contents.contains("p@ssw0rd"));
         }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn credentials_use_mstsc_targets_and_user_names() {
+        assert_eq!(credential_targets("10.0.0.5", 3389), ["TERMSRV/10.0.0.5"]);
         assert_eq!(
-            decoded.trim_end_matches('\0'),
-            "p@ssw0rd-示例",
-            "the round-tripped password must match"
+            credential_targets("ubuntu.lan", 3390),
+            ["TERMSRV/ubuntu.lan", "TERMSRV/ubuntu.lan:3390"]
         );
+        let mut account = Account {
+            host: "h",
+            port: 3389,
+            user: "alice",
+            domain: "",
+            password: "x",
+            fullscreen: false,
+            width: 1280,
+            height: 720,
+        };
+        assert_eq!(credential_user(&account), "alice");
+        account.domain = "CONTOSO";
+        assert_eq!(credential_user(&account), "CONTOSO\\alice");
+        // Nothing to save without a user or a password: mstsc prompts.
+        account.password = "";
+        assert!(!save_credential(&account));
+    }
+
+    /// Writing the credential must succeed for this Windows user; the test
+    /// target is removed again so Credential Manager is left as it was.
+    #[test]
+    #[cfg(windows)]
+    fn credential_manager_accepts_the_saved_password() {
+        let target = format!("TERMSRV/meatshell-test-{}.invalid", uuid::Uuid::new_v4());
+        assert_eq!(credman::write_domain_password(&target, "alice", "p@ssw0rd-示例"), Ok(()));
+        assert!(credman::delete_domain_password(&target));
     }
 }

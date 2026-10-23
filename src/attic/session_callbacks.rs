@@ -2,6 +2,55 @@
 
 use super::*;
 
+/// Drops the second connect of a double-click (#511). Session rows connect on
+/// each click release, and users coming from Xshell / FinalShell double-click.
+#[derive(Default)]
+struct DoubleClickGuard {
+    last: Option<(String, std::time::Instant)>,
+}
+
+impl DoubleClickGuard {
+    /// The default double-click time on Windows and macOS.
+    const WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
+
+    /// False when `id` was connected less than [`Self::WINDOW`] ago.
+    fn allow(&mut self, id: &str, now: std::time::Instant) -> bool {
+        let repeat = matches!(&self.last, Some((last_id, at))
+            if last_id == id && now.saturating_duration_since(*at) < Self::WINDOW);
+        if !repeat {
+            self.last = Some((id.to_string(), now));
+        }
+        !repeat
+    }
+}
+
+#[cfg(test)]
+mod double_click_tests {
+    use super::DoubleClickGuard;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn the_second_click_of_a_double_click_does_not_connect_again() {
+        let mut guard = DoubleClickGuard::default();
+        let t = Instant::now();
+        assert!(guard.allow("rdp", t));
+        assert!(!guard.allow("rdp", t + Duration::from_millis(180)));
+        // The ignored click does not extend the window: a deliberate third
+        // click after it connects again.
+        assert!(guard.allow("rdp", t + Duration::from_millis(600)));
+    }
+
+    #[test]
+    fn other_sessions_and_later_clicks_still_connect() {
+        let mut guard = DoubleClickGuard::default();
+        let t = Instant::now();
+        assert!(guard.allow("a", t));
+        assert!(guard.allow("b", t + Duration::from_millis(50)));
+        assert!(guard.allow("a", t + Duration::from_millis(100)));
+        assert!(guard.allow("a", t + Duration::from_secs(2)));
+    }
+}
+
 pub(super) fn sync_sessions_for_window(
     window: &slint::Weak<AppWindow>,
     store: &ConfigStore,
@@ -1171,8 +1220,18 @@ pub(super) fn wire_session_callbacks(
         let local_net_hist = local_net_hist.clone();
         let sftp_follow_cd = sftp_follow_cd.clone();
         let tab_routes = tab_routes.clone();
+        let repeat_guard = RefCell::new(DoubleClickGuard::default());
         window.on_connect_session(move |id: SharedString| {
             let id = id.to_string();
+            // A session row connects on every click release, so a double-click
+            // arrives here twice: two tabs, or two stacked RDP windows that
+            // kick each other off (#511). Only the first click connects.
+            if !repeat_guard
+                .borrow_mut()
+                .allow(&id, std::time::Instant::now())
+            {
+                return;
+            }
             let builtin =
                 id.starts_with("system:") || id.starts_with(super::agents::AGENT_ID_PREFIX);
             let session = if builtin {
