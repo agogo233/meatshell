@@ -360,4 +360,9 @@ pub(super) fn wire_editor_tabs(
             find_step(content.as_str(), query.as_str(), current, reverse)
         },
     );
+    window.on_editor_scroll_select(
+        |content: SharedString, anchor: i32, focus: i32, delta_y: f32, line_height: f32| {
+            scroll_selection(content.as_str(), anchor, focus, delta_y, line_height)
+        },
+    );
 }

@@ -69,6 +69,10 @@ export component EditorPane inherits Rectangle {
     callback editor-highlight(string);
     callback editor-count-matches(string, string) -> int;
     callback editor-find-step(string, string, int, bool) -> EditorFindResult;
+    // Grow the selection by the lines revealed while the viewport scrolls. The
+    // text input never sees the wheel itself (#388), so the byte offsets are
+    // computed from the scroll delta and pushed back here.
+    callback editor-scroll-select(string, int, int, length, length) -> EditorFindResult;
     callback editor-replace-all(string, string);
 
     public function focus-editor() { edit-input.focus(); }
@@ -80,6 +84,35 @@ export component EditorPane inherits Rectangle {
     // Focus on the next UI turn; focusing from init or a change handler can
     // re-enter the Windows accessibility adapter (#386).
     property <bool> focus-pending: false;
+    // Viewport offset mirrored here so the change can be watched; scrolling only
+    // moves the viewport, so a selection is grown by the revealed lines.
+    property <length> scroll-y: ed-scroll.content-y;
+    property <length> last-scroll-y: 0;
+    // The edge scroll driven by the caret must not grow the selection again.
+    property <bool> scroll-guard: false;
+    property <int> scroll-depth: 0;
+    changed scroll-y => {
+        if (root.scroll-guard || root.scroll-depth > 0) {
+            root.last-scroll-y = root.scroll-y;
+        } else {
+            let delta-y = root.scroll-y - root.last-scroll-y;
+            root.last-scroll-y = root.scroll-y;
+            if (delta-y != 0px && edit-input.anchor-position-byte-offset
+                    != edit-input.cursor-position-byte-offset) {
+                let line-height = edit-input.font-metrics.ascent
+                    - edit-input.font-metrics.descent;
+                if (line-height > 0px) {
+                    root.scroll-depth = root.scroll-depth + 1;
+                    let grown = root.editor-scroll-select(root.editor-content,
+                        edit-input.anchor-position-byte-offset,
+                        edit-input.cursor-position-byte-offset,
+                        delta-y, line-height);
+                    edit-input.set-selection-offsets(grown.start, grown.end);
+                    root.scroll-depth = root.scroll-depth - 1;
+                }
+            }
+        }
+    }
     init => {
         root.load-doc();
         if root.shown { root.focus-pending = true; }
@@ -339,7 +372,10 @@ export component EditorPane inherits Rectangle {
                                 cursor-position-changed(position) => {
                                     // Keep a keyboard/drag selection endpoint visible;
                                     // during a pointer grab this also scrolls as the
-                                    // mouse leaves the top or bottom edge (#388).
+                                    // mouse leaves the top or bottom edge (#388). The guard
+                                    // keeps that edge scroll from also growing the
+                                    // selection.
+                                    root.scroll-guard = true;
                                     let cursor-y = position.y + self.y + ed-scroll.content-y;
                                     if (cursor-y < 12px) {
                                         ed-scroll.content-y = min(0px,
@@ -350,6 +386,7 @@ export component EditorPane inherits Rectangle {
                                             ed-scroll.content-y
                                                 - (cursor-y - ed-scroll.visible-height + 12px));
                                     }
+                                    root.scroll-guard = false;
                                 }
                                 edited => {
                                     root.content-changed();

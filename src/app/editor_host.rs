@@ -83,6 +83,11 @@ pub(super) fn wire_editor_window(editor: &EditorWindow, sftp_handles: SftpHandle
             find_step(content.as_str(), query.as_str(), current, reverse)
         },
     );
+    editor.on_editor_scroll_select(
+        |content: SharedString, anchor: i32, focus: i32, delta_y: f32, line_height: f32| {
+            scroll_selection(content.as_str(), anchor, focus, delta_y, line_height)
+        },
+    );
     {
         let weak = editor.as_weak();
         editor.on_editor_replace_all(move |query: SharedString, replacement: SharedString| {
@@ -149,4 +154,83 @@ pub(super) fn find_step(
         end: start.saturating_add(query.len().min(i32::MAX as usize) as i32),
         count: positions.len().min(i32::MAX as usize) as i32,
     }
+}
+
+/// Extend a selection while the editor viewport scrolls. `delta-y` is the scroll offset
+/// delta in logical pixels (positive = the viewport moved up, so text above is revealed) and
+/// `line-height` the rendered line height, so the selection grows by whole visual lines.
+///
+/// The end on the revealed side moves: scrolling up extends the top end, scrolling down the
+/// bottom end. `anchor` keeps whichever side it sat on, so a backwards selection keeps growing
+/// backwards. Offsets are byte offsets, the unit `set-selection-offsets` takes, and are clamped
+/// to the document. Wrapping lines are measured against logical newlines, which is exact for
+/// short lines and only approximate on very long wrapped lines.
+pub(super) fn scroll_selection(
+    content: &str,
+    anchor: i32,
+    focus: i32,
+    delta_y: f32,
+    line_height: f32,
+) -> EditorFindResult {
+    let len = content.len().min(i32::MAX as usize) as i32;
+    let anchor = anchor.clamp(0, len) as usize;
+    let focus = focus.clamp(0, len) as usize;
+    let lines = if anchor == focus
+        || line_height <= 0.0
+        || !delta_y.is_finite()
+        || !line_height.is_finite()
+    {
+        0
+    } else {
+        (delta_y / line_height).round() as i32
+    };
+    if lines == 0 {
+        return EditorFindResult {
+            start: anchor as i32,
+            end: focus as i32,
+            count: 0,
+        };
+    }
+    let (lo, hi) = if anchor <= focus { (anchor, focus) } else { (focus, anchor) };
+    let (lo, hi) = if lines > 0 {
+        (move_selection_back(content, lo, lines), hi)
+    } else {
+        (lo, move_selection_forward(content, hi, -lines))
+    };
+    let (start, end) = if anchor <= focus { (lo, hi) } else { (hi, lo) };
+    EditorFindResult {
+        start: start as i32,
+        end: end as i32,
+        count: 0,
+    }
+}
+
+/// Move a selection end back `lines` logical lines, toward the start of the document. Each step
+/// lands on a line boundary: an end inside a line snaps to that line's start, and an end already
+/// on a line start steps back to the previous line's start.
+fn move_selection_back(content: &str, pos: usize, lines: i32) -> usize {
+    let mut p = pos.min(content.len());
+    let mut left = lines;
+    while left > 0 && p > 0 {
+        let line_start = content[..p].rfind('\n').map_or(0, |i| i + 1);
+        p = if line_start < p {
+            line_start
+        } else {
+            content[..p - 1].rfind('\n').map_or(0, |i| i + 1)
+        };
+        left -= 1;
+    }
+    p
+}
+
+/// Move a selection end forward `lines` logical lines, toward the end of the document.
+fn move_selection_forward(content: &str, pos: usize, lines: i32) -> usize {
+    let mut p = pos.min(content.len());
+    let mut left = lines;
+    while left > 0 && p < content.len() {
+        let line_end = content[p..].find('\n').map_or(content.len(), |i| p + i);
+        p = (line_end + 1).min(content.len());
+        left -= 1;
+    }
+    p
 }

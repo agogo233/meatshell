@@ -49,6 +49,14 @@ slint-build are pinned to the patched version.
 The application owns language detection and lexical tokenization in
 `src/app/editor_syntax.rs`; the renderer does not parse programming languages.
 
+`ui/editor_pane.slint` reads three TextInput properties upstream marks "internal,
+undocumented, only exposed for tests": `anchor-position-byte-offset`,
+`cursor-position-byte-offset`, and `font-metrics`. Nothing writes them. The first
+two hand the pane the selection's byte offsets so it can grow the selection while
+the viewport scrolls; `font-metrics` gives the line height as
+`ascent - descent` (descent is negative), which turns a pixel delta into whole
+lines. Keep them available when rebasing.
+
 ## i-slint-backend-winit
 
 Also the published 1.18.1 crate, with two fixes marked `MeatShell patch`:
@@ -70,4 +78,7 @@ gutter, and prints 10,000-line first/cached paint timings. Its screenshots go to
 checking IME behavior on the target desktop platforms. The same filter also runs
 the drag-scroll test, which presses, drags and wheels inside a grabbed editor and
 requires both the scroll offset to move and the selection drag to survive the
-wheel: that is what keeps the `handle_mouse_grab` change honest.
+wheel: that is what keeps the `handle_mouse_grab` change honest. The filter also
+runs the wheel-grow tests, which select in the same editor, wheel both ways and
+require each scroll to extend the end on the revealed side: that is what keeps the
+`scroll_selection` helper honest.

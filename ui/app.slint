@@ -1132,6 +1132,7 @@ export component AppWindow inherits Window {
     callback editor-discard-confirmed(string /* id */);
     callback editor-count-matches(string /* content */, string /* query */) -> int;
     callback editor-find-step(string /* content */, string /* query */, int /* current */, bool /* reverse */) -> EditorFindResult;
+    callback editor-scroll-select(string /* content */, int /* anchor */, int /* focus */, length /* delta-y */, length /* line-height */) -> EditorFindResult;
 
     // --- Session list ------------------------------------------------------
     in property <[SessionInfo]> sessions;
@@ -2788,6 +2789,9 @@ export component AppWindow inherits Window {
                         editor-count-matches(content, query) => { return root.editor-count-matches(content, query); }
                         editor-find-step(content, query, current, reverse) => {
                             return root.editor-find-step(content, query, current, reverse);
+                        }
+                        editor-scroll-select(content, anchor, focus, delta-y, line-height) => {
+                            return root.editor-scroll-select(content, anchor, focus, delta-y, line-height);
                         }
                         editor-replace-all(query, replacement) => {
                             root.editor-doc-replace-all(doc.id, query, replacement);

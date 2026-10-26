@@ -49,6 +49,7 @@ export component EditorWindow inherits Window {
     callback editor-highlight(string);
     callback editor-count-matches(string, string) -> int;
     callback editor-find-step(string, string, int, bool) -> EditorFindResult;
+    callback editor-scroll-select(string, int, int, length, length) -> EditorFindResult;
     callback editor-replace-all(string, string);
     callback win-drag();
     callback win-resize-se();
@@ -169,6 +170,9 @@ export component EditorWindow inherits Window {
                 editor-count-matches(content, query) => { return root.editor-count-matches(content, query); }
                 editor-find-step(content, query, current, reverse) => {
                     return root.editor-find-step(content, query, current, reverse);
+                }
+                editor-scroll-select(content, anchor, focus, delta-y, line-height) => {
+                    return root.editor-scroll-select(content, anchor, focus, delta-y, line-height);
                 }
                 editor-replace-all(query, replacement) => { root.editor-replace-all(query, replacement); }
             }
