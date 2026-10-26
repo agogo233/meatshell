@@ -60,7 +60,7 @@ slint::slint! {
                 scroll-event(event) => {
                     fl.content-y = clamp(
                         fl.content-y + event.delta-y,
-                        min(0px, fl.visible-height - fl.content-height),
+                        min(0px, fl.height - fl.content-height),
                         0px);
                     accept
                 }
@@ -78,10 +78,10 @@ slint::slint! {
                     let cursor-y = position.y + self.y + fl.content-y;
                     if (cursor-y < 12px) {
                         fl.content-y = min(0px, fl.content-y + 12px - cursor-y);
-                    } else if (cursor-y > fl.visible-height - 12px) {
+                    } else if (cursor-y > fl.height - 12px) {
                         fl.content-y = max(
-                            min(0px, fl.visible-height - fl.content-height),
-                            fl.content-y - (cursor-y - fl.visible-height + 12px));
+                            min(0px, fl.height - fl.content-height),
+                            fl.content-y - (cursor-y - fl.height + 12px));
                     }
                     root.scroll-guard = false;
                 }
@@ -146,7 +146,7 @@ fn editor_scroll_selection_clamps_to_the_document() {
     assert_eq!(upward.end, 0);
     let downward = super::super::editor_host::scroll_selection(text, 0, 4, -900.0, 10.0);
     assert_eq!(downward.start, 0);
-    assert_eq!(downward.end, text.len());
+    assert_eq!(downward.end as usize, text.len());
 }
 
 #[test]
