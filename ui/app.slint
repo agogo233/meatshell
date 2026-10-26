@@ -1240,7 +1240,7 @@ export component AppWindow inherits Window {
     in property <[string]> jump-ids;
     in-out property <[JumpHop]> dialog-jumps;
     in-out property <bool> dialog-allow-secret-reveal: false;
-    in-out property <bool> dialog-allow-mcp-access: true;
+    in-out property <bool> dialog-allow-mcp-access: false;
     callback reveal-session-secret(bool) -> string;
     callback add-jump();
     callback update-jump(int, int);

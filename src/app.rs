@@ -1051,6 +1051,7 @@ fn open_window(
     {
         let s = store.borrow();
         let fam = s.font_family().to_string();
+        refresh_glyph_fallback(&fam, &window, &bufs);
         if !fam.is_empty() {
             window.set_term_font_family(fam.into());
         }
@@ -1851,6 +1852,7 @@ fn open_window(
     {
         let weak = window.as_weak();
         let store = store.clone();
+        let bufs = bufs.clone();
         window.on_set_term_font(move |family: SharedString| {
             {
                 let mut s = store.borrow_mut();
@@ -1858,6 +1860,8 @@ fn open_window(
                 let _ = s.save();
             }
             if let Some(w) = weak.upgrade() {
+                // The new font covers a different glyph set (#461).
+                refresh_glyph_fallback(family.as_str(), &w, &bufs);
                 w.set_term_font_family(family);
             }
         });
@@ -5193,6 +5197,7 @@ fn wire_session_callbacks(
             w.set_dialog_group("".into());
             w.set_dialog_kind("ssh".into());
             w.set_dialog_serial_port("".into());
+            w.set_session_serial_ports(session_serial_ports_model());
             w.set_dialog_baud("115200".into());
             w.set_dialog_data_bits("8".into());
             w.set_dialog_stop_bits("1".into());
@@ -5204,8 +5209,18 @@ fn wire_session_callbacks(
             w.set_dialog_rdp_height("720".into());
             w.set_dialog_encoding("UTF-8".into());
             w.set_dialog_vt100_drawing(false);
+            w.set_dialog_term_type(crate::config::DEFAULT_TERM_TYPE.into());
             w.set_dialog_session_log("default".into());
             w.set_dialog_disable_shell_integration(false);
+            // A new session starts from a clean slate: the submit now takes
+            // these from the draft, so leftover values from the session edited
+            // before must not ride along (#438).
+            w.set_dialog_sftp_mode("".into());
+            w.set_dialog_sftp_command("".into());
+            w.set_dialog_allow_secret_reveal(false);
+            // MCP exposure is opt-in (#432): new sessions stay hidden from MCP
+            // clients until the user ticks it, matching the stored default.
+            w.set_dialog_allow_mcp_access(false);
             w.set_dialog_note("".into());
             w.set_dialog_editing(false);
             w.set_dialog_open(true);
@@ -5622,6 +5637,11 @@ fn wire_session_callbacks(
                 w.set_dialog_port(session.port.to_string().into());
                 w.set_dialog_user(session.user.clone().into());
                 w.set_dialog_auth(session.auth.as_str().into());
+                // The reveal opt-in goes first: `set_dialog_key_inline_mode`
+                // below makes the dialog ask for the stored credentials, and
+                // that request must already see this session's own value
+                // instead of whatever the previous one left behind.
+                w.set_dialog_allow_secret_reveal(session.allow_secret_reveal);
                 // Never echo the stored password back into the UI (issue #10) —
                 // leave it blank; a blank field on save keeps the existing one.
                 w.set_dialog_password("".into());
@@ -5661,6 +5681,7 @@ fn wire_session_callbacks(
                 w.set_dialog_group(session.group.clone().into());
                 w.set_dialog_kind(session.kind.as_str().into());
                 w.set_dialog_serial_port(session.serial_port.clone().into());
+                w.set_session_serial_ports(session_serial_ports_model());
                 w.set_dialog_baud(session.baud_rate.to_string().into());
                 w.set_dialog_data_bits(session.data_bits.to_string().into());
                 w.set_dialog_stop_bits(session.stop_bits.to_string().into());
@@ -5679,11 +5700,39 @@ fn wire_session_callbacks(
                 w.set_dialog_rdp_height(session.rdp_height.to_string().into());
                 w.set_dialog_encoding(session.encoding.clone().into());
                 w.set_dialog_vt100_drawing(session.vt100_drawing);
+                w.set_dialog_term_type(session.effective_term_type().into());
                 w.set_dialog_session_log(session.session_log.as_str().into());
+                w.set_dialog_sftp_mode(session.sftp_mode.clone().into());
+                w.set_dialog_sftp_command(session.sftp_command.clone().into());
                 w.set_dialog_disable_shell_integration(session.disable_shell_integration);
                 w.set_dialog_note(session.note.clone().into());
                 w.set_dialog_editing(true);
                 w.set_dialog_open(true);
+            }
+        });
+    }
+
+    // Reveal a saved credential from the open editor (#reveal-secret). The
+    // dialog only asks after the user opted in with `allow_secret_reveal`, so
+    // an unauthorized caller gets nothing back.
+    {
+        let weak = window.as_weak();
+        let store = store.clone();
+        window.on_reveal_session_secret(move |private_key| {
+            let Some(w) = weak.upgrade() else {
+                return SharedString::new();
+            };
+            if !w.get_dialog_open() || !w.get_dialog_allow_secret_reveal() {
+                return SharedString::new();
+            }
+            let store = store.borrow();
+            let Some(session) = store.get(w.get_dialog_id().as_str()) else {
+                return SharedString::new();
+            };
+            if private_key {
+                session.private_key_inline.as_str().into()
+            } else {
+                session.password.as_str().into()
             }
         });
     }
@@ -6167,8 +6216,17 @@ fn wire_session_callbacks(
                 forwards,
                 triggers,
                 disable_shell_integration: draft.disable_shell_integration,
-                sftp_mode: String::new(),
-                sftp_command: String::new(),
+                // Root / custom SFTP server command survive the save (#438).
+                sftp_mode: if kind == SessionKind::Ssh {
+                    normalized_sftp_mode(draft.sftp_mode.as_str(), draft.sftp_command.as_str())
+                } else {
+                    String::new()
+                },
+                sftp_command: if kind == SessionKind::Ssh {
+                    draft.sftp_command.trim().to_string()
+                } else {
+                    String::new()
+                },
                 note: draft.note.to_string(),
                 jump_session_id: String::new(),
                 allow_secret_reveal: draft.allow_secret_reveal,
@@ -7781,7 +7839,7 @@ fn wire_key_input(
                   host: SharedString,
                   host_port: SharedString| {
                 let kind = kind.to_string();
-                if kind != "local" && kind != "dynamic" {
+                if !matches!(kind.as_str(), "local" | "remote" | "dynamic") {
                     return;
                 }
                 // The loopback bind check runs in the session worker, so a
@@ -9673,6 +9731,123 @@ fn system_monospace_fonts() -> Vec<slint::SharedString> {
     let mut out = vec![slint::SharedString::from("Meatshell Mono")];
     out.extend(names.into_iter().map(slint::SharedString::from));
     out
+}
+
+/// System families tried, in order, for glyphs the terminal font lacks (#461).
+/// Symbol-heavy fonts first; a Nerd Font symbols-only face wins when present
+/// so Powerline/devicon glyphs in prompts render too.
+#[cfg(target_os = "windows")]
+const GLYPH_FALLBACK_FAMILIES: &[&str] = &[
+    "Symbols Nerd Font Mono",
+    "Segoe UI Symbol",
+    "Cambria Math",
+    "Segoe UI",
+    "Microsoft YaHei",
+];
+#[cfg(target_os = "macos")]
+const GLYPH_FALLBACK_FAMILIES: &[&str] = &[
+    "Symbols Nerd Font Mono",
+    "Menlo",
+    "Apple Symbols",
+    "Zapf Dingbats",
+    "STIX Two Math",
+];
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const GLYPH_FALLBACK_FAMILIES: &[&str] = &[
+    "Symbols Nerd Font Mono",
+    "DejaVu Sans Mono",
+    "Noto Sans Mono",
+    "DejaVu Sans",
+    "Noto Sans Symbols 2",
+    "Noto Sans Symbols",
+    "Noto Sans Math",
+    "Symbola",
+];
+
+fn face_coverage(db: &fontdb::Database, family: &str) -> Option<crate::terminal::Coverage> {
+    use fontdb::{Family, Query, Stretch, Style, Weight};
+    let id = db.query(&Query {
+        families: &[Family::Name(family)],
+        weight: Weight::NORMAL,
+        stretch: Stretch::Normal,
+        style: Style::Normal,
+    })?;
+    db.with_face_data(id, |data, index| {
+        crate::terminal::Coverage::from_font_data(data, index)
+    })
+    .flatten()
+}
+
+/// Build the glyph-fallback table for `term_family` (empty = bundled font).
+/// `None` when the terminal font can't be read (we can't tell what it lacks)
+/// or no fallback family is installed; rendering then stays as before.
+fn build_glyph_fallback(term_family: &str) -> Option<crate::terminal::GlyphFallback> {
+    use crate::terminal::{Coverage, GlyphFallback, BUNDLED_TERM_FONT};
+    let mut db = fontdb::Database::new();
+    db.load_system_fonts();
+    let primary = if term_family == BUNDLED_TERM_FONT {
+        Coverage::bundled()
+    } else {
+        face_coverage(&db, term_family)?
+    };
+    let fallbacks: Vec<_> = GLYPH_FALLBACK_FAMILIES
+        .iter()
+        .filter(|family| !family.eq_ignore_ascii_case(term_family))
+        .filter_map(|family| {
+            face_coverage(&db, family)
+                .map(|coverage| (slint::SharedString::from(*family), coverage))
+        })
+        .collect();
+    tracing::debug!(
+        term_font = term_family,
+        fallbacks = ?fallbacks.iter().map(|(family, _)| family.as_str()).collect::<Vec<_>>(),
+        "terminal glyph fallback resolved"
+    );
+    (!fallbacks.is_empty()).then(|| GlyphFallback::new(primary, fallbacks))
+}
+
+/// (Re)build the terminal glyph-fallback table for the current terminal font on
+/// a background thread (font enumeration and cmap parsing stay off the UI
+/// thread), then redraw this window's terminals so already-printed prompts pick
+/// up the fallback. Repeated calls for the same family are no-ops (#461).
+fn refresh_glyph_fallback(term_family: &str, window: &AppWindow, bufs: &TermBuffers) {
+    static CURRENT: Mutex<Option<String>> = Mutex::new(None);
+
+    let family = if term_family.trim().is_empty() {
+        crate::terminal::BUNDLED_TERM_FONT.to_string()
+    } else {
+        term_family.to_string()
+    };
+    {
+        let mut current = CURRENT.lock().unwrap_or_else(|e| e.into_inner());
+        if current.as_deref() == Some(family.as_str()) {
+            return;
+        }
+        *current = Some(family.clone());
+    }
+
+    let weak = window.as_weak();
+    let bufs = bufs.clone();
+    let spawned = std::thread::Builder::new()
+        .name("glyph-fallback".into())
+        .spawn(move || {
+            let fallback = build_glyph_fallback(&family);
+            // A newer font choice may have superseded this one meanwhile.
+            if CURRENT.lock().unwrap_or_else(|e| e.into_inner()).as_deref() != Some(family.as_str())
+            {
+                return;
+            }
+            crate::terminal::install_glyph_fallback(fallback);
+            let _ = weak.upgrade_in_event_loop(move |window| {
+                let tab_ids: Vec<String> = lock_or_recover(&bufs).keys().cloned().collect();
+                for tab_id in tab_ids {
+                    rebuild_tab_display(&window, &bufs, &tab_id);
+                }
+            });
+        });
+    if let Err(error) = spawned {
+        tracing::warn!(%error, "failed to start glyph-fallback thread");
+    }
 }
 
 /// Split a stored proxy URL into `(type, host:port)` for the session dialog.

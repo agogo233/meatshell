@@ -132,8 +132,15 @@ fn rdp_file_contents(account: &Account<'_>, saved_credential: bool) -> String {
         out.push_str("screen mode id:i:1\r\n");
         out.push_str(&format!("desktopwidth:i:{}\r\n", account.width));
         out.push_str(&format!("desktopheight:i:{}\r\n", account.height));
-        out.push_str("smart sizing:i:1\r\n");
     }
+    // Resizing scales the picture and never changes the remote resolution.
+    // Left unset, mstsc defaults to dynamic resolution, and on servers that
+    // cannot resize a live session it does so by reconnecting: a second
+    // connection that also logs the first one off on single-session Windows
+    // (#511). Smart sizing applies to full screen too, for when the user
+    // leaves full screen and resizes the window.
+    out.push_str("dynamic resolution:i:0\r\n");
+    out.push_str("smart sizing:i:1\r\n");
     // Local clipboard shared (what a launcher is expected to give you), and no
     // certificate warning for servers whose RDP certificate is self-signed —
     // the usual case for a standalone Windows box.
@@ -728,6 +735,30 @@ mod tests {
         assert!(!contents.contains("desktopheight:i:"));
         // An empty user name must not be written as `username:s:`.
         assert!(!contents.contains("username:s:"));
+    }
+
+    /// Resizing the window must scale the picture, never ask the server for a
+    /// new resolution: mstsc does that by reconnecting where the server cannot
+    /// resize live, which opens a second connection (#511).
+    #[test]
+    #[cfg(windows)]
+    fn resizing_scales_instead_of_reconnecting() {
+        for fullscreen in [false, true] {
+            let account = Account {
+                host: "server",
+                port: 3389,
+                user: "alice",
+                domain: "",
+                password: "",
+                fullscreen,
+                width: 1280,
+                height: 720,
+            };
+            let contents = rdp_file_contents(&account, false);
+            assert!(contents.contains("dynamic resolution:i:0\r\n"), "fullscreen={fullscreen}");
+            assert!(!contents.contains("dynamic resolution:i:1"), "fullscreen={fullscreen}");
+            assert!(contents.contains("smart sizing:i:1\r\n"), "fullscreen={fullscreen}");
+        }
     }
 
     /// The password never goes into the `.rdp` file: with a saved credential

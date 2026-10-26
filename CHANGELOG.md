@@ -3,6 +3,37 @@
 All notable changes are documented here. 本文件记录所有重要变更。
 中英对照（中文在前，English after）.
 
+## [Unreleased]
+
+- **修复 SFTP 的 root / 自定义服务器命令保存后失效（#438）。** 新建或编辑会话时选择的「sudo 提权」或「自定义命令」此前总被丢弃，连接仍以登录用户身份运行。现在会随会话保存，并在编辑时正确回填。
+- **Fix root / custom SFTP server command being lost on save (#438).** Choosing sudo elevation or a custom SFTP server command always came back as the login user; the choice now survives the save and is shown again when the session is edited.
+
+- **修复编辑会话时终端类型被重置（#498）。** 编辑已有会话时，终端类型没有从保存值回填，看到的永远是默认值，保存后即被改写。新建会话现在也会写入默认值。
+- **Fix the terminal type being reset when a session is edited (#498).** The editor never loaded the stored value, so the dropdown always showed the default and saving overwrote it. New sessions now get the default value written too.
+
+- **修复串口会话的端口下拉列表为空。** 下拉列表此前没有任何数据，端口只能手动输入（COM3 / /dev/ttyUSB0）。现在会在每次打开新建或编辑对话框时列出本机已检测到的串口。
+- **Fix the empty serial port dropdown.** The list was never filled, so a device could only be typed by hand (COM3 / /dev/ttyUSB0). Detected ports are now listed each time the new or edit dialog opens.
+
+- **修复会话编辑器无法查看已保存的凭据。** 「查看已保存的密码 / 私钥」此前完全没有接线：编辑会话时授权开关永远是关，密码与内联密钥也无法取回。现在可放心愿取用：对话框需已打开且已明确授权，才会返回该会话保存的密码或内联私钥，其余情况一律返回空。
+- **Fix the session editor being unable to reveal saved credentials.** The reveal path was never wired: the opt-in switch never left "off" when editing a session, and the saved password or inline key could not be read back. It now works as intended — an open editor with an explicit opt-in returns that session's stored password or inline private key, and nothing otherwise.
+
+- **修复远程隧道（-R）运行时不生效，且目标地址无法填写。** 添加远程转发时会话面板会静默丢弃它；目标主机与端口两栏也只在「本地转发」下显示，导致远程转发的目标只能是默认值。现在远程转发可正常建立，目标栏在「本地」与「远程」下均可填写（动态转发仍不需要目标）。
+- **Fix runtime remote (-R) tunnels being dropped with no way to set the target.** The runtime panel silently discarded a remote forward, and the target host/port row only showed for local forwarding, leaving the target at its default. Remote forwards now establish, and the target row is editable for both local and remote (dynamic still needs no target).
+
+- **修复终端缺字形显示为空白（#461）。** 字形回退表此前从未安装，`➜`、`✔` 等终端字体缺失的符号显示为空白。现在会在启动时以及更换终端字体后按系统字体重建回退表，并重绘已打开的终端。
+- **Fix missing terminal glyphs rendering as blank (#461).** The glyph-fallback table was never installed, so symbols the terminal font lacks (`➜`, `✔`, …) came out blank. The table is now rebuilt from system fonts at startup and after a font change, and open terminals are redrawn.
+
+- **修复 Windows 上调整远程桌面窗口大小导致 mstsc 重新连接（#511）。** 生成的 .rdp 文件此前没有设置动态分辨率，mstsc 使用默认值（开启）；服务器无法在会话中实时调整分辨率时，mstsc 会通过重新连接来实现，从而产生第二个连接，并在单会话的 Windows 上将第一个连接挤下线。现在窗口模式与全屏模式均写入动态分辨率关闭，调整大小时只缩放画面。（仅限 Windows 的 mstsc 路径；使用 FreeRDP 客户端的连接沿用原有参数。）
+- **Fix mstsc reconnecting when a remote desktop window is resized on Windows (#511).** The .rdp file never set dynamic resolution, so mstsc used its default (on); on servers that cannot resize a live session it resized by reconnecting, which opened a second connection that logged the first one off on single-session Windows. Dynamic resolution is now off for both windowed and full screen, so resizing only scales the picture. (mstsc on Windows only; connections through the FreeRDP client keep their existing arguments.)
+
+- **新会话的 MCP 访问默认改为未勾选。** 新建会话对话框此前默认勾选「允许 MCP 访问」，与「MCP 暴露需用户显式开启（#432）」以及已有会话的实际存储值不一致，新建会话可能被无意开放给 MCP 客户端。现在默认不勾选，需要时手动开启。
+- **The MCP access box is now unchecked by default for new sessions.** The new-session dialog pre-ticked "allow MCP access", which contradicted the opt-in design (#432) and the value actually stored for existing sessions, so a new session could be exposed to MCP clients without the user asking for it. It now starts unchecked and can be ticked deliberately.
+
+### 已知差异 / Known divergences（本 fork 与上游）
+
+- **SFTP 拖出到访达 / 资源管理器（#504）本 fork 有意未实现。** 上游 0.7.9 与 0.8.0 的更新日志宣称支持将 SFTP 行拖出到访达或资源管理器；本 fork 决定暂不接线，因此这两条在本仓库不生效。完整实现（Windows OLE 虚拟文件拖拽、macOS 文件承诺）归档在 `src/attic/drag_out.rs` 与 `src/attic/drag_out_mac.rs`，`src/sftp` 的传输侧仍可用；取用需同时恢复 `on_sftp_drag_out`、`drag_out_items` 与界面的拖出手势，详见 `src/attic/README.md`。
+- **Dragging SFTP rows out to Finder / Explorer (#504) is intentionally not implemented in this fork.** Upstream 0.7.9 and 0.8.0 advertise dragging SFTP rows out to Finder or Explorer; this fork deliberately leaves it unwired, so those entries do not hold here. The full implementation (Windows OLE virtual-file drag, macOS file promises) is archived in `src/attic/drag_out.rs` and `src/attic/drag_out_mac.rs`, the `src/sftp` transfer side is intact, and reviving it needs `on_sftp_drag_out`, `drag_out_items` and the UI drag gesture restored together — see `src/attic/README.md`.
+
 ## [0.8.0] - 2026-10-23
 
 - **中国大陆用户可通过下载镜像一键更新。** 界面为中文且系统时区为中国大陆时区（按 Asia/Shanghai 等时区名判断，新加坡、香港、台北等其他 UTC+8 地区仍直连 GitHub）时，一键更新可通过镜像下载。“设置 → 软件更新”新增“下载镜像”列表，内置 v4、v6、cdn、axisnow.gh-proxy.org 四个镜像，可添加或删除，右侧显示各下载源（含 GitHub）的测速结果。默认自动选择最快的源，也可点击某一行固定使用；失败时依次换用其他源，最后回到 GitHub。镜像只负责传输，所有下载仍按 GitHub 发布的 SHA-256 校验。

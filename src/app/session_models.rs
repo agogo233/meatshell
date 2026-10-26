@@ -43,7 +43,7 @@ pub(super) fn launch_shell_model(store: &ConfigStore) -> ModelRc<LaunchItem> {
 
 /// SFTP privilege mode from the editor (#438): only "sudo" and "custom" are
 /// stored, and "custom" without a command falls back to the default.
-fn normalized_sftp_mode(mode: &str, command: &str) -> String {
+pub(super) fn normalized_sftp_mode(mode: &str, command: &str) -> String {
     match mode {
         "sudo" => "sudo".to_string(),
         "custom" if !command.trim().is_empty() => "custom".to_string(),
@@ -108,6 +108,23 @@ pub(super) fn session_groups_model(store: &ConfigStore) -> ModelRc<SharedString>
         named
             .into_iter()
             .map(SharedString::from)
+            .collect::<Vec<_>>(),
+    )))
+}
+
+/// Serial ports detected on this machine — feeds the new/edit dialog's serial
+/// port dropdown. Enumeration failure logs and yields an empty list; the dialog
+/// keeps accepting a manually typed device (COM3 / /dev/ttyUSB0).
+pub(super) fn session_serial_ports_model() -> ModelRc<SharedString> {
+    let ports = serialport::available_ports().unwrap_or_else(|e| {
+        tracing::error!("No available serial ports found: {e}");
+        Vec::new()
+    });
+
+    ModelRc::from(Rc::new(VecModel::from(
+        ports
+            .into_iter()
+            .map(|p| SharedString::from(p.port_name))
             .collect::<Vec<_>>(),
     )))
 }
