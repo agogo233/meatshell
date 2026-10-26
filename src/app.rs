@@ -4401,15 +4401,16 @@ fn open_window(
     }
 
     // Position once shown (size is only known after the first frame). The
-    // first window centers on the primary monitor; later windows cascade
-    // ~40 px from the newest existing window instead of stacking exactly on
-    // top of it. The origin was captured above, before this window was
-    // registered (registry.newest() would return this window itself).
+    // first window restores the saved position (or centers); later windows
+    // cascade ~40 px from the newest existing window instead of stacking
+    // exactly on top of it. The origin was captured above, before this window
+    // was registered (registry.newest() would return this window itself).
     {
         let weak = window.as_weak();
         let origin = cascade_origin
             .and_then(|w| w.upgrade())
             .map(|w| w.window().position());
+        let store_for_position = store.clone();
         slint::Timer::single_shot(std::time::Duration::from_millis(30), move || {
             let Some(w) = weak.upgrade() else { return };
             if let Some(pos) = at {
@@ -4424,7 +4425,24 @@ fn open_window(
                         pos.y + 40,
                     ));
                 }
-                None => center_window(&w),
+                None => {
+                    // Restore the saved window position if available. (0,0) is
+                    // the serde default for an unset position, so only fall
+                    // through to center_window when both coordinates are 0.
+                    let saved = store_for_position.borrow().window_position();
+                    if (saved.0 != 0.0 || saved.1 != 0.0)
+                        && saved.0.is_finite()
+                        && saved.1.is_finite()
+                    {
+                        let scale = w.window().scale_factor().max(0.01);
+                        w.window().set_position(slint::PhysicalPosition::new(
+                            (saved.0 * scale) as i32,
+                            (saved.1 * scale) as i32,
+                        ));
+                    } else {
+                        center_window(&w);
+                    }
+                }
             }
         });
     }
@@ -4433,6 +4451,11 @@ fn open_window(
     // spinning the loop. run_event_loop() does not, so display it here —
     // without this the app starts but no window ever appears (#multi-window).
     window.show().context("failed to show window")?;
+    // window.show() alone does not guarantee a complete first paint on every
+    // platform/renderer: the docked bottom/right panels and SFTP toolbar
+    // buttons can come up blank until the next Occluded/Focus event triggers
+    // a redraw (regression from window.run() → run_event_loop(), #multi-window).
+    refresh_revealed_main_window(window.as_weak());
 
     Ok(window_id)
 }
@@ -7223,6 +7246,12 @@ fn save_layout(
         // valid native geometry as well, because a close can arrive before the
         // last resize callback has reached the UI store.
         s.set_window_size(w, h);
+    }
+    // Remember the window position too, so it restores on next launch.
+    // Only when not maximized — a maximized position isn't useful.
+    if !native_maximized {
+        let pos = win.window().position();
+        s.set_window_position(pos.x as f32 / scale, pos.y as f32 / scale);
     }
     let _ = s.save();
 }

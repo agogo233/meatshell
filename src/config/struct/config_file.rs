@@ -364,6 +364,12 @@ pub struct ConfigFile {
     pub window_width: f32,
     #[serde(default)]
     pub window_height: f32,
+    /// Last window position in logical px (0 = unset → use the default).
+    /// Lets users keep their preferred window position across restarts.
+    #[serde(default)]
+    pub window_x: f32,
+    #[serde(default)]
+    pub window_y: f32,
     /// Collapse the bottom SFTP panel on startup (#78).
     #[serde(default)]
     pub collapse_sftp_default: bool,

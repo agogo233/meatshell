@@ -2146,6 +2146,14 @@ impl ConfigStore {
         self.cache.window_width = w;
         self.cache.window_height = h;
     }
+    /// Last window position in logical px; `(0,0)` means unset (use the default).
+    pub fn window_position(&self) -> (f32, f32) {
+        (self.cache.window_x, self.cache.window_y)
+    }
+    pub fn set_window_position(&mut self, x: f32, y: f32) {
+        self.cache.window_x = x;
+        self.cache.window_y = y;
+    }
 
     /// Collapse the SFTP panel on startup (default false) (#78).
     pub fn collapse_sftp_default(&self) -> bool {
