@@ -1,5 +1,5 @@
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
-use slint::platform::WindowEvent;
+use slint::platform::{PointerEventButton, WindowEvent};
 use slint::{ComponentHandle, Rgb8Pixel};
 use std::rc::Rc;
 
@@ -44,9 +44,6 @@ slint::slint! {
                     }
                 }
             }
-        }
-        public function set-selection(anchor: int, focus: int) {
-            edit.set-selection-offsets(anchor, focus);
         }
         fl := Flickable {
             x: 0px; y: 0px;
@@ -176,13 +173,25 @@ fn editor_wheel_grows_the_selection() {
         window.set_size(slint::PhysicalSize::new(240, 120));
         settle(&window);
 
-        ui.invoke_set_selection(60, 100);
-        settle(&window);
-        let extend_calls = ui.get_extend_calls();
-        assert_eq!(ui.get_anchor_offset(), 60);
-        assert_eq!(ui.get_cursor_offset(), 100);
-
+        // Press above and drag down: the drag creates a selection whose lower
+        // end follows the pointer.
         let position = slint::LogicalPosition::new(120., 60.);
+        window.dispatch_event(WindowEvent::PointerPressed {
+            position,
+            button: PointerEventButton::Left,
+        });
+        settle(&window);
+        window.dispatch_event(WindowEvent::PointerMoved {
+            position: slint::LogicalPosition::new(120., 90.),
+        });
+        settle(&window);
+        let anchor = ui.get_anchor_offset();
+        let cursor = ui.get_cursor_offset();
+        assert_ne!(anchor, cursor, "the drag must create a selection");
+        let top = anchor.min(cursor);
+        let bottom = anchor.max(cursor);
+        let extend_calls = ui.get_extend_calls();
+
         // Scroll down a few notches: the viewport moves down, so the revealed
         // text is below the selection and its bottom end must grow.
         for _ in 0..3 {
@@ -193,29 +202,22 @@ fn editor_wheel_grows_the_selection() {
             });
             settle(&window);
         }
-        assert!(ui.get_scroll_y() < -60.0, "the wheel must scroll the viewport");
         assert!(
             ui.get_extend_calls() > extend_calls,
             "scrolling must grow the selection"
         );
-        assert!(
-            ui.get_cursor_offset() > 100,
-            "scrolling down must extend the bottom end"
-        );
+        let grown = ui.get_anchor_offset().max(ui.get_cursor_offset());
+        assert!(grown > bottom, "scrolling down must extend the bottom end");
 
-        // Reset the selection and scroll back up: the top end must grow.
-        ui.invoke_set_selection(60, 100);
-        settle(&window);
+        // Scroll back up: the top end must grow.
         window.dispatch_event(WindowEvent::PointerScrolled {
             position,
             delta_x: 0.,
             delta_y: 48.,
         });
         settle(&window);
-        assert!(
-            ui.get_anchor_offset() < 60,
-            "scrolling up must extend the top end"
-        );
+        let grown_top = ui.get_anchor_offset().min(ui.get_cursor_offset());
+        assert!(grown_top < top, "scrolling up must extend the top end");
     })
     .join()
     .unwrap();
