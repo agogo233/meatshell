@@ -229,6 +229,43 @@ pub(super) fn is_wayland_window(_window: &slint::Window) -> bool {
     false
 }
 
+/// Physical-pixel `(x, y, w, h)` rects of every connected monitor.
+pub(super) fn monitor_rects(window: &slint::Window) -> Vec<(f64, f64, f64, f64)> {
+    window
+        .with_winit_window(|ww| {
+            ww.available_monitors()
+                .iter()
+                .map(|m| {
+                    let p = m.position();
+                    let s = m.size();
+                    (p.x as f64, p.y as f64, s.width as f64, s.height as f64)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// True if `window` (physical px) overlaps at least 40 physical px in both
+/// dimensions on any monitor — i.e. a placement a human could actually find.
+/// A position saved while a second monitor was attached (or the -32000,-32000
+/// sentinel Windows reports for a minimized HWND) fails this check, and the
+/// caller should fall back to centering instead of restoring it.
+pub(super) fn window_rect_visible_on_any_monitor(
+    window: (f64, f64, f64, f64),
+    monitors: &[(f64, f64, f64, f64)],
+) -> bool {
+    const MIN_VISIBLE_OVERLAP: f64 = 40.0;
+    let (wx, wy, ww, wh) = window;
+    if ww <= 0.0 || wh <= 0.0 {
+        return false;
+    }
+    monitors.iter().any(|&(mx, my, mw, mh)| {
+        let iw = (wx + ww).fmin(mx + mw) - wx.fmax(mx);
+        let ih = (wy + wh).fmin(my + mh) - wy.fmax(my);
+        iw >= MIN_VISIBLE_OVERLAP && ih >= MIN_VISIBLE_OVERLAP
+    })
+}
+
 /// Detect the Windows mixed-DPI failure where the native maximized flag stays
 /// set but the HWND keeps a much smaller geometry from the previous monitor.
 /// Normal maximized work areas may be a little smaller because of the taskbar;

@@ -4372,15 +4372,49 @@ fn open_window(
                     // the serde default for an unset position, so only fall
                     // through to center_window when both coordinates are 0.
                     let saved = store_for_position.borrow().window_position();
+                    let saved_size = store_for_position.borrow().window_size();
                     if (saved.0 != 0.0 || saved.1 != 0.0)
                         && saved.0.is_finite()
                         && saved.1.is_finite()
                     {
                         let scale = w.window().scale_factor().max(0.01);
-                        w.window().set_position(slint::PhysicalPosition::new(
-                            (saved.0 * scale) as i32,
-                            (saved.1 * scale) as i32,
-                        ));
+                        let size = w.window().size();
+                        // Mirror the size restore: prefer the persisted size
+                        // (what the Resized handler will settle on) so the
+                        // overlap check uses the rect the window will actually
+                        // have, not a transient default.
+                        let (rw, rh) = if saved_size.0 > 0.0 && saved_size.1 > 0.0 {
+                            (saved_size.0, saved_size.1)
+                        } else {
+                            (size.width, size.height)
+                        };
+                        let rect = (
+                            saved.0 as f64 * scale as f64,
+                            saved.1 as f64 * scale as f64,
+                            rw as f64 * scale as f64,
+                            rh as f64 * scale as f64,
+                        );
+                        let monitors = monitor_rects(&w.window());
+                        if monitors.is_empty()
+                            || window_rect_visible_on_any_monitor(rect, &monitors)
+                        {
+                            w.window().set_position(slint::PhysicalPosition::new(
+                                (saved.0 * scale) as i32,
+                                (saved.1 * scale) as i32,
+                            ));
+                        } else {
+                            // The saved position fell off every screen: a second
+                            // monitor was detached, or a minimized HWND's
+                            // (-32000,-32000) sentinel was persisted. Center on
+                            // the primary instead of opening invisible.
+                            tracing::warn!(
+                                "saved window position ({:.0}, {:.0}) is off-screen; re-centering. monitors={:?}",
+                                saved.0,
+                                saved.1,
+                                monitors
+                            );
+                            center_window(&w);
+                        }
                     } else {
                         center_window(&w);
                     }
@@ -7238,6 +7272,12 @@ fn save_layout(
         .window()
         .with_winit_window(|ww| ww.is_maximized())
         .unwrap_or_else(|| win.get_window_maximized());
+    // Windows reports (-32000,-32000) for a minimized window; persisting
+    // that sentinel would make the next launch open off-screen (#save-position).
+    let native_minimized = win
+        .window()
+        .with_winit_window(|ww| ww.is_minimized())
+        .unwrap_or(false);
     if !native_maximized && w > 200.0 && h > 200.0 {
         // Resize events normally keep this cache current. Persist the final
         // valid native geometry as well, because a close can arrive before the
@@ -7245,8 +7285,9 @@ fn save_layout(
         s.set_window_size(w, h);
     }
     // Remember the window position too, so it restores on next launch.
-    // Only when not maximized — a maximized position isn't useful.
-    if !native_maximized {
+    // Only when not maximized (a maximized position isn't useful) and not
+    // minimized (its sentinel position isn't either).
+    if !native_maximized && !native_minimized {
         let pos = win.window().position();
         s.set_window_position(pos.x as f32 / scale, pos.y as f32 / scale);
     }
