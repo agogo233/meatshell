@@ -179,7 +179,8 @@ class Node:
 
 def session(name, host, port, jump=""):
     return dict(id=name, name=name, host=host, port=port, user="fixture",
-                auth="password", password=PASSWORD, kind="ssh", jump_session_id=jump)
+                auth="password", password=PASSWORD, kind="ssh", jump_session_id=jump,
+                mcp_access=True)
 
 class Fixture:
     def __init__(self, binary, directory):
