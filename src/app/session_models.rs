@@ -440,12 +440,6 @@ pub(super) fn resolve_builtin_session(store: &ConfigStore, id: &str) -> Option<S
     if id.starts_with(super::agents::AGENT_ID_PREFIX) {
         return super::agents::agent_session(store, id);
     }
-    if id == crate::update::linux::AUR_SESSION_ID {
-        // The update tab for AUR installs: runs the user's AUR helper.
-        let mut session = builtin_local_session(id, t("更新 MeatShell", "Update MeatShell"), "shell");
-        session.local_command = crate::update::linux::aur_update_command();
-        return Some(session);
-    }
     builtin_local_sessions(store.wsl_profiles())
         .into_iter()
         .find(|s| s.id == id)

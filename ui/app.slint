@@ -29,12 +29,12 @@ import { ProcWindow, ProcRow } from "proc_window.slint";
 import { SystemInfoWindow, SysInfoRow, SysMetricRow, SysNetRow } from "system_info_window.slint";
 import { EditorWindow } from "editor_window.slint";
 import { EditorPane, EditorFindResult, EditorDoc } from "editor_pane.slint";
-import { InterfacePanel, OutputRuleItem, WslProfileInfo, CustomAgentInfo, UpdateMirrorRow, ColorThemeItem } from "interface_panel.slint";
+import { InterfacePanel, OutputRuleItem, WslProfileInfo, CustomAgentInfo, ColorThemeItem } from "interface_panel.slint";
 // Re-export so `slint::include_modules!` generates the detached Rust window types.
 export { ProcWindow, SystemInfoWindow, EditorWindow }
 import { ComboBox, SpinBox, LineEdit, Button, ScrollView, CheckBox, Palette } from "std-widgets.slint";
 
-export { SessionInfo, LaunchItem, SessionDraft, JumpHop, TabInfo, SftpEntry, SftpTreeNode, TunnelInfo, QuickCmd, PortFwd, WslProfileInfo, CustomAgentInfo, UpdateMirrorRow, ThemePalette, ColorThemeItem }
+export { SessionInfo, LaunchItem, SessionDraft, JumpHop, TabInfo, SftpEntry, SftpTreeNode, TunnelInfo, QuickCmd, PortFwd, WslProfileInfo, CustomAgentInfo, ThemePalette, ColorThemeItem }
 
 // --- TerminalState ---------------------------------------------------------
 // Per-terminal view-model exposed to Rust. A TabInfo has the metadata; the
@@ -233,8 +233,7 @@ component IconBtn inherits Rectangle {
     //   independent layers below, with animation only on the breathe layer
     //   and only while `breathe=true` (#breathing-light).
     in property <bool> breathe: false;
-    // `badge=true` draws a small red dot on the top-right corner (the Updates
-    // button uses it to flag a newer release instead of a popup banner).
+    // `badge=true` draws a small red dot on the top-right corner.
     in property <bool> badge: false;
     callback clicked();
     width: 26px;
@@ -911,8 +910,6 @@ export component AppWindow inherits Window {
     // Render the welcome/session list as a left sidebar instead of a tab (v0.5).
     in-out property <bool> welcome-as-sidebar: false;
     callback set-welcome-as-sidebar(bool);         // apply + persist
-    in-out property <bool> update-check-enabled: false;  // startup new-version check (#184, off by default for this fork)
-    callback set-update-check-enabled(bool);       // apply + persist
     in-out property <bool> mcp-enabled: true;
     in-out property <bool> mcp-use-saved-credentials: true;
     in-out property <bool> mcp-allow-commands: true;
@@ -1086,41 +1083,6 @@ export component AppWindow inherits Window {
     callback clear-transfers();              // wipe the transfer history
     callback cancel-transfer(string);        // cancel an in-progress transfer by id (#100)
     callback set-language(string);           // switch UI language ("zh" / "en")
-
-    // --- Updates ----------------------------------------------------------
-    in property <bool> update-available: false;   // red dot on the toolbar Updates button
-    in property <string> update-version;
-    in property <bool> update-busy;
-    in property <bool> update-ready;
-    in property <bool> update-error;
-    in property <bool> update-install-supported;
-    // AUR installs: the update runs in a terminal tab, then MeatShell restarts.
-    in property <bool> update-via-terminal;
-    in property <string> update-status;
-    property <string> update-action-label: root.update-via-terminal
-        ? (root.update-ready
-            ? (root.lang-en ? "Restart" : "重启")
-            : (root.lang-en ? "Update in terminal" : "在终端中更新"))
-        : root.update-ready
-        ? (root.lang-en ? "Install and restart" : "安装并重启")
-        : root.update-install-supported
-            ? (root.lang-en ? "Download update" : "下载更新")
-            : (root.lang-en ? "Release page" : "发布页面");
-    callback check-for-updates();
-    callback update-action();
-    callback open-update-url();
-    // Download mirrors (Chinese UI only; used in a mainland China time zone).
-    in property <[UpdateMirrorRow]> update-mirrors;
-    in property <bool> update-mirrors-testing;
-    in property <bool> update-china-tz;
-    in property <string> update-mirror-error;
-    callback add-update-mirror(string);
-    callback remove-update-mirror(string);
-    callback reset-update-mirrors();
-    callback test-update-mirrors();
-    in property <bool> update-mirror-auto: true;
-    callback select-update-mirror(string);
-    callback set-update-mirror-auto(bool);
 
     // --- Editor tabs (#70, #494) ------------------------------------------
     // Settings → SFTP: open text files as tabs in this window (true) or in the
@@ -3620,23 +3582,6 @@ export component AppWindow inherits Window {
             : (root.pinned ? "取消置顶" : "窗口置顶");
         clicked => { root.pinned = !root.pinned; root.pinned-changed(root.pinned); }
     }
-    // Updates: a quiet red dot instead of a popup banner when a newer release
-    // is found; clicking opens Settings → Updates, which holds every action.
-    IconBtn {
-        x: root.width - 214px - root.toolbar-x-off; y: root.toolbar-y;
-        visible: !root.term-fullscreen;
-        icon: "\u{E2C0}";   // Material "cloud_download"
-        badge: root.update-available;
-        tooltip: root.update-available
-            ? (root.lang-en ? "Update available: " : "有新版本：") + root.update-version
-            : (root.lang-en ? "Updates" : "软件更新");
-        clicked => {
-            root.settings-open = false;
-            root.download-open = false;
-            root.interface-start-page = "update";
-            root.interface-open = true;
-        }
-    }
 
     // Frameless resize edges (#119): thin hit-zones that start an OS-level
     // resize via winit. Hidden when maximized.
@@ -5944,28 +5889,6 @@ export component AppWindow inherits Window {
                     zen-mode <=> root.zen-mode;
                     welcome-as-sidebar <=> root.welcome-as-sidebar;
                     quick-commands-as-sidebar <=> root.quick-commands-as-sidebar;
-                    update-check-enabled <=> root.update-check-enabled;
-                    update-version: root.update-version;
-                    update-busy: root.update-busy;
-                    update-error: root.update-error;
-                    update-install-supported: root.update-install-supported;
-                    update-via-terminal: root.update-via-terminal;
-                    update-status: root.update-status;
-                    update-action-label: root.update-action-label;
-                    check-for-updates => { root.check-for-updates(); }
-                    update-action => { root.update-action(); }
-                    open-update-url => { root.open-update-url(); }
-                    update-mirrors: root.update-mirrors;
-                    update-mirrors-testing: root.update-mirrors-testing;
-                    update-china-tz: root.update-china-tz;
-                    update-mirror-error: root.update-mirror-error;
-                    add-update-mirror(url) => { root.add-update-mirror(url); }
-                    remove-update-mirror(url) => { root.remove-update-mirror(url); }
-                    reset-update-mirrors => { root.reset-update-mirrors(); }
-                    test-update-mirrors => { root.test-update-mirrors(); }
-                    update-mirror-auto: root.update-mirror-auto;
-                    select-update-mirror(key) => { root.select-update-mirror(key); }
-                    set-update-mirror-auto(v) => { root.set-update-mirror-auto(v); }
                     mcp-enabled <=> root.mcp-enabled;
                     mcp-use-saved-credentials <=> root.mcp-use-saved-credentials;
                     mcp-allow-commands <=> root.mcp-allow-commands;
@@ -6073,7 +5996,6 @@ export component AppWindow inherits Window {
                         }
                         root.set-quick-commands-as-sidebar(v);
                     }
-                    set-update-check-enabled(v) => { root.set-update-check-enabled(v); }
                     set-mcp-permissions(enabled, credentials, commands, files) => {
                         root.set-mcp-permissions(enabled, credentials, commands, files);
                     }

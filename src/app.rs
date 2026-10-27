@@ -36,7 +36,6 @@ mod tab_transfer;
 mod dock_stacks;
 mod terminal_ui;
 mod tray;
-mod update;
 mod webdav;
 mod window;
 
@@ -47,7 +46,7 @@ mod window;
 // ai/sftp/editor 独有逻辑）。
 // [merge-2026-10] 采纳上游编辑器标签页形态（#494）：启用上游新模块
 // editor_host / editor_tabs / editor_syntax（语法 span 喂给 vendored
-// i-slint-core 的原生 colour spans）、agents / update / tray、可定制快捷键
+// i-slint-core 的原生 colour spans）、agents / tray、可定制快捷键
 // shortcuts、SFTP places 书签 sftp_places，以及副窗接线 aux_windows。
 // [attic-2026-10] 其余未接线拆分模块不在此处声明，已移入 src/attic/
 // （open_window / session_callbacks / settings_callbacks / misc_callbacks /
@@ -656,8 +655,6 @@ pub fn run(intent: crate::app::launch::LaunchIntent) -> Result<()> {
         registry: Rc::new(WindowRegistry::default()),
         window_states: Rc::new(RefCell::new(HashMap::new())),
         tab_routes: Arc::new(Mutex::new(HashMap::new())),
-        first_window_done: Cell::new(false),
-        update: RefCell::new(update::State::default()),
     });
 
     // IPC listener: forwarded "new-window" requests arrive on the listener
@@ -730,9 +727,6 @@ pub fn run(intent: crate::app::launch::LaunchIntent) -> Result<()> {
     #[cfg(windows)]
     crate::app::jump_list::register_new_window_task();
 
-    #[cfg(windows)]
-    crate::update::windows::cleanup_stale_downloads();
-    crate::update::inplace::cleanup_after_update();
     open_window(core.clone(), false, None)?;
     // System tray: keeps sessions running while all windows are hidden. The
     // timer owns the tray icon, so it must outlive the event loop below.
@@ -759,7 +753,6 @@ pub fn run(intent: crate::app::launch::LaunchIntent) -> Result<()> {
     // hard-exit unconditionally. The event-loop error path goes through here
     // too: propagating with `?` would hand the runtime to the TLS destructor
     // chain, where a wedged blocking thread could hang the process forever.
-    update::cleanup(&core);
     // Drop the tray before exit so no stale icon outlives the process.
     tray::clear();
     drop(tray_timer);
@@ -1417,7 +1410,6 @@ fn open_window(
         window.set_welcome_collapsed(welcome_collapsed);
         window.set_sidebar_collapsed(sidebar_collapsed);
         window.set_wallpaper_overlay(s.wallpaper_overlay());
-        window.set_update_check_enabled(s.update_check_enabled()); // #184
         if collapse_sftp {
             window.set_sftp_collapsed(true);
             window.set_sftp_saved_height(s.sftp_panel_height());
@@ -1442,16 +1434,6 @@ fn open_window(
         window.on_set_quick_commands_as_sidebar(move |v| {
             let mut s = store.borrow_mut();
             s.set_quick_commands_as_sidebar(v);
-            let _ = s.save();
-        });
-    }
-    {
-        // Toggle the startup new-version check (#184). Takes effect next launch
-        // for the check itself; the banner just won't appear once it's off.
-        let store = store.clone();
-        window.on_set_update_check_enabled(move |v| {
-            let mut s = store.borrow_mut();
-            s.set_update_check_enabled(v);
             let _ = s.save();
         });
     }
@@ -3210,9 +3192,6 @@ fn open_window(
     // Tab-bar "+" launch menu: local shells + WSL profiles (#launch).
     window.set_launch_shells(launch_shell_model(&store.borrow()));
 
-    // In-app updates (#390): settings page state + the startup version check.
-    update::wire(&core, &window);
-
     // Agent launchers (#427): the tab-bar launch menu, the Quick Connect
     // "agents" group and the Settings → AI agents page.
     let agent_ctx = WinCtx {
@@ -3472,68 +3451,6 @@ fn open_window(
         });
     }
 
-    // --- In-app update check (#48) -----------------------------------------
-    // "Download" on the banner opens the latest-release page in the browser.
-    window.on_open_update_url(move || {
-        let url = "https://github.com/yituorou/meatshell/releases/latest";
-        #[cfg(windows)]
-        let _ = std::process::Command::new("explorer").arg(url).spawn();
-        #[cfg(target_os = "macos")]
-        let _ = std::process::Command::new("open").arg(url).spawn();
-        #[cfg(all(not(windows), not(target_os = "macos")))]
-        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
-    });
-    // The open-source link in the About dialog opens the project page.
-    window.on_open_repo(move || {
-        let url = "https://github.com/yituorou/meatshell";
-        #[cfg(windows)]
-        let _ = std::process::Command::new("explorer").arg(url).spawn();
-        #[cfg(target_os = "macos")]
-        let _ = std::process::Command::new("open").arg(url).spawn();
-        #[cfg(all(not(windows), not(target_os = "macos")))]
-        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
-    });
-    // Query the GitHub releases API on a background thread; if a newer version
-    // exists, flip the banner on. Best-effort: any network/parse error is
-    // silently ignored and the app keeps working on the current version.
-    // Skipped entirely when the user turned the check off (#184). Runs only
-    // for the first window of the process: the old `registry.count() == 1`
-    // guard re-fired the check whenever the count returned to 1 after a
-    // close-then-open. The flag is set regardless of the enabled setting, so
-    // a disabled check is never deferred to a later window either.
-    let first_window = !core.first_window_done.get();
-    core.first_window_done.set(true);
-    if first_window && store.borrow().update_check_enabled() {
-        let weak = window.as_weak();
-        std::thread::spawn(move || {
-            let body =
-                match ureq::get("https://api.github.com/repos/yituorou/meatshell/releases/latest")
-                    .set("User-Agent", "meatshell-update-check")
-                    .timeout(std::time::Duration::from_secs(8))
-                    .call()
-                {
-                    Ok(resp) => resp.into_string().unwrap_or_default(),
-                    Err(_) => return,
-                };
-            let json: serde_json::Value = match serde_json::from_str(&body) {
-                Ok(v) => v,
-                Err(_) => return,
-            };
-            let tag = json["tag_name"].as_str().unwrap_or("").to_string();
-            let newer = matches!(
-                (parse_version(&tag), parse_version(env!("CARGO_PKG_VERSION"))),
-                (Some(latest), Some(cur)) if latest > cur
-            );
-            if !newer {
-                return;
-            }
-            let _ = weak.upgrade_in_event_loop(move |w| {
-                w.set_update_version(tag.into());
-                w.set_update_available(true);
-            });
-        });
-    }
-
     // Transfer records (download/upload progress + history) shown in the popup.
     let transfers_model: Rc<VecModel<TransferInfo>> = Rc::new(VecModel::default());
     window.set_transfers(ModelRc::from(transfers_model.clone()));
@@ -3543,7 +3460,7 @@ fn open_window(
     }
     {
         // Cancel a transfer by id. The id is a UUID unique across sessions, so we
-        // broadcast to every SFTP handle — only the owning one has it registered
+        // broadcast to every SFTP handle — only the owning handle is registered
         // and will act on it (#100).
         let sftp_handles = sftp_handles.clone();
         window.on_cancel_transfer(move |id: SharedString| {
@@ -9878,24 +9795,7 @@ fn refresh_glyph_fallback(term_family: &str, window: &AppWindow, bufs: &TermBuff
 /// `http`/`https` scheme prefixes. A value without a (recognised) scheme is
 /// treated as SOCKS5, matching proxy.rs's parse default, so older configs that
 /// stored a bare `host:port` keep working.
-/// Parse a "vX.Y.Z" / "X.Y.Z" tag into a comparable tuple, or None if it isn't
-/// a three-part numeric version. A pre-release suffix on the patch (e.g.
-/// "3-rc1") is tolerated by taking its leading digits (#48).
-fn parse_version(s: &str) -> Option<(u32, u32, u32)> {
-    let s = s.trim().trim_start_matches('v');
-    let mut it = s.split('.');
-    let major = it.next()?.parse().ok()?;
-    let minor = it.next()?.parse().ok()?;
-    let patch = it
-        .next()?
-        .split(|c: char| !c.is_ascii_digit())
-        .next()?
-        .parse()
-        .ok()?;
-    Some((major, minor, patch))
-}
-
-fn split_proxy(url: &str) -> (String, String) {
+    fn split_proxy(url: &str) -> (String, String) {
     let s = url.trim();
     if s.is_empty() {
         return ("none".to_string(), String::new());

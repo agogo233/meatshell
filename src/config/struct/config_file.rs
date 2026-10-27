@@ -117,10 +117,8 @@ pub(crate) fn default_ai_panel_height() -> f32 {
 }
 
 /// On-disk layout. Keep additive to ease forward-compat.
-/// NOTE: `ConfigFile::default()` yields `update_check_disabled=false` (derive),
-/// but serde missing field and `fresh_config()` yield `true` (= disabled, no
-/// network on startup). Do not construct new-user configs via `Default`; use
-/// `fresh_config()` or serde deserialization.
+/// Do not construct new-user configs via `Default`; use `fresh_config()` or
+/// serde deserialization.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ConfigFile {
     #[serde(default)]
@@ -422,19 +420,6 @@ pub struct ConfigFile {
     /// Settings-panel font scale, percent (80–160). 0 = 100% default (v0.5).
     #[serde(default)]
     pub panel_font: u32,
-    /// Disable the startup "new version available" check (#184). Default true =
-    /// no network on startup; user can opt-in via Settings (#184, fork A).
-    #[serde(default = "default_true")]
-    pub update_check_disabled: bool,
-    /// Download mirror prefixes for one-click updates, raced against GitHub.
-    /// Used only with the Chinese UI in a mainland China time zone.
-    /// `None` = the built-in list (`update::mirror::DEFAULT_MIRRORS`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub update_mirrors: Option<Vec<String>>,
-    /// The download source the user picked (a mirror prefix, `""` = GitHub).
-    /// `None` = automatic: use the fastest source at download time.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub update_mirror_choice: Option<String>,
     /// Enable the local stdio MCP server (`meatshell mcp serve`).
     #[serde(default = "default_mcp_preview_enabled")]
     pub mcp_enabled: bool,

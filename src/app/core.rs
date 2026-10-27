@@ -171,12 +171,6 @@ pub struct AppCore {
     /// Tab id → delivery route, shared with the session pump threads so a
     /// tab can be retargeted at another window while its pumps keep running.
     pub tab_routes: TabRoutes,
-    /// Set once the first window of the process lifetime finishes opening.
-    /// The in-app update check runs only for that window — keying it off
-    /// `registry.count() == 1` would re-fire after close-then-open.
-    /// UI-thread-only, like the rest of this struct.
-    pub first_window_done: Cell<bool>,
-    pub update: RefCell<super::update::State>,
 }
 
 #[cfg(test)]

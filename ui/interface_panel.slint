@@ -19,20 +19,6 @@ export struct OutputRuleItem {
     enabled: bool,
 }
 
-// One download source on Settings → Updates (GitHub first, then mirrors).
-// `key` is the normalised prefix ("" = GitHub). `selected` is the source a
-// one-click update will use first (the user's pick, or the fastest in auto).
-// `level`: 0 untested/testing, 1 fast, 2 medium, 3 slow, 4 failed.
-export struct UpdateMirrorRow {
-    url: string,
-    key: string,
-    ping: string,
-    level: int,
-    fastest: bool,
-    selected: bool,
-    removable: bool,
-}
-
 export struct WslProfileInfo {
     id: string,
     name: string,
@@ -574,28 +560,6 @@ export component InterfacePanel inherits Rectangle {
     in-out property <bool> zen-mode: false;
     in-out property <bool> welcome-as-sidebar;
     in-out property <bool> quick-commands-as-sidebar;
-    in-out property <bool> update-check-enabled;
-    in property <string> update-version;
-    in property <bool> update-busy;
-    in property <bool> update-error;
-    in property <bool> update-install-supported;
-    in property <bool> update-via-terminal;
-    in property <string> update-status;
-    in property <string> update-action-label;
-    callback check-for-updates();
-    callback update-action();
-    callback open-update-url();
-    in property <[UpdateMirrorRow]> update-mirrors;
-    in property <bool> update-mirrors-testing;
-    in property <bool> update-china-tz;
-    in property <string> update-mirror-error;
-    callback add-update-mirror(string);
-    callback remove-update-mirror(string);
-    callback reset-update-mirrors();
-    callback test-update-mirrors();
-    in property <bool> update-mirror-auto: true;
-    callback select-update-mirror(string /* key */);
-    callback set-update-mirror-auto(bool);
     property <string> new-mirror;
     // MCP / remote control: fail-closed defaults (see config_file.rs
     // default_mcp_preview_enabled). The values are pushed from the store
@@ -690,7 +654,6 @@ export component InterfacePanel inherits Rectangle {
     callback set-zen-mode(bool);
     callback set-welcome-as-sidebar(bool);
     callback set-quick-commands-as-sidebar(bool);
-    callback set-update-check-enabled(bool);   // startup new-version check (#184)
     callback set-mcp-permissions(bool, bool, bool, bool);
     callback persist-wallpaper-overlay(float);   // save the overlay opacity
     callback set-wallpaper(string);    // none / builtin selection
@@ -797,11 +760,6 @@ export component InterfacePanel inherits Rectangle {
                     icon: "\u{E335}"; label: "MCP";
                     active: root.ifd-page == "mcp";
                     clicked => { root.ifd-page = "mcp"; }
-                }
-                NavItem {
-                    icon: "\u{E923}"; label: root.lang-en ? "Updates" : "软件更新";
-                    active: root.ifd-page == "update";
-                    clicked => { root.ifd-page = "update"; }
                 }
                 }
             }
@@ -2425,223 +2383,6 @@ export component InterfacePanel inherits Rectangle {
                     color: Theme.text-muted;
                     font-family: Theme.term-font-family;
                     font-size: 12px * Theme.panel-font;
-                }
-            }
-
-            // --- Updates -----------------------------------------------
-            if root.ifd-page == "update" : VerticalLayout {
-                padding-left: 20px;
-                padding-right: 20px;
-                padding-top: 14px;
-                // Room below the mirror buttons so they scroll fully into view
-                // above the card's bottom edge / resize grip.
-                padding-bottom: 28px;
-                spacing: 0;
-                alignment: start;
-                SectionHeader { text: root.lang-en ? "UPDATES" : "软件更新"; height: 24px; }
-                SettingRow {
-                    label: root.lang-en ? "Check for new versions on startup" : "启动时检查新版本";
-                    desc: root.lang-en
-                        ? "Check automatically on startup. You can also check manually below."
-                        : "启动时自动查询新版本，也可随时在下方手动检查。";
-                    show-divider: false;
-                    Switch {
-                        on: root.update-check-enabled;
-                        toggled(v) => { root.update-check-enabled = v; root.set-update-check-enabled(v); }
-                    }
-                }
-                Rectangle { height: 16px; }
-                if root.update-version != "" : Text {
-                    text: (root.lang-en ? "Available version: " : "可用版本：") + root.update-version;
-                    color: Theme.text-primary;
-                    font-size: Theme.fs-md;
-                }
-                Text {
-                    text: root.update-status;
-                    color: root.update-error ? #e57373 : Theme.text-muted;
-                    font-size: Theme.fs-sm;
-                    wrap: word-wrap;
-                }
-                Rectangle { height: 12px; }
-                HorizontalLayout {
-                    spacing: 10px;
-                    alignment: start;
-                    PrimaryButton {
-                        text: root.lang-en ? "Check for updates" : "检查更新";
-                        disabled: root.update-busy;
-                        clicked => { root.check-for-updates(); }
-                    }
-                    if root.update-version != "" && root.update-install-supported : PrimaryButton {
-                        text: root.update-action-label;
-                        disabled: root.update-busy;
-                        clicked => { root.update-action(); }
-                    }
-                }
-                Rectangle { height: 8px; }
-                HorizontalLayout {
-                    alignment: start;
-                    GhostButton {
-                        text: root.lang-en ? "Release page" : "发布页面";
-                        clicked => { root.open-update-url(); }
-                    }
-                }
-                Rectangle { height: 12px; }
-                Text {
-                    text: root.update-via-terminal
-                        ? (root.lang-en
-                            ? "Updates are built from the AUR: MeatShell opens a terminal tab running paru, yay or makepkg. When it finishes, restart MeatShell."
-                            : "更新从 AUR 构建：MeatShell 会打开终端标签页运行 paru、yay 或 makepkg，完成后重启 MeatShell 即可。")
-                        : root.update-install-supported
-                        ? (root.lang-en
-                            ? "Downloads are verified before installation. Installing closes all windows and connections, then reopens MeatShell. Temporary packages are removed afterwards."
-                            : "安装前会校验下载文件。安装时关闭所有窗口和连接，完成后重新打开 MeatShell，并清理临时安装包。")
-                        : (root.lang-en
-                            ? "This installation can't be updated from inside MeatShell; use the release page or your package manager."
-                            : "此安装方式不支持在软件内更新，请通过发布页面或系统包管理器更新。");
-                    color: Theme.text-muted;
-                    font-size: Theme.fs-sm;
-                    wrap: word-wrap;
-                }
-
-                // Download mirrors — Chinese UI only. Rust uses them only in a
-                // mainland China time zone, racing them against GitHub.
-                if !root.lang-en : VerticalLayout {
-                    spacing: 6px;
-                    // Speed-test every source each time the section appears.
-                    init => { root.test-update-mirrors(); }
-                    Rectangle { height: 14px; }
-                    HorizontalLayout {
-                        SectionHeader { text: "下载镜像"; height: 24px; horizontal-stretch: 1; }
-                        GhostButton {
-                            text: root.update-mirrors-testing ? "测速中…" : "重新测速";
-                            clicked => { if (!root.update-mirrors-testing) { root.test-update-mirrors(); } }
-                        }
-                    }
-                    Text {
-                        text: root.update-china-tz
-                            ? "一键更新优先使用选中的下载源，失败时依次换用其他源。所有下载均按 GitHub 发布的 SHA-256 校验。"
-                            : "当前系统时区不在中国大陆，镜像不会启用，更新将直接从 GitHub 下载。";
-                        color: Theme.text-muted;
-                        font-size: Theme.fs-sm;
-                        wrap: word-wrap;
-                    }
-                    SettingRow {
-                        label: "自动选择最快的下载源";
-                        desc: root.update-mirror-auto
-                            ? "每次更新前重新测速并使用最快的源。点击下方任一行可改为固定使用该源。"
-                            : "已固定使用选中的源，失败时再依次换用其他源。打开此开关恢复自动选择。";
-                        show-divider: false;
-                        Switch {
-                            on: root.update-mirror-auto;
-                            toggled(v) => { root.set-update-mirror-auto(v); }
-                        }
-                    }
-                    for mirror in root.update-mirrors : Rectangle {
-                        height: 30px;
-                        border-radius: Theme.radius-sm;
-                        background: mirror-row-ta.has-hover && !mirror.selected
-                            ? Theme.bg-hover.brighter(0.15) : Theme.bg-hover;
-                        border-width: mirror.selected ? 1px : 0px;
-                        border-color: Theme.accent;
-                        // Whole row selects; the ✕ button below sits on top of it.
-                        mirror-row-ta := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.select-update-mirror(mirror.key); }
-                        }
-                        HorizontalLayout {
-                            padding-left: 10px; padding-right: 4px; spacing: 8px;
-                            // Radio dot.
-                            Rectangle {
-                                width: 14px; height: 14px;
-                                y: (parent.height - self.height) / 2;
-                                border-radius: 7px;
-                                border-width: 1.5px;
-                                border-color: mirror.selected ? Theme.accent : Theme.text-muted;
-                                Rectangle {
-                                    width: 6px; height: 6px;
-                                    border-radius: 3px;
-                                    background: Theme.accent;
-                                    visible: mirror.selected;
-                                }
-                            }
-                            Text {
-                                text: mirror.removable ? mirror.url : mirror.url + "（官方源）";
-                                color: mirror.removable ? Theme.text-primary : Theme.text-secondary;
-                                font-size: Theme.fs-sm;
-                                vertical-alignment: center;
-                                horizontal-stretch: 1;
-                                overflow: elide;
-                            }
-                            if mirror.fastest : Text {
-                                text: "最快";
-                                color: #4caf50;
-                                font-size: Theme.fs-xs;
-                                vertical-alignment: center;
-                            }
-                            Text {
-                                min-width: 64px;
-                                text: mirror.ping;
-                                color: mirror.level == 1 ? #4caf50
-                                     : mirror.level == 2 ? #e0a040
-                                     : mirror.level >= 3 ? #e57373
-                                     : Theme.text-muted;
-                                font-size: Theme.fs-sm;
-                                horizontal-alignment: right;
-                                vertical-alignment: center;
-                            }
-                            // Keeps the ping column aligned on the GitHub row.
-                            if !mirror.removable : Rectangle { width: 22px; }
-                            if mirror.removable : Rectangle {
-                                width: 22px; height: 22px;
-                                y: (parent.height - self.height) / 2;
-                                border-radius: Theme.radius-sm;
-                                background: mirror-del-ta.has-hover ? Theme.bg-root : transparent;
-                                mirror-del-ta := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.remove-update-mirror(mirror.url); }
-                                }
-                                Text {
-                                    text: "\u{E5CD}";   // close
-                                    font-family: "Material Icons";
-                                    color: mirror-del-ta.has-hover ? #e57373 : Theme.text-muted;
-                                    font-size: Theme.fs-sm;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-                            }
-                        }
-                    }
-                    LabeledInput {
-                        label: "添加镜像（加在 GitHub 下载地址前的前缀）";
-                        placeholder: "https://v4.gh-proxy.org/";
-                        value <=> root.new-mirror;
-                        accepted => {
-                            root.add-update-mirror(root.new-mirror);
-                            if (root.update-mirror-error == "") { root.new-mirror = ""; }
-                        }
-                    }
-                    if root.update-mirror-error != "" : Text {
-                        text: root.update-mirror-error;
-                        color: #e57373;
-                        font-size: Theme.fs-sm;
-                        wrap: word-wrap;
-                    }
-                    HorizontalLayout {
-                        spacing: 10px;
-                        alignment: start;
-                        PrimaryButton {
-                            text: "添加";
-                            disabled: root.new-mirror == "";
-                            clicked => {
-                                root.add-update-mirror(root.new-mirror);
-                                if (root.update-mirror-error == "") { root.new-mirror = ""; }
-                            }
-                        }
-                        GhostButton {
-                            text: "恢复默认";
-                            clicked => { root.reset-update-mirrors(); }
-                        }
-                    }
                 }
             }
 

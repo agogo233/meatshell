@@ -248,10 +248,9 @@ fn normalize_hex_color(value: &str) -> Option<String> {
 }
 
 /// A brand-new config (no file yet, or the old one was corrupt). Seeds the
-/// new-user default layout (#new-user-defaults): ms wallpaper, welcome page as
-/// a left sidebar, resource panel docked right, 15% wallpaper transparency,
-/// update check disabled (no network on startup, fork A), and marks the
-/// migration done so it isn't re-applied.
+    /// new-user default layout (#new-user-defaults): ms wallpaper, welcome page as
+    /// a left sidebar, resource panel docked right, 15% wallpaper transparency,
+    /// and marks the migration done so it isn't re-applied.
 fn fresh_config() -> ConfigFile {
     // Deserialize `{}` rather than `ConfigFile::default()`: the derived
     // Default ignores the `#[serde(default = "default_true")]` markers and
@@ -269,7 +268,6 @@ fn fresh_config() -> ConfigFile {
     cfg.welcome_as_sidebar = true;
     cfg.sidebar_dock = "right".to_string();
     cfg.wallpaper_overlay = DEFAULT_WALLPAPER_OVERLAY;
-    cfg.update_check_disabled = true;
     cfg.defaults_rev = DEFAULTS_REV;
     cfg
 }
@@ -315,12 +313,6 @@ fn migrate_defaults(cfg: &mut ConfigFile) -> bool {
         && (cfg.wallpaper_overlay - PREVIOUS_DEFAULT_WALLPAPER_OVERLAY).abs() < 0.005
     {
         cfg.wallpaper_overlay = DEFAULT_WALLPAPER_OVERLAY;
-    }
-    // rev 4: turn the startup new-version check off by default. The check
-    // queries the upstream project's releases, which is not meaningful for a
-    // fork; users can still re-enable it from settings.
-    if cfg.defaults_rev < 4 {
-        cfg.update_check_disabled = true;
     }
     cfg.defaults_rev = DEFAULTS_REV;
     true
@@ -1973,40 +1965,6 @@ impl ConfigStore {
     }
     pub fn set_welcome_collapsed(&mut self, v: bool) {
         self.cache.welcome_collapsed = Some(v);
-    }
-    /// Whether the startup new-version check is enabled (#184).
-    pub fn update_check_enabled(&self) -> bool {
-        !self.cache.update_check_disabled
-    }
-    pub fn set_update_check_enabled(&mut self, enabled: bool) {
-        self.cache.update_check_disabled = !enabled;
-    }
-    /// Update download mirrors; the built-in list until the user edits it.
-    pub fn update_mirrors(&self) -> Vec<String> {
-        self.cache.update_mirrors.clone().unwrap_or_else(|| {
-            // The `update` module is compiled out in headless builds, so there is
-            // no built-in list to fall back to there.
-            #[cfg(not(feature = "headless"))]
-            {
-                crate::update::mirror::DEFAULT_MIRRORS
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect()
-            }
-            #[cfg(feature = "headless")]
-            Vec::new()
-        })
-    }
-    /// `None` restores the built-in list.
-    pub fn set_update_mirrors(&mut self, mirrors: Option<Vec<String>>) {
-        self.cache.update_mirrors = mirrors;
-    }
-    /// The picked download source (`""` = GitHub); `None` = fastest, automatically.
-    pub fn update_mirror_choice(&self) -> Option<String> {
-        self.cache.update_mirror_choice.clone()
-    }
-    pub fn set_update_mirror_choice(&mut self, choice: Option<String>) {
-        self.cache.update_mirror_choice = choice;
     }
     pub fn mcp_enabled(&self) -> bool {
         self.cache.mcp_enabled

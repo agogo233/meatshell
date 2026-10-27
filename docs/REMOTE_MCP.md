@@ -13,17 +13,6 @@ ChatGPT/dot. No account, token, signing key, tunnel, public listener or producti
 profile is created by installing the release. Local synthetic integration tests
 do not constitute an end-to-end ChatGPT login test.
 
-## Fork update warning
-
-Fork prereleases must be updated manually from the fork's Releases page. The
-inherited desktop startup update check and Download banner still point to
-`yituorou/meatshell` upstream. The banner opens a web page and does not install
-anything automatically, but installing its download can replace fork-only
-features. Do not use that upstream banner to update a fork build. You can turn off
-“Check for updates on startup” in Settings → Interface. The headless service does
-not run the desktop updater. No build-time fork update channel currently exists;
-this feature does not silently change upstream defaults or existing user settings.
-
 ## 1. Prepare one deliberately selected profile
 
 Run under a dedicated unprivileged OS account. Create a private profile directory
