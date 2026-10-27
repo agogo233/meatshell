@@ -5,8 +5,9 @@
 //! disagree about encodings. `portable-pty` gives us ConPTY on Windows and a
 //! Unix PTY on Linux/macOS while reusing the same UI event path as SSH.
 
+use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use anyhow::{Context, Result};
 use portable_pty::{CommandBuilder, PtySize};
@@ -31,9 +32,11 @@ pub fn spawn_local_session(
     let (evt_tx, evt_rx) = mpsc::unbounded_channel::<SessionEvent>();
 
     let evt_for_task = evt_tx.clone();
+    let tab_for_task = tab_id.clone();
     let join = runtime.spawn(async move {
         if let Err(err) = run_local(
             session,
+            tab_for_task,
             cmd_rx,
             evt_for_task.clone(),
             initial_cols,
@@ -55,8 +58,127 @@ pub fn spawn_local_session(
     )
 }
 
+/// Shell PID of every running local-terminal tab, keyed by tab id, so the tab
+/// menu can find an `ssh` the user started in it (#501). Tab ids are UUIDs,
+/// unique across windows.
+static SHELL_PIDS: LazyLock<Mutex<HashMap<String, u32>>> = LazyLock::new(Default::default);
+
+/// Keeps a tab's [`SHELL_PIDS`] entry for as long as its shell worker runs.
+struct ShellPidGuard {
+    tab_id: String,
+    pid: u32,
+}
+
+impl ShellPidGuard {
+    fn register(tab_id: &str, pid: u32) -> Self {
+        SHELL_PIDS.lock().unwrap().insert(tab_id.to_string(), pid);
+        Self {
+            tab_id: tab_id.to_string(),
+            pid,
+        }
+    }
+}
+
+impl Drop for ShellPidGuard {
+    fn drop(&mut self) {
+        let mut pids = SHELL_PIDS.lock().unwrap();
+        // An in-place reconnect may already have registered the new shell.
+        if pids.get(&self.tab_id) == Some(&self.pid) {
+            pids.remove(&self.tab_id);
+        }
+    }
+}
+
+/// One process, as far as finding an `ssh` below a shell needs (#501).
+#[derive(Debug, Clone)]
+pub(crate) struct ProcessRecord {
+    pub pid: u32,
+    pub parent: Option<u32>,
+    pub name: String,
+    pub start_time: u64,
+    pub cmd: Vec<String>,
+}
+
+fn is_ssh_program(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name == "ssh" || name == "ssh.exe"
+}
+
+/// The `ssh` the user is running under `root`: a descendant of the shell that
+/// is not itself below another `ssh` (which skips the `ssh -W` helpers that
+/// `-J` / ProxyJump spawn). With several, the most recently started wins.
+pub(crate) fn find_user_ssh(processes: &[ProcessRecord], root: u32) -> Option<&ProcessRecord> {
+    let mut children: HashMap<u32, Vec<&ProcessRecord>> = HashMap::new();
+    for process in processes {
+        if let Some(parent) = process.parent {
+            if parent != process.pid {
+                children.entry(parent).or_default().push(process);
+            }
+        }
+    }
+    // A "child" older than the shell is a PID-reuse artefact, not ours.
+    let root_started = processes
+        .iter()
+        .find(|p| p.pid == root)
+        .map_or(0, |p| p.start_time);
+    let mut found: Vec<&ProcessRecord> = Vec::new();
+    let mut seen = std::collections::HashSet::from([root]);
+    let mut queue = std::collections::VecDeque::from([root]);
+    while let Some(pid) = queue.pop_front() {
+        for child in children.get(&pid).into_iter().flatten() {
+            if child.start_time < root_started || !seen.insert(child.pid) {
+                continue;
+            }
+            if is_ssh_program(&child.name) {
+                found.push(child); // do not descend into its helpers
+            } else {
+                queue.push_back(child.pid);
+            }
+        }
+    }
+    found.into_iter().max_by_key(|p| (p.start_time, p.pid))
+}
+
+/// Command line of the `ssh` running in local tab `tab_id`, if any (#501).
+/// `None` when the tab is not a running local terminal or no `ssh` runs in
+/// it. An `ssh` inside WSL runs in the Linux VM and is not visible here.
+pub(crate) fn ssh_command_in_tab(tab_id: &str) -> Option<Vec<String>> {
+    let root = *SHELL_PIDS.lock().unwrap().get(tab_id)?;
+    ssh_command_below(root)
+}
+
+/// Command line of the user's `ssh` below process `root` (see [`find_user_ssh`]).
+fn ssh_command_below(root: u32) -> Option<Vec<String>> {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+    );
+    let processes: Vec<ProcessRecord> = system
+        .processes()
+        .values()
+        .map(|p| ProcessRecord {
+            pid: p.pid().as_u32(),
+            parent: p.parent().map(|pid| pid.as_u32()),
+            name: p.name().to_string_lossy().into_owned(),
+            start_time: p.start_time(),
+            cmd: p
+                .cmd()
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect(),
+        })
+        .collect();
+    find_user_ssh(&processes, root)
+        .map(|p| p.cmd.clone())
+        .filter(|cmd| !cmd.is_empty())
+}
+
 async fn run_local(
     session: Session,
+    tab_id: String,
     mut commands: UnboundedReceiver<SessionCommand>,
     events: UnboundedSender<SessionEvent>,
     initial_cols: u32,
@@ -102,6 +224,9 @@ async fn run_local(
         .spawn_command(cmd)
         .with_context(|| format!("failed to start local terminal: {program}"))?;
     drop(pair.slave);
+    let _shell_pid = child
+        .process_id()
+        .map(|pid| ShellPidGuard::register(&tab_id, pid));
 
     let mut reader = pair.master.try_clone_reader().context("local pty reader")?;
     let writer = pair.master.take_writer().context("local pty writer")?;
@@ -309,6 +434,100 @@ pub(crate) fn powershell_quote(value: &str) -> String {
 #[cfg(any(not(windows), test))]
 pub(crate) fn sh_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
+}
+
+#[cfg(test)]
+mod ssh_process_tests {
+    use super::{find_user_ssh, ProcessRecord};
+
+    fn proc(pid: u32, parent: u32, name: &str, start: u64) -> ProcessRecord {
+        ProcessRecord {
+            pid,
+            parent: Some(parent),
+            name: name.into(),
+            start_time: start,
+            cmd: vec![name.into(), format!("host{pid}")],
+        }
+    }
+
+    #[test]
+    fn finds_ssh_below_the_shell_and_skips_jump_helpers() {
+        let processes = vec![
+            proc(10, 1, "powershell.exe", 100),
+            proc(20, 10, "ssh.exe", 110),
+            // ProxyJump helper spawned by the user's ssh.
+            proc(21, 20, "ssh.exe", 111),
+            // Someone else's ssh.
+            proc(30, 1, "ssh.exe", 120),
+        ];
+        assert_eq!(find_user_ssh(&processes, 10).unwrap().pid, 20);
+    }
+
+    #[test]
+    fn looks_through_intermediate_processes_and_prefers_the_newest() {
+        let processes = vec![
+            proc(10, 1, "bash", 100),
+            proc(11, 10, "tmux", 101),
+            proc(12, 11, "ssh", 102),
+            proc(13, 10, "SSH", 105),
+        ];
+        assert_eq!(find_user_ssh(&processes, 10).unwrap().pid, 13);
+    }
+
+    #[test]
+    fn none_without_ssh_or_for_reused_pids() {
+        let processes = vec![proc(10, 1, "bash", 100), proc(11, 10, "vim", 101)];
+        assert!(find_user_ssh(&processes, 10).is_none());
+        // Started before the shell: its parent pid was reused by the shell.
+        let processes = vec![proc(10, 1, "bash", 100), proc(11, 10, "ssh", 50)];
+        assert!(find_user_ssh(&processes, 10).is_none());
+        // Self-parented entries (pid 0 on Windows) do not loop.
+        let processes = vec![proc(0, 0, "System Idle Process", 0)];
+        assert!(find_user_ssh(&processes, 0).is_none());
+    }
+
+    /// Real process tree: a shell running an OpenSSH client that hangs
+    /// connecting to a TEST-NET address. Needs `ssh` on PATH, so it is
+    /// ignored by default: `cargo test -- --ignored real_ssh_below_a_shell`.
+    #[test]
+    #[ignore]
+    fn real_ssh_below_a_shell_is_found() {
+        let ssh = "ssh -o ConnectTimeout=30 -o BatchMode=yes -p 2222 probe@192.0.2.1";
+        #[cfg(windows)]
+        let mut shell = std::process::Command::new("cmd.exe")
+            .args(["/C", ssh])
+            .spawn()
+            .unwrap();
+        // `; true` stops sh from exec-ing ssh in place of itself.
+        #[cfg(not(windows))]
+        let mut shell = std::process::Command::new("sh")
+            .args(["-c", &format!("{ssh}; true")])
+            .spawn()
+            .unwrap();
+        let root = shell.id();
+        let mut found = None;
+        for _ in 0..50 {
+            found = super::ssh_command_below(root);
+            if found.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        #[cfg(windows)]
+        let _ = std::process::Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &root.to_string()])
+            .output();
+        #[cfg(not(windows))]
+        let _ = std::process::Command::new("pkill")
+            .args(["-P", &root.to_string()])
+            .output();
+        let _ = shell.kill();
+        let argv = found.expect("ssh below the shell");
+        let invocation = crate::ssh::ssh_cli::parse_command_line(&argv).unwrap();
+        assert_eq!(invocation.host, "192.0.2.1");
+        assert_eq!(invocation.user.as_deref(), Some("probe"));
+        assert_eq!(invocation.port, Some(2222));
+    }
 }
 
 #[cfg(test)]

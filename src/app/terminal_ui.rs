@@ -461,7 +461,10 @@ pub(super) fn apply_wallpaper(
             // theme toggle still governs text contrast — a light/white wallpaper
             // reads best in light mode (crisp dark text) rather than being forced
             // dark and greying the text out (#wallpaper).
-            if apply_builtin_theme && crate::wallpaper::is_builtin(id) {
+            // With immersive colours off the wallpaper is only a backdrop and
+            // leaves light/dark alone.
+            if apply_builtin_theme && crate::wallpaper::is_builtin(id) && store.immersive_colors()
+            {
                 apply_dark_mode(window, bufs, wp.palette.is_dark);
             }
             window.set_wallpaper_active(true);

@@ -12,3 +12,5 @@ mod tools;
 
 pub(crate) use structs::Frontend;
 pub(crate) use tools::call;
+#[cfg_attr(not(test), allow(unused_imports))]
+pub(crate) use tools::{validate_arguments, SESSION_ID_KEYS};

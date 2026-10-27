@@ -13,13 +13,19 @@
 //! * reports the session's terminal type on request (TERMINAL-TYPE, RFC 1091).
 //!
 //! There is no SFTP and no resource monitor — a Telnet console is a raw pipe.
+//!
+//! When the session has a saved username / password, the worker answers the
+//! device's first login and password prompts with them (#507); see
+//! [`AutoLogin`].
+
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
-use crate::config::Session;
+use crate::config::{Secret, Session};
 use crate::i18n::t;
 use crate::ssh::{SessionCommand, SessionEvent, SessionHandle};
 
@@ -78,6 +84,140 @@ pub fn spawn_telnet_session(
         },
         evt_rx,
     )
+}
+
+/// How long after connecting, and how much output, to watch for login prompts.
+const AUTOLOGIN_WINDOW: Duration = Duration::from_secs(60);
+const AUTOLOGIN_BUDGET: usize = 64 * 1024;
+/// Longest prompt line kept for matching.
+const PROMPT_LINE_MAX: usize = 200;
+
+#[derive(Debug, PartialEq, Eq)]
+enum Prompt {
+    User,
+    Password,
+}
+
+/// Recognise a login prompt at the end of the current output line. Password
+/// is checked first so "User password:" is a password prompt.
+fn classify_prompt(line: &str) -> Option<Prompt> {
+    let line = line.trim_end().to_lowercase();
+    const PASSWORD: &[&str] = &["password:", "passwd:", "password：", "密码:", "密码："];
+    const USER: &[&str] = &[
+        "login:", "username:", "user name:", "user:", "login：", "username：",
+        "用户名:", "用户名：", "账号:", "账号：", "帐号:", "帐号：",
+    ];
+    if PASSWORD.iter().any(|p| line.ends_with(p)) {
+        Some(Prompt::Password)
+    } else if USER.iter().any(|p| line.ends_with(p)) {
+        Some(Prompt::User)
+    } else {
+        None
+    }
+}
+
+/// Answers a device's first login prompt with the saved username and its
+/// first password prompt with the saved password (#507). Each prompt is
+/// answered at most once, so wrong credentials fall back to manual typing
+/// instead of looping; a blank field is left for the user to type. It stops
+/// after the password is sent, when a prompt it already answered comes back,
+/// or once [`AUTOLOGIN_BUDGET`] characters of output went by.
+struct AutoLogin {
+    user: String,
+    password: Secret,
+    line: String,
+    sent_user: bool,
+    sent_password: bool,
+    seen: usize,
+    done: bool,
+}
+
+impl AutoLogin {
+    /// `None` when the session has nothing to send.
+    fn new(user: &str, password: &Secret) -> Option<Self> {
+        let user = user.trim().to_string();
+        if user.is_empty() && password.is_empty() {
+            return None;
+        }
+        Some(Self {
+            user,
+            password: password.clone(),
+            line: String::new(),
+            sent_user: false,
+            sent_password: false,
+            seen: 0,
+            done: false,
+        })
+    }
+
+    fn done(&self) -> bool {
+        self.done
+    }
+
+    /// Feed decoded terminal output; returns what to type (ending in Enter)
+    /// when the output ends at a prompt we should answer.
+    fn feed(&mut self, text: &str) -> Option<Secret> {
+        if self.done {
+            return None;
+        }
+        self.seen += text.len();
+        for ch in text.chars() {
+            if ch == '\r' || ch == '\n' {
+                self.line.clear();
+            } else if !ch.is_control() {
+                self.line.push(ch);
+            }
+        }
+        if self.line.len() > PROMPT_LINE_MAX {
+            let cut = self.line.len() - PROMPT_LINE_MAX;
+            let cut = (cut..self.line.len())
+                .find(|&i| self.line.is_char_boundary(i))
+                .unwrap_or(self.line.len());
+            self.line.drain(..cut);
+        }
+        let reply = match classify_prompt(&self.line) {
+            Some(Prompt::User) if self.sent_user => {
+                // Asked again: the login failed. Let the user take over.
+                self.done = true;
+                None
+            }
+            Some(Prompt::User) if !self.user.is_empty() => {
+                self.sent_user = true;
+                Some(Secret::new(format!("{}\r", self.user)))
+            }
+            Some(Prompt::Password) if self.sent_password => {
+                self.done = true;
+                None
+            }
+            Some(Prompt::Password) if !self.password.is_empty() => {
+                self.sent_password = true;
+                self.done = true; // nothing left to answer
+                Some(Secret::new(format!("{}\r", self.password.as_str())))
+            }
+            _ => None,
+        };
+        if reply.is_some() {
+            self.line.clear();
+        }
+        if self.seen > AUTOLOGIN_BUDGET {
+            self.done = true;
+        }
+        reply
+    }
+}
+
+/// User input as sent on the wire: re-encoded to the session charset, with
+/// IAC (0xFF) doubled per RFC 854.
+fn wire_input(encoder: &crate::terminal::TerminalEncoding, bytes: &[u8]) -> Vec<u8> {
+    let bytes = encoder.encode(bytes);
+    let mut out = Vec::with_capacity(bytes.len());
+    for b in bytes {
+        out.push(b);
+        if b == IAC {
+            out.push(IAC);
+        }
+    }
+    out
 }
 
 /// Incoming-byte parser state for stripping IAC sequences.
@@ -178,6 +318,9 @@ async fn run_telnet(
     // decoder is stateful so a multibyte char split across reads survives.
     let mut decoder = crate::terminal::TerminalEncoding::new(&session.encoding);
     let encoder = crate::terminal::TerminalEncoding::new(&session.encoding);
+    // Saved credentials answer the first login / password prompts (#507).
+    let mut autologin = AutoLogin::new(&session.user, &session.password);
+    let connected_at = Instant::now();
 
     loop {
         tokio::select! {
@@ -186,13 +329,7 @@ async fn run_telnet(
                     Some(SessionCommand::RawInput(bytes)) => {
                         // Never log keystroke bytes — they can be passwords (#15).
                         tracing::debug!("telnet write len={} bytes", bytes.len());
-                        let bytes = encoder.encode(&bytes);
-                        // Escape IAC (0xFF) in user data per RFC 854.
-                        let mut out = Vec::with_capacity(bytes.len());
-                        for b in bytes {
-                            out.push(b);
-                            if b == IAC { out.push(IAC); }
-                        }
+                        let out = wire_input(&encoder, &bytes);
                         if wr.write_all(&out).await.is_err() {
                             let _ = events.send(SessionEvent::Closed(
                                 t("写入失败", "write failed").into()));
@@ -232,7 +369,24 @@ async fn run_telnet(
                         if !data.is_empty() {
                             let text = decoder.decode(&data);
                             if !text.is_empty() {
+                                let answer = match autologin.as_mut() {
+                                    Some(login) if connected_at.elapsed() < AUTOLOGIN_WINDOW => {
+                                        login.feed(&text)
+                                    }
+                                    _ => None,
+                                };
+                                if autologin.as_ref().is_some_and(|l| l.done())
+                                    || connected_at.elapsed() >= AUTOLOGIN_WINDOW
+                                {
+                                    autologin = None;
+                                }
                                 let _ = events.send(SessionEvent::Output(text));
+                                if let Some(answer) = answer {
+                                    // Never log the answer; it may be the password.
+                                    let out = wire_input(&encoder, answer.as_str().as_bytes());
+                                    let _ = wr.write_all(&out).await;
+                                    let _ = wr.flush().await;
+                                }
                             }
                         }
                     }
@@ -376,6 +530,166 @@ mod tests {
         }
         assert!(data.is_empty());
         assert!(replies.ends_with(b"vt100\xff\xf0"));
+    }
+
+    fn login(user: &str, password: &str) -> AutoLogin {
+        AutoLogin::new(user, &Secret::new(password)).unwrap()
+    }
+
+    fn answer(login: &mut AutoLogin, text: &str) -> Option<String> {
+        login.feed(text).map(|s| s.as_str().to_string())
+    }
+
+    #[test]
+    fn recognises_common_prompts() {
+        for p in ["login: ", "Username:", "User Name:", "R1 login:", "用户名：", "账号:"] {
+            assert_eq!(classify_prompt(p), Some(Prompt::User), "{p}");
+        }
+        for p in ["Password: ", "password:", "User password:", "密码："] {
+            assert_eq!(classify_prompt(p), Some(Prompt::Password), "{p}");
+        }
+        for p in ["Last login: Mon Oct 26 from 10.0.0.1", "Router>", "$ ", ""] {
+            assert_eq!(classify_prompt(p), None, "{p}");
+        }
+    }
+
+    #[test]
+    fn answers_login_then_password_once() {
+        let mut l = login("admin", "s3cret");
+        assert_eq!(answer(&mut l, "Welcome\r\n"), None);
+        assert_eq!(answer(&mut l, "\r\nlogin: ").as_deref(), Some("admin\r"));
+        // The echoed username does not trigger anything.
+        assert_eq!(answer(&mut l, "admin\r\n"), None);
+        assert_eq!(answer(&mut l, "Password: ").as_deref(), Some("s3cret\r"));
+        assert!(l.done());
+        assert_eq!(answer(&mut l, "\r\nPassword: "), None);
+    }
+
+    #[test]
+    fn prompts_split_across_reads_still_match() {
+        let mut l = login("admin", "pw");
+        assert_eq!(answer(&mut l, "\r\nUser"), None);
+        assert_eq!(answer(&mut l, "name: ").as_deref(), Some("admin\r"));
+    }
+
+    #[test]
+    fn blank_fields_are_left_to_the_user() {
+        // Password-only devices (e.g. a console line asking just "Password:").
+        let mut l = login("", "pw");
+        assert_eq!(answer(&mut l, "login: "), None);
+        assert_eq!(answer(&mut l, "\r\nPassword: ").as_deref(), Some("pw\r"));
+        // Username only: the password prompt is the user's.
+        let mut l = login("admin", "");
+        assert_eq!(answer(&mut l, "login: ").as_deref(), Some("admin\r"));
+        assert_eq!(answer(&mut l, "\r\nPassword: "), None);
+        assert!(AutoLogin::new(" ", &Secret::default()).is_none());
+    }
+
+    #[test]
+    fn a_failed_login_is_not_retried() {
+        let mut l = login("admin", "");
+        assert_eq!(answer(&mut l, "login: ").as_deref(), Some("admin\r"));
+        assert_eq!(answer(&mut l, "\r\nLogin incorrect\r\nlogin: "), None);
+        assert!(l.done());
+    }
+
+    #[test]
+    fn stops_watching_after_the_output_budget() {
+        let mut l = login("admin", "pw");
+        let noise = "x".repeat(AUTOLOGIN_BUDGET + 1) + "\r\n";
+        assert_eq!(answer(&mut l, &noise), None);
+        assert!(l.done());
+        assert_eq!(answer(&mut l, "login: "), None);
+    }
+
+    /// End to end: the worker logs in to a fake device that prompts for a
+    /// username and password, then hands the session to the user.
+    #[test]
+    fn worker_logs_in_to_a_device() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let listener = rt
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        /// One answer line from the client, without its telnet negotiation.
+        async fn read_line(rd: &mut BufReader<tokio::net::tcp::OwnedReadHalf>) -> String {
+            let mut buf = Vec::new();
+            rd.read_until(b'\r', &mut buf).await.unwrap();
+            let mut text = Vec::new();
+            let mut i = 0;
+            while i < buf.len() {
+                if buf[i] == IAC {
+                    if buf.get(i + 1) == Some(&SB) {
+                        while i < buf.len() && !(buf[i] == IAC && buf.get(i + 1) == Some(&SE)) {
+                            i += 1;
+                        }
+                        i += 2;
+                    } else {
+                        i += 3;
+                    }
+                } else {
+                    text.push(buf[i]);
+                    i += 1;
+                }
+            }
+            String::from_utf8(text).unwrap()
+        }
+        // The device: prompt for a username, then a password.
+        let device = rt.spawn(async move {
+            let (sock, _) = listener.accept().await.unwrap();
+            let (rd, mut wr) = sock.into_split();
+            let mut rd = BufReader::new(rd);
+            wr.write_all(b"Welcome to R1\r\n\r\nR1 login: ").await.unwrap();
+            let user = read_line(&mut rd).await;
+            wr.write_all(b"\r\nPassword: ").await.unwrap();
+            let password = read_line(&mut rd).await;
+            wr.write_all(b"\r\nR1> ").await.unwrap();
+            (user, password)
+        });
+
+        let mut session = Session::new_empty();
+        session.kind = crate::config::SessionKind::Telnet;
+        session.host = "127.0.0.1".into();
+        session.port = port;
+        session.user = "admin".into();
+        session.password = Secret::new("s3cret");
+        let (handle, mut events) =
+            spawn_telnet_session(rt.handle(), "t1".into(), session, 80, 24);
+        let (user, password) = rt
+            .block_on(async { tokio::time::timeout(Duration::from_secs(10), device).await })
+            .expect("device finished")
+            .unwrap();
+        assert_eq!(user, "admin\r");
+        assert_eq!(password, "s3cret\r");
+        // The prompts still reach the terminal.
+        let output = rt.block_on(async {
+            let mut all = String::new();
+            while let Ok(Some(ev)) =
+                tokio::time::timeout(Duration::from_millis(500), events.recv()).await
+            {
+                if let SessionEvent::Output(text) = ev {
+                    all.push_str(&text);
+                }
+            }
+            all
+        });
+        assert!(output.contains("R1 login: "), "{output:?}");
+        assert!(output.contains("Password: "), "{output:?}");
+        let _ = handle.commands.send(SessionCommand::Close);
+    }
+
+    #[test]
+    fn wire_input_doubles_iac_bytes() {
+        let utf8 = crate::terminal::TerminalEncoding::new("UTF-8");
+        assert_eq!(wire_input(&utf8, b"ab\r"), b"ab\r");
+        let latin1 = crate::terminal::TerminalEncoding::new("ISO-8859-1");
+        let out = wire_input(&latin1, "ÿ".as_bytes());
+        assert_eq!(out, [IAC, IAC]);
     }
 
     #[test]

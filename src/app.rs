@@ -9,6 +9,7 @@ mod agents;
 mod auth_dialogs;
 mod aux_windows;
 mod ai;
+mod color_theme;
 pub(crate) mod core;
 mod editor_host;
 mod editor_tabs;
@@ -20,6 +21,7 @@ mod port_forward;
 mod session_trigger;
 mod quick_commands;
 mod resource_ui;
+mod save_tab_session;
 mod session_event;
 mod session_models;
 mod session_runtime;
@@ -1098,6 +1100,10 @@ fn open_window(
         });
     }
 
+    // Colour theme preset + the immersive-colours switch. Applied before the
+    // wallpaper so a built-in wallpaper can still override light/dark.
+    color_theme::apply_color_theme(&window, &store.borrow());
+
     // Apply the saved immersive wallpaper (overrides dark/light when set; a
     // missing custom file falls back to the plain theme).
     {
@@ -2109,7 +2115,9 @@ fn open_window(
             let mut selected_builtin_theme = None;
             if let Some(w) = weak.upgrade() {
                 apply_wallpaper(&w, &store.borrow(), &bufs_wp, &id, true);
-                if crate::wallpaper::is_builtin(&id) {
+                // With immersive colours off the wallpaper is only a backdrop,
+                // so it did not touch light/dark: nothing new to persist.
+                if crate::wallpaper::is_builtin(&id) && store.borrow().immersive_colors() {
                     selected_builtin_theme = Some(w.get_dark_mode());
                 }
                 // Keep an already-open process window in sync with the change.
@@ -2186,6 +2194,8 @@ fn open_window(
             sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
             // Re-apply the theme to the chrome AND every open terminal buffer.
             apply_dark_mode(&w, &bufs, theme_pref_is_dark(&store.borrow()));
+            // Colour theme preset + immersive switch (Settings › Wallpaper & theme).
+            color_theme::apply_color_theme(&w, &store.borrow());
             // Language translations are process-global; refresh our flag only.
             w.set_lang_en(crate::i18n::is_en());
             // Local shells / WSL profiles and detected agents can change in
@@ -2376,6 +2386,7 @@ fn open_window(
         title: t("新标签页", "New tab").into(),
         kind: "welcome".into(),
         connected: false,
+        local: false,
     });
     window.set_tabs(ModelRc::from(tabs_model.clone()));
     window.set_active_tab_id("welcome".into());
@@ -3221,6 +3232,9 @@ fn open_window(
     };
     agents::wire_agent_launchers(&agent_ctx, &sessions_model);
 
+    // Colour theme presets + the immersive-colours switch.
+    color_theme::wire(&agent_ctx);
+
     // Customisable keyboard shortcuts: match-shortcut dispatch + the Shortcuts
     // dialog (record / reset / reset all). The Slint handlers already call
     // `match-shortcut`; without this wiring every chord fell through to the
@@ -3644,6 +3658,13 @@ fn open_window(
             splitters: splitters_model.clone(),
         },
         sftp_handles.clone(),
+    );
+    // A local shell's running ssh connection can be saved as a session (#501).
+    save_tab_session::wire(
+        &window,
+        store.clone(),
+        registry.clone(),
+        sessions_model.clone(),
     );
     wire_sftp_callbacks(
         &window,
@@ -6936,6 +6957,7 @@ fn wire_session_callbacks(
                 title: tab_title.into(),
                 kind: "terminal".into(),
                 connected: false,
+                local: session.kind == SessionKind::Local,
             });
             // Each session keeps its own SFTP collapse state + sizes, seeded from
             // the global defaults (the "collapse SFTP by default" pref and the

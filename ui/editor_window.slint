@@ -1,4 +1,4 @@
-import { Theme } from "theme.slint";
+import { Theme, ThemePalette } from "theme.slint";
 import { ModalScope } from "modal.slint";
 import { ConfirmDialog } from "confirm_dialog.slint";
 import { EditorPane, EditorFindResult } from "editor_pane.slint";
@@ -20,6 +20,9 @@ export component EditorWindow inherits Window {
     in-out property <bool> wallpaper-active <=> Theme.wallpaper-active;
     in-out property <color> wp-accent <=> Theme.wp-accent;
     in-out property <color> wp-tint <=> Theme.wp-tint;
+    in-out property <ThemePalette> theme-palette-dark <=> Theme.palette-dark;
+    in-out property <ThemePalette> theme-palette-light <=> Theme.palette-light;
+    in-out property <bool> immersive-colors <=> Theme.immersive;
     default-font-family: Theme.ui-font-family;
 
     in-out property <string> editor-name;

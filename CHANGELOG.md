@@ -29,6 +29,21 @@ All notable changes are documented here. 本文件记录所有重要变更。
 - **新会话的 MCP 访问默认改为未勾选。** 新建会话对话框此前默认勾选「允许 MCP 访问」，与「MCP 暴露需用户显式开启（#432）」以及已有会话的实际存储值不一致，新建会话可能被无意开放给 MCP 客户端。现在默认不勾选，需要时手动开启。
 - **The MCP access box is now unchecked by default for new sessions.** The new-session dialog pre-ticked "allow MCP access", which contradicted the opt-in design (#432) and the value actually stored for existing sessions, so a new session could be exposed to MCP clients without the user asking for it. It now starts unchecked and can be ticked deliberately.
 
+- **本地标签页可把正在运行的 ssh 连接加入会话列表（#501）。** 在本地终端里用 ssh 连上服务器后，标签页右键菜单新增「加入会话列表」：主机、端口、用户名与跳板链路从 ssh 命令行解析，名称取自 ~/.ssh/config 中的别名；配置里匹配不到的跳板主机不会编造，会在保存后的提示里说明。
+- **A local tab can save its running ssh connection as a session (#501).** After connecting with ssh in a local shell, the tab context menu gains "Add to session list": host, port, user and the jump chain are read from the ssh command line, and the name comes from the alias in ~/.ssh/config. A jump host that does not match a saved session is reported in the note after saving rather than guessed.
+
+- **Telnet 会话可保存凭据并自动登录（#507）。** 新建或编辑 Telnet 会话时可填写用户名与密码；连接时 MeatShell 自动应答设备首次出现的登录与密码提示，任一项留空则仍由你手动输入。
+- **Telnet sessions can save credentials and log in automatically (#507).** A Telnet session can store a user name and a password; on connect MeatShell answers the device's first login and password prompts with them, and leaving either blank keeps you typing it by hand.
+
+- **FinalShell 导入现在带端口转发（#514）。** 从 FinalShell 导出导入会话时，`port_forwarding_list` 一并迁入：type 100 → 本地、200 → 远程、300 → 动态（SOCKS5），默认自动启动；动态转发会清空无意义的主机与端口（FinalShell 常仍写入 127.0.0.1:0），无法识别的类型带警告跳过，不影响该会话其余内容。
+- **FinalShell import now carries port forwards (#514).** Importing a FinalShell export brings over `port_forwarding_list`: type 100 → local, 200 → remote, 300 → dynamic (SOCKS5), starting automatically by default; a dynamic forward has its meaningless host and port cleared (FinalShell often still writes 127.0.0.1:0), and an unrecognised type is skipped with a warning while the rest of the session imports as before.
+
+- **设置新增配色预设与「沉浸式配色」开关。** 「设置 → 壁纸与主题」新增配色预设：默认、纯白、雾灰、钛灰、钴蓝、鼠尾草绿、暖黄、樱粉，以及 VS Code / IDEA / Xcode / JetBrains / Cursor / Claude Code 六套编辑器风格，最后是按一个自定义颜色推导的「自定义」。每套预设含深色与浅色两套调色板，跟随明暗切换，并同步到已打开的进程、系统与编辑器窗口。打开「沉浸式配色」时壁纸的强调色与色调仍覆盖预设；关闭后壁纸只作背景，配色由预设决定。
+- **Settings › Wallpaper & theme gains colour theme presets and an "immersive colours" switch.** The page gains presets for Default, White, Mist Gray, Titanium Gray, Cobalt Blue, Sage Green, Warm Yellow, Sakura Pink, six editor looks (VS Code, IDEA, Xcode, JetBrains, Cursor, Claude Code) and a Custom derived from one accent colour; each carries a dark and a light palette that follows the light/dark switch and is mirrored to the process, system-information and editor windows. With "immersive colours" on the wallpaper's accent and tint still override the preset; with it off the wallpaper is only a backdrop and the preset decides the colours.
+
+- **MCP 与自动化接口接受 saved_session_id 别名。** Claude 桌面版的 remote-devices 桥接不会转发顶层 session_id 参数，导致每个会话类工具都报「缺少或无效的 session_id」，而 list_sessions / import_sessions 正常。现在 saved_session_id 与 sessionId 都作为别名接受，取值冲突直接拒绝；缺少参数时会列出实际收到的参数名。另将 upload_file / download_file 的默认超时对齐到声明的 120 秒，minLength:1 的字符串参数不再接受空值。
+- **MCP and automation accept the saved_session_id alias.** Claude desktop's remote-devices bridge does not forward a top-level session_id, so every session tool failed with "missing or invalid string argument: session_id" while list_sessions and import_sessions worked. saved_session_id and sessionId are now accepted as aliases, conflicting values are rejected, and a missing argument names the keys that actually arrived. upload_file / download_file also default to the advertised 120 s timeout, and minLength:1 strings no longer accept the empty value.
+
 ### 已知差异 / Known divergences（本 fork 与上游）
 
 - **SFTP 拖出到访达 / 资源管理器（#504）本 fork 有意未实现。** 上游 0.7.9 与 0.8.0 的更新日志宣称支持将 SFTP 行拖出到访达或资源管理器；本 fork 决定暂不接线，因此这两条在本仓库不生效。完整实现（Windows OLE 虚拟文件拖拽、macOS 文件承诺）归档在 `src/attic/drag_out.rs` 与 `src/attic/drag_out_mac.rs`，`src/sftp` 的传输侧仍可用；取用需同时恢复 `on_sftp_drag_out`、`drag_out_items` 与界面的拖出手势，详见 `src/attic/README.md`。

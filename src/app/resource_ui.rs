@@ -226,6 +226,9 @@ pub(super) fn sync_proc_theme(main: &AppWindow, proc: &ProcWindow) {
     proc.set_wallpaper_active(main.get_wallpaper_active());
     proc.set_wp_accent(main.get_wp_accent());
     proc.set_wp_tint(main.get_wp_tint());
+    proc.set_theme_palette_dark(main.get_theme_palette_dark());
+    proc.set_theme_palette_light(main.get_theme_palette_light());
+    proc.set_immersive_colors(main.get_immersive_colors());
 }
 
 pub(super) fn sync_system_info_theme(main: &AppWindow, sys: &SystemInfoWindow) {
@@ -236,6 +239,9 @@ pub(super) fn sync_system_info_theme(main: &AppWindow, sys: &SystemInfoWindow) {
     sys.set_wallpaper_active(main.get_wallpaper_active());
     sys.set_wp_accent(main.get_wp_accent());
     sys.set_wp_tint(main.get_wp_tint());
+    sys.set_theme_palette_dark(main.get_theme_palette_dark());
+    sys.set_theme_palette_light(main.get_theme_palette_light());
+    sys.set_immersive_colors(main.get_immersive_colors());
 }
 
 /// Mirror the main window's theme onto the detached editor window (#494):
@@ -249,6 +255,9 @@ pub(super) fn sync_editor_theme(main: &AppWindow, editor: &EditorWindow) {
     editor.set_wallpaper_active(main.get_wallpaper_active());
     editor.set_wp_accent(main.get_wp_accent());
     editor.set_wp_tint(main.get_wp_tint());
+    editor.set_theme_palette_dark(main.get_theme_palette_dark());
+    editor.set_theme_palette_light(main.get_theme_palette_light());
+    editor.set_immersive_colors(main.get_immersive_colors());
 }
 
 pub(super) fn place_system_info_window(main: &AppWindow, sys: &SystemInfoWindow) {

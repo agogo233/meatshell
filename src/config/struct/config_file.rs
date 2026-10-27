@@ -409,6 +409,16 @@ pub struct ConfigFile {
     /// Interface › Wallpaper opacity slider. 0 = use the current default.
     #[serde(default)]
     pub wallpaper_overlay: f32,
+    /// Colour theme preset id (Settings › Wallpaper & theme). Empty = default.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub color_theme: String,
+    /// `#RRGGBB` for the "custom" colour theme.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub color_theme_custom: String,
+    /// Turn off immersive colours: a wallpaper stays, but no longer recolours
+    /// the interface or switches light/dark. Default false keeps them on.
+    #[serde(default)]
+    pub immersive_colors_disabled: bool,
     /// Settings-panel font scale, percent (80–160). 0 = 100% default (v0.5).
     #[serde(default)]
     pub panel_font: u32,

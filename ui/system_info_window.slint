@@ -3,7 +3,7 @@
 // Opens from the resource summary in the sidebar and shares live resource
 // models with AppWindow, much like ProcWindow shares the process table.
 
-import { Theme } from "theme.slint";
+import { Theme, ThemePalette } from "theme.slint";
 import { ModalScope } from "modal.slint";
 import { DiskInfo } from "sidebar.slint";
 
@@ -175,6 +175,9 @@ export component SystemInfoWindow inherits Window {
     in-out property <bool> wallpaper-active <=> Theme.wallpaper-active;
     in-out property <color> wp-accent <=> Theme.wp-accent;
     in-out property <color> wp-tint <=> Theme.wp-tint;
+    in-out property <ThemePalette> theme-palette-dark <=> Theme.palette-dark;
+    in-out property <ThemePalette> theme-palette-light <=> Theme.palette-light;
+    in-out property <bool> immersive-colors <=> Theme.immersive;
     default-font-family: Theme.ui-font-family;
 
     in property <bool> is-mac: false;

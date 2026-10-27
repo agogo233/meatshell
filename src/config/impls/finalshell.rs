@@ -10,15 +10,20 @@ use des::cipher::{generic_array::GenericArray, BlockDecrypt, KeyInit};
 use des::Des;
 use serde::Deserialize;
 
-use super::structs::{AuthMethod, Secret, Session, SessionKind};
+use super::structs::{AuthMethod, PortForward, Secret, Session, SessionKind};
 
 const JAVA_RANDOM_MULTIPLIER: u64 = 0x5DEECE66D;
 const JAVA_RANDOM_ADDEND: u64 = 0xB;
 const JAVA_RANDOM_MASK: u64 = (1_u64 << 48) - 1;
 
+/// FinalShell `port_forwarding_list.type` values confirmed against exports.
+const FINALSHELL_FORWARD_LOCAL: i64 = 100;
+const FINALSHELL_FORWARD_REMOTE: i64 = 200;
+const FINALSHELL_FORWARD_SOCKS5: i64 = 300;
+
 /// The fields used by FinalShell's `*_connect_config.json` files. Unknown fields
 /// are intentionally ignored so exports from different FinalShell releases remain
-/// importable.
+/// importable. `remote_port_forwarding` is unused (`{}` in current exports).
 #[derive(Debug, Deserialize)]
 struct FinalShellConnection {
     conection_type: i64,
@@ -37,6 +42,27 @@ struct FinalShellConnection {
     terminal_encoding: String,
     #[serde(default)]
     description: String,
+    #[serde(default)]
+    port_forwarding_list: Vec<FinalShellPortForward>,
+}
+
+/// One SSH tunnel in FinalShell's `port_forwarding_list`.
+#[derive(Debug, Deserialize)]
+struct FinalShellPortForward {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    ip: String,
+    #[serde(default)]
+    port: u16,
+    #[serde(default)]
+    dst_address: String,
+    #[serde(default)]
+    dst_port: u16,
+    #[serde(default)]
+    id: Option<i64>,
+    #[serde(rename = "type", default)]
+    kind: i64,
 }
 
 fn default_ssh_port() -> u16 {
@@ -123,7 +149,49 @@ impl FinalShellConnection {
             kind: SessionKind::Ssh,
             encoding,
             note: self.description,
+            forwards: map_port_forwards(self.port_forwarding_list),
             ..Session::new_empty()
+        })
+    }
+}
+
+fn map_port_forwards(entries: Vec<FinalShellPortForward>) -> Vec<PortForward> {
+    entries
+        .into_iter()
+        .filter_map(FinalShellPortForward::into_port_forward)
+        .collect()
+}
+
+impl FinalShellPortForward {
+    fn into_port_forward(self) -> Option<PortForward> {
+        let kind = match self.kind {
+            FINALSHELL_FORWARD_LOCAL => "local",
+            FINALSHELL_FORWARD_REMOTE => "remote",
+            FINALSHELL_FORWARD_SOCKS5 => "dynamic",
+            other => {
+                tracing::warn!(
+                    "skipping FinalShell port forward {:?}: unsupported type {other}",
+                    self.name
+                );
+                return None;
+            }
+        };
+        // SOCKS5/dynamic: MeatShell ignores host/host_port; FinalShell still
+        // writes dst_address 127.0.0.1 and dst_port 0 in many exports.
+        let (host, host_port) = if kind == "dynamic" {
+            (String::new(), 0)
+        } else {
+            (self.dst_address, self.dst_port)
+        };
+        Some(PortForward {
+            id: self.id.map(|id| id.to_string()).unwrap_or_default(),
+            kind: kind.to_string(),
+            auto_start: true,
+            name: self.name,
+            bind_addr: self.ip,
+            bind_port: self.port,
+            host,
+            host_port,
         })
     }
 }
@@ -289,6 +357,7 @@ mod tests {
         assert_eq!(session.user, "admin");
         assert_eq!(session.password.as_str(), "meatshell-test");
         assert_eq!(session.note, "imported from FinalShell");
+        assert!(session.forwards.is_empty());
     }
 
     #[test]
@@ -296,5 +365,162 @@ mod tests {
         let raw = r#"{"conection_type": 7, "host": "192.0.2.10"}"#;
         let error = parse_export(raw).unwrap_err().to_string();
         assert!(error.contains("unsupported FinalShell connection type"));
+    }
+
+    fn ssh_connection_with_forwards(forwards: &str) -> String {
+        format!(
+            r#"{{
+                "conection_type": 100,
+                "name": "imported",
+                "host": "192.0.2.10",
+                "port": 22,
+                "user_name": "root",
+                "authentication_type": 1,
+                "remote_port_forwarding": {{}},
+                "port_forwarding_list": {forwards}
+            }}"#
+        )
+    }
+
+    fn find_forward<'a>(session: &'a Session, name: &str) -> &'a PortForward {
+        session
+            .forwards
+            .iter()
+            .find(|forward| forward.name == name)
+            .unwrap_or_else(|| panic!("missing imported forward {name}"))
+    }
+
+    #[test]
+    fn imports_local_port_forwards() {
+        let raw = ssh_connection_with_forwards(
+            r#"[
+                {"port": 3308, "ip": "127.0.0.1", "dst_address": "127.0.0.1", "name": "MySQL", "dst_port": 3306, "id": 121327396, "type": 100},
+                {"port": 6679, "ip": "127.0.0.1", "dst_address": "127.0.0.1", "name": "redis", "dst_port": 6379, "id": 1432965430, "type": 100}
+            ]"#,
+        );
+        let session = &parse_export(&raw).unwrap()[0];
+        assert_eq!(session.forwards.len(), 2);
+
+        let mysql = find_forward(session, "MySQL");
+        assert_eq!(mysql.kind, "local");
+        assert_eq!(mysql.bind_addr, "127.0.0.1");
+        assert_eq!(mysql.bind_port, 3308);
+        assert_eq!(mysql.host, "127.0.0.1");
+        assert_eq!(mysql.host_port, 3306);
+        assert_eq!(mysql.id, "121327396");
+        assert!(mysql.auto_start);
+
+        let redis = find_forward(session, "redis");
+        assert_eq!(redis.kind, "local");
+        assert_eq!(redis.bind_port, 6679);
+        assert_eq!(redis.host, "127.0.0.1");
+        assert_eq!(redis.host_port, 6379);
+        assert_eq!(redis.id, "1432965430");
+        assert!(redis.auto_start);
+    }
+
+    #[test]
+    fn imports_remote_port_forward() {
+        let raw = ssh_connection_with_forwards(
+            r#"[{
+                "port": 1234,
+                "ip": "127.0.0.1",
+                "dst_address": "127.0.0.1",
+                "name": "远程隧道测试",
+                "dst_port": 2345,
+                "id": 1889610311,
+                "type": 200
+            }]"#,
+        );
+        let session = &parse_export(&raw).unwrap()[0];
+        let forward = find_forward(session, "远程隧道测试");
+        assert_eq!(forward.kind, "remote");
+        assert_eq!(forward.bind_addr, "127.0.0.1");
+        assert_eq!(forward.bind_port, 1234);
+        assert_eq!(forward.host, "127.0.0.1");
+        assert_eq!(forward.host_port, 2345);
+        assert_eq!(forward.id, "1889610311");
+        assert!(forward.auto_start);
+    }
+
+    #[test]
+    fn imports_socks5_dynamic_forward_with_zero_dst_port() {
+        let raw = ssh_connection_with_forwards(
+            r#"[{
+                "port": 5678,
+                "ip": "127.0.0.1",
+                "dst_address": "127.0.0.1",
+                "name": "SOCKS5测试",
+                "dst_port": 0,
+                "id": 1612811717,
+                "type": 300
+            }]"#,
+        );
+        let session = &parse_export(&raw).unwrap()[0];
+        let forward = find_forward(session, "SOCKS5测试");
+        assert_eq!(forward.kind, "dynamic");
+        assert_eq!(forward.bind_addr, "127.0.0.1");
+        assert_eq!(forward.bind_port, 5678);
+        assert_eq!(forward.host, "");
+        assert_eq!(forward.host_port, 0);
+        assert_eq!(forward.id, "1612811717");
+        assert!(forward.auto_start);
+    }
+
+    #[test]
+    fn imports_sample_socks5_and_remote_together() {
+        let raw = r#"{
+            "forwarding_auto_reconnect": false,
+            "user_name": "root",
+            "remote_port_forwarding": {},
+            "conection_type": 100,
+            "authentication_type": 1,
+            "host": "10.99.100.7",
+            "id": "226yrdf4ahr1ktie",
+            "port_forwarding_list": [
+                {
+                    "port": 5678,
+                    "ip": "127.0.0.1",
+                    "dst_address": "127.0.0.1",
+                    "name": "SOCKS5测试",
+                    "dst_port": 0,
+                    "id": 1612811717,
+                    "type": 300
+                },
+                {
+                    "port": 1234,
+                    "ip": "127.0.0.1",
+                    "dst_address": "127.0.0.1",
+                    "name": "远程隧道测试",
+                    "dst_port": 2345,
+                    "id": 1889610311,
+                    "type": 200
+                }
+            ],
+            "port": 22,
+            "name": "10.99.100.7(new)"
+        }"#;
+        let session = &parse_export(raw).unwrap()[0];
+        assert_eq!(session.name, "10.99.100.7(new)");
+        assert_eq!(session.forwards.len(), 2);
+        assert_eq!(session.forwards[0].kind, "dynamic");
+        assert_eq!(session.forwards[0].name, "SOCKS5测试");
+        assert_eq!(session.forwards[1].kind, "remote");
+        assert_eq!(session.forwards[1].name, "远程隧道测试");
+    }
+
+    #[test]
+    fn skips_unknown_port_forward_type_without_failing_session() {
+        let raw = ssh_connection_with_forwards(
+            r#"[
+                {"port": 3308, "ip": "127.0.0.1", "dst_address": "127.0.0.1", "name": "MySQL", "dst_port": 3306, "id": 121327396, "type": 100},
+                {"port": 9999, "ip": "127.0.0.1", "dst_address": "10.0.0.1", "name": "unknown", "dst_port": 80, "id": 1, "type": 999}
+            ]"#,
+        );
+        let session = &parse_export(&raw).unwrap()[0];
+        assert_eq!(session.host, "192.0.2.10");
+        assert_eq!(session.forwards.len(), 1);
+        assert_eq!(session.forwards[0].name, "MySQL");
+        assert_eq!(session.forwards[0].kind, "local");
     }
 }

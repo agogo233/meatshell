@@ -223,6 +223,7 @@ fn tab(id: &str, title: &str, kind: &str, connected: bool) -> super::super::TabI
         title_len: title.chars().count() as i32,
         kind: kind.into(),
         connected,
+        local: false,
     }
 }
 

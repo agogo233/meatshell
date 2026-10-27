@@ -2037,6 +2037,27 @@ impl ConfigStore {
     pub fn set_wallpaper_overlay(&mut self, v: f32) {
         self.cache.wallpaper_overlay = v.clamp(0.30, 1.0);
     }
+    /// Colour theme preset id; "" = the default MeatShell palette.
+    pub fn color_theme(&self) -> &str {
+        &self.cache.color_theme
+    }
+    pub fn set_color_theme(&mut self, id: impl Into<String>) {
+        self.cache.color_theme = id.into();
+    }
+    /// `#RRGGBB` of the custom colour theme ("" = not set yet).
+    pub fn color_theme_custom(&self) -> &str {
+        &self.cache.color_theme_custom
+    }
+    pub fn set_color_theme_custom(&mut self, hex: impl Into<String>) {
+        self.cache.color_theme_custom = hex.into();
+    }
+    /// Whether a wallpaper recolours the interface (on by default).
+    pub fn immersive_colors(&self) -> bool {
+        !self.cache.immersive_colors_disabled
+    }
+    pub fn set_immersive_colors(&mut self, on: bool) {
+        self.cache.immersive_colors_disabled = !on;
+    }
     pub fn panel_font(&self) -> u32 {
         if self.cache.panel_font == 0 {
             100

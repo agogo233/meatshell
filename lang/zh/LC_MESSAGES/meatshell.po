@@ -754,6 +754,9 @@ msgstr "AI 助手"
 msgid "Add as quick command"
 msgstr "添加为快捷命令"
 
+msgid "Add to session list"
+msgstr "加入会话列表"
+
 msgid "Ask about terminal output, errors, or commands"
 msgstr "询问终端输出、错误或命令"
 
@@ -808,6 +811,9 @@ msgstr "大输出保护已生效"
 msgid "Local listen address"
 msgstr "本地监听地址"
 
+msgid "MeatShell answers the device's first login and password prompts with these. Leave them blank to type them yourself."
+msgstr "MeatShell 会用这些信息自动回应设备首次出现的登录和密码提示。留空则由你手动输入。"
+
 msgid "Merge panes"
 msgstr "合并面板"
 
@@ -834,6 +840,12 @@ msgstr "仅允许 127.0.0.1 / localhost / ::1——其他地址会把隧道暴�
 
 msgid "Overview"
 msgstr "概览"
+
+msgid "Optional, typed at the login prompt"
+msgstr "可选，在登录提示时自动输入"
+
+msgid "Optional, typed at the password prompt"
+msgstr "可选，在密码提示时自动输入"
 
 msgid "Paste and go"
 msgstr "粘贴并前往"
@@ -914,4 +926,3 @@ msgstr "最近访问"
 
 msgid "No recent folders"
 msgstr "暂无最近文件夹"
-

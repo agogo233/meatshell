@@ -8,6 +8,8 @@ export struct TabInfo {
     kind: string,   // "welcome" | "terminal" | "editor" (#494)
     // terminal: session connected. editor: no unsaved edits.
     connected: bool,
+    // terminal: a local shell, which can save the ssh it runs (#501).
+    local: bool,
 }
 
 // One entry of the new-tab launch menu (#427): a local shell ("system:…") or
@@ -277,6 +279,8 @@ export component TabBar inherits Rectangle {
     callback tab-duplicate(string /* tab-id */);
     // Rename an open session's tab (display name only).
     callback tab-rename-request(string /* tab-id */);
+    // Save the ssh connection running in a local tab as a session (#501).
+    callback tab-save-session(string /* tab-id */);
     callback merge-pane();
     // Drag-to-split (#v0.5): cursor moved / dropped while dragging `tab-id`, in
     // absolute (window) coordinates. `over-own-strip` tells Rust that this strip
@@ -296,6 +300,7 @@ export component TabBar inherits Rectangle {
     property <length> menu-y;
     property <string> menu-target;
     property <string> menu-target-kind;
+    property <bool> menu-target-local;
 
     height: 36px;
     background: Theme.bg-panel-alt;
@@ -508,6 +513,7 @@ export component TabBar inherits Rectangle {
                         context-requested(ax, ay) => {
                             root.menu-target = tab.id;
                             root.menu-target-kind = tab.kind;
+                            root.menu-target-local = tab.local;
                             root.menu-x = ax - root.absolute-position.x;
                             root.menu-y = ay - root.absolute-position.y;
                             tab-menu.show();
@@ -645,8 +651,8 @@ export component TabBar inherits Rectangle {
     tab-menu := PopupWindow {
         x: root.menu-x;
         y: root.menu-y;
-        width: 140px;
-        height: 7 * 29px + 13px;
+        width: 160px;
+        height: tab-menu-list.preferred-height;
         Rectangle {
             background: Theme.popup-bg;
             border-radius: Theme.radius-sm;
@@ -654,7 +660,7 @@ export component TabBar inherits Rectangle {
             border-color: Theme.border-strong;
             drop-shadow-blur: 12px;
             drop-shadow-color: #00000060;
-            VerticalLayout {
+            tab-menu-list := VerticalLayout {
                 padding: 4px;
                 spacing: 1px;
                 TabMenuItem {
@@ -666,6 +672,13 @@ export component TabBar inherits Rectangle {
                     label: @tr("Rename");
                     enabled: root.menu-target-kind == "terminal";
                     clicked => { root.tab-rename-request(root.menu-target); }
+                }
+                // Turn an `ssh user@host` typed in a local shell into a saved
+                // session (#501).
+                TabMenuItem {
+                    label: @tr("Add to session list");
+                    enabled: root.menu-target-kind == "terminal" && root.menu-target-local;
+                    clicked => { root.tab-save-session(root.menu-target); }
                 }
                 Rectangle { height: 1px; background: Theme.border-subtle; }
                 TabMenuItem {

@@ -1139,13 +1139,36 @@ export component SessionDialog inherits ModalLayer {
                 font-size: Theme.fs-sm;
             }
 
-            // ── SSH-only: user + auth ───────────────────────────────────────
-            if root.draft-kind == "ssh" : LabeledInput {
+            // ── SSH: user + auth. Telnet: optional auto-login (#507) ────────
+            if root.draft-kind == "ssh" || root.draft-kind == "telnet" : LabeledInput {
                 input-background: Theme.bg-elevated;
                 idle-border: Theme.border-strong;
                 label: @tr("Username");
-                placeholder: @tr("Prompted on connect if blank");
+                placeholder: root.draft-kind == "telnet"
+                    ? @tr("Optional, typed at the login prompt")
+                    : @tr("Prompted on connect if blank");
                 value <=> root.draft-user;
+            }
+
+            if root.draft-kind == "telnet" : LabeledInput {
+                input-background: Theme.bg-elevated;
+                idle-border: Theme.border-strong;
+                label: @tr("Password");
+                placeholder: root.is-editing
+                    ? (root.allow-secret-reveal ? @tr("Enter a new password") : @tr("Leave blank to keep the current password"))
+                    : @tr("Optional, typed at the password prompt");
+                password: true;
+                reveal-enabled: root.allow-secret-reveal;
+                revealed <=> root.password-revealed;
+                reveal => { root.reveal-secret(false) }
+                value <=> root.draft-password;
+            }
+
+            if root.draft-kind == "telnet" : Text {
+                text: @tr("MeatShell answers the device's first login and password prompts with these. Leave them blank to type them yourself.");
+                color: Theme.text-muted;
+                font-size: Theme.fs-xs;
+                wrap: word-wrap;
             }
 
             if root.draft-kind == "ssh" : VerticalLayout {
@@ -1400,7 +1423,7 @@ export component SessionDialog inherits ModalLayer {
                 value <=> root.draft-password;
             }
 
-            if root.draft-kind == "ssh" || root.draft-kind == "rdp" : CheckBox {
+            if root.draft-kind == "ssh" || root.draft-kind == "rdp" || root.draft-kind == "telnet" : CheckBox {
                 text: @tr("Allow viewing saved credentials in this session");
                 checked <=> root.allow-secret-reveal;
                 toggled => {
@@ -1409,7 +1432,7 @@ export component SessionDialog inherits ModalLayer {
                 }
             }
 
-            if root.allow-secret-reveal && (root.draft-kind == "ssh" || root.draft-kind == "rdp") : Text {
+            if root.allow-secret-reveal && (root.draft-kind == "ssh" || root.draft-kind == "rdp" || root.draft-kind == "telnet") : Text {
                 text: @tr("Credentials start hidden. Click the eye to view. Save to remember this option.");
                 color: Theme.text-muted;
                 font-size: Theme.fs-xs;

@@ -757,6 +757,9 @@ msgstr "AI assistant"
 msgid "Add as quick command"
 msgstr "Add as quick command"
 
+msgid "Add to session list"
+msgstr "Add to session list"
+
 msgid "Ask about terminal output, errors, or commands"
 msgstr "Ask about terminal output, errors, or commands"
 
@@ -811,6 +814,9 @@ msgstr "Large-output protection active"
 msgid "Local listen address"
 msgstr "Local listen address"
 
+msgid "MeatShell answers the device's first login and password prompts with these. Leave them blank to type them yourself."
+msgstr "MeatShell answers the device's first login and password prompts with these. Leave them blank to type them yourself."
+
 msgid "Merge panes"
 msgstr "Merge panes"
 
@@ -837,6 +843,12 @@ msgstr "Only 127.0.0.1 / localhost / ::1 is allowed — other addresses would ex
 
 msgid "Overview"
 msgstr "Overview"
+
+msgid "Optional, typed at the login prompt"
+msgstr "Optional, typed at the login prompt"
+
+msgid "Optional, typed at the password prompt"
+msgstr "Optional, typed at the password prompt"
 
 msgid "Paste and go"
 msgstr "Paste and go"
@@ -917,4 +929,3 @@ msgstr "Recent"
 
 msgid "No recent folders"
 msgstr "No recent folders"
-

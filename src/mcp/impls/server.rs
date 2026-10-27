@@ -211,6 +211,44 @@ mod tests {
         assert!(!text.contains("missing or invalid string argument"), "{text}");
     }
 
+    async fn get_session_text(arguments: Value) -> String {
+        let response = handle(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 9,
+                "method": "tools/call",
+                "params": { "name": "get_session", "arguments": arguments }
+            }),
+            false,
+        )
+        .await
+        .unwrap();
+        response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn schema_shaped_session_id_reaches_the_tool() {
+        // Arguments come from params.arguments with snake_case keys; parsing
+        // succeeds and the tool fails later, on the lookup or the config.
+        for arguments in [
+            json!({ "session_id": "no-such-session" }),
+            json!({ "saved_session_id": "no-such-session" }),
+        ] {
+            let text = get_session_text(arguments).await;
+            assert!(!text.contains("missing or invalid string argument"), "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_session_id_names_the_keys_that_arrived() {
+        let text = get_session_text(json!({ "unexpected": "x" })).await;
+        assert!(text.contains("missing or invalid string argument: session_id"), "{text}");
+        assert!(text.contains("unexpected"), "{text}");
+    }
+
     #[tokio::test]
     async fn non_object_arguments_are_invalid_params() {
         let response = handle(

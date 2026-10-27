@@ -216,6 +216,7 @@ pub(super) fn wire_editor_tabs(
                             title: name,
                             kind: "editor".into(),
                             connected: true,
+                            local: false,
                         });
                         // Joins the focused pane, like a new terminal tab.
                         models.layout.borrow_mut().add_tab(id.clone());

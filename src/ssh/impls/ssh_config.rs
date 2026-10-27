@@ -20,6 +20,14 @@ pub fn parse_default() -> Vec<ImportedHost> {
     parse_file(&path, &home)
 }
 
+/// Parse a specific config file, e.g. one given to `ssh -F` (#501).
+pub(crate) fn parse_path(path: &Path) -> Vec<ImportedHost> {
+    let Some(home) = home_dir() else {
+        return Vec::new();
+    };
+    parse_file(path, &home)
+}
+
 fn parse_file(path: &Path, home: &Path) -> Vec<ImportedHost> {
     let mut visited = HashSet::new();
     let text = read_with_includes(path, home, &mut visited, 0);
@@ -86,7 +94,7 @@ fn read_with_includes(
     expanded
 }
 
-fn home_dir() -> Option<PathBuf> {
+pub(crate) fn home_dir() -> Option<PathBuf> {
     directories::UserDirs::new().map(|u| u.home_dir().to_path_buf())
 }
 
@@ -113,7 +121,7 @@ fn split_kv(line: &str) -> Option<(String, String)> {
     Some((k.trim().to_ascii_lowercase(), v.to_string()))
 }
 
-fn expand_tilde(path: &str, home: &Path) -> String {
+pub(crate) fn expand_tilde(path: &str, home: &Path) -> String {
     if let Some(rest) = path.strip_prefix("~/") {
         home.join(rest).to_string_lossy().replace('\\', "/")
     } else if path == "~" {
@@ -134,7 +142,7 @@ fn is_concrete(pattern: &str) -> bool {
 /// (`http://…`), etc.  This stops a malformed or hostile `~/.ssh/config` entry
 /// from flowing unchecked into a saved session.  Internal IPs are intentionally
 /// allowed — they are a legitimate SSH target and can't be told apart by format.
-fn is_valid_hostname(s: &str) -> bool {
+pub(crate) fn is_valid_hostname(s: &str) -> bool {
     // IP literals (including private/loopback addresses) are always fine.
     if s.parse::<std::net::IpAddr>().is_ok() {
         return true;

@@ -14,7 +14,7 @@ import "fonts/MeatshellMono-Regular.ttf";
 import "fonts/MeatshellMono-Bold.ttf";
 import "fonts/MaterialIcons-Regular.ttf";
 
-import { Theme } from "theme.slint";
+import { Theme, ThemePalette } from "theme.slint";
 import { Sidebar, DiskInfo } from "sidebar.slint";
 import { TabBar, TabInfo, LaunchItem } from "tabs.slint";
 import { Welcome, SessionInfo } from "welcome.slint";
@@ -29,12 +29,12 @@ import { ProcWindow, ProcRow } from "proc_window.slint";
 import { SystemInfoWindow, SysInfoRow, SysMetricRow, SysNetRow } from "system_info_window.slint";
 import { EditorWindow } from "editor_window.slint";
 import { EditorPane, EditorFindResult, EditorDoc } from "editor_pane.slint";
-import { InterfacePanel, OutputRuleItem, WslProfileInfo, CustomAgentInfo, UpdateMirrorRow } from "interface_panel.slint";
+import { InterfacePanel, OutputRuleItem, WslProfileInfo, CustomAgentInfo, UpdateMirrorRow, ColorThemeItem } from "interface_panel.slint";
 // Re-export so `slint::include_modules!` generates the detached Rust window types.
 export { ProcWindow, SystemInfoWindow, EditorWindow }
 import { ComboBox, SpinBox, LineEdit, Button, ScrollView, CheckBox, Palette } from "std-widgets.slint";
 
-export { SessionInfo, LaunchItem, SessionDraft, JumpHop, TabInfo, SftpEntry, SftpTreeNode, TunnelInfo, QuickCmd, PortFwd, WslProfileInfo, CustomAgentInfo, UpdateMirrorRow }
+export { SessionInfo, LaunchItem, SessionDraft, JumpHop, TabInfo, SftpEntry, SftpTreeNode, TunnelInfo, QuickCmd, PortFwd, WslProfileInfo, CustomAgentInfo, UpdateMirrorRow, ThemePalette, ColorThemeItem }
 
 // --- TerminalState ---------------------------------------------------------
 // Per-terminal view-model exposed to Rust. A TabInfo has the metadata; the
@@ -768,6 +768,17 @@ export component AppWindow inherits Window {
     // User-adjustable wallpaper overlay opacity (0.30–1.00), persisted.
     in-out property <float> wallpaper-overlay <=> Theme.panel-alpha;
     callback persist-wallpaper-overlay(float);
+    // Colour theme presets + the immersive-colours switch (Settings ›
+    // Wallpaper & theme). Rust fills the palettes from the chosen preset.
+    in-out property <ThemePalette> theme-palette-dark <=> Theme.palette-dark;
+    in-out property <ThemePalette> theme-palette-light <=> Theme.palette-light;
+    in-out property <bool> immersive-colors <=> Theme.immersive;
+    in property <[ColorThemeItem]> color-themes;
+    in-out property <string> color-theme: "default";
+    in-out property <string> color-theme-custom: "#4A90E2";
+    callback set-color-theme(string);
+    callback set-color-theme-custom(string) -> bool;
+    callback set-immersive-colors(bool);
     in property <[string]> term-fonts;             // installed monospace families
     in-out property <bool> interface-open: false;  // Interface settings overlay
     // Interface card position (draggable by its title bar, clamped inside the
@@ -1380,6 +1391,8 @@ export component AppWindow inherits Window {
     // Rename an open session's tab. Request pre-fills the dialog (Rust reads
     // the current title); submit applies the new display name.
     callback tab-rename-request(string /* tab-id */);
+    // Save the ssh connection running in a local tab as a session (#501).
+    callback tab-save-session(string /* tab-id */);
     callback rename-tab(string /* tab-id */, string /* new-title */);
     in-out property <bool> tab-rename-open: false;
     in-out property <string> tab-rename-id: "";
@@ -2491,6 +2504,7 @@ export component AppWindow inherits Window {
                         merge-pane() => { root.pane-merge(pane.id); }
                         tab-duplicate(id) => { root.tab-duplicate(id); }
                         tab-rename-request(id) => { root.tab-rename-request(id); }
+                        tab-save-session(id) => { root.tab-save-session(id); }
                         tab-drag-move(id, ax, ay, own-strip) => {
                             root.tab-drag-px = ax - pane-area.absolute-position.x;
                             root.tab-drag-py = ay - pane-area.absolute-position.y;
@@ -5968,6 +5982,13 @@ export component AppWindow inherits Window {
                     agent-new-directory <=> root.agent-new-directory;
                     set-wallpaper(v) => { root.set-wallpaper(v); }
                     pick-wallpaper-file() => { root.pick-wallpaper-file(); }
+                    color-themes: root.color-themes;
+                    color-theme: root.color-theme;
+                    color-theme-custom <=> root.color-theme-custom;
+                    immersive-colors: root.immersive-colors;
+                    set-color-theme(id) => { root.set-color-theme(id); }
+                    set-color-theme-custom(hex) => { root.set-color-theme-custom(hex) }
+                    set-immersive-colors(v) => { root.set-immersive-colors(v); }
                     set-term-font(v) => { root.set-term-font(v); }
                     set-term-font-size(v) => { root.set-term-font-size(v); }
                     set-terminal-line-spacing(v) => { root.set-terminal-line-spacing(v); }
