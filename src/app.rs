@@ -6936,7 +6936,7 @@ fn wire_session_callbacks(
                 sftp_recent: {
                     let v: Vec<slint::SharedString> = store
                         .borrow()
-                        .sftp_places(&conn_label)
+                        .sftp_places(&id)
                         .recent
                         .iter()
                         .map(|p| p.as_str().into())
@@ -6948,7 +6948,7 @@ fn wire_session_callbacks(
                 sftp_places_bookmarks: {
                     let v: Vec<slint::SharedString> = store
                         .borrow()
-                        .sftp_places(&conn_label)
+                        .sftp_places(&id)
                         .bookmarks
                         .iter()
                         .map(|p| p.as_str().into())
