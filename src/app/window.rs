@@ -234,7 +234,6 @@ pub(super) fn monitor_rects(window: &slint::Window) -> Vec<(f64, f64, f64, f64)>
     window
         .with_winit_window(|ww| {
             ww.available_monitors()
-                .iter()
                 .map(|m| {
                     let p = m.position();
                     let s = m.size();
@@ -260,8 +259,8 @@ pub(super) fn window_rect_visible_on_any_monitor(
         return false;
     }
     monitors.iter().any(|&(mx, my, mw, mh)| {
-        let iw = (wx + ww).fmin(mx + mw) - wx.fmax(mx);
-        let ih = (wy + wh).fmin(my + mh) - wy.fmax(my);
+        let iw = (wx + ww).min(mx + mw) - wx.max(mx);
+        let ih = (wy + wh).min(my + mh) - wy.max(my);
         iw >= MIN_VISIBLE_OVERLAP && ih >= MIN_VISIBLE_OVERLAP
     })
 }

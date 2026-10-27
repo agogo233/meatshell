@@ -4378,21 +4378,26 @@ fn open_window(
                         && saved.1.is_finite()
                     {
                         let scale = w.window().scale_factor().max(0.01);
-                        let size = w.window().size();
+                        let size = w.window().size(); // physical pixels
                         // Mirror the size restore: prefer the persisted size
                         // (what the Resized handler will settle on) so the
                         // overlap check uses the rect the window will actually
                         // have, not a transient default.
-                        let (rw, rh) = if saved_size.0 > 0.0 && saved_size.1 > 0.0 {
-                            (saved_size.0, saved_size.1)
+                        let rw = if saved_size.0 > 0.0 {
+                            saved_size.0 * scale
                         } else {
-                            (size.width, size.height)
+                            size.width as f32
+                        };
+                        let rh = if saved_size.1 > 0.0 {
+                            saved_size.1 * scale
+                        } else {
+                            size.height as f32
                         };
                         let rect = (
                             saved.0 as f64 * scale as f64,
                             saved.1 as f64 * scale as f64,
-                            rw as f64 * scale as f64,
-                            rh as f64 * scale as f64,
+                            rw as f64,
+                            rh as f64,
                         );
                         let monitors = monitor_rects(&w.window());
                         if monitors.is_empty()
@@ -7276,7 +7281,7 @@ fn save_layout(
     // that sentinel would make the next launch open off-screen (#save-position).
     let native_minimized = win
         .window()
-        .with_winit_window(|ww| ww.is_minimized())
+        .with_winit_window(|ww| ww.is_minimized().unwrap_or(false))
         .unwrap_or(false);
     if !native_maximized && w > 200.0 && h > 200.0 {
         // Resize events normally keep this cache current. Persist the final
