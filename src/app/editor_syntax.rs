@@ -314,15 +314,24 @@ struct HeredocMarker {
 }
 
 fn heredoc_markers(text: &str) -> Vec<HeredocMarker> {
+    // Three alternative delimiter groups instead of a backreference: the
+    // regex crate does not support backreferences.
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
-        regex::Regex::new(r#"<<-?[ \t]*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1"#)
-            .expect("heredoc marker regex")
+        regex::Regex::new(
+            r#"<<-?[ \t]*(?:'([A-Za-z_][A-Za-z0-9_]*)'|"([A-Za-z_][A-Za-z0-9_]*)"|([A-Za-z_][A-Za-z0-9_]*))"#,
+        )
+        .expect("heredoc marker regex")
     });
     re.find_iter(text)
         .map(|m| {
             let caps = re.captures(m.as_str()).expect("heredoc captures");
-            let raw = caps.get(2).expect("heredoc delimiter").as_str();
+            let raw = caps
+                .get(1)
+                .or_else(|| caps.get(2))
+                .or_else(|| caps.get(3))
+                .expect("heredoc delimiter")
+                .as_str();
             let hyphen = m.as_str().starts_with("<<-");
             HeredocMarker {
                 pos: m.start(),
