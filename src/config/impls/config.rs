@@ -1984,10 +1984,17 @@ impl ConfigStore {
     /// Update download mirrors; the built-in list until the user edits it.
     pub fn update_mirrors(&self) -> Vec<String> {
         self.cache.update_mirrors.clone().unwrap_or_else(|| {
-            crate::update::mirror::DEFAULT_MIRRORS
-                .iter()
-                .map(|s| s.to_string())
-                .collect()
+            // The `update` module is compiled out in headless builds, so there is
+            // no built-in list to fall back to there.
+            #[cfg(not(feature = "headless"))]
+            {
+                crate::update::mirror::DEFAULT_MIRRORS
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect()
+            }
+            #[cfg(feature = "headless")]
+            Vec::new()
         })
     }
     /// `None` restores the built-in list.
