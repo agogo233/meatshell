@@ -211,7 +211,7 @@ fn keyword_set(language: &str) -> &'static str {
 fn base_tokens(text: &str, language: &str) -> Vec<(usize, usize, Kind)> {
     static TOKENS: OnceLock<[regex::Regex; 3]> = OnceLock::new();
     let tokens = TOKENS.get_or_init(|| {
-        let common = r#"(?s:""".*?(?:"""|$)|'''.*?(?:'''|$))|"(?:\\.|[^"\\r\\n])*"|'(?:\\.|[^'\\r\\n])*'|`(?:\\.|[^`\\r\\n])*`|\b(?:0[xX][0-9a-fA-F]+|[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)\b|\b[A-Za-z_][A-Za-z_0-9]*\b"#;
+        let common = r#"(?s:""".*?(?:"""|$)|'''.*?(?:'''|$))|"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|`(?:\\.|[^`\\\r\n])*`|\b(?:0[xX][0-9a-fA-F]+|[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)\b|\b[A-Za-z_][A-Za-z_0-9]*\b"#;
         [common.to_string(), format!(r"\#[^\r\n]*|{common}"),
             format!(r"(?s:/\*.*?(?:\*/|$))|//[^\r\n]*|{common}")]
             .map(|pattern| regex::Regex::new(&pattern).expect("editor token regex"))
@@ -587,6 +587,51 @@ mod tests {
     }
 
     #[test]
+    fn strings_containing_r_or_n_are_lexed_as_strings() {
+        for text in [
+            r#""error""#,
+            r#""name""#,
+            r#""print""#,
+            r#"'error'"#,
+            r#"`error`"#,
+        ] {
+            let tokens = base_tokens(text, "Rust");
+            assert_eq!(tokens.len(), 1, "expected one token in {text}");
+            assert!(tokens[0].2 == Kind::Str, "{text} should be a string");
+            assert_eq!(tokens[0].0, 0);
+            assert_eq!(tokens[0].1, text.len());
+        }
+    }
+
+    #[test]
+    fn unterminated_quote_does_not_span_lines() {
+        let text = "echo \"oops\ncall(arg)\n";
+        for entry in highlight(text, "deploy.sh")
+            .split(';')
+            .filter(|entry| !entry.is_empty())
+        {
+            let mut fields = entry.split(':');
+            let start: usize = fields.next().unwrap().parse().unwrap();
+            let end: usize = fields.next().unwrap().parse().unwrap();
+            let value = &text[start..end];
+            assert!(
+                !value.contains('\n'),
+                "span crossed a line boundary: {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn string_content_is_not_keyword_colored() {
+        let text = "let msg = \"return\";\n";
+        let hit = covering(text, "x.rs", "return").expect("the string should be coloured");
+        assert!(
+            hit.2 == STR,
+            "the string content should not be keyword-coloured"
+        );
+    }
+
+    #[test]
     fn heredoc_body_is_not_keyword_colored() {
         let text = "cat <<EOF\nif true; then\nEOF\n";
         let result = highlight(text, "deploy.sh");
@@ -666,6 +711,27 @@ mod tests {
         let text = "x = \"{\"\ny = \"}\"";
         assert_eq!(bracket_pair(text, 4, "x.py"), None);
         assert_eq!(pair("a(b)", 1), Some((1, 3)));
+    }
+
+    #[test]
+    fn brackets_in_strings_with_r_or_n_are_skipped() {
+        let text = "call(\"r)\");\n";
+        let open = text.find('(').expect("the call should be there");
+        let close = text.rfind(')').expect("the call should be there");
+        assert_eq!(
+            bracket_pair(text, close as i32, "x.rs"),
+            Some((open, close))
+        );
+    }
+
+    #[test]
+    fn brackets_after_an_unterminated_quote_still_pair() {
+        let text = "echo \"oops\ncall(arg)\n";
+        let open = text.find("(arg)").expect("the call should be there");
+        assert_eq!(
+            bracket_pair(text, open as i32, "x.sh"),
+            Some((open, open + 4))
+        );
     }
 
     #[test]
