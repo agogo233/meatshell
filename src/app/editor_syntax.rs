@@ -453,7 +453,7 @@ pub(super) fn bracket_pair(content: &str, caret: i32, path: &str) -> Option<(usi
     }
     let tokens = base_tokens(content, language);
     let bodies = cross_line_bodies(content, language, &tokens);
-    let mut cover = covered_ranges(tokens);
+    let mut cover = covered_ranges(&tokens);
     cover.extend(bodies);
     cover.sort_by_key(|r| r.0);
     let mut merged: Vec<(usize, usize)> = Vec::new();
