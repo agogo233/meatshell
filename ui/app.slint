@@ -1096,6 +1096,7 @@ export component AppWindow inherits Window {
                              string /* content */, bool /* readonly */);
     callback editor-doc-edited(string /* id */, string /* content */);
     callback editor-doc-highlight(string /* id */, string /* content */);
+    callback editor-doc-bracket-check(string /* id */, int /* caret byte offset */);
     callback editor-doc-save(string /* id */);
     callback editor-doc-replace-all(string /* id */, string /* query */, string /* replacement */);
     callback refresh-editor-syntax();         // theme changed: recolour every doc
@@ -2762,6 +2763,7 @@ export component AppWindow inherits Window {
                         content-changed => { root.editor-doc-edited(doc.id, self.editor-content); }
                         save-file => { root.editor-doc-save(doc.id); }
                         editor-highlight(text) => { root.editor-doc-highlight(doc.id, text); }
+                        editor-bracket-check(caret) => { root.editor-doc-bracket-check(doc.id, caret); }
                         editor-count-matches(content, query) => { return root.editor-count-matches(content, query); }
                         editor-find-step(content, query, current, reverse) => {
                             return root.editor-find-step(content, query, current, reverse);

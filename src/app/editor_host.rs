@@ -37,6 +37,28 @@ pub(super) fn wire_editor_window(editor: &EditorWindow, sftp_handles: SftpHandle
         });
     }
 
+    // Bracket-pair highlight: the pane reports the caret offset whenever it
+    // moves or the text is re-highlighted; the pair is merged into the spans
+    // only when the caret actually sits next to a bracket, so plain caret
+    // moves stay cheap (the O(1) fast path inside `bracket_pair`).
+    {
+        let weak = editor.as_weak();
+        let mut last_pair: Option<(usize, usize)> = None;
+        editor.on_editor_bracket_check(move |caret: i32| {
+            let Some(e) = weak.upgrade() else { return };
+            let text = e.get_editor_content();
+            let path = e.get_editor_path();
+            let pair = editor_syntax::bracket_pair(text.as_str(), caret, path.as_str());
+            if pair.is_none() && last_pair.is_none() {
+                return;
+            }
+            last_pair = pair;
+            let spans =
+                editor_syntax::spans_for(text.as_str(), path.as_str(), e.get_dark_mode(), pair);
+            e.set_editor_syntax_spans(spans.into());
+        });
+    }
+
     // Save (Ctrl+S / button) writes the text back to the remote file (#70).
     // Read-only (view) sessions never save.
     {

@@ -50,6 +50,7 @@ export component EditorWindow inherits Window {
     callback save-file();
     callback close-editor();
     callback editor-highlight(string);
+    callback editor-bracket-check(int);
     callback editor-count-matches(string, string) -> int;
     callback editor-find-step(string, string, int, bool) -> EditorFindResult;
     callback editor-scroll-select(string, int, int, length, length) -> EditorFindResult;
@@ -170,6 +171,7 @@ export component EditorWindow inherits Window {
                 save-file => { root.save-file(); }
                 request-close => { root.request-close(); }
                 editor-highlight(text) => { root.editor-highlight(text); }
+                editor-bracket-check(caret) => { root.editor-bracket-check(caret); }
                 editor-count-matches(content, query) => { return root.editor-count-matches(content, query); }
                 editor-find-step(content, query, current, reverse) => {
                     return root.editor-find-step(content, query, current, reverse);

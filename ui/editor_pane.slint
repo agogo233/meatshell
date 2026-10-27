@@ -67,6 +67,10 @@ export component EditorPane inherits Rectangle {
     callback request-close();
     callback content-changed();          // the user typed; host marks dirty
     callback editor-highlight(string);
+    // Recompute the bracket-pair highlight from the caret byte offset. The
+    // host merges the pair into the syntax spans, so the caret moves cheaply
+    // when it is not next to a bracket.
+    callback editor-bracket-check(int);
     callback editor-count-matches(string, string) -> int;
     callback editor-find-step(string, string, int, bool) -> EditorFindResult;
     // Grow the selection by the lines revealed while the viewport scrolls. The
@@ -121,6 +125,7 @@ export component EditorPane inherits Rectangle {
         root.load-doc();
         root.editor-find-position = -1;
         root.editor-match-count = root.editor-count-matches(root.editor-content, root.editor-find-query);
+        root.editor-bracket-check(edit-input.cursor-position-byte-offset);
     }
     changed shown => {
         if root.shown {
@@ -387,6 +392,8 @@ export component EditorPane inherits Rectangle {
                                                 - (cursor-y - ed-scroll.visible-height + 12px));
                                     }
                                     root.scroll-guard = false;
+                                    root.editor-bracket-check(
+                                        edit-input.cursor-position-byte-offset);
                                 }
                                 edited => {
                                     root.content-changed();
@@ -408,6 +415,7 @@ export component EditorPane inherits Rectangle {
         triggered => {
             root.highlight-pending = false;
             root.editor-highlight(root.editor-content);
+            root.editor-bracket-check(edit-input.cursor-position-byte-offset);
         }
     }
 }

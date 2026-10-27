@@ -10,6 +10,7 @@
 
 use super::*;
 use std::cell::Cell;
+use std::collections::HashMap;
 
 /// Models the editor tabs touch to add, focus and re-flatten tabs.
 pub(super) struct EditorTabModels {
@@ -258,6 +259,32 @@ pub(super) fn wire_editor_tabs(
                 d.syntax_spans =
                     editor_syntax::themed_spans(text.as_str(), d.path.as_str(), dark).into();
                 d.syntax_source = text;
+            });
+        });
+    }
+
+    // Bracket-pair highlight, one last pair per document: recompute only when
+    // the caret sits next to a bracket (the O(1) fast path inside
+    // `bracket_pair` keeps ordinary caret moves free).
+    {
+        let weak = window.as_weak();
+        let models = models.clone();
+        let mut last_pairs: HashMap<String, Option<(usize, usize)>> = HashMap::new();
+        window.on_editor_doc_bracket_check(move |id: SharedString, caret: i32| {
+            let Some(w) = weak.upgrade() else { return };
+            let dark = w.get_dark_mode();
+            let Some(doc) = find_doc(&models.docs, id.as_str()) else {
+                return;
+            };
+            let pair = editor_syntax::bracket_pair(doc.content.as_str(), caret, doc.path.as_str());
+            if pair.is_none() && last_pairs.get(id.as_str()).is_some_and(Option::is_none) {
+                return;
+            }
+            last_pairs.insert(id.to_string(), pair);
+            let spans =
+                editor_syntax::spans_for(doc.content.as_str(), doc.path.as_str(), dark, pair);
+            update_doc(&models.docs, id.as_str(), |d| {
+                d.syntax_spans = spans.into();
             });
         });
     }
