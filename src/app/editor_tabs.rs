@@ -388,9 +388,16 @@ pub(super) fn wire_editor_tabs(
             find_step(content.as_str(), query.as_str(), current, reverse)
         },
     );
-    window.on_editor_scroll_select(
-        |content: SharedString, anchor: i32, focus: i32, delta_y: f32, line_height: f32| {
-            scroll_selection(content.as_str(), anchor, focus, delta_y, line_height)
-        },
-    );
+    // One editor pane serves every editor tab: keep the sub-line scroll
+    // remainder for the shared viewport here as well (see scroll_accumulate).
+    {
+        let pending = std::rc::Rc::new(std::cell::RefCell::new(0.0f32));
+        window.on_editor_scroll_select(
+            move |content: SharedString, anchor: i32, focus: i32, delta_y: f32, line_height: f32| {
+                let (lines, next) = scroll_accumulate(*pending.borrow(), delta_y, line_height);
+                *pending.borrow_mut() = next;
+                scroll_selection(content.as_str(), anchor, focus, lines)
+            },
+        );
+    }
 }

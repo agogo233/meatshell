@@ -89,16 +89,29 @@ export component EditorPane inherits Rectangle {
     // re-enter the Windows accessibility adapter (#386).
     property <bool> focus-pending: false;
     // Viewport offset mirrored here so the change can be watched; scrolling only
-    // moves the viewport, so a selection is grown by the revealed lines.
+    // moves the viewport, so a selection is grown by the revealed lines. The
+    // host accumulates the per-event deltas (desktop wheels arrive as many small
+    // animation frames), so each change reports its own incremental delta.
     property <length> scroll-y: ed-scroll.content-y;
     property <length> last-scroll-y: 0;
-    // The edge scroll driven by the caret must not grow the selection again.
-    property <bool> scroll-guard: false;
+    // The edge scroll driven by the caret must not grow the selection. A plain
+    // boolean is useless here: `changed scroll-y` runs on a later tick, long
+    // after the guard has been cleared. Instead the target offset the caret
+    // scroll requested is remembered and consumed when it actually lands.
+    property <length> scroll-guard-target: 0px;
+    property <bool> scroll-guard-armed: false;
     property <int> scroll-depth: 0;
     changed scroll-y => {
-        if (root.scroll-guard || root.scroll-depth > 0) {
+        let guard-diff = root.scroll-y - root.scroll-guard-target;
+        if (root.scroll-guard-armed && guard-diff < 0.5px && guard-diff > -0.5px) {
+            // The caret's edge scroll landed: sync the baseline so the jump is
+            // not counted as a user scroll.
+            root.scroll-guard-armed = false;
+            root.last-scroll-y = root.scroll-y;
+        } else if (root.scroll-depth > 0) {
             root.last-scroll-y = root.scroll-y;
         } else {
+            root.scroll-guard-armed = false;
             let delta-y = root.scroll-y - root.last-scroll-y;
             root.last-scroll-y = root.scroll-y;
             if (delta-y != 0px && edit-input.anchor-position-byte-offset
@@ -344,18 +357,6 @@ export component EditorPane inherits Rectangle {
                     Rectangle {
                         horizontal-stretch: 1;
                         clip: true;
-                        // TextInput owns the pointer grab while selecting and
-                        // ignores wheel events. Catch the rejected wheel behind
-                        // it and scroll the editor (#388).
-                        TouchArea {
-                            scroll-event(event) => {
-                                ed-scroll.content-y = clamp(
-                                    ed-scroll.content-y + event.delta-y,
-                                    min(0px, ed-scroll.visible-height - ed-scroll.content-height),
-                                    0px);
-                                accept
-                            }
-                        }
                         ed-scroll := ScrollView {
                             content-width: self.visible-width;
                             content-height: max(self.visible-height, edit-input.preferred-height + 16px);
@@ -377,10 +378,10 @@ export component EditorPane inherits Rectangle {
                                 cursor-position-changed(position) => {
                                     // Keep a keyboard/drag selection endpoint visible;
                                     // during a pointer grab this also scrolls as the
-                                    // mouse leaves the top or bottom edge (#388). The guard
-                                    // keeps that edge scroll from also growing the
-                                    // selection.
-                                    root.scroll-guard = true;
+                                    // mouse leaves the top or bottom edge (#388). The
+                                    // remembered target keeps that edge scroll from
+                                    // also growing the selection.
+                                    let before-y = ed-scroll.content-y;
                                     let cursor-y = position.y + self.y + ed-scroll.content-y;
                                     if (cursor-y < 12px) {
                                         ed-scroll.content-y = min(0px,
@@ -391,7 +392,10 @@ export component EditorPane inherits Rectangle {
                                             ed-scroll.content-y
                                                 - (cursor-y - ed-scroll.visible-height + 12px));
                                     }
-                                    root.scroll-guard = false;
+                                    if (ed-scroll.content-y != before-y) {
+                                        root.scroll-guard-target = ed-scroll.content-y;
+                                        root.scroll-guard-armed = true;
+                                    }
                                     root.editor-bracket-check(
                                         edit-input.cursor-position-byte-offset);
                                 }

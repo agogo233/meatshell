@@ -918,6 +918,12 @@ msgstr "从书签移除当前路径"
 msgid "No bookmarks for this session"
 msgstr "该会话暂无书签"
 
+msgid "Server bookmarks"
+msgstr "服务器书签"
+
+msgid "Save current path as server bookmark"
+msgstr "保存当前路径为服务器书签"
+
 msgid "Recent"
 msgstr "最近访问"
 

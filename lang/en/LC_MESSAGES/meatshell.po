@@ -921,6 +921,12 @@ msgstr "Remove current path from bookmarks"
 msgid "No bookmarks for this session"
 msgstr "No bookmarks for this session"
 
+msgid "Server bookmarks"
+msgstr "Server bookmarks"
+
+msgid "Save current path as server bookmark"
+msgstr "Save current path as server bookmark"
+
 msgid "Recent"
 msgstr "Recent"
 

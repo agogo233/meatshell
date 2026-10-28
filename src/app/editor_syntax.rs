@@ -31,6 +31,7 @@ const KEY: &str = "ff9cdcfe";
 const NUMBER: &str = "ffb5cea8";
 const BOOL: &str = "ff569cd6";
 const KEYWORD: &str = "ffc586c0";
+const LIFETIME: &str = "ff91bfe7";
 const BRACKET_DARK: &str = "ffffd700";
 const BRACKET_LIGHT: &str = "ffb1590b";
 
@@ -41,6 +42,9 @@ const BRACKET_LIGHT: &str = "ffb1590b";
 enum Kind {
     Comment,
     Str,
+    /// A Rust lifetime like `'a`: structural code (its quote is not a string
+    /// delimiter), coloured to tell it apart from identifiers.
+    Lifetime,
     Other,
 }
 
@@ -115,6 +119,7 @@ fn lighten(color: &str) -> &str {
         NUMBER => "ff098658",
         BOOL => "ff0000ff",
         KEYWORD => "ff800080",
+        LIFETIME => "ff2563eb",
         BRACKET_DARK => BRACKET_LIGHT,
         other => other,
     }
@@ -141,6 +146,7 @@ fn colorize(text: &str, path: &str) -> Vec<(usize, usize, &'static str)> {
         let colour = match kind {
             Kind::Comment => COMMENT,
             Kind::Str => STR,
+            Kind::Lifetime => LIFETIME,
             Kind::Other => {
                 let is_other = if value.as_bytes()[0].is_ascii_digit() {
                     NUMBER
@@ -209,16 +215,37 @@ fn keyword_set(language: &str) -> &'static str {
 /// see. `Kind::Str` / `Kind::Comment` mark the regions that never count as
 /// bracket structure and that heredoc / block-scalar markers cannot live in.
 fn base_tokens(text: &str, language: &str) -> Vec<(usize, usize, Kind)> {
-    static TOKENS: OnceLock<[regex::Regex; 3]> = OnceLock::new();
+    static TOKENS: OnceLock<[regex::Regex; 4]> = OnceLock::new();
     let tokens = TOKENS.get_or_init(|| {
         let common = r#"(?s:""".*?(?:"""|$)|'''.*?(?:'''|$))|"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|`(?:\\.|[^`\\\r\n])*`|\b(?:0[xX][0-9a-fA-F]+|[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)\b|\b[A-Za-z_][A-Za-z_0-9]*\b"#;
-        [common.to_string(), format!(r"\#[^\r\n]*|{common}"),
-            format!(r"(?s:/\*.*?(?:\*/|$))|//[^\r\n]*|{common}")]
-            .map(|pattern| regex::Regex::new(&pattern).expect("editor token regex"))
+        // Rust: raw strings (`r#"…"#`, `br##"…"##`, any hash count) and char
+        // literals first — they must win over the generic quote rule, which
+        // would treat a char literal like `'"'` as an unterminated string.
+        // The raw-string branch consumes its `r` / `br` prefix so the token is
+        // not first split into an `r` identifier plus a stray `#"…"` fragment.
+        // A lifetime (`'a`) must not be swallowed by the char-literal rule: the
+        // char-literal branch here matches exactly one char / escape so it can
+        // never span a comma in `<'a, 'b: 'a>`. The lifetime branch matches a
+        // bare `'ident` with an *optional* closing quote — when the quote is
+        // present the caller sees a token ending in `'` and treats it as a
+        // string, so `'error'` stays a string while `'a` stays a lifetime.
+        let rust = format!(
+            r"(?s:(?:r|br)?#*\".*?\"#*)|'(?:\\.|[^'\\\r\n])'|'[A-Za-z_][A-Za-z0-9_]*'?|(?s:/\*.*?(?:\*/|$))|//[^\r\n]*|{common}"
+        );
+        [
+            common.to_string(),
+            format!(r"\#[^\r\n]*|{common}"),
+            format!(r"(?s:/\*.*?(?:\*/|$))|//[^\r\n]*|{common}"),
+            rust,
+        ]
+        .map(|pattern| regex::Regex::new(&pattern).expect("editor token regex"))
     });
     let hash_comments = matches!(language, "Python" | "Shell" | "YAML" | "TOML");
     let slash_comments = matches!(language, "Rust" | "JavaScript" | "C/C++");
-    let tokens = &tokens[if hash_comments {
+    let is_rust = language == "Rust";
+    let tokens = &tokens[if is_rust {
+        3
+    } else if hash_comments {
         1
     } else if slash_comments {
         2
@@ -231,9 +258,23 @@ fn base_tokens(text: &str, language: &str) -> Vec<(usize, usize, Kind)> {
             let value = token.as_str();
             let kind = if (hash_comments && value.starts_with('#'))
                 || (slash_comments && (value.starts_with("//") || value.starts_with("/*")))
+                || (is_rust && (value.starts_with("//") || value.starts_with("/*")))
             {
                 Kind::Comment
-            } else if value.starts_with('"') || value.starts_with('\'') || value.starts_with('`') {
+            } else if is_rust
+                && value.len() >= 2
+                && value.starts_with('\'')
+                && value.as_bytes()[1].is_ascii_alphabetic()
+                && !value.ends_with('\'')
+            {
+                // A bare `'ident` (no closing quote): a lifetime like `'a` or
+                // `'static`. A char literal (`'a'`, `'\n'`) ends with a quote
+                // and stays a string.
+                Kind::Lifetime
+            } else if value.contains('"')
+                || value.starts_with('\'')
+                || value.starts_with('`')
+            {
                 Kind::Str
             } else {
                 Kind::Other
@@ -275,7 +316,7 @@ fn cross_line_bodies(
 fn covered_ranges(tokens: &[(usize, usize, Kind)]) -> Vec<(usize, usize)> {
     let mut cover: Vec<(usize, usize)> = tokens
         .iter()
-        .filter(|t| t.2 != Kind::Other)
+        .filter(|t| matches!(t.2, Kind::Comment | Kind::Str))
         .map(|t| (t.0, t.1))
         .collect();
     cover.sort_by_key(|r| r.0);
@@ -601,6 +642,58 @@ mod tests {
             assert_eq!(tokens[0].0, 0);
             assert_eq!(tokens[0].1, text.len());
         }
+    }
+
+    #[test]
+    fn rust_char_literals_are_lexed_as_string_tokens() {
+        for text in [r"'{'", r"'\''", r"'\n'", r#""'\''""#, r#""'\n'""#, r#""plain""#] {
+            let tokens = base_tokens(text, "Rust");
+            assert_eq!(tokens.len(), 1, "expected one token in {text:?}");
+            assert!(tokens[0].2 == Kind::Str, "{text:?} should be a string");
+            assert_eq!(tokens[0].0, 0);
+            assert_eq!(tokens[0].1, text.len());
+        }
+    }
+
+    #[test]
+    fn rust_raw_strings_keep_inner_brackets_structural() {
+        for raw in [
+            r"r#"{(}"#",
+            r"r##"{(}"##",
+            r"br##""##",
+            r#"r"{(}"#,
+        ] {
+            let tokens = base_tokens(raw, "Rust");
+            assert_eq!(tokens.len(), 1, "expected one token in {raw:?}");
+            assert!(tokens[0].2 == Kind::Str, "{raw:?} should be one string");
+            assert_eq!(tokens[0].0, 0);
+            assert_eq!(tokens[0].1, raw.len());
+        }
+        let text = "let one = r#\"{(}\"#\nlet two = r##\"{(}\"##\n";
+        let open = text.find('(').expect("the raw string should contain (");
+        assert_eq!(bracket_pair(text, open as i32, "x.rs"), None);
+        assert_eq!(covering(text, "x.rs", "{(").expect("raw string body").2, STR);
+    }
+
+    #[test]
+    fn rust_lifetimes_are_lexed_as_structural_code() {
+        let text = "fn pick<'a, 'b: 'a>(x: &'a str, y: &'b str) -> &'a str { x }";
+        let tokens = base_tokens(text, "Rust");
+        for needle in ["'a", "'b"] {
+            let pos = text.find(needle).unwrap();
+            assert!(
+                tokens
+                    .iter()
+                    .any(|t| t.0 == pos && t.1 == pos + 2 && t.2 == Kind::Lifetime),
+                "{needle} should be a lifetime token at {pos}"
+            );
+        }
+        let b = text.find("'b").unwrap();
+        assert_eq!(
+            covering(text, "x.rs", "'b").map(|entry| entry.2),
+            Some(LIFETIME.to_string()),
+            "'b should be coloured as a lifetime, not a string"
+        );
     }
 
     #[test]

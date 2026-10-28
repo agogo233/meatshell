@@ -7004,7 +7004,17 @@ fn wire_session_callbacks(
                         .collect();
                     ModelRc::from(std::rc::Rc::new(VecModel::from(v)))
                 },
-                sftp_bookmarked: false,
+                sftp_bookmarked: {
+                    // Seed the star flag from the initial path ("/") so the
+                    // toolbar matches the places menu on the first draw; the
+                    // navigation callbacks own it afterwards.
+                    store
+                        .borrow()
+                        .sftp_places(&id)
+                        .bookmarks
+                        .iter()
+                        .any(|p| p.as_str() == "/")
+                },
                 font_size: 0,
                 tunnels: ModelRc::from(std::rc::Rc::new(VecModel::<TunnelInfo>::default())),
                 sftp_collapsed: !has_sftp || sftp_collapsed_default,

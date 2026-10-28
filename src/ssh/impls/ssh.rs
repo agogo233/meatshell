@@ -1495,10 +1495,18 @@ where
         jump.host, jump.port
     );
     let _ = events.send(SessionEvent::Status(stage.clone()));
+    // A bracketed IPv6 literal (`[::1]`) is only valid in the joined string
+    // form; the direct-tcpip channel address must be bare, like the direct
+    // path strips it before the `(host, port)` tuple.
+    let bare_target = target_host
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim();
     let channel = network_stage(
         &stage,
         jhandle.channel_open_direct_tcpip(
-            target_host.to_string(),
+            bare_target.to_string(),
             target_port as u32,
             "127.0.0.1".to_string(),
             0,

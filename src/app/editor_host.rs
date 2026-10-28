@@ -105,11 +105,19 @@ pub(super) fn wire_editor_window(editor: &EditorWindow, sftp_handles: SftpHandle
             find_step(content.as_str(), query.as_str(), current, reverse)
         },
     );
-    editor.on_editor_scroll_select(
-        |content: SharedString, anchor: i32, focus: i32, delta_y: f32, line_height: f32| {
-            scroll_selection(content.as_str(), anchor, focus, delta_y, line_height)
-        },
-    );
+    // The UI reports one incremental scroll delta per change tick; desktop
+    // wheel steps arrive split across many small animation frames, so the
+    // sub-line remainder is kept per editor and folded into the next call.
+    {
+        let pending = std::rc::Rc::new(std::cell::RefCell::new(0.0f32));
+        editor.on_editor_scroll_select(
+            move |content: SharedString, anchor: i32, focus: i32, delta_y: f32, line_height: f32| {
+                let (lines, next) = scroll_accumulate(*pending.borrow(), delta_y, line_height);
+                *pending.borrow_mut() = next;
+                scroll_selection(content.as_str(), anchor, focus, lines)
+            },
+        );
+    }
     {
         let weak = editor.as_weak();
         editor.on_editor_replace_all(move |query: SharedString, replacement: SharedString| {
@@ -178,35 +186,38 @@ pub(super) fn find_step(
     }
 }
 
-/// Extend a selection while the editor viewport scrolls. `delta-y` is the scroll offset
-/// delta in logical pixels (positive = the viewport moved up, so text above is revealed) and
-/// `line-height` the rendered line height, so the selection grows by whole visual lines.
+/// Fold a viewport scroll displacement into whole visual lines, carrying the
+/// sub-line remainder into the next call. A desktop wheel notch is animated
+/// over ~180 ms, so one notch reports many small per-frame deltas: rounding
+/// each frame separately extended nothing. Accumulating instead, and
+/// truncating toward zero, makes "grow by the scrolled distance" hold for
+/// mouse wheels, touchpads and one-shot headless deltas alike.
+pub(super) fn scroll_accumulate(prev_px: f32, delta_px: f32, line_height_px: f32) -> (i32, f32) {
+    if line_height_px <= 0.0
+        || !line_height_px.is_finite()
+        || !prev_px.is_finite()
+        || !delta_px.is_finite()
+    {
+        return (0, 0.0);
+    }
+    let total = prev_px + delta_px;
+    let lines = (total / line_height_px) as i32;
+    (lines, total - lines as f32 * line_height_px)
+}
+
+/// Extend a selection by `lines` whole visual lines revealed by a viewport
+/// scroll (positive = the viewport moved up, so text above is revealed).
 ///
 /// The end on the revealed side moves: scrolling up extends the top end, scrolling down the
 /// bottom end. `anchor` keeps whichever side it sat on, so a backwards selection keeps growing
 /// backwards. Offsets are byte offsets, the unit `set-selection-offsets` takes, and are clamped
 /// to the document. Wrapping lines are measured against logical newlines, which is exact for
 /// short lines and only approximate on very long wrapped lines.
-pub(super) fn scroll_selection(
-    content: &str,
-    anchor: i32,
-    focus: i32,
-    delta_y: f32,
-    line_height: f32,
-) -> EditorFindResult {
+pub(super) fn scroll_selection(content: &str, anchor: i32, focus: i32, lines: i32) -> EditorFindResult {
     let len = content.len().min(i32::MAX as usize) as i32;
     let anchor = anchor.clamp(0, len) as usize;
     let focus = focus.clamp(0, len) as usize;
-    let lines = if anchor == focus
-        || line_height <= 0.0
-        || !delta_y.is_finite()
-        || !line_height.is_finite()
-    {
-        0
-    } else {
-        (delta_y / line_height).round() as i32
-    };
-    if lines == 0 {
+    if anchor == focus || lines == 0 {
         return EditorFindResult {
             start: anchor as i32,
             end: focus as i32,

@@ -572,6 +572,7 @@ export component SftpPanel inherits Rectangle {
                             + (root.places-bookmarks.length == 0 && root.bookmarks.length == 0 ? 1 : 0)
                             + (root.bookmarks.length > 0 ? 1 + min(root.bookmarks.length, 6) : 0)
                             + 1
+                            + 1
                             + min(root.places-recent.length, 6)
                             + (root.places-recent.length == 0 ? 1 : 0)
                             + 1
@@ -676,11 +677,19 @@ export component SftpPanel inherits Rectangle {
                                                        horizontal-alignment: center; vertical-alignment: center; }
                                             }
                                         }
-                                    }
-                                    Rectangle { height: 1px; background: Theme.border-subtle; }
-                                    Text {
-                                        x: 10px;
-                                        text: @tr("Recent");
+                                     }
+                                     // Per-server add entry: the E866 toolbar button was
+                                     // merged into this star menu, so "add the current
+                                     // path" lives here (always shown, even with no
+                                     // server bookmarks yet).
+                                     SftpMenuItem {
+                                         label: @tr("Save current path as server bookmark");
+                                         clicked => { root.bookmark-add(); }
+                                     }
+                                     Rectangle { height: 1px; background: Theme.border-subtle; }
+                                     Text {
+                                         x: 10px;
+                                         text: @tr("Recent");
                                         color: Theme.text-muted;
                                         font-size: Theme.fs-xs;
                                         height: 22px; vertical-alignment: center;

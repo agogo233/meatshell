@@ -57,6 +57,10 @@ fn parse(url: &str) -> Option<ProxyConfig> {
     let hostport = hostport.trim_end_matches('/');
     let (host, port) = hostport.rsplit_once(':')?;
     let port: u16 = port.parse().ok()?;
+    // A proxy address is a `(host, port)` socket address: a bracketed IPv6
+    // literal (`socks5://[::1]:1080`) must arrive bare like every host stored
+    // in the config — the brackets only live in the URL form.
+    let host = host.trim().trim_start_matches('[').trim_end_matches(']').trim();
     if host.is_empty() {
         return None;
     }
@@ -100,7 +104,9 @@ fn bare_target_host(host: &str) -> &str {
 
 async fn connect_socks5(cfg: &ProxyConfig, host: &str, port: u16) -> Result<TcpStream> {
     use tokio_socks::tcp::Socks5Stream;
-    let proxy = (cfg.host.as_str(), cfg.port);
+    // The proxy's own address is a bare host (a bracketed IPv6 literal breaks
+    // the `(host, port)` socket address), as is the target for SOCKS5.
+    let proxy = (bare_target_host(cfg.host.as_str()), cfg.port);
     let target = (bare_target_host(host), port);
     let stream = match &cfg.auth {
         Some((u, p)) => Socks5Stream::connect_with_password(proxy, target, u, p.as_str())
@@ -115,11 +121,22 @@ async fn connect_socks5(cfg: &ProxyConfig, host: &str, port: u16) -> Result<TcpS
 }
 
 async fn connect_http(cfg: &ProxyConfig, host: &str, port: u16) -> Result<TcpStream> {
-    let mut s = TcpStream::connect((cfg.host.as_str(), cfg.port))
+    // The proxy's own address is a bare host: a bracketed IPv6 literal is not a
+    // valid `(host, port)` socket address.
+    let proxy = bare_target_host(cfg.host.as_str());
+    let mut s = TcpStream::connect((proxy, cfg.port))
         .await
         .with_context(|| format!("connect to HTTP proxy {}:{} failed", cfg.host, cfg.port))?;
-
-    let mut req = format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n");
+    // CONNECT takes the target as authority, where an IPv6 literal keeps its
+    // brackets (or gains them) — `[fe80::1]:22`, not `fe80::1:22`. Normalize
+    // first so an already-bracketed host is never wrapped twice.
+    let target = bare_target_host(host);
+    let authority = if target.contains(':') {
+        format!("[{target}]:{port}")
+    } else {
+        format!("{target}:{port}")
+    };
+    let mut req = format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n");
     if let Some((u, p)) = &cfg.auth {
         let token = base64::engine::general_purpose::STANDARD.encode(format!("{u}:{}", p.as_str()));
         req.push_str(&format!("Proxy-Authorization: Basic {token}\r\n"));
