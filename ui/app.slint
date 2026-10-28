@@ -233,8 +233,6 @@ component IconBtn inherits Rectangle {
     //   independent layers below, with animation only on the breathe layer
     //   and only while `breathe=true` (#breathing-light).
     in property <bool> breathe: false;
-    // `badge=true` draws a small red dot on the top-right corner.
-    in property <bool> badge: false;
     callback clicked();
     width: 26px;
     height: 26px;
@@ -300,17 +298,6 @@ component IconBtn inherits Rectangle {
         font-size: Theme.fs-md;
         horizontal-alignment: center;
         vertical-alignment: center;
-    }
-    // Ringed in the toolbar background so it reads as a cut-out over the icon.
-    if root.badge : Rectangle {
-        x: parent.width - 10px;
-        y: 2px;
-        width: 8px;
-        height: 8px;
-        border-radius: 4px;
-        background: #e5484d;
-        border-width: 1.5px;
-        border-color: Theme.bg-panel;
     }
     if ta.has-hover && root.tooltip != "" : Rectangle {
         y: parent.height + 5px;
@@ -3325,6 +3312,8 @@ export component AppWindow inherits Window {
                         root.tunnel-add(root.sftp-current-tab-id, name, kind, bind, bind-port, host, host-port);
                     }
                     tunnel-stop(id) => { root.tunnel-stop(root.sftp-current-tab-id, id); }
+                    tunnel-start(id) => { root.tunnel-start(root.sftp-current-tab-id, id); }
+                    tunnel-delete(id) => { root.tunnel-delete(root.sftp-current-tab-id, id); }
                     rename-request(path, name) => {
                         root.sftp-prompt-kind = "rename";
                         root.sftp-prompt-tab = root.sftp-current-tab-id;
@@ -5313,7 +5302,7 @@ export component AppWindow inherits Window {
                             HorizontalLayout {
                                 padding-left: 4px; padding-right: 4px;
                                 Text {
-                                    text: "github.com/yituorou/meatshell";
+                                    text: "github.com/agogo233/meatshell";
                                     color: Theme.accent;
                                     font-size: Theme.fs-sm;
                                     vertical-alignment: center;

@@ -645,6 +645,7 @@ pub(super) fn open_window(
     wire_auth_prompts(&ctx);
 
     wire_downloads_and_links(&ctx, &tab_statuses, &local_snap, &local_net_hist);
+    // STALE: `super::update` was deleted with the update feature (719ae86).
     super::update::wire(&core, &window);
 
     // Transfer records (download/upload progress + history) shown in the popup.

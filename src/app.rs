@@ -1315,6 +1315,16 @@ fn open_window(
             let _ = std::process::Command::new("xdg-open").arg(&dir).spawn();
         });
     }
+    // The open-source link in the About panel opens this fork's repository.
+    window.on_open_repo(|| {
+        let url = "https://github.com/agogo233/meatshell";
+        #[cfg(windows)]
+        let _ = std::process::Command::new("explorer").arg(url).spawn();
+        #[cfg(target_os = "macos")]
+        let _ = std::process::Command::new("open").arg(url).spawn();
+        #[cfg(all(not(windows), not(target_os = "macos")))]
+        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    });
     {
         let store = store.clone();
         window.on_set_paste_confirm_enabled(move |enabled| {
@@ -9841,7 +9851,7 @@ fn refresh_glyph_fallback(term_family: &str, window: &AppWindow, bufs: &TermBuff
 /// `http`/`https` scheme prefixes. A value without a (recognised) scheme is
 /// treated as SOCKS5, matching proxy.rs's parse default, so older configs that
 /// stored a bare `host:port` keep working.
-    fn split_proxy(url: &str) -> (String, String) {
+fn split_proxy(url: &str) -> (String, String) {
     let s = url.trim();
     if s.is_empty() {
         return ("none".to_string(), String::new());

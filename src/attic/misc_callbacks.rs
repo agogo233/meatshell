@@ -78,6 +78,8 @@ pub(super) fn wire_downloads_and_links(
     }
 
     // --- In-app update check (#48) -----------------------------------------
+    // STALE: `crate::update::RELEASE_PAGE` was deleted with the update
+    // feature (719ae86); this callback no longer revives as-is.
     // "Download" on the banner opens the latest-release page in the browser.
     window.on_open_update_url(move || {
         let url = crate::update::RELEASE_PAGE;
@@ -88,6 +90,8 @@ pub(super) fn wire_downloads_and_links(
         #[cfg(all(not(windows), not(target_os = "macos")))]
         let _ = std::process::Command::new("xdg-open").arg(url).spawn();
     });
+    // STALE: the active equivalent now lives in `src/app.rs` and opens the
+    // fork repository (agogo233/meatshell), not the upstream URL below.
     // The open-source link in the About dialog opens the project page.
     window.on_open_repo(move || {
         let url = "https://github.com/yituorou/meatshell";

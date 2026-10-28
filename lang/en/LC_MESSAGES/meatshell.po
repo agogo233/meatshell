@@ -216,9 +216,6 @@ msgstr "Empty directory"
 msgid "Download"
 msgstr "Download"
 
-msgid "Update available:"
-msgstr "Update available:"
-
 msgid "Open externally"
 msgstr "Open externally"
 

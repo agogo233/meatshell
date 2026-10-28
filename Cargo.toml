@@ -135,11 +135,8 @@ chacha20poly1305 = "0.10"
 # Used on startup to honour the system preference before the user overrides it.
 dark-light = "1"
 # rustls provides TLS without requiring a system OpenSSL installation.
-    ureq = { version = "2", features = ["tls"] }
-    # Reads the IANA zone name on every OS. Already in the tree through chrono.
-    iana-time-zone = "0.1"
-    flate2 = "1"
-    tar = "0.4"
+# Used by the WebDAV and AI clients (src/app/webdav.rs, src/app/ai.rs).
+ureq = { version = "2", features = ["tls"] }
 
 # Image decoding: custom wallpapers (PNG/JPEG/WebP/BMP) for the immersive theme,
 # and the embedded PNG window icon on Linux. On Windows the icon comes from the

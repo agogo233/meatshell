@@ -216,9 +216,6 @@ msgstr "目录为空"
 msgid "Download"
 msgstr "下载"
 
-msgid "Update available:"
-msgstr "发现新版本:"
-
 msgid "Open externally"
 msgstr "外部程序查看"
 

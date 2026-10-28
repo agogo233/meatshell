@@ -361,6 +361,8 @@ pub(super) fn wire_layout_prefs(ctx: &WinCtx) {
         window.set_welcome_collapsed(welcome_collapsed);
         window.set_sidebar_collapsed(sidebar_collapsed);
         window.set_wallpaper_overlay(s.wallpaper_overlay());
+        // STALE: `update_check_enabled` was removed from ConfigStore with the
+        // update feature (719ae86); neither side of this line compiles.
         window.set_update_check_enabled(s.update_check_enabled()); // #184
         if collapse_sftp {
             window.set_sftp_collapsed(true);
@@ -390,6 +392,9 @@ pub(super) fn wire_layout_prefs(ctx: &WinCtx) {
         });
     }
     {
+        // STALE: the update-check toggle no longer exists (removed in 719ae86);
+        // `ConfigStore::set_update_check_enabled` and the matching window
+        // callback are both gone.
         // Toggle the startup new-version check (#184). Takes effect next launch
         // for the check itself; the banner just won't appear once it's off.
         let store = store.clone();

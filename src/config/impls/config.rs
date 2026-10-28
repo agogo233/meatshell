@@ -248,9 +248,9 @@ fn normalize_hex_color(value: &str) -> Option<String> {
 }
 
 /// A brand-new config (no file yet, or the old one was corrupt). Seeds the
-    /// new-user default layout (#new-user-defaults): ms wallpaper, welcome page as
-    /// a left sidebar, resource panel docked right, 15% wallpaper transparency,
-    /// and marks the migration done so it isn't re-applied.
+/// new-user default layout (#new-user-defaults): ms wallpaper, welcome page as
+/// a left sidebar, resource panel docked right, 15% wallpaper transparency,
+/// and marks the migration done so it isn't re-applied.
 fn fresh_config() -> ConfigFile {
     // Deserialize `{}` rather than `ConfigFile::default()`: the derived
     // Default ignores the `#[serde(default = "default_true")]` markers and
