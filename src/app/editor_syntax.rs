@@ -230,7 +230,7 @@ fn base_tokens(text: &str, language: &str) -> Vec<(usize, usize, Kind)> {
         // present the caller sees a token ending in `'` and treats it as a
         // string, so `'error'` stays a string while `'a` stays a lifetime.
         let rust = format!(
-            r#"(?s:(?:r|br)?#*".*?"#*)|'(?:\\.|[^'\\\r\n])'|'[A-Za-z_][A-Za-z0-9_]*'?|(?s:/\*.*?(?:\*/|$))|//[^\r\n]*|{common}"#
+            r##"(?s:(?:r|br)?#*".*?"#*)|'(?:\\.|[^'\\\r\n])'|'[A-Za-z_][A-Za-z0-9_]*'?|(?s:/\*.*?(?:\*/|$))|//[^\r\n]*|{common}"##
         );
         [
             common.to_string(),
@@ -658,9 +658,9 @@ mod tests {
     #[test]
     fn rust_raw_strings_keep_inner_brackets_structural() {
         for raw in [
-            r#"r#"{(}"#"#,
-            r#"r##"{(}"##"#,
-            r#"br##""##"#,
+            r##"r#"{(}"#"##,
+            r###"r##"{(}"##"###,
+            r###"br##""##"###,
             r#"r"{(}""#,
         ] {
             let tokens = base_tokens(raw, "Rust");
