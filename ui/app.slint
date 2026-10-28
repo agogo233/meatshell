@@ -2122,6 +2122,8 @@ export component AppWindow inherits Window {
                         }
                         root.panel-dragging = false;
                     }
+                    // Grab cancelled: drop the preview without committing.
+                    dock-drag-cancelled() => { root.panel-dragging = false; }
                     new-session => { root.new-session-clicked(); }
                     import-ssh-config => { root.import-ssh-config(); }
                     connect-session(id) => { root.connect-session(id); }
@@ -2292,6 +2294,8 @@ export component AppWindow inherits Window {
                     }
                     root.panel-dragging = false;
                 }
+                // Grab cancelled: drop the preview without committing.
+                dock-drag-cancelled() => { root.panel-dragging = false; }
                 toggle-collapse() => {
                     root.sidebar-collapsed = !root.sidebar-collapsed;
                     root.set-sidebar-collapsed(root.sidebar-collapsed);
@@ -2612,6 +2616,8 @@ export component AppWindow inherits Window {
                             }
                             root.panel-dragging = false;
                         }
+                        // Grab cancelled: drop the preview without committing.
+                        quick-dock-drag-cancelled() => { root.panel-dragging = false; }
                         toggle-quick-group(g) => { root.toggle-quick-group(g); }
                         edit-quick-command(i) => { root.edit-quick-command(i); }
                         duplicate-quick-command(i) => { root.duplicate-quick-command(i); }
@@ -2869,6 +2875,8 @@ export component AppWindow inherits Window {
                     }
                     root.panel-dragging = false;
                 }
+                // Grab cancelled: drop the preview without committing.
+                dock-drag-cancelled => { root.panel-dragging = false; }
             }
 
             Rectangle {
@@ -2954,6 +2962,8 @@ export component AppWindow inherits Window {
                     }
                     root.panel-dragging = false;
                 }
+                // Grab cancelled: drop the preview without committing.
+                dock-drag-cancelled => { root.panel-dragging = false; }
             }
 
             Rectangle {
@@ -3066,6 +3076,9 @@ export component AppWindow inherits Window {
                         }
                         root.panel-dragging = false;
                     }
+                    // Grab cancelled: drop the preview without committing a
+                    // move or reorder the user never finished.
+                    dock-drag-cancelled() => { root.panel-dragging = false; }
                     toggle-collapse() => {
                         root.sidebar-collapsed = !root.sidebar-collapsed;
                         root.set-sidebar-collapsed(root.sidebar-collapsed);
@@ -3108,6 +3121,9 @@ export component AppWindow inherits Window {
                         }
                         root.panel-dragging = false;
                     }
+                    // Grab cancelled: drop the preview without committing a
+                    // move or reorder the user never finished.
+                    dock-drag-cancelled() => { root.panel-dragging = false; }
                     new-session => { root.new-session-clicked(); }
                     import-ssh-config => { root.import-ssh-config(); }
                     connect-session(id) => { root.connect-session(id); }
@@ -3173,6 +3189,9 @@ export component AppWindow inherits Window {
                         }
                         root.panel-dragging = false;
                     }
+                    // Grab cancelled: drop the preview without committing a
+                    // move or reorder the user never finished.
+                    dock-drag-cancelled => { root.panel-dragging = false; }
                 }
                 if gp.kind == "ai" : AIPanel {
                     width: parent.width;
@@ -3207,6 +3226,9 @@ export component AppWindow inherits Window {
                         }
                         root.panel-dragging = false;
                     }
+                    // Grab cancelled: drop the preview without committing a
+                    // move or reorder the user never finished.
+                    dock-drag-cancelled => { root.panel-dragging = false; }
                 }
                 // The docked SFTP panel renders globally from the ACTIVE tab's
                 // mirrored state (#dock-stack); models are shared by reference
@@ -3271,6 +3293,9 @@ export component AppWindow inherits Window {
                         }
                         root.panel-dragging = false;
                     }
+                    // Grab cancelled: drop the preview without committing a
+                    // move or reorder the user never finished.
+                    dock-drag-cancelled => { root.panel-dragging = false; }
                     navigate(path) => { root.sftp-navigate(root.sftp-current-tab-id, path); }
                     bookmark-add() => { root.sftp-bookmark-add(root.sftp-current-tab-id); }
                     bookmark-jump(path) => { root.sftp-navigate(root.sftp-current-tab-id, path); }

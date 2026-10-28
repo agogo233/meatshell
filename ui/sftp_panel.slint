@@ -263,6 +263,9 @@ export component SftpPanel inherits Rectangle {
     // reported in window space so the parent can compute the target edge (#dock).
     callback dock-drag-move(length /* abs-x */, length /* abs-y */);
     callback dock-drag-end();
+    // The grab was taken away without a release: drop the dock preview
+    // without committing a move or reorder.
+    callback dock-drag-cancelled();
 
     // -----------------------------------------------------------------------
     background: Theme.bg-panel;
@@ -315,9 +318,9 @@ export component SftpPanel inherits Rectangle {
         }
         pointer-event(ev) => {
             if (ev.kind == PointerEventKind.up) { root.dock-drag-end(); }
-            // Grab taken away (popup, deactivation): end the gesture
-            // anyway so no dock preview is stranded.
-            else if (ev.kind == PointerEventKind.cancel) { root.dock-drag-end(); }
+            // Grab taken away (popup, deactivation): roll the gesture back
+            // instead of committing a move / reorder the user never finished.
+            else if (ev.kind == PointerEventKind.cancel) { root.dock-drag-cancelled(); }
         }
     }
 
@@ -368,9 +371,10 @@ export component SftpPanel inherits Rectangle {
                         }
                         pointer-event(ev) => {
                             if (ev.kind == PointerEventKind.up) { root.dock-drag-end(); }
-                            // Grab taken away (popup, deactivation): end the
-                            // gesture anyway so no dock preview is stranded.
-                            else if (ev.kind == PointerEventKind.cancel) { root.dock-drag-end(); }
+                            // Grab taken away (popup, deactivation): roll the
+                            // gesture back instead of committing a move /
+                            // reorder the user never finished.
+                            else if (ev.kind == PointerEventKind.cancel) { root.dock-drag-cancelled(); }
                         }
                     }
                     Text {

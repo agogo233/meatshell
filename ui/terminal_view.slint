@@ -113,6 +113,9 @@ export component QuickDockPanel inherits Rectangle {
     callback close();
     callback dock-drag-move(length, length);
     callback dock-drag-end();
+    // The grab was taken away without a release: drop the dock preview
+    // without committing a move.
+    callback dock-drag-cancelled();
 
     background: Theme.bg-panel;
     border-width: 1px;
@@ -134,9 +137,10 @@ export component QuickDockPanel inherits Rectangle {
                 }
                 pointer-event(ev) => {
                     if (ev.kind == PointerEventKind.up) { root.dock-drag-end(); }
-                    // Grab taken away (popup, deactivation): end the gesture
-                    // anyway so no dock preview is stranded.
-                    else if (ev.kind == PointerEventKind.cancel) { root.dock-drag-end(); }
+                    // Grab taken away (popup, deactivation): roll the gesture
+                    // back instead of committing a move the user never
+                    // finished.
+                    else if (ev.kind == PointerEventKind.cancel) { root.dock-drag-cancelled(); }
                 }
             }
             HorizontalLayout {
@@ -287,6 +291,9 @@ export component AIPanel inherits Rectangle {
     callback collapse();
     callback dock-drag-move(length, length);
     callback dock-drag-end();
+    // The grab was taken away without a release: drop the dock preview
+    // without committing a move.
+    callback dock-drag-cancelled();
 
     // Auto-follow: while streaming, jump to the bottom only if the view was
     // still near the bottom at the previous tick — scrolling up pauses the
@@ -317,9 +324,10 @@ export component AIPanel inherits Rectangle {
                 }
                 pointer-event(ev) => {
                     if (ev.kind == PointerEventKind.up) { root.dock-drag-end(); }
-                    // Grab taken away (popup, deactivation): end the gesture
-                    // anyway so no dock preview is stranded.
-                    else if (ev.kind == PointerEventKind.cancel) { root.dock-drag-end(); }
+                    // Grab taken away (popup, deactivation): roll the gesture
+                    // back instead of committing a move the user never
+                    // finished.
+                    else if (ev.kind == PointerEventKind.cancel) { root.dock-drag-cancelled(); }
                 }
             }
             HorizontalLayout {
@@ -596,6 +604,9 @@ export component TerminalView inherits Rectangle {
     callback manage-quick-commands();          // open the add/edit/delete dialog
     callback quick-dock-drag-move(length, length);
     callback quick-dock-drag-end();
+    // The grab was taken away without a release: drop the dock preview
+    // without committing a move.
+    callback quick-dock-drag-cancelled();
     callback toggle-quick-group(string /* group */);  // collapse/expand a group (#55)
     // Right-click management on the popup, mirroring the welcome session list (#55).
     callback edit-quick-command(int /* index */);
@@ -2320,12 +2331,12 @@ export component TerminalView inherits Rectangle {
                                                 root.quick-open = false;
                                                 root.quick-dock-drag-end();
                                             }
-                                            // Grab taken away (popup, deactivation): end the
-                                            // gesture anyway so no dock preview is stranded
-                                            // (mirrors up, which also closes the popup).
+                                            // Grab taken away (popup, deactivation): roll the
+                                            // gesture back instead of committing a move the
+                                            // user never finished (the popup still closes).
                                             else if (ev.kind == PointerEventKind.cancel) {
                                                 root.quick-open = false;
-                                                root.quick-dock-drag-end();
+                                                root.quick-dock-drag-cancelled();
                                             }
                                         }
                                     }

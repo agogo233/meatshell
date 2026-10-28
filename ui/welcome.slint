@@ -401,6 +401,9 @@ export component Welcome inherits Rectangle {
     callback collapse();
     callback dock-drag-move(length, length);
     callback dock-drag-end();
+    // The grab was taken away without a release: drop the dock preview
+    // without committing a move.
+    callback dock-drag-cancelled();
 
     background: Theme.bg-root;
 
@@ -487,9 +490,10 @@ export component Welcome inherits Rectangle {
                         }
                         pointer-event(ev) => {
                             if (ev.kind == PointerEventKind.up) { root.dock-drag-end(); }
-                            // Grab taken away (popup, deactivation): end the gesture
-                            // anyway so no dock preview is stranded.
-                            else if (ev.kind == PointerEventKind.cancel) { root.dock-drag-end(); }
+                            // Grab taken away (popup, deactivation): roll the
+                            // gesture back instead of committing a move the
+                            // user never finished.
+                            else if (ev.kind == PointerEventKind.cancel) { root.dock-drag-cancelled(); }
                         }
                     }
                     header-row := HorizontalLayout {

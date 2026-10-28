@@ -5,6 +5,16 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ## [Unreleased]
 
+- **移除应用内更新功能。** 工具栏的更新按钮、设置里的更新页、启动时的版本检查、下载镜像与一键安装（AUR / 自更新 / MSI）全部移除；应用不再自行检查或下载新版。升级请直接从本仓库（agogo233/meatshell）的 Releases 页下载，旧配置里残留的更新相关项会被静默忽略，无需手动清理。关于面板的项目主页链接统一指向本仓库。
+- **The in-app update feature has been removed.** The toolbar update button, the Settings → Updates page, the startup version check, download mirrors and one-click installers (AUR / self-update / MSI) are all gone; the app no longer checks for or downloads new versions on its own. To upgrade, download from this repository's (agogo233/meatshell) Releases page. Update-related leftovers in old config files are silently ignored — no manual cleanup needed. The About panel's project link now points at this repository.
+
+- **修复取消面板拖拽后残留虚线预览（#dock）。** 拖动面板时若焦点被弹窗或失焦夺走（指针取消事件），此前会当成一次完成的拖放提交移动/排序，预览框也会卡住。现在取消事件只清掉预览，不会提交任何移动或排序。
+- **Fix a stranded dock preview when a panel drag is cancelled (#dock).** When a drag lost its grab to a popup or window deactivation (a pointer-cancel event), it used to commit the move/reorder and leave the preview stuck. Cancel now just drops the preview without committing any move or reorder.
+
+- **修复面板排序未即时保存。** 把侧栏、欢迎页、快速命令、AI 或 SFTP 面板拖回自身边缘重新排序后，新顺序只在下次显式保存窗口布局时才落盘。现在每次排序成功即写入配置。
+- **Fix panel reorders not being saved immediately.** Reordering a docked panel back onto its own edge only persisted the new order the next time the layout was saved explicitly. It is now written to config on every successful reorder.
+
+
 - **修复 SFTP 的 root / 自定义服务器命令保存后失效（#438）。** 新建或编辑会话时选择的「sudo 提权」或「自定义命令」此前总被丢弃，连接仍以登录用户身份运行。现在会随会话保存，并在编辑时正确回填。
 - **Fix root / custom SFTP server command being lost on save (#438).** Choosing sudo elevation or a custom SFTP server command always came back as the login user; the choice now survives the save and is shown again when the session is edited.
 

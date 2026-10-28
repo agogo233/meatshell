@@ -203,6 +203,9 @@ component StatusBlock inherits Rectangle {
     in property <string> collapse-icon;   // chevron pointing toward the docked edge
     callback dock-drag-move(length, length);
     callback dock-drag-end();
+    // The grab was taken away without a release: drop the dock preview
+    // without committing a move or reorder.
+    callback dock-drag-cancelled();
     callback collapse();
     callback copy-host(string);
     property <bool> copied;                // shows a brief "Copied" badge after a click
@@ -216,9 +219,9 @@ component StatusBlock inherits Rectangle {
         }
         pointer-event(ev) => {
             if (ev.kind == PointerEventKind.up) { root.dock-drag-end(); }
-            // Grab taken away (popup, deactivation): end the gesture
-            // anyway so no dock preview is stranded.
-            else if (ev.kind == PointerEventKind.cancel) { root.dock-drag-end(); }
+            // Grab taken away (popup, deactivation): roll the gesture back
+            // instead of committing a move / reorder the user never finished.
+            else if (ev.kind == PointerEventKind.cancel) { root.dock-drag-cancelled(); }
         }
     }
     VerticalLayout {
@@ -472,6 +475,9 @@ export component Sidebar inherits Rectangle {
     // in window space so the AppWindow can compute the target edge (#dock).
     callback dock-drag-move(length /* abs-x */, length /* abs-y */);
     callback dock-drag-end();
+    // The grab was taken away without a release: drop the dock preview
+    // without committing a move or reorder.
+    callback dock-drag-cancelled();
     callback toggle-collapse();
     // When docked top/bottom the panel is short and wide, so the blocks lay out
     // in a row; left/right keeps the classic vertical stack (#dock).
@@ -502,9 +508,9 @@ export component Sidebar inherits Rectangle {
         }
         pointer-event(ev) => {
             if (ev.kind == PointerEventKind.up) { root.dock-drag-end(); }
-            // Grab taken away (popup, deactivation): end the gesture
-            // anyway so no dock preview is stranded.
-            else if (ev.kind == PointerEventKind.cancel) { root.dock-drag-end(); }
+            // Grab taken away (popup, deactivation): roll the gesture back
+            // instead of committing a move / reorder the user never finished.
+            else if (ev.kind == PointerEventKind.cancel) { root.dock-drag-cancelled(); }
         }
     }
 
@@ -530,6 +536,7 @@ export component Sidebar inherits Rectangle {
                 collapse-icon: root.collapse-icon;
                 dock-drag-move(x, y) => { root.dock-drag-move(x, y); }
                 dock-drag-end() => { root.dock-drag-end(); }
+                dock-drag-cancelled() => { root.dock-drag-cancelled(); }
                 collapse() => { root.toggle-collapse(); }
                 copy-host(h) => { root.copy-host(h); }
             }
@@ -588,6 +595,7 @@ export component Sidebar inherits Rectangle {
                     collapse-icon: root.collapse-icon;
                     dock-drag-move(x, y) => { root.dock-drag-move(x, y); }
                     dock-drag-end() => { root.dock-drag-end(); }
+                    dock-drag-cancelled() => { root.dock-drag-cancelled(); }
                     collapse() => { root.toggle-collapse(); }
                 }
                 StatsBlock {

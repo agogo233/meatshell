@@ -2609,6 +2609,7 @@ fn open_window(
         // across the window (a re-dock in progress) can never reorder it.
         let weak5 = window.as_weak();
         let ds5 = dock_stacks.clone();
+        let store5 = store.clone();
         let pm5 = dock_panels_model.clone();
         let dm5 = dock_dividers_model.clone();
         let da5 = da_size.clone();
@@ -2659,6 +2660,13 @@ fn open_window(
             let target = insertion_index(&midpoints, axis_pos);
             let moved = ds5.borrow_mut().move_to_index(&edge, &kind, target);
             if moved {
+                // Persist the new order immediately: a reorder is a discrete
+                // gesture, not a transient drag state, so save it now rather
+                // than deferring to the next explicit save_layout.
+                store5.borrow_mut().set_dock_stacks(ds5.borrow().to_saved());
+                if let Err(err) = store5.borrow_mut().save() {
+                    tracing::warn!("failed to save dock stacks: {err:#}");
+                }
                 if let Some(win) = weak5.upgrade() {
                     refresh_dock(&win, &ds5, &pm5, &dm5, da5.get());
                 }
