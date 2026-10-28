@@ -4383,11 +4383,18 @@ fn open_window(
                     // through to center_window when both coordinates are 0.
                     let saved = store_for_position.borrow().window_position();
                     let saved_size = store_for_position.borrow().window_size();
+                    // The position's logical coordinates were written under the
+                    // monitor scale that was active when the window closed.
+                    // Re-project them with that saved scale (falling back to the
+                    // live scale when an older config has none) so a mixed-DPI
+                    // desktop restores the physical spot, not a scaled guess.
+                    let saved_scale = store_for_position.borrow().window_scale();
+                    let scale = w.window().scale_factor().max(0.01);
+                    let pos_scale = if saved_scale > 0.5 { saved_scale } else { scale };
                     if (saved.0 != 0.0 || saved.1 != 0.0)
                         && saved.0.is_finite()
                         && saved.1.is_finite()
                     {
-                        let scale = w.window().scale_factor().max(0.01);
                         let size = w.window().size(); // physical pixels
                         // Mirror the size restore: prefer the persisted size
                         // (what the Resized handler will settle on) so the
@@ -4404,18 +4411,22 @@ fn open_window(
                             size.height as f32
                         };
                         let rect = (
-                            saved.0 as f64 * scale as f64,
-                            saved.1 as f64 * scale as f64,
+                            saved.0 as f64 * pos_scale as f64,
+                            saved.1 as f64 * pos_scale as f64,
                             rw as f64,
                             rh as f64,
                         );
+                        // When no monitor geometry is available (a non-winit
+                        // backend) we cannot verify visibility, so centre —
+                        // which is a no-op there anyway — rather than trust a
+                        // blind saved coordinate.
                         let monitors = monitor_rects(&w.window());
-                        if monitors.is_empty()
-                            || window_rect_visible_on_any_monitor(rect, &monitors)
+                        if !monitors.is_empty()
+                            && window_rect_visible_on_any_monitor(rect, &monitors)
                         {
                             w.window().set_position(slint::PhysicalPosition::new(
-                                (saved.0 * scale) as i32,
-                                (saved.1 * scale) as i32,
+                                (saved.0 * pos_scale) as i32,
+                                (saved.1 * pos_scale) as i32,
                             ));
                         } else {
                             // The saved position fell off every screen: a second
@@ -4487,8 +4498,34 @@ fn center_window(win: &AppWindow) {
         .set_position(slint::PhysicalPosition::new(x, y));
 }
 
+/// Center the window on the primary monitor (X11 / macOS; Windows uses the
+/// work-area version above). On Wayland the compositor owns the position, so
+/// `set_outer_position` is advisory and a no-op — which is fine, since a
+/// centered-on-primary request is always on a visible screen.
 #[cfg(not(windows))]
-fn center_window(_win: &AppWindow) {}
+fn center_window(win: &AppWindow) {
+    let _ = win.window().with_winit_window(|ww| {
+        let scale = ww.scale_factor().max(0.01);
+        // Before the first paint winit may not know the current monitor yet;
+        // fall back to the primary so a persisted position that is off every
+        // screen still lands somewhere a user can find it.
+        let Some(monitor) = ww.current_monitor().or_else(|| ww.primary_monitor()) else {
+            return;
+        };
+        let size = monitor.size();
+        let pos = monitor.position();
+        let w = ww.inner_size().width as f64 / scale;
+        let h = ww.inner_size().height as f64 / scale;
+        let mon_w = size.width as f64 / scale;
+        let mon_h = size.height as f64 / scale;
+        let mon_x = pos.x as f64 / scale;
+        let mon_y = pos.y as f64 / scale;
+        ww.set_outer_position(i_slint_backend_winit::winit::dpi::LogicalPosition::new(
+            mon_x + (mon_w - w).max(0.0) / 2.0,
+            mon_y + (mon_h - h).max(0.0) / 2.0,
+        ));
+    });
+}
 
 /// Bring a window to the front and give it keyboard focus: un-minimize it
 /// and ask the OS for focus. Used when an OS entry point (taskbar jump list,
@@ -7311,10 +7348,20 @@ fn save_layout(
     }
     // Remember the window position too, so it restores on next launch.
     // Only when not maximized (a maximized position isn't useful) and not
-    // minimized (its sentinel position isn't either).
-    if !native_maximized && !native_minimized {
+    // minimized (its sentinel position isn't either). Wayland compositors
+    // don't expose a settable window position, so `position()` reports a
+    // constant (0,0); writing that would clobber a real position saved under
+    // X11, so skip the save on Wayland (restore then centres / defers to the
+    // compositor).
+    if !native_maximized
+        && !native_minimized
+        && !is_wayland_window(win.window())
+    {
         let pos = win.window().position();
         s.set_window_position(pos.x as f32 / scale, pos.y as f32 / scale);
+        // Remember which monitor's scale these logical coordinates came from so
+        // a mixed-DPI restore doesn't re-project them onto a different screen.
+        s.set_window_scale(scale);
     }
     let _ = s.save();
 }

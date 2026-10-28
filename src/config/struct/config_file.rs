@@ -368,6 +368,13 @@ pub struct ConfigFile {
     pub window_x: f32,
     #[serde(default)]
     pub window_y: f32,
+    /// The monitor's pixel scale factor at the moment the position/size above
+    /// were saved (0 = unset → fall back to the current window scale). On a
+    /// mixed-DPI desktop the saved logical coordinates only restore to the
+    /// physical spot they had on the monitor they came from when converted
+    /// with that monitor's own scale, not today's.
+    #[serde(default)]
+    pub window_scale: f32,
     /// Collapse the bottom SFTP panel on startup (#78).
     #[serde(default)]
     pub collapse_sftp_default: bool,

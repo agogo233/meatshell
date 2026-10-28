@@ -151,6 +151,28 @@ impl TermBuffer {
         self.reset_light_state();
     }
 
+    /// Drop the oldest scrollback lines beyond `cap`, keeping the newest. A
+    /// disconnected tab is trimmed to this bound so a long session's full
+    /// scrollback (up to MAX_HISTORY, ~20 MB of spans) is released while the
+    /// tab stays open for review. Rows shift when history is dropped, so the
+    /// history-mode search index (absolute rows) must be invalidated.
+    pub(crate) fn trim_history(&mut self, cap: usize) {
+        if self.history.len() > cap {
+            let drop = self.history.len() - cap;
+            for _ in 0..drop {
+                self.history.pop_front();
+            }
+            // find_positions are absolute (history, row) offsets that shift
+            // when the front of the deque is dropped.
+            self.find_positions.clear();
+            self.find_active = -1;
+            self.find_dirty = true;
+            // The view offset is also an absolute history index: a user
+            // scrolled far back would otherwise point past the new front.
+            self.view_offset = self.view_offset.min(self.history.len());
+        }
+    }
+
     /// Shared bookkeeping reset between the two variants above: everything
     /// except the decision of whether to also recreate `self.parser`.
     fn reset_light_state(&mut self) {

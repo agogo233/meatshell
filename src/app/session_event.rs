@@ -114,6 +114,11 @@ pub(super) fn apply_session_event_to_window(
                 if let Some(log) = b.session_log.as_mut() {
                     log.note(&format!("disconnected: {reason}"));
                 }
+                // A disconnected tab stays open for review, but its full
+                // 100k-line scrollback is not worth holding once the link is
+                // down; trim to the disconnected bound so many idle tabs don't
+                // stack up ~20 MB each. Active tabs keep MAX_HISTORY.
+                b.trim_history(crate::terminal::DISCONNECTED_MAX_HISTORY);
             }
             // Print the hint into the terminal itself (FinalShell-style), via a
             // synthetic Output event so it reuses the normal render path (#79).

@@ -762,6 +762,16 @@ impl ConfigStore {
                 "failed to archive undecodable secrets to {}: {e}",
                 backup.display()
             );
+            return;
+        }
+        // The archive is a verbatim copy of the live config (encrypted
+        // credentials included): it must not sit at the 0644 default that
+        // `fs::write` gives it, or it outlives the key rotation in a mode
+        // others can read.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&backup, fs::Permissions::from_mode(0o600));
         }
     }
 
@@ -2139,6 +2149,14 @@ impl ConfigStore {
     pub fn set_window_position(&mut self, x: f32, y: f32) {
         self.cache.window_x = x;
         self.cache.window_y = y;
+    }
+    /// Monitor scale factor the last window position was saved under; `0.0`
+    /// means unset (older configs) and the caller falls back to the live scale.
+    pub fn window_scale(&self) -> f32 {
+        self.cache.window_scale
+    }
+    pub fn set_window_scale(&mut self, s: f32) {
+        self.cache.window_scale = s;
     }
 
     /// Collapse the SFTP panel on startup (default false) (#78).
