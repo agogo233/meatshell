@@ -18,34 +18,6 @@ permissions:
   contents: read
 
 jobs:
-  publish-update-manifest:
-    name: Publish update manifest
-    needs: [check-version, build, build-flatpak, build-linux-aarch64-glibc228, build-linux-x86_64-glibc228]
-    if: ${{ !cancelled() && needs.check-version.result == 'success' && startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-') }}
-    runs-on: ubuntu-latest
-    steps:
-      # Read the files actually attached to the release, including their GitHub
-      # SHA-256 digests. A failed optional package must not leave a broken link.
-      - name: Generate and publish latest.json
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" --jq '
-            .tag_name as $tag |
-            {tag_name, draft, prerelease, assets: [
-              .assets[] | select(.state == "uploaded" and
-                (.name | startswith("meatshell-" + $tag + "-"))) |
-              {name, browser_download_url, size, digest}
-            ]}' > latest.json
-          jq -e '
-            .draft == false and .prerelease == false and
-            (.assets | length > 0) and
-            all(.assets[]; .size > 0 and
-              (.digest // "" | test("^sha256:[0-9a-fA-F]{64}$")))
-          ' latest.json > /dev/null
-          gh release upload "$GITHUB_REF_NAME" latest.json --clobber --repo "$GITHUB_REPOSITORY"
-
   check-version:
     name: Check tag version
     runs-on: ubuntu-latest
@@ -242,12 +214,9 @@ jobs:
             # signature and metadata. Plain `zip` mangles them and re-breaks the
             # signature, which would reintroduce the "damaged" error.
             #
-            # ⚠ KEEP THIS .zip (meatshell-<tag>-macos-<arch>.zip). Builds from
-            # v0.7.8 until the .dmg-aware updater download exactly this file
-            # name; newer builds prefer the .dmg below and fall back to it
-            # (src/update/inplace.rs `asset_names`). Retire it only once the
-            # zip's download count shows those older builds are gone.
-            # tests/update/inplace.rs guards this.
+            # ⚠ KEEP THIS .zip (meatshell-<tag>-macos-<arch>.zip). It remains the
+            # documented one-click install target for older builds; retire it only
+            # once the zip's download count shows those older builds are gone.
             ditto -c -k --keepParent "$APP" "${STAGE}.zip"
             echo "ASSET=${STAGE}.zip" >> "$GITHUB_ENV"
 
@@ -291,10 +260,10 @@ jobs:
           echo "MSI=meatshell-$VERSION-windows-x86_64.msi" >> $env:GITHUB_ENV
 
       # Drag-to-Applications disk image (#503): the download for manual
-      # installs, and the package dmg-aware builds prefer for one-click
-      # updates (they fall back to the .zip above, which stays for older
-      # builds). Installing into /Applications also keeps the app out of App
-      # Translocation, so one-click updates can replace it in place.
+      # installs. The legacy one-click updater that preferred it has been
+      # removed, but the .zip above stays for those older builds.
+      # Installing into /Applications keeps the app out of App
+      # Translocation.
       # Best-effort like the MSI: a hdiutil hiccup must not block the release.
       - name: Build DMG (macOS)
         if: runner.os == 'macOS'
@@ -492,9 +461,6 @@ jobs:
 
       - name: Build (release)
         shell: bash
-        env:
-          # One-click updates fetch the same .tar.gz variant this build came from (#390).
-          MEATSHELL_RELEASE_VARIANT: glibc228
         run: |
           set -eu
           . "$HOME/.cargo/env"
@@ -589,9 +555,6 @@ jobs:
 
       - name: Build (release)
         shell: bash
-        env:
-          # One-click updates fetch the same .tar.gz variant this build came from (#390).
-          MEATSHELL_RELEASE_VARIANT: glibc228
         run: |
           set -eu
           . "$HOME/.cargo/env"

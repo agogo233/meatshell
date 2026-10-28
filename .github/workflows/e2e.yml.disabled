@@ -17,6 +17,7 @@ on:
     - cron: "0 18 * * 1" # Mondays 18:00 UTC
   pull_request:
     paths:
+      - "src/app/**"
       - "src/mcp/**"
       - "src/automation/**"
       - "src/ssh/**"
@@ -40,8 +41,6 @@ jobs:
   linux:
     runs-on: ubuntu-22.04
     timeout-minutes: 45
-    permissions:
-      contents: write # only used to attach the tested headless service to a v* tag release
     steps:
       - uses: actions/checkout@v4
       - name: Install build and synthetic test dependencies
@@ -100,12 +99,26 @@ jobs:
           path: |
             ${{ env.ASSET }}
             ${{ env.ASSET }}.sha256
+
+  attach-headless-release:
+    # Only this job needs to write to the release, so it stays out of the
+    # long-running linux job above; run it only for a v* tag push.
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: linux
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write # only used to attach the tested headless service to a v* tag release
+    steps:
+      - name: Download tested headless package
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-x86_64-headless
+          path: dist
       - name: Attach tested headless service to fork release
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           prerelease: true
           fail_on_unmatched_files: true
           files: |
-            ${{ env.ASSET }}
-            ${{ env.ASSET }}.sha256
+            dist/meatshell-*.tar.gz
+            dist/meatshell-*.sha256

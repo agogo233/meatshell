@@ -178,9 +178,13 @@ class Node:
             transport.close()
 
 def session(name, host, port, jump=""):
-    return dict(id=name, name=name, host=host, port=port, user="fixture",
-                auth="password", password=PASSWORD, kind="ssh", jump_session_id=jump,
-                mcp_access=True)
+    # The GUI route editor persists `jump_session_ids`, so a hop with its own
+    # jump lands on that field, not the legacy singular one below.
+    value = dict(id=name, name=name, host=host, port=port, user="fixture",
+                 auth="password", password=PASSWORD, kind="ssh", mcp_access=True)
+    if jump:
+        value["jump_session_ids"] = [jump]
+    return value
 
 class Fixture:
     def __init__(self, binary, directory):
@@ -327,7 +331,7 @@ class Fixture:
             assert result.get("isError"), f"Untrusted host accepted: {host}"
         self.trust()
         print("PASS: host key verification is enforced at all three hosts")
-        original = self.sessions[0]["jump_session_id"]
+        original = self.sessions[0].get("jump_session_id", "")
         for invalid in ("target", "missing"):
             self.sessions[0]["jump_session_id"] = invalid
             self.save()
