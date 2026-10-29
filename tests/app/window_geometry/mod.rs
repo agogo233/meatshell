@@ -1,4 +1,6 @@
-use super::{maximized_geometry_needs_repair, window_rect_visible_on_any_monitor};
+use super::{
+    maximized_geometry_needs_repair, saved_position_plausible, window_rect_visible_on_any_monitor,
+};
 
 #[test]
 fn repairs_large_maximized_geometry_mismatch() {
@@ -54,4 +56,25 @@ fn no_monitors_is_invisible() {
     // Callers treat an empty monitor list as "cannot verify" and keep the
     // saved position; the pure predicate itself reports invisibility.
     assert!(!window_rect_visible_on_any_monitor((0.0, 0.0, 1280.0, 720.0), &[]));
+}
+
+#[test]
+fn real_saved_position_is_plausible() {
+    assert!(saved_position_plausible(58.666668, 47.333332));
+    assert!(saved_position_plausible(-1900.0, 100.0));
+    assert!(saved_position_plausible(0.0, 0.0));
+}
+
+#[test]
+fn minimized_sentinel_is_not_plausible() {
+    // Windows reports (-32000,-32000) for a minimized HWND.
+    assert!(!saved_position_plausible(-32000.0, -32000.0));
+    assert!(!saved_position_plausible(-32000.0, 100.0));
+}
+
+#[test]
+fn absurd_saved_position_is_not_plausible() {
+    assert!(!saved_position_plausible(1.0e7, 0.0));
+    assert!(!saved_position_plausible(f32::NAN, 0.0));
+    assert!(!saved_position_plausible(f32::INFINITY, 0.0));
 }

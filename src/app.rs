@@ -4424,33 +4424,51 @@ fn open_window(
                             rw as f64,
                             rh as f64,
                         );
-                        // When no monitor geometry is available (a non-winit
-                        // backend) we cannot verify visibility, so centre —
-                        // which is a no-op there anyway — rather than trust a
-                        // blind saved coordinate.
                         let monitors = monitor_rects(&w.window());
-                        if !monitors.is_empty()
-                            && window_rect_visible_on_any_monitor(rect, &monitors)
-                        {
+                        let plausible = saved_position_plausible(saved.0, saved.1);
+                        // No monitor geometry yet — the first timer tick can run
+                        // before the winit window is attached to a display — so
+                        // trust the saved position instead of centering with a
+                        // zero size (which would pin the top-left to the screen
+                        // centre and push a large window's bottom/right panels
+                        // off-screen). Only a degenerate saved coordinate (the
+                        // minimized -32000 sentinel, or an absurd value) falls
+                        // back to centering.
+                        let restore = if monitors.is_empty() {
+                            plausible
+                        } else {
+                            window_rect_visible_on_any_monitor(rect, &monitors)
+                        };
+                        if restore {
+                            tracing::info!(
+                                "[WINDOW_POS] restore saved=({:.1},{:.1}) scale={:.2} monitors={}",
+                                saved.0,
+                                saved.1,
+                                pos_scale,
+                                monitors.len()
+                            );
                             w.window().set_position(slint::PhysicalPosition::new(
                                 (saved.0 * pos_scale) as i32,
                                 (saved.1 * pos_scale) as i32,
                             ));
                         } else {
-                            // The saved position fell off every screen: a second
+                            // The saved position fell off every screen (a second
                             // monitor was detached, or a minimized HWND's
-                            // (-32000,-32000) sentinel was persisted. Center on
-                            // the primary instead of opening invisible.
+                            // (-32000,-32000) sentinel was persisted), or it is
+                            // degenerate with no monitors to verify against.
+                            // Center on the primary instead of opening invisible.
                             tracing::warn!(
-                                "saved window position ({:.0}, {:.0}) is off-screen; re-centering. monitors={:?}",
+                                "[WINDOW_POS] center saved=({:.0},{:.0}) scale={:.2} monitors={} plausible={}",
                                 saved.0,
                                 saved.1,
-                                monitors
+                                pos_scale,
+                                monitors.len(),
+                                plausible
                             );
-                            center_window(&w);
+                            center_window(&w, Some(saved_size));
                         }
                     } else {
-                        center_window(&w);
+                        center_window(&w, Some(saved_size));
                     }
                 }
             }
@@ -4472,7 +4490,7 @@ fn open_window(
 
 /// Center the window on the primary monitor's work area (Windows).
 #[cfg(windows)]
-fn center_window(win: &AppWindow) {
+fn center_window(win: &AppWindow, expected: Option<(f32, f32)>) {
     #[repr(C)]
     struct Rect {
         left: i32,
@@ -4488,6 +4506,19 @@ fn center_window(win: &AppWindow) {
     const SPI_GETWORKAREA: u32 = 0x0030;
 
     let size = win.window().size(); // physical pixels
+    // Before the first paint winit has no size yet; fall back to the saved /
+    // preferred logical size so a zero-size window isn't centred by pinning
+    // its top-left to the screen centre (which pushes a large window's bottom
+    // and right edges — and its docked panels — off-screen).
+    let (w, h) = if size.width == 0 || size.height == 0 {
+        let scale = win.window().scale_factor().max(0.01);
+        let (ew, eh) = expected
+            .filter(|e| e.0 > 0.0 && e.1 > 0.0)
+            .unwrap_or((1440.0, 900.0));
+        ((ew * scale).round() as u32, (eh * scale).round() as u32)
+    } else {
+        (size.width, size.height)
+    };
     let mut wa = Rect {
         left: 0,
         top: 0,
@@ -4500,8 +4531,8 @@ fn center_window(win: &AppWindow) {
     }
     let area_w = (wa.right - wa.left).max(0) as u32;
     let area_h = (wa.bottom - wa.top).max(0) as u32;
-    let x = wa.left + ((area_w.saturating_sub(size.width)) / 2) as i32;
-    let y = wa.top + ((area_h.saturating_sub(size.height)) / 2) as i32;
+    let x = wa.left + ((area_w.saturating_sub(w)) / 2) as i32;
+    let y = wa.top + ((area_h.saturating_sub(h)) / 2) as i32;
     win.window()
         .set_position(slint::PhysicalPosition::new(x, y));
 }
@@ -4511,7 +4542,7 @@ fn center_window(win: &AppWindow) {
 /// `set_outer_position` is advisory and a no-op — which is fine, since a
 /// centered-on-primary request is always on a visible screen.
 #[cfg(not(windows))]
-fn center_window(win: &AppWindow) {
+fn center_window(win: &AppWindow, expected: Option<(f32, f32)>) {
     let _ = win.window().with_winit_window(|ww| {
         let scale = ww.scale_factor().max(0.01);
         // Before the first paint winit may not know the current monitor yet;
@@ -4522,8 +4553,17 @@ fn center_window(win: &AppWindow) {
         };
         let size = monitor.size();
         let pos = monitor.position();
-        let w = ww.inner_size().width as f64 / scale;
-        let h = ww.inner_size().height as f64 / scale;
+        // Zero-size windows would centre by pinning their top-left to the
+        // screen centre; use the saved / preferred logical size as a stand-in.
+        let inner = ww.inner_size();
+        let (w, h) = if inner.width == 0 || inner.height == 0 {
+            let (ew, eh) = expected
+                .filter(|e| e.0 > 0.0 && e.1 > 0.0)
+                .unwrap_or((1440.0, 900.0));
+            (ew as f64, eh as f64)
+        } else {
+            (inner.width as f64 / scale, inner.height as f64 / scale)
+        };
         let mon_w = size.width as f64 / scale;
         let mon_h = size.height as f64 / scale;
         let mon_x = pos.x as f64 / scale;
