@@ -423,8 +423,6 @@ fn wire_sftp_split_callbacks(window: &AppWindow, sftp_handles: &SftpHandles) {
         });
     }
 }
-    }
-}
 
 pub(super) fn wire_sftp_callbacks(
     window: &AppWindow,
