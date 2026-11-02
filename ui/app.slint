@@ -2628,7 +2628,6 @@ export component AppWindow inherits Window {
                         set-sftp-panel-height(v) => { root.set-pane-sftp-height(term.id, v); }
                         sftp-panel-width: term.sftp-panel-width;
                         set-sftp-panel-width(v) => { root.set-pane-sftp-width(term.id, v); }
-                        sftp-dock <=> root.sftp-dock;
                         sftp-collapsed: term.sftp-collapsed;
                         set-sftp-collapsed(v) => { root.set-pane-sftp-collapsed(term.id, v); }
                         sftp-saved-height: term.sftp-saved-height;

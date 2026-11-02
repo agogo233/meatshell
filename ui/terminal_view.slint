@@ -652,6 +652,7 @@ export component TerminalView inherits Rectangle {
     callback sftp-download(string);
     callback sftp-open-file(string);                // double-click a file (#493)
     callback sftp-upload-clicked(string, bool);
+    callback sftp-paste-upload(string);             // upload clipboard files (#508)
     callback sftp-refresh(string);
     callback sftp-tree-expand(string);
     callback sftp-delete(string);

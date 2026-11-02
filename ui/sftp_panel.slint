@@ -622,6 +622,19 @@ export component SftpPanel inherits Rectangle {
     property <bool> fit-group: root.fit-owner && (!root.show-group || root.extras-w - root.used-5 >= root.cost-group);
     property <bool> show-group-col: root.show-group && root.fit-group;
     property <int> selected-row: -1;       // clicked/highlighted file-list row (#70)
+    // Selection bookkeeping for the remote rows (#100): shift-click ranges and
+    // the multi-select checkbox column.
+    property <int> select-anchor: -1;
+    property <bool> shift-click-pending: false;
+    callback select-range(int, int);
+    // The user's own column toggles (column menu marks the preference; the
+    // effective show-*-col above may drop a column the width can't hold).
+    property <bool> show-type-col-user: root.show-type;
+    property <bool> show-size-col-user: root.show-size;
+    property <bool> show-modified-col-user: root.show-modified;
+    property <bool> show-permissions-col-user: root.show-permissions;
+    property <bool> show-owner-col-user: root.show-owner;
+    property <bool> show-group-col-user: root.show-group;
     in property <int> selected-count;      // number of checked entries (#100)
     // Keyboard type-ahead (#sftp-typeahead): after clicking a row the panel grabs
     // keyboard focus, letters narrow to the first matching name, arrow keys move
