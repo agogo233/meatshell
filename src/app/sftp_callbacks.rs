@@ -1388,13 +1388,13 @@ fn queue_uploads(
     };
     if let Some(h) = handles.get(tab_id) {
         for local in locals {
-            h.upload(local.clone(), remote_dir.to_string());
+            h.upload(local.clone(), remote_dir.to_string(), UploadDecision::Proceed);
         }
     }
     for (id, dir) in sync_targets {
         if let Some(h) = handles.get(id) {
             for local in locals {
-                h.upload(local.clone(), dir.clone());
+                h.upload(local.clone(), dir.clone(), UploadDecision::Proceed);
             }
         }
     }

@@ -7097,6 +7097,17 @@ fn wire_session_callbacks(
                     ModelRc::from(std::rc::Rc::new(VecModel::from(v)))
                 },
                 sftp_available: has_sftp,
+                // Split (dual-pane) view starts off; the local pane remembers
+                // the home folder until it is first opened (lazy listing).
+                sftp_dual: false,
+                sftp_local_path: home_display().into(),
+                sftp_local_entries: ModelRc::from(std::rc::Rc::new(
+                    VecModel::<SftpEntry>::default(),
+                )),
+                sftp_local_status: "".into(),
+                sftp_local_loading: false,
+                sftp_local_selected_count: 0,
+                sftp_local_pane_width: 0.0,
                 sftp_recent: {
                     let v: Vec<slint::SharedString> = store
                         .borrow()

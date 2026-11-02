@@ -887,6 +887,8 @@ async fn run_sftp(
                 let handle = handle.clone();
                 let events = events.clone();
                 let cancels_done = cancels.clone();
+                let rate_kbps = queue.rate_limit_kbps;
+                let preserve_mtime = queue.preserve_mtime;
                 transfers.spawn(async move {
                     let total = remotes.len();
                     let mut ok = 0usize;
@@ -905,7 +907,16 @@ async fn run_sftp(
                             name
                         )));
                         match download_one_into(
-                            &sftp, &handle, remote, &local_dir, conflict, &events, &cancel, &id,
+                            &sftp,
+                            &handle,
+                            remote,
+                            &local_dir,
+                            conflict,
+                            &events,
+                            &cancel,
+                            &id,
+                            rate_kbps,
+                            preserve_mtime,
                         )
                         .await
                         {
@@ -3196,6 +3207,8 @@ async fn download_one_into(
     events: &UnboundedSender<SessionEvent>,
     cancel: &Arc<AtomicBool>,
     id: &str,
+    rate_kbps: u32,
+    preserve_mtime: bool,
 ) -> Result<bool> {
     let is_dir = sftp
         .metadata(remote)
@@ -3210,7 +3223,8 @@ async fn download_one_into(
             t("下载文件夹", "Downloading folder"),
             dirname
         )));
-        download_dir(sftp, handle, remote, local_dir, events).await?;
+        download_dir(sftp, handle, remote, local_dir, events, rate_kbps, preserve_mtime)
+            .await?;
         return Ok(true);
     }
     // The server controls the name, so sanitize it before it becomes a local
@@ -3229,6 +3243,9 @@ async fn download_one_into(
         id,
         events,
         cancel,
+        rate_kbps,
+        preserve_mtime,
+        conflict == DownloadConflict::Fail,
     )
     .await
 }
