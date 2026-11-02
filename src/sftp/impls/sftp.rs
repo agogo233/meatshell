@@ -3232,8 +3232,11 @@ async fn download_one_into(
     let filename = sanitize_filename(&base_name(remote));
     let requested = download_target_path(remote, local_dir);
     let local_path = match conflict {
+        DownloadConflict::Absent => requested,
         DownloadConflict::Replace => requested,
         DownloadConflict::KeepBoth => available_download_path(&requested),
+        // Refuse-if-exists is enforced by download_impl's fail_if_exists flag.
+        DownloadConflict::Fail => requested,
     };
     download_impl(
         handle,
