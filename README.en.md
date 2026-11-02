@@ -98,7 +98,7 @@ open /Applications/meatshell.app
     / `~/.config/meatshell/sessions.json` (Linux)
     / `~/Library/Application Support/meatshell/sessions.json` (macOS)
 - [x] SSH (`russh`, pure Rust): password / private key / encrypted key (passphrase)
-- [x] SFTP browser + upload / download (drag-and-drop) + in-terminal ZMODEM (`sz` download / `rz` multi-file upload)
+- [x] SFTP browser + upload / download (drag-and-drop) + split local/remote view (drag between panes) + in-terminal ZMODEM (`sz` download / `rz` multi-file upload)
 - [x] SSH port forwarding / tunnels: local -L / remote -R / dynamic -D (SOCKS5)
   - The connected session's Tunnels panel can add, stop, restart, and delete forwards. Rules can be saved to the SSH session with optional automatic startup on reconnect.
 - [x] System tray: closing the main window keeps sessions running; restore or create a window from the tray, or choose Quit to exit.

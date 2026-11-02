@@ -67,6 +67,49 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 - **SFTP 拖出到访达 / 资源管理器（#504）本 fork 有意未实现。** 上游 0.7.9 与 0.8.0 的更新日志宣称支持将 SFTP 行拖出到访达或资源管理器；本 fork 决定暂不接线，因此这两条在本仓库不生效。完整实现（Windows OLE 虚拟文件拖拽、macOS 文件承诺）归档在 `src/attic/drag_out.rs` 与 `src/attic/drag_out_mac.rs`，`src/sftp` 的传输侧仍可用；取用需同时恢复 `on_sftp_drag_out`、`drag_out_items` 与界面的拖出手势，详见 `src/attic/README.md`。
 - **Dragging SFTP rows out to Finder / Explorer (#504) is intentionally not implemented in this fork.** Upstream 0.7.9 and 0.8.0 advertise dragging SFTP rows out to Finder or Explorer; this fork deliberately leaves it unwired, so those entries do not hold here. The full implementation (Windows OLE virtual-file drag, macOS file promises) is archived in `src/attic/drag_out.rs` and `src/attic/drag_out_mac.rs`, the `src/sftp` transfer side is intact, and reviving it needs `on_sftp_drag_out`, `drag_out_items` and the UI drag gesture restored together — see `src/attic/README.md`.
+## [0.8.1] - 2026-10-30
+
+- **SSH 保活可在设置中调整（#515）。** 新增“设置 → 连接”页：可开关 SSH 保活，设置发送间隔（5–300 秒，默认 30 秒）和断开前允许的连续无响应次数（2–10 次，默认 3 次）。保活可防止空闲连接被 NAT、防火墙或校园网关静默回收；服务器连续无响应时会直接提示连接已关闭并可按 Enter 重连，不必等到按键才发现。设置同时作用于终端、SFTP、跳板机和 MCP 连接，对新建连接生效。
+- **Configurable SSH keepalive (#515).** A new Settings → Connection page turns SSH keepalives on or off and sets the interval (5–300 s, default 30 s) and how many keepalives in a row may go unanswered before disconnecting (2–10, default 3). Keepalives stop NAT, firewalls and campus gateways from silently dropping idle connections; when the server stops answering, the tab now reports the closed connection with Enter to reconnect instead of waiting for a keypress. The setting covers terminal, SFTP, jump-host and MCP connections and applies to new connections.
+
+- **配色主题预设与沉浸式配色开关。** “设置 → 壁纸”更名为“壁纸与主题”，新增配色主题选择：默认、纯白、雾灰、钛灰、钴蓝、鼠尾草绿、暖黄、樱花粉、VS Code、IDEA、Xcode、JetBrains、Cursor、Claude Code，以及用一个颜色生成配色的“自定义”。每个预设都有深色和浅色两套，随深浅模式切换，独立窗口同步使用。新增“沉浸式配色”开关（默认开启）：关闭后壁纸仍作为背景，但不再改变界面颜色或自动切换深浅模式。
+- **Color theme presets and an immersive colors switch.** Settings → Wallpaper is now "Wallpaper & theme" with a color theme picker: Default, White, Mist Gray, Titanium Gray, Cobalt Blue, Sage Green, Warm Yellow, Sakura Pink, VS Code, IDEA, Xcode, JetBrains, Cursor, Claude Code, and Custom, built from one color of your choice. Every preset has dark and light variants that follow the light/dark switch, and detached windows use it too. A new "Immersive colors" switch (on by default) keeps a wallpaper as the backdrop without recoloring the interface or flipping light/dark when turned off.
+
+- **从资源管理器拖文件到双栏会按落点区分去向。** 拖到左侧本机面板即复制到该目录（重名自动保留两份），拖到右侧远程面板或终端区域则照旧上传到远程当前目录；复制在本机后台线程完成，结果写在左侧状态栏。
+- **Files dropped from Explorer go where you drop them in the split view.** Dropping on the local half copies the file into that folder (keeping both on a name clash); dropping on the remote half or the terminal uploads it to the remote directory as before. The copy runs on a background thread and reports the result in the local pane's status line.
+
+- **SFTP 双栏支持拖拽互传。** 双栏模式下，把文件或文件夹从左侧本机列表拖到右侧远程列表即可上传，反向拖动即可下载；被拖动的行若是多个勾选项之一，则整组一起传输。拖动时鼠标旁显示条目名（多选时显示数量），接收文件的那一半会蓝色高亮；拖回同一侧则取消，不会有任何传输。远程行拖出面板外仍然是原来的“拖到资源管理器”。
+- **Drag files between the split view's panes.** In the local/remote split view, drag a file or folder from the local list onto the remote list to upload it, or the other way round to download it; a row that is one of several checked items drags the whole checked set. While dragging, the item name (or a count for a multi-item drag) follows the cursor and the receiving half is highlighted in blue; dropping back on the same side cancels with no transfer. Dragging a remote row outside the panel still starts the existing drag-to-Explorer/Finder.
+
+- **SFTP 新增双栏（本地/远程）模式。** 面板工具栏新增“双栏”按钮：左侧显示本机文件夹，右侧仍是远程目录，两边都可浏览、多选，左右默认各占一半，拖动中间分隔条可调整宽度，双击分隔条恢复居中。本地侧点击“上传”或右键“上传到服务器”，可把勾选的条目（或点击的那一行）连同整个文件夹传到右侧当前目录；远程侧右键“下载到本地文件夹”或“下载选中项到本地文件夹”，则把文件或文件夹直接下载到左侧当前目录，重名时统一询问替换还是保留两份，下载完成后左侧列表自动刷新。工具栏原有的路径栏、书签、排序等仍管理右侧的远程目录。感谢 @qux-bbb（#520）。
+- **Split (local/remote) view for SFTP.** A new "Split view" button in the panel toolbar shows this machine's folders on the left while the remote directory stays on the right; both sides can be browsed and multi-selected, they start at an even split, the divider between them can be dragged, and double-clicking it restores the middle. On the local side, "Upload" (or the right-click "Upload to server") sends the checked entries — or the clicked row — including whole folders into the remote folder on the right; on the remote side, "Download to local folder" / "Download checked to local folder" writes files and folders straight into the local folder on the left, asking once whether to replace or keep both when names collide, and the local list refreshes itself when the download finishes. The toolbar's path bar, bookmarks and sorting keep driving the remote side as before. Thanks @qux-bbb (#520).
+
+- **SFTP 支持粘贴上传（#508）。** 在资源管理器、访达或 IDE 中复制文件或文件夹后，在 SFTP 面板右键“粘贴”即可上传到当前目录（右键文件夹时上传到该文件夹）；文件列表获得焦点时也可直接按粘贴快捷键。其他按键仍会交给终端，不会丢失输入。
+- **Paste to upload in SFTP (#508).** Copy files or folders in Explorer, Finder or an IDE, then right-click › Paste in the SFTP panel to upload them to the current folder (or to the folder you right-clicked); the paste shortcut also works while the file list has focus. Other keys still go to the terminal, so no keystroke is lost.
+
+- **本地终端里的 ssh 连接可一键加入会话列表（#501）。** 右键本地终端标签页选择“加入会话列表”，MeatShell 会读取该标签页中正在运行的 ssh 命令（支持 user@host、-p、-l、-i、-J、-o 选项及 ~/.ssh/config 别名），保存为会话并打开编辑窗口。已有相同会话时直接使用；密码不会被保存，首次连接时再输入。
+- **Add a local tab's ssh connection to the session list (#501).** Right-click a local terminal tab and choose "Add to session list": MeatShell reads the ssh command running in that tab (user@host, -p, -l, -i, -J, -o options and ~/.ssh/config aliases), saves it as a session and opens it in the session editor. An existing matching session is reused; no password is saved, so the first connect asks for it.
+
+- **Telnet 支持保存账号密码并自动登录（#507）。** Telnet 会话的编辑窗口新增“用户名”和“密码”，连接后自动回应设备的登录提示（login:、Username:、用户名：等）和密码提示。每种提示只回应一次，登录失败时交还给用户手动输入；留空的项由用户自己输入。
+- **Telnet username and password auto-login (#507).** Telnet sessions gain Username and Password fields; MeatShell answers the device's login prompt (login:, Username:, 用户名：…) and password prompt with them. Each prompt is answered once, a failed login hands control back to you, and a blank field is left for you to type.
+
+- **导入 FinalShell 配置时一并导入端口转发。** 本地、远程和 SOCKS5（动态）端口转发都会随会话导入。感谢 @Venshao。
+- **FinalShell import brings port forwards along.** Local, remote and SOCKS5 (dynamic) port forwards are now imported with each session. Thanks @Venshao.
+
+- **“设置 → MCP”显示可一键复制的客户端配置。** 页面给出本机的 mcpServers 配置 JSON，右上角带复制按钮；启动命令会按安装方式生成（Windows、macOS、.deb、AUR、AppImage、Flatpak 均可直接使用）。
+- **Copyable MCP client config in Settings → MCP.** The page shows the mcpServers JSON for this installation with a copy button in the corner; the launch command matches how MeatShell is installed (Windows, macOS, .deb, AUR, AppImage and Flatpak all work as pasted).
+
+- **修复 `sudo -s` 切换 root 后文件管理器不再跟随终端目录的问题（#513）。** 感谢 @old-rubick。
+- **Fix the file manager no longer following the terminal after `sudo -s` (#513).** Thanks @old-rubick.
+
+- **修复 zsh 中 Home、End、PageUp、PageDown、Delete 键无效的问题（#519）。** 未使用 oh-my-zsh 等配置（例如只装了 starship）时，这些键没有反应或输出 `~` 等字符。现在会为尚未绑定的按键补上默认绑定，已有的绑定保持不变。
+- **Fix Home, End, PageUp, PageDown and Delete in zsh (#519).** Without a framework such as oh-my-zsh (for example with only starship), these keys did nothing or typed characters such as `~`. Keys that are not already bound now get the usual bindings; existing bindings are left alone.
+
+- **修复 macOS 上独立窗口内容被窗口按钮遮挡的问题（#360）。** “进程”“系统信息”和编辑器窗口顶部现在留出标题栏，红绿灯按钮不再压在第一行上。资源面板和 SFTP 面板的空白处也改为普通光标，只在拖动时显示移动光标。
+- **Fix macOS window buttons covering detached windows' content (#360).** The Processes, System information and editor windows now keep a title strip at the top, so the traffic-light buttons no longer sit on the first row. The empty areas of the resource and SFTP panels also show the normal cursor, switching to the move cursor only while dragging.
+
+- **修复通过 Claude 桌面端远程桥接调用 MCP 会话工具时报错的问题。** 桥接层会丢弃 `session_id` 参数，导致会话相关工具全部提示缺少参数；现在同时接受 `saved_session_id`。
+- **Fix MCP session tools failing through Claude desktop's remote bridge.** The bridge drops the `session_id` argument, so every session tool reported it missing; `saved_session_id` is now accepted as well.
 
 ## [0.8.0] - 2026-10-23
 

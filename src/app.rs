@@ -27,6 +27,7 @@ mod session_models;
 mod session_runtime;
 mod shortcuts;
 mod sftp_callbacks;
+mod sftp_local;
 mod sftp_places;
 mod sftp_ui;
 mod sidebar;
@@ -68,6 +69,7 @@ use self::session_event::*;
 use self::session_models::*;
 use self::session_runtime::*;
 use self::sftp_callbacks::*;
+use self::sftp_local::*;
 use self::sftp_ui::*;
 use self::sidebar::*;
 use self::dock_stacks::*;
@@ -1079,6 +1081,9 @@ fn open_window(
         window.set_mcp_use_saved_credentials(s.mcp_use_saved_credentials());
         window.set_mcp_allow_commands(s.mcp_allow_commands());
         window.set_mcp_allow_file_transfers(s.mcp_allow_file_transfers());
+        // Settings › MCP: ready-to-paste client config with this exe's real path.
+        let (command, args) = crate::mcp::client_launch();
+        window.set_mcp_config_json(crate::mcp::client_config_json(&command, &args).into());
     }
 
     {
@@ -1184,6 +1189,31 @@ fn open_window(
             let mut s = store.borrow_mut();
             s.set_sftp_queue_preserve_mtime(preserve);
             let _ = s.save();
+        });
+    }
+
+    // SSH keepalive (Settings › Connection, #515): mirror + persist. The value
+    // reaches every new SSH connection through `ssh::apply_keepalive`.
+    window.set_ssh_keepalive_enabled(store.borrow().ssh_keepalive_enabled());
+    window.set_ssh_keepalive_interval(store.borrow().ssh_keepalive_interval() as i32);
+    window.set_ssh_keepalive_max(store.borrow().ssh_keepalive_max() as i32);
+    {
+        let store = store.clone();
+        let registry = registry.clone();
+        let weak = window.as_weak();
+        window.on_set_ssh_keepalive(move |enabled, interval, max| {
+            {
+                let mut s = store.borrow_mut();
+                s.set_ssh_keepalive(enabled, interval.max(0) as u32, max.max(0) as u32);
+                let _ = s.save();
+                // Show the clamped values the store actually kept.
+                if let Some(w) = weak.upgrade() {
+                    w.set_ssh_keepalive_enabled(s.ssh_keepalive_enabled());
+                    w.set_ssh_keepalive_interval(s.ssh_keepalive_interval() as i32);
+                    w.set_ssh_keepalive_max(s.ssh_keepalive_max() as i32);
+                }
+            }
+            registry.broadcast_config_changed();
         });
     }
 
@@ -7629,6 +7659,15 @@ fn sync_active_sftp_to_root(win: &AppWindow, terminals: &VecModel<TerminalState>
             VecModel::<TunnelInfo>::default(),
         )));
         win.set_sftp_current_tab_id("".into());
+        win.set_sftp_dual(false);
+        win.set_sftp_local_path(Default::default());
+        win.set_sftp_local_status(Default::default());
+        win.set_sftp_local_loading(false);
+        win.set_sftp_local_selected_count(0);
+        win.set_sftp_local_pane_width(0.0);
+        win.set_sftp_local_entries(ModelRc::from(std::rc::Rc::new(
+            VecModel::<SftpEntry>::default(),
+        )));
         return;
     };
     win.set_sftp_available(row.sftp_available);
@@ -7648,6 +7687,13 @@ fn sync_active_sftp_to_root(win: &AppWindow, terminals: &VecModel<TerminalState>
     win.set_sftp_bookmarked(row.sftp_bookmarked);
     win.set_sftp_tunnels(row.tunnels.clone());
     win.set_sftp_current_tab_id(row.id.clone());
+    win.set_sftp_dual(row.sftp_dual);
+    win.set_sftp_local_path(row.sftp_local_path.clone());
+    win.set_sftp_local_status(row.sftp_local_status.clone());
+    win.set_sftp_local_loading(row.sftp_local_loading);
+    win.set_sftp_local_selected_count(row.sftp_local_selected_count);
+    win.set_sftp_local_pane_width(row.sftp_local_pane_width);
+    win.set_sftp_local_entries(row.sftp_local_entries.clone());
     // Panel extent follows the active tab's remembered size (#v0.5 keeps these
     // per-tab), so a wide panel on tab A isn't crushed to tab B's narrow one.
     win.set_sftp_panel_width(row.sftp_panel_width);

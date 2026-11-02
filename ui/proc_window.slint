@@ -164,6 +164,27 @@ export component ProcWindow inherits Window {
     VerticalLayout {
         spacing: 0;
 
+        // --- macOS title strip -----------------------------------------------
+        // The native title bar is transparent with the content extended under
+        // it (window.rs::setup_macos_platform), so reserve its height or the
+        // traffic lights sit on the first row (#360). The native title text is
+        // hidden, so show it here. No TouchArea: macOS keeps handling the drag.
+        if root.is-mac && !root.custom-titlebar : Rectangle {
+            height: 28px;
+            background: Theme.bg-elevated;
+            Text {
+                x: 76px;
+                width: parent.width - 152px;
+                height: parent.height;
+                text: @tr("Processes") + (root.host != "" ? "  ·  " + root.host : "");
+                color: Theme.text-secondary;
+                font-size: Theme.fs-sm;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+
         // --- Custom titlebar (frameless platforms) -------------------------
         if root.custom-titlebar : Rectangle {
             height: 36px;

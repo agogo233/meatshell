@@ -929,3 +929,30 @@ msgstr "最近访问"
 
 msgid "No recent folders"
 msgstr "暂无最近文件夹"
+
+msgid "MeatShell answers the device's first login and password prompts with these. Leave them blank to type them yourself."
+msgstr "MeatShell 会用这些信息自动回应设备首次出现的登录和密码提示。留空则由你手动输入。"
+
+msgid "Open"
+msgstr "打开"
+
+msgid "Split view"
+msgstr "双栏"
+
+msgid "Upload to server"
+msgstr "上传到服务器"
+
+msgid "Upload checked items"
+msgstr "上传选中项"
+
+msgid "Download to local folder"
+msgstr "下载到本地文件夹"
+
+msgid "Download checked to local folder"
+msgstr "下载选中项到本地文件夹"
+
+msgid "Selected items"
+msgstr "选中项"
+
+msgid "System information"
+msgstr "系统信息"

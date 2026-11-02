@@ -98,6 +98,16 @@ export struct TerminalState {
     sftp-places-bookmarks: [string], // this session's bookmarked folders (#500)
     sftp-recent: [string],      // recently visited folders, newest first (#500)
     sftp-bookmarked: bool,      // current sftp-path is bookmarked (#500)
+    // Split view (dual pane): the left half browses this machine's filesystem,
+    // the right half keeps the remote listing. Local state lives per tab so
+    // switching tabs returns to the folder you left.
+    sftp-dual: bool,
+    sftp-local-path: string,
+    sftp-local-entries: [SftpEntry],
+    sftp-local-status: string,
+    sftp-local-loading: bool,
+    sftp-local-selected-count: int,
+    sftp-local-pane-width: length,   // 0 = even split; set by dragging the divider
     font-size: int,             // per-session zoom override in px (0 = follow window)
     tunnels: [TunnelInfo],      // runtime SSH tunnels (#206)
     sftp-collapsed: bool,       // SFTP panel minimised — per session (#v0.5)
@@ -865,6 +875,11 @@ export component AppWindow inherits Window {
     callback set-paste-confirm-enabled(bool);
     in-out property <bool> extra-paste-shortcuts-enabled: true;
     callback set-extra-paste-shortcuts-enabled(bool);
+    // SSH keepalive (Settings › Connection, #515).
+    in-out property <bool> ssh-keepalive-enabled: true;
+    in-out property <int> ssh-keepalive-interval: 30;
+    in-out property <int> ssh-keepalive-max: 3;
+    callback set-ssh-keepalive(bool, int, int);
     in-out property <bool> zen-mode: false;
     callback set-zen-mode(bool);
     // Zen empties/restores the whole dock stack without resizing the frame, so
@@ -901,6 +916,8 @@ export component AppWindow inherits Window {
     in-out property <bool> mcp-use-saved-credentials: true;
     in-out property <bool> mcp-allow-commands: true;
     in-out property <bool> mcp-allow-file-transfers: true;
+    // MCP client config snippet shown in Settings › MCP (set by Rust).
+    in property <string> mcp-config-json;
     callback set-mcp-permissions(bool, bool, bool, bool);
     callback add-wsl-profile(string, string, string);
     callback remove-wsl-profile(string);
@@ -959,6 +976,15 @@ export component AppWindow inherits Window {
     in-out property <[string]> sftp-recent;
     in-out property <bool> sftp-bookmarked: false;
     in-out property <[TunnelInfo]> sftp-tunnels;
+    // Split (dual-pane) view state, mirrored from the active tab like the
+    // remote-side state above (#515/#520 backport).
+    in-out property <bool> sftp-dual: false;
+    in-out property <string> sftp-local-path: "";
+    in-out property <[SftpEntry]> sftp-local-entries;
+    in-out property <string> sftp-local-status: "";
+    in-out property <bool> sftp-local-loading: false;
+    in-out property <int> sftp-local-selected-count: 0;
+    in-out property <length> sftp-local-pane-width: 0px;
     in-out property <string> sftp-current-tab-id: "";
     // Confirm-before-close when there are live session tabs (#88): a stray
     // double-click on the title-bar icon / X shouldn't drop active sessions.
@@ -1413,6 +1439,8 @@ export component AppWindow inherits Window {
     callback sftp-open-file(string /* tab-id */, string /* remote-path */);   // (#493)
     // Trigger an upload: Rust opens a file-picker dialog then transfers.
     callback sftp-upload-clicked(string /* tab-id */, string /* remote-dir */, bool /* folder */);
+    // Upload the files / folders on the OS clipboard (#508).
+    callback sftp-paste-upload(string /* tab-id */, string /* remote-dir */);
     // Refresh the current directory listing.
     callback sftp-refresh(string /* tab-id */, string /* path */);
     // Toggle expand/collapse of a tree node (also navigates to that directory).
@@ -1457,6 +1485,25 @@ export component AppWindow inherits Window {
     in-out property <string> sftp-prompt-value;  // user input
     callback sftp-prompt-submit(string /* tab */, string /* kind */, string /* target */, string /* value */);
     callback sftp-copy-path(string);             // put the path on the clipboard
+
+    // --- Split (dual-pane) SFTP view --------------------------------------
+    // The left pane browses local folders, the right pane the remote host; the
+    // transfer buttons in between copy the checked (or clicked) entries.
+    callback sftp-toggle-dual(string /* tab-id */);
+    callback sftp-local-navigate(string /* tab-id */, string /* path */);   // "..", "~" or a path
+    callback sftp-local-up(string /* tab-id */);
+    callback sftp-local-home(string /* tab-id */);
+    callback sftp-local-refresh(string /* tab-id */);
+    callback sftp-local-open(string /* tab-id */, string /* local-path */);  // OS default app
+    callback sftp-local-toggle-select(string /* tab-id */, int /* row */);
+    callback sftp-local-select-range(string /* tab-id */, int /* from */, int /* to */);
+    callback sftp-local-copy-path(string /* local-path */);
+    callback sftp-local-upload(string /* tab-id */, string /* local-path */);
+    callback sftp-local-upload-selected(string /* tab-id */);
+    callback sftp-download-to-local(string /* tab-id */, string /* remote-path */);
+    callback sftp-download-selected-to-local(string /* tab-id */);
+    // Split-view divider moved (0 = back to an even split).
+    callback persist-sftp-local-pane-width(string /* tab-id */, length /* px */);
 
     // Visual chmod dialog (#84). Rust decomposes the current mode into nine
     // bools when opening and recomposes on apply (Slint has no bitwise ops).
@@ -2577,6 +2624,45 @@ export component AppWindow inherits Window {
                         find-navigate(reverse) => { root.find-navigate(term.id, reverse); }
                         set-search-history-mode(v) => { root.set-search-history-mode(v); }
                         selection: term.selection;
+                        sftp-panel-height: term.sftp-panel-height;
+                        set-sftp-panel-height(v) => { root.set-pane-sftp-height(term.id, v); }
+                        sftp-panel-width: term.sftp-panel-width;
+                        set-sftp-panel-width(v) => { root.set-pane-sftp-width(term.id, v); }
+                        sftp-dock <=> root.sftp-dock;
+                        sftp-collapsed: term.sftp-collapsed;
+                        set-sftp-collapsed(v) => { root.set-pane-sftp-collapsed(term.id, v); }
+                        sftp-saved-height: term.sftp-saved-height;
+                        set-sftp-saved-height(v) => { root.set-pane-sftp-saved-height(term.id, v); }
+                        sftp-tree-width: root.sftp-tree-width;
+                        persist-sftp-tree-width(v) => { root.persist-sftp-tree-width(v); }
+                        sftp-show-type: root.sftp-show-type;
+                        sftp-show-size: root.sftp-show-size;
+                        sftp-show-modified: root.sftp-show-modified;
+                        sftp-show-permissions: root.sftp-show-permissions;
+                        sftp-show-owner: root.sftp-show-owner;
+                        sftp-show-group: root.sftp-show-group;
+                        toggle-sftp-column(key) => { root.toggle-sftp-column(key); }
+                        sftp-path: term.sftp-path;
+                        sftp-entries: term.sftp-entries;
+                        sftp-status: term.sftp-status;
+                        sftp-loading: term.sftp-loading;
+                        sftp-tree-nodes: term.sftp-tree-nodes;
+                        sftp-transfer-targets: root.tabs;
+                        sftp-selected-count: term.sftp-selected-count;
+                        sftp-sort-key: term.sftp-sort-key;
+                        sftp-sort-dir: term.sftp-sort-dir;
+                        sftp-available: term.sftp-available;
+                        sftp-dual: term.sftp-dual;
+                        sftp-local-path: term.sftp-local-path;
+                        sftp-local-entries: term.sftp-local-entries;
+                        sftp-local-status: term.sftp-local-status;
+                        sftp-local-loading: term.sftp-local-loading;
+                        sftp-local-selected-count: term.sftp-local-selected-count;
+                        sftp-local-pane-width: term.sftp-local-pane-width;
+                        persist-sftp-local-pane-width(v) => {
+                            root.persist-sftp-local-pane-width(term.id, v);
+                        }
+                        tunnels: term.tunnels;
                         has-selection: term.has-selection;
                         quick-commands: root.quick-commands;
                         quick-sidebar-enabled: root.quick-commands-as-sidebar;
@@ -2645,6 +2731,7 @@ export component AppWindow inherits Window {
                         sftp-download(path) => { root.sftp-download(term.id, path); }
                         sftp-open-file(path) => { root.sftp-open-file(term.id, path); }
                         sftp-upload-clicked(dir, folder) => { root.sftp-upload-clicked(term.id, dir, folder); }
+                        sftp-paste-upload(dir) => { root.sftp-paste-upload(term.id, dir); }
                         sftp-refresh(path) => { root.sftp-refresh(term.id, path); }
                         sftp-tree-expand(path) => { root.sftp-tree-expand(term.id, path); }
                         sftp-toggle-select(i) => { root.sftp-toggle-select(term.id, i); }
@@ -2699,6 +2786,19 @@ export component AppWindow inherits Window {
                             root.sftp-chmod-open(term.id, path, name, mode);
                         }
                         sftp-copy-path(path) => { root.sftp-copy-path(path); }
+                        sftp-toggle-dual() => { root.sftp-toggle-dual(term.id); }
+                        sftp-local-navigate(path) => { root.sftp-local-navigate(term.id, path); }
+                        sftp-local-up() => { root.sftp-local-up(term.id); }
+                        sftp-local-home() => { root.sftp-local-home(term.id); }
+                        sftp-local-refresh() => { root.sftp-local-refresh(term.id); }
+                        sftp-local-open(path) => { root.sftp-local-open(term.id, path); }
+                        sftp-local-toggle-select(i) => { root.sftp-local-toggle-select(term.id, i); }
+                        sftp-local-select-range(a, b) => { root.sftp-local-select-range(term.id, a, b); }
+                        sftp-local-copy-path(path) => { root.sftp-local-copy-path(path); }
+                        sftp-local-upload(path) => { root.sftp-local-upload(term.id, path); }
+                        sftp-local-upload-selected() => { root.sftp-local-upload-selected(term.id); }
+                        sftp-download-to-local(path) => { root.sftp-download-to-local(term.id, path); }
+                        sftp-download-selected-to-local() => { root.sftp-download-selected-to-local(term.id); }
                         sftp-new-folder(dir) => {
                             root.sftp-prompt-kind = "mkdir";
                             root.sftp-prompt-tab = term.id;
@@ -3262,6 +3362,30 @@ export component AppWindow inherits Window {
                     places-recent: root.sftp-recent;
                     places-bookmarked: root.sftp-bookmarked;
                     tunnels: root.sftp-tunnels;
+                    // Split (dual-pane) view: state mirrored from the active tab.
+                    dual: root.sftp-dual;
+                    local-path: root.sftp-local-path;
+                    local-entries: root.sftp-local-entries;
+                    local-status: root.sftp-local-status;
+                    local-loading: root.sftp-local-loading;
+                    local-selected-count: root.sftp-local-selected-count;
+                    local-pane-default: root.sftp-local-pane-width;
+                    persist-local-pane-width(v) => {
+                        root.persist-sftp-local-pane-width(root.sftp-current-tab-id, v);
+                    }
+                    toggle-dual()          => { root.sftp-toggle-dual(root.sftp-current-tab-id); }
+                    local-navigate(path)   => { root.sftp-local-navigate(root.sftp-current-tab-id, path); }
+                    local-up()             => { root.sftp-local-up(root.sftp-current-tab-id); }
+                    local-home()           => { root.sftp-local-home(root.sftp-current-tab-id); }
+                    local-refresh()        => { root.sftp-local-refresh(root.sftp-current-tab-id); }
+                    local-open(path)       => { root.sftp-local-open(root.sftp-current-tab-id, path); }
+                    local-toggle-select(i) => { root.sftp-local-toggle-select(root.sftp-current-tab-id, i); }
+                    local-select-range(a, b) => { root.sftp-local-select-range(root.sftp-current-tab-id, a, b); }
+                    local-copy-path(path)  => { root.sftp-local-copy-path(path); }
+                    local-upload(path)     => { root.sftp-local-upload(root.sftp-current-tab-id, path); }
+                    local-upload-selected() => { root.sftp-local-upload-selected(root.sftp-current-tab-id); }
+                    download-to-local(path) => { root.sftp-download-to-local(root.sftp-current-tab-id, path); }
+                    download-selected-to-local() => { root.sftp-download-selected-to-local(root.sftp-current-tab-id); }
                     collapsed: false;
                     compact: false;
                     // Side-docked (left/right): hide the tree like the old
@@ -5902,6 +6026,9 @@ export component AppWindow inherits Window {
                     session-log-dir-custom: root.session-log-dir-custom;
                     paste-confirm-enabled <=> root.paste-confirm-enabled;
                     extra-paste-shortcuts-enabled <=> root.extra-paste-shortcuts-enabled;
+                    ssh-keepalive-enabled <=> root.ssh-keepalive-enabled;
+                    ssh-keepalive-interval <=> root.ssh-keepalive-interval;
+                    ssh-keepalive-max <=> root.ssh-keepalive-max;
                     zen-mode <=> root.zen-mode;
                     welcome-as-sidebar <=> root.welcome-as-sidebar;
                     quick-commands-as-sidebar <=> root.quick-commands-as-sidebar;
@@ -5909,6 +6036,8 @@ export component AppWindow inherits Window {
                     mcp-use-saved-credentials <=> root.mcp-use-saved-credentials;
                     mcp-allow-commands <=> root.mcp-allow-commands;
                     mcp-allow-file-transfers <=> root.mcp-allow-file-transfers;
+                    mcp-config-json: root.mcp-config-json;
+                    copy-text(t) => { root.copy-text(t); }
                     wallpaper-overlay <=> root.wallpaper-overlay;
                     current-wallpaper: root.current-wallpaper;
                     custom-wallpaper-name: root.custom-wallpaper-name;
@@ -6002,6 +6131,7 @@ export component AppWindow inherits Window {
                     open-session-log-dir => { root.open-session-log-dir(); }
                     set-paste-confirm-enabled(v) => { root.set-paste-confirm-enabled(v); }
                     set-extra-paste-shortcuts-enabled(v) => { root.set-extra-paste-shortcuts-enabled(v); }
+                    set-ssh-keepalive(on, interval, max) => { root.set-ssh-keepalive(on, interval, max); }
                     set-zen-mode(v) => { root.set-zen-mode(v); }
                     set-welcome-as-sidebar(v) => { root.set-welcome-as-sidebar(v); }
                     set-quick-commands-as-sidebar(v) => {

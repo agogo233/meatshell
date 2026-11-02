@@ -1,0 +1,486 @@
+//! Local-filesystem side of the split (dual-pane) SFTP view.
+//!
+//! The right-hand pane of the split view is the usual remote listing owned by
+//! the SFTP worker; the left-hand pane browses the machine MeatShell runs on.
+//! Local listings are plain synchronous filesystem calls, so they run on a
+//! short-lived thread and are published back on the Slint event loop (the same
+//! pattern the file dialogs use) — a slow network drive can therefore never
+//! block the UI thread.
+//!
+//! Uploads reuse the worker's existing `Upload` command (one command per path,
+//! files and folders alike) and downloads go through `DownloadInto`, which
+//! writes everything straight into the folder the pane is showing.
+
+use super::*;
+
+use std::path::{Component, Path, PathBuf};
+
+/// A local listing can be huge (`C:\Windows\WinSxS` has 100k+ entries) and the
+/// Slint list materialises every row, so cap what one directory shows.
+pub(super) const MAX_LOCAL_ENTRIES: usize = 5_000;
+
+/// One completed local directory read.
+#[derive(Debug, Default)]
+pub(super) struct LocalListing {
+    pub path: String,
+    pub entries: Vec<SftpEntry>,
+    /// More than [`MAX_LOCAL_ENTRIES`] items were present; only the first are shown.
+    pub truncated: bool,
+}
+
+/// The user's home directory (the local pane's starting point).
+pub(super) fn home_dir() -> PathBuf {
+    directories::BaseDirs::new()
+        .map(|dirs| dirs.home_dir().to_path_buf())
+        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        // Last resort: the drive/directory the process started in.
+        .unwrap_or_else(|| PathBuf::from(std::path::MAIN_SEPARATOR.to_string()))
+}
+
+/// Home directory as the pane's path string.
+pub(super) fn home_display() -> String {
+    display_path(&home_dir())
+}
+
+/// Render an absolute path the way a user would type it.
+///
+/// Windows hands out verbatim paths (`\\?\C:\…`, `\\?\UNC\server\share\…`) from
+/// some APIs; strip that prefix so the path bar stays readable and copy/pasteable.
+pub(super) fn display_path(path: &Path) -> String {
+    let text = path.to_string_lossy().to_string();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        text
+    }
+}
+
+/// Remove `.`/`..` components without touching the filesystem, so navigating up
+/// from a drive root (`C:\` + `..`) stays at the root instead of failing.
+fn normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // `pop` on a root (or prefix+root) refuses to climb out.
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    if out.as_os_str().is_empty() {
+        PathBuf::from(std::path::MAIN_SEPARATOR.to_string())
+    } else {
+        out
+    }
+}
+
+/// Resolve what the user typed (or `..`, `~`) against the pane's current folder.
+pub(super) fn resolve_path(current: &str, input: &str) -> Result<PathBuf, String> {
+    let trimmed = input.trim();
+    let target = if trimmed.is_empty() || trimmed == "~" {
+        home_dir()
+    } else if let Some(rest) = trimmed
+        .strip_prefix("~/")
+        .or_else(|| trimmed.strip_prefix("~\\"))
+    {
+        home_dir().join(rest)
+    } else {
+        let typed = PathBuf::from(trimmed);
+        if typed.is_absolute() || looks_like_windows_root(trimmed) {
+            typed
+        } else if current.is_empty() {
+            typed
+        } else {
+            Path::new(current).join(typed)
+        }
+    };
+    let resolved = normalize(&target);
+    let meta = std::fs::metadata(&resolved).map_err(|e| {
+        format!(
+            "{} {}: {e}",
+            t("无法访问", "Cannot open"),
+            display_path(&resolved)
+        )
+    })?;
+    if !meta.is_dir() {
+        return Err(format!(
+            "{}: {}",
+            t("不是文件夹", "Not a folder"),
+            display_path(&resolved)
+        ));
+    }
+    Ok(resolved)
+}
+
+/// `C:` / `D:` without a separator are drive roots, not relative names.
+fn looks_like_windows_root(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+}
+
+/// Parent folder of a directory, or `None` at a filesystem root.
+pub(super) fn parent_of(path: &str) -> Option<PathBuf> {
+    let parent = Path::new(path).parent()?;
+    if parent.as_os_str().is_empty() {
+        None
+    } else {
+        Some(parent.to_path_buf())
+    }
+}
+
+/// Compare two local folder paths the way the OS would for the pane's purpose:
+/// trailing separators are ignored, and Windows compares case-insensitively.
+/// Deliberately lexical — no filesystem access, so a stale network share can't
+/// stall the UI thread on a path comparison.
+pub(super) fn same_dir(a: &str, b: &str) -> bool {
+    let normalize = |path: &str| {
+        let trimmed = path.trim_end_matches(['/', '\\']);
+        if cfg!(windows) {
+            trimmed.to_lowercase()
+        } else {
+            trimmed.to_string()
+        }
+    };
+    normalize(a) == normalize(b)
+}
+
+/// Read one local directory into Slint rows (folders first, natural name order).
+pub(super) fn list_dir(dir: &Path) -> Result<LocalListing, String> {
+    let read = std::fs::read_dir(dir).map_err(|e| {
+        format!(
+            "{} {}: {e}",
+            t("无法访问", "Cannot open"),
+            display_path(dir)
+        )
+    })?;
+
+    let mut entries = Vec::new();
+    let mut truncated = false;
+    for item in read {
+        let Ok(item) = item else { continue };
+        if entries.len() >= MAX_LOCAL_ENTRIES {
+            truncated = true;
+            break;
+        }
+        let full = item.path();
+        let name = item.file_name().to_string_lossy().to_string();
+        // `file_type` reports a symlink itself; `metadata` follows it, so a
+        // link to a folder behaves like a folder when double-clicked.
+        let is_link = item.file_type().map(|kind| kind.is_symlink()).unwrap_or(false);
+        let meta = std::fs::metadata(&full).ok();
+        let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        let modified = meta
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|delta| delta.as_secs().min(u32::MAX as u64) as u32)
+            .unwrap_or(0);
+        entries.push(SftpEntry {
+            name: name.into(),
+            full_path: display_path(&full).into(),
+            is_dir,
+            size: if is_dir {
+                "".into()
+            } else {
+                format_size(size).into()
+            },
+            size_bytes: size as f32,
+            modified: format_mtime(modified).into(),
+            modified_ts: modified as f32,
+            // Local files carry no POSIX metadata worth showing, so the pane
+            // hides the permissions/owner/group columns entirely.
+            mode: 0,
+            file_type: local_type_label(is_dir, is_link),
+            permissions: "".into(),
+            permissions_mode: 0,
+            owner: "".into(),
+            group: "".into(),
+            selected: false,
+        });
+    }
+    sort_sftp_entries(&mut entries, "", 0);
+    Ok(LocalListing {
+        path: display_path(dir),
+        entries,
+        truncated,
+    })
+}
+
+fn local_type_label(is_dir: bool, is_link: bool) -> SharedString {
+    let label = if is_link {
+        t("符号链接", "Symbolic link")
+    } else if is_dir {
+        t("文件夹", "Folder")
+    } else {
+        t("文件", "File")
+    };
+    label.into()
+}
+
+/// Publish a listing into a tab's local-pane fields.
+fn publish_local_listing(
+    window: &AppWindow,
+    tab_id: &str,
+    listing: LocalListing,
+    note: Option<String>,
+) {
+    let terminals = window.get_terminals();
+    let Some(model) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>() else {
+        return;
+    };
+    // The status line is reserved for what the path bar cannot say: a failed
+    // listing, a truncated one, or the outcome of a local copy.
+    let status = if listing.truncated {
+        format!(
+            "{} ({MAX_LOCAL_ENTRIES}+)",
+            t("条目过多，仅显示前 5000 项", "Too many entries — showing the first 5000")
+        )
+    } else {
+        note.unwrap_or_default()
+    };
+    let entries = ModelRc::from(Rc::new(VecModel::from(listing.entries)));
+    update_terminal_row(model, tab_id, |row| {
+        row.sftp_local_path = listing.path.into();
+        row.sftp_local_entries = entries.clone();
+        row.sftp_local_loading = false;
+        row.sftp_local_selected_count = 0;
+        row.sftp_local_status = status.into();
+    });
+    // The docked panel mirrors this row onto window properties (#dock-stack):
+    // re-sync so the split view's local panes always show fresh state.
+    window.invoke_refresh_sidebar();
+}
+
+/// Read `dir` on a worker thread and publish it when it comes back.
+///
+/// The tab may have been closed (or the window gone) by then, in which case the
+/// result is dropped.
+pub(super) fn load_dir(window: &AppWindow, tab_id: &str, dir: PathBuf) {
+    load_dir_with_status(window, tab_id, dir, None);
+}
+
+/// Like [`load_dir`], but keeps `note` in the pane's status line afterwards
+/// (used to confirm a local copy without a second repaint).
+pub(super) fn load_dir_with_status(
+    window: &AppWindow,
+    tab_id: &str,
+    dir: PathBuf,
+    note: Option<String>,
+) {
+    {
+        let terminals = window.get_terminals();
+        if let Some(model) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>() {
+            // Only flip the spinner: the row area already paints "Loading...",
+            // and writing a status here would pop the error strip in and out
+            // on every navigation.
+            update_terminal_row(model, tab_id, |row| row.sftp_local_loading = true);
+            window.invoke_refresh_sidebar();
+        }
+    }
+    let weak = window.as_weak();
+    let tab = tab_id.to_string();
+    std::thread::spawn(move || {
+        let result = list_dir(&dir);
+        let _ = weak.upgrade_in_event_loop(move |window| match result {
+            Ok(listing) => publish_local_listing(&window, &tab, listing, note),
+            Err(message) => {
+                let terminals = window.get_terminals();
+                if let Some(model) =
+                    terminals.as_any().downcast_ref::<VecModel<TerminalState>>()
+                {
+                    update_terminal_row(model, &tab, |row| {
+                        row.sftp_local_loading = false;
+                        row.sftp_local_status = message.into();
+                    });
+                    window.invoke_refresh_sidebar();
+                }
+            }
+        });
+    });
+}
+
+/// Navigate the local pane: `..`, `~`, an absolute path, or a folder name.
+pub(super) fn navigate(window: &AppWindow, tab_id: &str, input: &str) {
+    let current = current_path(window, tab_id);
+    match resolve_path(&current, input) {
+        Ok(dir) => load_dir(window, tab_id, dir),
+        Err(message) => {
+            let terminals = window.get_terminals();
+            if let Some(model) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>() {
+                update_terminal_row(model, tab_id, |row| {
+                    row.sftp_local_status = message.into();
+                });
+            }
+        }
+    }
+}
+
+/// Go to the parent folder (no-op at a drive root).
+pub(super) fn navigate_up(window: &AppWindow, tab_id: &str) {
+    let Some(parent) = parent_of(&current_path(window, tab_id)) else {
+        return;
+    };
+    load_dir(window, tab_id, parent);
+}
+
+/// The folder a tab's local pane is showing ("" before it was ever opened).
+pub(super) fn current_path(window: &AppWindow, tab_id: &str) -> String {
+    let terminals = window.get_terminals();
+    let Some(model) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>() else {
+        return String::new();
+    };
+    (0..model.row_count())
+        .filter_map(|i| model.row_data(i))
+        .find(|row| row.id.as_str() == tab_id)
+        .map(|row| row.sftp_local_path.to_string())
+        .unwrap_or_default()
+}
+
+/// Checked local rows, in list order.
+pub(super) fn selected_paths(model: &VecModel<TerminalState>, tab_id: &str) -> Vec<String> {
+    for i in 0..model.row_count() {
+        let Some(row) = model.row_data(i) else { continue };
+        if row.id.as_str() != tab_id {
+            continue;
+        }
+        let Some(entries) = row.sftp_local_entries.as_any().downcast_ref::<VecModel<SftpEntry>>()
+        else {
+            return Vec::new();
+        };
+        return (0..entries.row_count())
+            .filter_map(|index| entries.row_data(index))
+            .filter(|entry| entry.selected)
+            .map(|entry| entry.full_path.to_string())
+            .collect();
+    }
+    Vec::new()
+}
+
+/// Toggle one local row's checkbox and recount the selection.
+pub(super) fn toggle_selected(model: &VecModel<TerminalState>, tab_id: &str, index: i32) {
+    let Ok(index) = usize::try_from(index) else {
+        return;
+    };
+    for i in 0..model.row_count() {
+        let Some(row) = model.row_data(i) else { continue };
+        if row.id.as_str() != tab_id {
+            continue;
+        }
+        let Some(entries) = row.sftp_local_entries.as_any().downcast_ref::<VecModel<SftpEntry>>()
+        else {
+            return;
+        };
+        if let Some(mut entry) = entries.row_data(index) {
+            entry.selected = !entry.selected;
+            entries.set_row_data(index, entry);
+        }
+        let mut count = 0;
+        for index in 0..entries.row_count() {
+            if entries.row_data(index).map(|e| e.selected).unwrap_or(false) {
+                count += 1;
+            }
+        }
+        let mut row = row.clone();
+        row.sftp_local_selected_count = count;
+        model.set_row_data(i, row);
+        return;
+    }
+}
+
+/// Shift+click range on the local pane: the checked set becomes `from..=to`.
+pub(super) fn select_range(model: &VecModel<TerminalState>, tab_id: &str, from: i32, to: i32) -> i32 {
+    for i in 0..model.row_count() {
+        let Some(row) = model.row_data(i) else { continue };
+        if row.id.as_str() != tab_id {
+            continue;
+        }
+        let Some(entries) = row.sftp_local_entries.as_any().downcast_ref::<VecModel<SftpEntry>>()
+        else {
+            return 0;
+        };
+        let count = apply_range_selection(entries, from, to) as i32;
+        let mut row = row.clone();
+        row.sftp_local_selected_count = count;
+        model.set_row_data(i, row);
+        return count;
+    }
+    0
+}
+
+/// Copy a path dropped from the OS file manager into `dir` (the split view's
+/// local half). A name that is already taken is kept side by side, like a file
+/// manager's copy. The work runs off the UI thread and reports the outcome in
+/// the pane's status line.
+pub(super) fn copy_into(window: &AppWindow, tab_id: &str, dir: PathBuf, source: PathBuf) {
+    let Some(name) = source.file_name().map(|name| name.to_string_lossy().to_string()) else {
+        return;
+    };
+    let shown = display_path(&dir);
+    let weak = window.as_weak();
+    let tab = tab_id.to_string();
+    std::thread::spawn(move || {
+        let target = crate::sftp::available_download_path(&dir.join(&name));
+        let result = copy_recursive(&source, &target).map(|()| target);
+        let _ = weak.upgrade_in_event_loop(move |window| {
+            let terminals = window.get_terminals();
+            let Some(model) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>() else {
+                return;
+            };
+            match result {
+                Ok(target) => {
+                    let copied = target
+                        .file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .unwrap_or(name);
+                    let note = format!("{}: {copied}", t("已复制到本机", "Copied locally"));
+                    if same_dir(&current_path(&window, &tab), &shown) {
+                        load_dir_with_status(&window, &tab, dir.clone(), Some(note));
+                    } else {
+                        update_terminal_row(model, &tab, |row| {
+                            row.sftp_local_status = note.into();
+                        });
+                    }
+                }
+                Err(message) => {
+                    update_terminal_row(model, &tab, |row| {
+                        row.sftp_local_status =
+                            format!("{}: {message}", t("复制失败", "Copy failed")).into();
+                    });
+                }
+            }
+        });
+    });
+}
+
+/// Recursively copy a file or a whole folder (symlinks are followed, like a
+/// normal file-manager copy).
+fn copy_recursive(source: &Path, target: &Path) -> Result<(), String> {
+    let meta = std::fs::metadata(source).map_err(|e| format!("{}: {e}", display_path(source)))?;
+    if meta.is_dir() {
+        std::fs::create_dir_all(target).map_err(|e| format!("{}: {e}", display_path(target)))?;
+        let entries =
+            std::fs::read_dir(source).map_err(|e| format!("{}: {e}", display_path(source)))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("{}: {e}", display_path(source)))?;
+            copy_recursive(&entry.path(), &target.join(entry.file_name()))?;
+        }
+        return Ok(());
+    }
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("{}: {e}", display_path(parent)))?;
+    }
+    std::fs::copy(source, target)
+        .map(|_| ())
+        .map_err(|e| format!("{}: {e}", display_path(source)))
+}
+
+#[cfg(test)]
+#[path = "../../tests/app/sftp_local/mod.rs"]
+mod tests;

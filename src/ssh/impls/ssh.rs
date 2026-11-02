@@ -24,6 +24,7 @@ use super::connection::{
     connect_ssh_stream, disconnect_jump_chain, disconnect_ssh, network_stage, HandshakeHandler,
     HostKeyWait,
 };
+use super::cwd::CwdTracker;
 use super::structs::*;
 
 struct RuntimeTrigger {
@@ -211,7 +212,7 @@ const PROMPT_SETUP_SUFFIX: &str = "__ms7'";
 #[cfg(test)]
 const PROMPT_SETUP_HISTORY_MARKER: &str = "__MEATSHELL_INTERNAL_SETUP_1";
 const PROMPT_SETUP_DONE: &str = "\u{1b}]699;ready\u{07}";
-const PROMPT_BODY: &str = "test -z \"$FISH_VERSION\" && eval '__msc(){ __c=\"$(fc -ln -1 2>/dev/null)\"; [ -n \"$__c\" ] && [ \"$__c\" != \"$__cl\" ] && { __cl=\"$__c\"; printf \"\\033]697;%s\\007\" \"$__c\"; }; }; __ms7(){ printf \"\\033]7;file://%s%s\\007\" \"$HOSTNAME\" \"$PWD\"; __msc; }; if [ -n \"$ZSH_VERSION\" ]; then autoload -Uz add-zsh-hook 2>/dev/null; add-zsh-hook precmd __ms7; else PROMPT_COMMAND=\"declare -F __ms7 >/dev/null && __ms7${PROMPT_COMMAND:+;$PROMPT_COMMAND}\"; fi; : __MEATSHELL_INTERNAL_SETUP_1; if [ -n \"$BASH_VERSION\" ]; then __md=\"$(history 2>/dev/null | { __md=\"\"; while read -r __mn __mr; do case \"$__mr\" in *\"__ms7()\"*\"PROMPT_COMMAND=\"*) __mn=\"${__mn%\\*}\"; __md=\"$__mn $__md\";; esac; done; printf \"%s\" \"$__md\"; })\"; for __mn in $__md; do history -d \"$__mn\" 2>/dev/null; done; unset __md __mn __mr; fi; __cl=\"$(fc -ln -1 2>/dev/null)\"; printf \"\\033]699;ready\\007\"; __ms7'";
+const PROMPT_BODY: &str = "test -z \"$FISH_VERSION\" && eval '__msc(){ __c=\"$(fc -ln -1 2>/dev/null)\"; [ -n \"$__c\" ] && [ \"$__c\" != \"$__cl\" ] && { __cl=\"$__c\"; printf \"\\033]697;%s\\007\" \"$__c\"; }; }; __ms7(){ printf \"\\033]7;file://%s%s\\007\" \"$HOSTNAME\" \"$PWD\"; __msc; }; if [ -n \"$ZSH_VERSION\" ]; then autoload -Uz add-zsh-hook 2>/dev/null; add-zsh-hook precmd __ms7; for __mb in \"^[[H=beginning-of-line\" \"^[OH=beginning-of-line\" \"^[[1~=beginning-of-line\" \"^[[F=end-of-line\" \"^[OF=end-of-line\" \"^[[4~=end-of-line\" \"^[[3~=delete-char\" \"^[[2~=overwrite-mode\" \"^[[5~=beginning-of-buffer-or-history\" \"^[[6~=end-of-buffer-or-history\"; do for __mm in emacs viins; do case \"$(bindkey -M $__mm \"${__mb%%=*}\" 2>/dev/null)\" in *undefined-key) bindkey -M $__mm \"${__mb%%=*}\" \"${__mb#*=}\";; esac; done; done; unset __mb __mm; else PROMPT_COMMAND=\"declare -F __ms7 >/dev/null && __ms7${PROMPT_COMMAND:+;$PROMPT_COMMAND}\"; fi; : __MEATSHELL_INTERNAL_SETUP_1; if [ -n \"$BASH_VERSION\" ]; then __md=\"$(history 2>/dev/null | { __md=\"\"; while read -r __mn __mr; do case \"$__mr\" in *\"__ms7()\"*\"PROMPT_COMMAND=\"*) __mn=\"${__mn%\\*}\"; __md=\"$__mn $__md\";; esac; done; printf \"%s\" \"$__md\"; })\"; for __mn in $__md; do history -d \"$__mn\" 2>/dev/null; done; unset __md __mn __mr; fi; __cl=\"$(fc -ln -1 2>/dev/null)\"; printf \"\\033]699;ready\\007\"; __ms7'";
 const PROMPT_SHELL_PROBE: &[u8] = b"if [ -n \"$BASH_VERSION\" ]; then printf '__MEATSHELL_SHELL__:bash\\n'; elif [ -n \"$ZSH_VERSION\" ]; then printf '__MEATSHELL_SHELL__:zsh\\n'; else printf '__MEATSHELL_SHELL__:other\\n'; fi";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -513,61 +514,6 @@ fn bound_prompt_setup_echo(text: &mut String) {
     let mut tail: String = text.chars().rev().take(KEEP_CHARS).collect();
     tail = tail.chars().rev().collect();
     *text = tail;
-}
-
-/// Extract the remote path from an OSC 7 sequence embedded in `text`.
-///
-/// Format: `ESC ] 7 ; file://hostname/path BEL`
-/// Returns the decoded absolute path component (without hostname).
-pub fn extract_osc7_path(text: &str) -> Option<String> {
-    extract_osc7_end(text).map(|(path, _)| path)
-}
-
-/// Like [`extract_osc7_path`] but also returns the byte index just past the OSC
-/// sequence's terminator, so the caller can cut everything up to and including
-/// it — used to discard the echoed setup line (which may wrap) at connect (#98).
-fn extract_osc7_end(text: &str) -> Option<(String, usize)> {
-    let bytes = text.as_bytes();
-    let mut i = 0;
-    while i + 1 < bytes.len() {
-        if bytes[i] != 0x1b || bytes[i + 1] != b']' {
-            i += 1;
-            continue;
-        }
-        let osc_start = i + 2;
-        i += 2;
-        // Scan for BEL (0x07) or ST (ESC \)
-        let mut end = i;
-        let mut term_len = 0;
-        while end < bytes.len() {
-            if bytes[end] == 0x07 {
-                term_len = 1;
-                break;
-            } else if bytes[end] == 0x1b && end + 1 < bytes.len() && bytes[end + 1] == b'\\' {
-                term_len = 2;
-                break;
-            }
-            end += 1;
-        }
-        if end >= bytes.len() {
-            break;
-        }
-        if let Ok(content) = std::str::from_utf8(&bytes[osc_start..end]) {
-            if let Some(rest) = content.strip_prefix("7;file://") {
-                // rest = "hostname/path" or "/path" (empty hostname)
-                let path = if rest.starts_with('/') {
-                    rest.to_string()
-                } else if let Some(slash) = rest.find('/') {
-                    rest[slash..].to_string()
-                } else {
-                    "/".to_string()
-                };
-                return Some((url_decode(&path), end + term_len));
-            }
-        }
-        i = end + term_len.max(1);
-    }
-    None
 }
 
 /// Find a meatshell command-capture sequence (`ESC ] 697 ; <command> BEL|ST`)
@@ -1561,13 +1507,69 @@ pub(crate) const COMPAT_CIPHER: &[russh::cipher::Name] = &[
     russh::cipher::TRIPLE_DES_CBC, // legacy fallback
 ];
 
+/// Default seconds of server silence before a keepalive is sent (#160, #515).
+pub const KEEPALIVE_DEFAULT_INTERVAL: u32 = 30;
+/// Default unanswered keepalives before the connection counts as dead.
+pub const KEEPALIVE_DEFAULT_MAX: u32 = 3;
+/// Settings range for the keepalive interval, in seconds.
+pub const KEEPALIVE_INTERVAL_RANGE: (u32, u32) = (5, 300);
+/// Settings range for unanswered keepalives. The minimum is 2 because russh
+/// treats `keepalive_max == 0` as "never time out" (see `keepalive_params`).
+pub const KEEPALIVE_MAX_RANGE: (u32, u32) = (2, 10);
+
+/// Process-wide SSH keepalive setting (Settings › Connection, #515), packed as
+/// `enabled << 63 | interval << 32 | max`. A global rather than a `Session`
+/// field because it is a client-wide preference read when each connection
+/// (terminal, SFTP, jump hosts, MCP) is opened; `ConfigStore` pushes it here
+/// on load and whenever it changes.
+static KEEPALIVE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(
+    pack_keepalive(true, KEEPALIVE_DEFAULT_INTERVAL, KEEPALIVE_DEFAULT_MAX),
+);
+
+const fn pack_keepalive(enabled: bool, interval_secs: u32, max_missed: u32) -> u64 {
+    ((enabled as u64) << 63) | (((interval_secs & 0x7fff_ffff) as u64) << 32) | max_missed as u64
+}
+
+/// Set the keepalive used by connections opened from now on (#515).
+pub fn set_keepalive(enabled: bool, interval_secs: u32, max_missed: u32) {
+    KEEPALIVE.store(
+        pack_keepalive(enabled, interval_secs, max_missed),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// russh `(keepalive_interval, keepalive_max)` for the user's setting.
+///
+/// russh sends a keepalive after `interval` without any data from the server
+/// and closes the connection once *more than* `keepalive_max` have gone
+/// unanswered when the timer fires again. OpenSSH's `ServerAliveCountMax = N`
+/// gives up after N unanswered probes, so pass `N - 1` to match: with the
+/// defaults (30 s, 3) a dead link is reported after about 2 minutes. The
+/// result is never 0, which russh would read as "never time out".
+fn keepalive_params(enabled: bool, interval_secs: u32, max_missed: u32) -> (Option<std::time::Duration>, usize) {
+    if !enabled {
+        return (None, 0);
+    }
+    let (lo, hi) = KEEPALIVE_INTERVAL_RANGE;
+    let interval = std::time::Duration::from_secs(u64::from(interval_secs.clamp(lo, hi)));
+    let (lo, hi) = KEEPALIVE_MAX_RANGE;
+    (Some(interval), (max_missed.clamp(lo, hi) - 1) as usize)
+}
+
+/// Apply the current keepalive setting to a client config. Every SSH
+/// connection MeatShell opens (terminal, SFTP, jump hosts) goes through here.
+pub fn apply_keepalive(config: &mut client::Config) {
+    let v = KEEPALIVE.load(std::sync::atomic::Ordering::Relaxed);
+    let enabled = v >> 63 == 1;
+    let interval = ((v >> 32) & 0x7fff_ffff) as u32;
+    let max = v as u32;
+    let (interval, max) = keepalive_params(enabled, interval, max);
+    config.keepalive_interval = interval;
+    config.keepalive_max = max;
+}
+
 fn ssh_client_config() -> Arc<client::Config> {
-    Arc::new(client::Config {
-        // Keep idle connections alive (#160). The terminal usually has the
-        // resource-monitor channel streaming every 2 s, but with shell
-        // integration disabled (#140) it can go idle and be dropped by
-        // NAT / firewall / server timeouts.
-        keepalive_interval: Some(std::time::Duration::from_secs(30)),
+    let mut config = client::Config {
         // Match the normal terminal connection exactly, including compatibility
         // fallbacks for older servers and network equipment (#172).
         preferred: russh::Preferred {
@@ -1576,7 +1578,13 @@ fn ssh_client_config() -> Arc<client::Config> {
             ..russh::Preferred::DEFAULT
         },
         ..<_>::default()
-    })
+    };
+    // Keep idle connections alive (#160) and notice dead ones (#515). The
+    // terminal usually has the resource-monitor channel streaming every 2 s,
+    // but with shell integration disabled (#140) it can go idle and be
+    // dropped by NAT / firewall / gateway timeouts.
+    apply_keepalive(&mut config);
+    Arc::new(config)
 }
 
 /// Perform the same SSH handshake and authentication as a real terminal
@@ -2000,6 +2008,14 @@ async fn run_session(
     //                `precmd` hook via `add-zsh-hook` instead (non-destructive —
     //                it preserves oh-my-zsh / p10k hooks, unlike `precmd(){…}`).
     //   • fish     → guarded out (fish 3.1+ emits OSC 7 itself).
+    // zsh also gets default bindings for Home / End / Delete / Insert /
+    // PageUp / PageDown (#519): zsh ships none, so a bare or starship-only
+    // setup (Arch's default) left Home/End dead and PageUp/PageDown/Delete
+    // typing `~`. Only keys the user's config left *unbound* are touched
+    // (`bindkey` reports `undefined-key`), in the emacs and viins keymaps, so
+    // oh-my-zsh, grml, p10k and hand-written bindings win. The loop uses
+    // `key=widget` words and `case`, not zsh's `for a b in`, because bash and
+    // dash parse the whole eval body too.
     // `__ms7` is called once at the end so the initial cwd arrives immediately.
     //
     // The whole shell-specific body lives inside `eval '…'`: fish can't parse
@@ -2109,6 +2125,7 @@ async fn run_session(
     let mut extended_decoder = crate::terminal::TerminalEncoding::new(&session.encoding);
     let terminal_encoder = crate::terminal::TerminalEncoding::new(&session.encoding);
     let mut trigger_engine = TriggerEngine::new(&session.triggers);
+    let mut cwd_tracker = CwdTracker::new(prompt_setup_supported);
 
     // --- Main pump ------------------------------------------------------
     loop {
@@ -2159,6 +2176,7 @@ async fn run_session(
                         // Only log the byte count — never the bytes themselves,
                         // which are raw keystrokes and may contain passwords (#15).
                         tracing::debug!("ssh channel.data len={} bytes", bytes.len());
+                        cwd_tracker.input(&bytes);
                         let bytes = terminal_encoder.encode(&bytes);
                         if let Err(err) = channel.data(&bytes[..]).await {
                             let _ = events.send(SessionEvent::Closed(format!("{}: {err}", t("写入失败", "write failed"))));
@@ -2334,7 +2352,7 @@ async fn run_session(
                                     // the prompt shows and the cwd updates.
                                     if !leftover.is_empty() {
                                         let text = terminal_decoder.decode(&leftover);
-                                        if let Some(cwd) = extract_osc7_path(&text) {
+                                        if let Some(cwd) = cwd_tracker.feed(&text) {
                                             let _ =
                                                 events.send(SessionEvent::CwdChanged(cwd));
                                         }
@@ -2409,6 +2427,9 @@ async fn run_session(
                                     }
                                 }
                             }
+                            if let Some(cwd) = cwd_tracker.feed(&painted) {
+                                let _ = events.send(SessionEvent::CwdChanged(cwd));
+                            }
                             let _ = events.send(SessionEvent::Output(painted));
                             let _ = channel.data(prompt_setup.as_bytes()).await;
                             continue;
@@ -2427,21 +2448,12 @@ async fn run_session(
                         if let Some(tail) = take_after_prompt_setup_done(&mut echo_buf) {
                             suppress_echo = false;
                             late_prompt_echo_pending = false;
-                            if let Some(cwd) = extract_osc7_path(&tail) {
-                                tracing::debug!("OSC7 cwd={:?}", cwd);
-                                let _ = events.send(SessionEvent::CwdChanged(cwd));
-                            }
                             tail
                         } else {
                                 bound_prompt_setup_echo(&mut echo_buf);
                                 continue; // keep buffering; show nothing yet
                             }
                         } else {
-                            // Scan for the OSC 7 CWD notification (cd-follow).
-                            if let Some(cwd) = extract_osc7_path(&chunk) {
-                                tracing::debug!("OSC7 cwd={:?}", cwd);
-                                let _ = events.send(SessionEvent::CwdChanged(cwd));
-                            }
                             let mut clean = chunk;
                             strip_pending_prompt_setup_echo(
                                 &mut clean,
@@ -2453,6 +2465,14 @@ async fn run_session(
                         // chunk before anything else looks at this text.
                         if !osc133_pending.is_empty() {
                             text.insert_str(0, &std::mem::take(&mut osc133_pending));
+                        }
+
+                        // OSC 7 remains authoritative. Some Bash configurations
+                        // also report root's absolute directory in OSC 0/2 titles
+                        // after sudo discards our hook. Only complete control
+                        // strings count; visible prompt text never does.
+                        if let Some(cwd) = cwd_tracker.feed(&text) {
+                            let _ = events.send(SessionEvent::CwdChanged(cwd));
                         }
 
                         // Capture commands run in the terminal via our OSC 697
@@ -2496,6 +2516,7 @@ async fn run_session(
                             if append_enter {
                                 bytes.push(b'\r');
                             }
+                            cwd_tracker.input(&bytes);
                             let encoded = terminal_encoder.encode(&bytes);
                             if let Err(error) = channel.data(&encoded[..]).await {
                                 tracing::warn!("session trigger response failed: {error}");
@@ -2505,11 +2526,15 @@ async fn run_session(
                     }
                     Some(ChannelMsg::ExtendedData { data, ext: _ }) => {
                         let text = extended_decoder.decode(&data);
+                        if let Some(cwd) = cwd_tracker.feed(&text) {
+                            let _ = events.send(SessionEvent::CwdChanged(cwd));
+                        }
                         for (response, append_enter) in trigger_engine.feed(&text) {
                             let mut bytes = response.as_str().as_bytes().to_vec();
                             if append_enter {
                                 bytes.push(b'\r');
                             }
+                            cwd_tracker.input(&bytes);
                             let encoded = terminal_encoder.encode(&bytes);
                             if let Err(error) = channel.data(&encoded[..]).await {
                                 tracing::warn!("session trigger response failed: {error}");
@@ -3457,6 +3482,35 @@ fn _assert_handle_send() {
 }
 
 #[cfg(test)]
+mod keepalive_tests {
+    use super::{keepalive_params, KEEPALIVE_DEFAULT_INTERVAL, KEEPALIVE_DEFAULT_MAX};
+    use std::time::Duration;
+
+    #[test]
+    fn default_matches_openssh_server_alive_semantics() {
+        // #515: 30 s interval, give up after 3 unanswered keepalives. russh
+        // drops the link once *more than* keepalive_max are unanswered.
+        let (interval, max) =
+            keepalive_params(true, KEEPALIVE_DEFAULT_INTERVAL, KEEPALIVE_DEFAULT_MAX);
+        assert_eq!(interval, Some(Duration::from_secs(30)));
+        assert_eq!(max, 2);
+    }
+
+    #[test]
+    fn disabled_sends_no_keepalives() {
+        assert_eq!(keepalive_params(false, 30, 3).0, None);
+    }
+
+    #[test]
+    fn out_of_range_values_are_clamped_and_never_disable_the_timeout() {
+        // keepalive_max == 0 means "never time out" in russh, so the smallest
+        // setting must still map to 1.
+        assert_eq!(keepalive_params(true, 1, 0), (Some(Duration::from_secs(5)), 1));
+        assert_eq!(keepalive_params(true, 99_999, 99), (Some(Duration::from_secs(300)), 9));
+    }
+}
+
+#[cfg(test)]
 mod prompt_setup_echo_tests {
     use super::{
         bound_prompt_setup_echo, prompt_setup_echo_end, prompt_setup_supported,
@@ -3502,6 +3556,30 @@ mod prompt_setup_echo_tests {
         assert!(PROMPT_BODY
             .contains("PROMPT_COMMAND=\"declare -F __ms7 >/dev/null && __ms7${PROMPT_COMMAND:+;"));
         assert!(!PROMPT_BODY.contains("PROMPT_COMMAND=\"__ms7"));
+    }
+
+    #[test]
+    fn zsh_gets_default_bindings_only_for_unbound_keys() {
+        // #519: bare / starship-only zsh has no Home/End/PageUp/PageDown/Delete
+        // bindings. The setup fills them in, inside the zsh branch only.
+        let zsh = &PROMPT_BODY[PROMPT_BODY.find("if [ -n \"$ZSH_VERSION\" ]").unwrap()
+            ..PROMPT_BODY.find("else PROMPT_COMMAND=").unwrap()];
+        for binding in [
+            "^[[H=beginning-of-line",
+            "^[OH=beginning-of-line",
+            "^[[F=end-of-line",
+            "^[OF=end-of-line",
+            "^[[3~=delete-char",
+            "^[[5~=beginning-of-buffer-or-history",
+            "^[[6~=end-of-buffer-or-history",
+        ] {
+            assert!(zsh.contains(binding), "{binding}");
+        }
+        // Never override the user's own bindings, in emacs and vi insert mode.
+        assert!(zsh.contains("in *undefined-key) bindkey -M $__mm"));
+        assert!(zsh.contains("for __mm in emacs viins"));
+        // bash and dash parse the whole eval body: no zsh-only `for a b in`.
+        assert!(!zsh.contains("for __mk __mw"));
     }
 
     #[test]

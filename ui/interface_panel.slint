@@ -557,6 +557,10 @@ export component InterfacePanel inherits Rectangle {
     in property <bool> session-log-dir-custom;
     in-out property <bool> paste-confirm-enabled: true;
     in-out property <bool> extra-paste-shortcuts-enabled: true;
+    // SSH keepalive (Settings › Connection, #515).
+    in-out property <bool> ssh-keepalive-enabled: true;
+    in-out property <int> ssh-keepalive-interval: 30;
+    in-out property <int> ssh-keepalive-max: 3;
     in-out property <bool> zen-mode: false;
     in-out property <bool> welcome-as-sidebar;
     in-out property <bool> quick-commands-as-sidebar;
@@ -567,6 +571,10 @@ export component InterfacePanel inherits Rectangle {
     in-out property <bool> mcp-use-saved-credentials: false;
     in-out property <bool> mcp-allow-commands: false;
     in-out property <bool> mcp-allow-file-transfers: false;
+    // Ready-to-paste MCP client entry with this executable's path (Rust).
+    in property <string> mcp-config-json;
+    callback copy-text(string);
+    property <bool> mcp-json-copied: false;
     in-out property <float> wallpaper-overlay;   // frosted-panel opacity 0.30-1.00
     // Active wallpaper id: "" / "builtin:light" / "builtin:dark" / a file path.
     in property <string> current-wallpaper;
@@ -650,6 +658,7 @@ export component InterfacePanel inherits Rectangle {
     callback open-session-log-dir();
     callback set-paste-confirm-enabled(bool);
     callback set-extra-paste-shortcuts-enabled(bool);
+    callback set-ssh-keepalive(bool /* enabled */, int /* interval s */, int /* max missed */);
     callback set-zen-mode(bool);
     callback set-welcome-as-sidebar(bool);
     callback set-quick-commands-as-sidebar(bool);
@@ -709,6 +718,11 @@ export component InterfacePanel inherits Rectangle {
                     icon: "\u{E1BC}"; label: root.lang-en ? "Wallpaper & theme" : "壁纸与主题";
                     active: root.ifd-page == "wallpaper";
                     clicked => { root.ifd-page = "wallpaper"; }
+                }
+                NavItem {
+                    icon: "\u{E8BE}"; label: root.lang-en ? "Connection" : "连接";
+                    active: root.ifd-page == "connection";
+                    clicked => { root.ifd-page = "connection"; }
                 }
                 NavItem {
                     icon: "\u{E2C7}"; label: "SFTP";
@@ -1643,6 +1657,57 @@ export component InterfacePanel inherits Rectangle {
                 }
             }
 
+            // --- Connection page (#515) -------------------------------
+            if root.ifd-page == "connection" : VerticalLayout {
+                padding-left: 20px;
+                padding-right: 20px;
+                padding-top: 14px;
+                spacing: 0;
+                alignment: start;
+
+                SectionHeader { text: root.lang-en ? "SSH KEEPALIVE" : "SSH 保活"; height: 24px; }
+                SettingRow {
+                    label: root.lang-en ? "Send keepalives" : "发送保活包";
+                    desc: root.lang-en
+                        ? "Stops NAT, firewalls and gateways from dropping idle SSH / SFTP connections, and reports a dead connection instead of waiting for a keypress. Applies to new connections."
+                        : "防止空闲的 SSH / SFTP 连接被 NAT、防火墙或网关回收，连接断开时也能及时提示，而不是等到按键才发现。对新建连接生效。";
+                    show-divider: root.ssh-keepalive-enabled;
+                    Switch {
+                        on: root.ssh-keepalive-enabled;
+                        toggled(v) => {
+                            root.ssh-keepalive-enabled = v;
+                            root.set-ssh-keepalive(v, root.ssh-keepalive-interval, root.ssh-keepalive-max);
+                        }
+                    }
+                }
+                if root.ssh-keepalive-enabled : SettingRow {
+                    label: root.lang-en ? "Interval" : "发送间隔";
+                    desc: root.lang-en ? "Send a keepalive after the server has been silent this long."
+                                       : "服务器持续无数据多久后发送一次保活包。";
+                    Stepper {
+                        value: root.ssh-keepalive-interval; minimum: 5; maximum: 300; step: 5; unit: "s";
+                        changed(v) => {
+                            root.ssh-keepalive-interval = v;
+                            root.set-ssh-keepalive(true, v, root.ssh-keepalive-max);
+                        }
+                    }
+                }
+                if root.ssh-keepalive-enabled : SettingRow {
+                    label: root.lang-en ? "Unanswered keepalives" : "最大无响应次数";
+                    desc: root.lang-en
+                        ? "Disconnect after this many keepalives in a row get no reply (about " + (root.ssh-keepalive-max + 1) * root.ssh-keepalive-interval + " s)."
+                        : "连续这么多次保活包无响应后断开连接(约 " + (root.ssh-keepalive-max + 1) * root.ssh-keepalive-interval + " 秒)。";
+                    show-divider: false;
+                    Stepper {
+                        value: root.ssh-keepalive-max; minimum: 2; maximum: 10; step: 1;
+                        changed(v) => {
+                            root.ssh-keepalive-max = v;
+                            root.set-ssh-keepalive(true, root.ssh-keepalive-interval, v);
+                        }
+                    }
+                }
+            }
+
             // --- SFTP page ---------------------------------------------
             if root.ifd-page == "sftp" : VerticalLayout {
                 padding-left: 20px;
@@ -2307,6 +2372,9 @@ export component InterfacePanel inherits Rectangle {
                 padding-left: 20px;
                 padding-right: 20px;
                 padding-top: 14px;
+                // Room below the config snippet so it scrolls clear of the
+                // card's bottom edge / resize grip.
+                padding-bottom: 24px;
                 spacing: 0;
                 alignment: start;
                 SectionHeader { text: "MODEL CONTEXT PROTOCOL"; height: 24px; }
@@ -2375,13 +2443,64 @@ export component InterfacePanel inherits Rectangle {
                     wrap: word-wrap;
                 }
                 Rectangle { height: 18px; }
+                SectionHeader { text: root.lang-en ? "CLIENT CONFIGURATION" : "客户端配置"; height: 22px; }
                 Text {
                     text: root.lang-en
-                        ? "Command: meatshell mcp serve\nTransport: stdio (local process only)"
-                        : "启动命令：meatshell mcp serve\n传输方式：stdio（仅本机进程）";
+                        ? "Add this entry under \"mcpServers\" in your MCP client's config (for example claude_desktop_config.json). Transport: stdio, local process only."
+                        : "把这段配置加到 MCP 客户端配置的 \"mcpServers\" 下（例如 claude_desktop_config.json）。传输方式：stdio，仅本机进程。";
                     color: Theme.text-muted;
-                    font-family: Theme.term-font-family;
-                    font-size: 12px * Theme.panel-font;
+                    font-size: 11px * Theme.panel-font;
+                    wrap: word-wrap;
+                }
+                Rectangle { height: 8px; }
+                // The snippet, with a copy button in its top-right corner.
+                Rectangle {
+                    border-radius: 6px;
+                    border-width: 1px;
+                    border-color: Theme.border-subtle;
+                    background: Theme.bg-elevated;
+                    height: mcp-json-text.preferred-height + 24px;
+                    mcp-json-text := Text {
+                        x: 12px;
+                        y: 12px;
+                        width: parent.width - 12px - 44px;
+                        text: root.mcp-config-json;
+                        color: Theme.text-primary;
+                        font-family: Theme.term-font-family;
+                        font-size: 12px * Theme.panel-font;
+                        wrap: char-wrap;
+                    }
+                    copy-btn := Rectangle {
+                        x: parent.width - self.width - 6px;
+                        y: 6px;
+                        width: 30px;
+                        height: 26px;
+                        border-radius: 5px;
+                        background: copy-ta.has-hover ? Theme.bg-hover : transparent;
+                        Text {
+                            text: root.mcp-json-copied ? "\u{E5CA}" : "\u{E14D}"; // check / content_copy
+                            font-family: "Material Icons";
+                            font-size: 16px * Theme.panel-font;
+                            color: root.mcp-json-copied ? Theme.success : Theme.text-secondary;
+                            width: 100%;
+                            height: 100%;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        copy-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.copy-text(root.mcp-config-json);
+                                root.mcp-json-copied = true;
+                            }
+                        }
+                    }
+                    // Flip the check back to the copy icon after a moment.
+                    Timer {
+                        interval: 1500ms;
+                        running: root.mcp-json-copied;
+                        triggered => { root.mcp-json-copied = false; }
+                    }
                 }
             }
 

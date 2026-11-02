@@ -497,9 +497,11 @@ export component Sidebar inherits Rectangle {
     // Drag from any empty area of the panel to re-dock it (the status header is
     // a small target). Sits behind the content; interactive widgets (stat bars,
     // net selector, disk rows) are in front and capture their own events, so
-    // this only fires on the panel's empty space (#dock).
+    // this only fires on the panel's empty space (#dock). The move cursor shows
+    // only while dragging: hovering empty space keeps the normal arrow, like the
+    // other panels, and the header keeps the move cursor as the visible handle (#360).
     dock-bg := TouchArea {
-        mouse-cursor: move;
+        mouse-cursor: self.pressed ? move : default;
         moved => {
             if (self.pressed) {
                 root.dock-drag-move(self.absolute-position.x + self.mouse-x,

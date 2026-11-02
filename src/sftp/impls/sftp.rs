@@ -72,6 +72,19 @@ impl SftpHandle {
             local_dir,
         });
     }
+    /// Dual-pane download: copy `remotes` directly into `local_dir`.
+    pub fn download_into(
+        &self,
+        remotes: Vec<String>,
+        local_dir: String,
+        conflict: DownloadConflict,
+    ) {
+        let _ = self.commands.send(SftpCommand::DownloadInto {
+            remotes,
+            local_dir,
+            conflict,
+        });
+    }
     pub fn cancel_transfer(&self, id: String) {
         let _ = self.commands.send(SftpCommand::CancelTransfer(id));
     }
@@ -302,14 +315,7 @@ async fn run_sftp(
     ));
 
     // Open a dedicated SSH connection for SFTP.
-    let config = Arc::new(client::Config {
-        // Keep the idle SFTP connection alive (#160). Without a keepalive, an idle
-        // SFTP connection (no file ops for a while) gets silently dropped by
-        // NAT / firewall / server idle timeouts; afterwards every operation fails
-        // ("folder read failed"). Send a keepalive every 30 s so traffic never
-        // goes quiet; keepalive_max (default 3) still closes a genuinely dead
-        // connection after ~90 s of unanswered keepalives.
-        keepalive_interval: Some(std::time::Duration::from_secs(30)),
+    let mut config = client::Config {
         // Match the shell connection's algorithm set so SFTP reaches the same
         // legacy servers (#172) instead of failing with "No common algorithm".
         preferred: russh::Preferred {
@@ -318,7 +324,13 @@ async fn run_sftp(
             ..russh::Preferred::DEFAULT
         },
         ..<_>::default()
-    });
+    };
+    // Keep the idle SFTP connection alive (#160). Without a keepalive, an idle
+    // SFTP connection (no file ops for a while) gets silently dropped by
+    // NAT / firewall / server idle timeouts; afterwards every operation fails
+    // ("folder read failed"). Uses the same setting as the terminal (#515).
+    crate::ssh::apply_keepalive(&mut config);
+    let config = Arc::new(config);
 
     let addr = format!("{}:{}", session.host, session.port);
     // Isolate external-editor files by connection and keep the server in the
@@ -855,7 +867,100 @@ async fn run_sftp(
                             }
                         }
                     }
+                    // Let a dual-pane local browser refresh if it shows this dir.
+                    let _ = events.send(SessionEvent::LocalFilesChanged {
+                        path: local_dir.clone(),
+                    });
                     lock_or_recover(&cancels_done).remove(&file_id);
+                });
+            }
+
+            SftpCommand::DownloadInto {
+                remotes,
+                local_dir,
+                conflict,
+            } => {
+                // Dual-pane "← 下载": write every selected entry into the local
+                // folder the pane is showing, one after another (no remote tar —
+                // the user expects plain files, not an archive).
+                let sftp = sftp.clone();
+                let handle = handle.clone();
+                let events = events.clone();
+                let cancels_done = cancels.clone();
+                transfers.spawn(async move {
+                    let total = remotes.len();
+                    let mut ok = 0usize;
+                    let mut failed = 0usize;
+                    for remote in &remotes {
+                        let id = Uuid::new_v4().to_string();
+                        let cancel = Arc::new(AtomicBool::new(false));
+                        cancels_done
+                            .lock()
+                            .unwrap()
+                            .insert(id.clone(), cancel.clone());
+                        let name = base_name(remote);
+                        let _ = events.send(SessionEvent::SftpStatus(format!(
+                            "{} {}...",
+                            t("下载", "Downloading"),
+                            name
+                        )));
+                        match download_one_into(
+                            &sftp, &handle, remote, &local_dir, conflict, &events, &cancel, &id,
+                        )
+                        .await
+                        {
+                            Ok(true) => {
+                                ok += 1;
+                                let _ = events.send(SessionEvent::SftpStatus(format!(
+                                    "{}: {}",
+                                    t("下载完成", "Downloaded"),
+                                    name
+                                )));
+                            }
+                            Ok(false) => {
+                                let _ = events.send(SessionEvent::SftpStatus(format!(
+                                    "{}: {}",
+                                    t("已取消", "Cancelled"),
+                                    name
+                                )));
+                            }
+                            Err(e) => {
+                                failed += 1;
+                                emit_transfer(
+                                    &events,
+                                    &id,
+                                    &name,
+                                    false,
+                                    0,
+                                    0,
+                                    2,
+                                    &e.to_string(),
+                                );
+                                let _ = events.send(SessionEvent::SftpStatus(format!(
+                                    "{}: {e}",
+                                    t("下载失败", "Download failed")
+                                )));
+                            }
+                        }
+                        cancels_done.lock().unwrap().remove(&id);
+                    }
+                    if total > 1 {
+                        let _ = events.send(SessionEvent::SftpStatus(if failed == 0 {
+                            format!("{}: {} {}", t("下载完成", "Downloaded"), ok, t("项", "items"))
+                        } else {
+                            format!(
+                                "{}: {}/{} {}",
+                                t("下载失败", "Download failed"),
+                                failed,
+                                total,
+                                t("项", "items")
+                            )
+                        }));
+                    }
+                    // Let the local pane pick up the new files.
+                    let _ = events.send(SessionEvent::LocalFilesChanged {
+                        path: local_dir.clone(),
+                    });
                 });
             }
 
@@ -977,6 +1082,11 @@ async fn run_sftp(
                             )));
                         }
                     }
+                    // The archive landed in `local_dir`; refresh a local pane
+                    // showing that folder (dual-pane view).
+                    let _ = events.send(SessionEvent::LocalFilesChanged {
+                        path: local_dir.clone(),
+                    });
                     lock_or_recover(&cancels_done).remove(&id);
                 });
             }
@@ -2096,7 +2206,7 @@ fn parent_dir(path: &str) -> String {
 /// no shell parsing happens.  (`xdg-open` on Unix already takes a single argv
 /// argument and never invokes a shell.)
 #[cfg(windows)]
-fn open_with_os(path: &str) {
+pub(crate) fn open_with_os(path: &str) {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     #[link(name = "shell32")]
@@ -2131,7 +2241,7 @@ fn open_with_os(path: &str) {
 }
 
 #[cfg(not(windows))]
-fn open_with_os(path: &str) {
+pub(crate) fn open_with_os(path: &str) {
     let _ = std::process::Command::new("xdg-open").arg(path).spawn();
 }
 
@@ -2207,7 +2317,7 @@ pub(crate) fn download_target_path(remote: &str, local_dir: &str) -> PathBuf {
     Path::new(local_dir).join(sanitize_filename(&base_name(remote)))
 }
 
-fn available_download_path(requested: &Path) -> PathBuf {
+pub(crate) fn available_download_path(requested: &Path) -> PathBuf {
     if !requested.exists() {
         return requested.to_path_buf();
     }
@@ -3069,8 +3179,61 @@ async fn download_impl(
     Ok(true)
 }
 
-/// Recursively download a remote directory tree under `local_parent` (#50).
+/// Download one remote entry (a file or a whole folder) into an existing local
+/// folder — the dual-pane view's "download to the folder on the left".
 ///
+/// Unlike the single-entry `Download` command above, an empty folder is still
+/// created locally (the pane shows what is on the server, and "the folder moved
+/// over" is the expected result there), and the conflict policy applies to
+/// every entry of a multi-selection in the same way.
+#[allow(clippy::too_many_arguments)]
+async fn download_one_into(
+    sftp: &SftpSession,
+    handle: &SftpLink,
+    remote: &str,
+    local_dir: &str,
+    conflict: DownloadConflict,
+    events: &UnboundedSender<SessionEvent>,
+    cancel: &Arc<AtomicBool>,
+    id: &str,
+) -> Result<bool> {
+    let is_dir = sftp
+        .metadata(remote)
+        .await
+        .ok()
+        .map(|m| (m.permissions.unwrap_or(0) & 0o170_000) == 0o040_000)
+        .unwrap_or(false);
+    if is_dir {
+        let dirname = base_name(remote);
+        let _ = events.send(SessionEvent::SftpStatus(format!(
+            "{} {}/...",
+            t("下载文件夹", "Downloading folder"),
+            dirname
+        )));
+        download_dir(sftp, handle, remote, local_dir, events).await?;
+        return Ok(true);
+    }
+    // The server controls the name, so sanitize it before it becomes a local
+    // path (#26) — same rule as the regular download path.
+    let filename = sanitize_filename(&base_name(remote));
+    let requested = download_target_path(remote, local_dir);
+    let local_path = match conflict {
+        DownloadConflict::Replace => requested,
+        DownloadConflict::KeepBoth => available_download_path(&requested),
+    };
+    download_impl(
+        handle,
+        remote,
+        &local_path.to_string_lossy(),
+        &filename,
+        id,
+        events,
+        cancel,
+    )
+    .await
+}
+
+/// Recursively download a remote directory tree under `local_parent` (#50).
 /// Iterative (work-stack) rather than a boxed async recursion: each remote dir
 /// is mirrored to a sanitized local name, then its files are downloaded with the
 /// same per-file pipeline used for single downloads. Names are sanitized (#26)

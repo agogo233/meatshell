@@ -77,6 +77,457 @@ component SftpMenuItem inherits Rectangle {
 }
 
 // ---------------------------------------------------------------------------
+// LocalPane — this machine's folders, the left half of the split view
+// ---------------------------------------------------------------------------
+//
+// The right half keeps the regular remote listing, so the two panes can be
+// compared side by side and files/folders copied either way with the buttons
+// in each pane's header (or the row context menu). Browsing is entirely local:
+// the folder is read on a Rust worker thread and the rows arrive through
+// `local-entries`, exactly like the remote listing.
+component LocalPane inherits Rectangle {
+    in property <[SftpEntry]> entries;
+    in property <string> path: "";
+    in property <bool> loading: false;
+    in property <string> status: "";
+    in property <int> selected-count: 0;
+
+    callback navigate(string);      // "..", "~" or a typed path
+    callback up();
+    callback home();
+    callback refresh();
+    callback open(string);          // double-click on a file
+    callback toggle-select(int);
+    callback select-range(int, int);
+    callback copy-path(string);
+    callback upload(string);        // upload this entry (file or whole folder)
+    callback upload-selected();
+    // Split-view drag & drop: the panel owns the gesture, this pane only
+    // reports it (absolute cursor coordinates, so the panel can find the
+    // opposite pane).
+    callback drag-begin(int /*row*/, int /*item count*/, string /*label*/, length /*abs x*/, length /*abs y*/);
+    callback drag-move(length /*abs x*/, length /*abs y*/);
+    callback drag-end(length /*abs x*/, length /*abs y*/);
+    callback drag-cancel();
+
+    property <int> selected-row: -1;
+    property <int> select-anchor: -1;
+    property <bool> shift-click-pending: false;
+    property <bool> drag-started: false;
+    property <length> menu-x;
+    property <length> menu-y;
+    property <string> menu-target;
+    property <bool> menu-target-is-dir;
+    // Narrow halves drop the optional columns so the name stays readable.
+    property <bool> show-size: root.width > 250px;
+    property <bool> show-modified: root.width > 350px;
+
+    background: Theme.bg-panel;
+    clip: true;
+
+    // Keep the editable path field in sync when navigation happens elsewhere
+    // (up / home / double-click), mirroring the panel's own path bar.
+    changed path => {
+        path-input.text = root.path;
+        root.selected-row = -1;
+        root.select-anchor = -1;
+    }
+
+    VerticalLayout {
+        spacing: 0;
+
+        // --- Path bar: local path + up/home/refresh/upload ------------------
+        Rectangle {
+            height: 28px;
+            background: Theme.bg-panel-alt;
+            HorizontalLayout {
+                padding-left: 6px;
+                padding-right: 4px;
+                spacing: 3px;
+                Text {
+                    width: 16px;
+                    text: "\u{E30C}"; // computer
+                    font-family: "Material Icons";
+                    color: Theme.text-secondary;
+                    font-size: Theme.fs-sm;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: 22px;
+                    border-radius: Theme.radius-sm;
+                    background: Theme.bg-root;
+                    border-width: 1px;
+                    border-color: path-input.has-focus ? Theme.accent : Theme.border-subtle;
+                    path-input := TextInput {
+                        x: 6px;
+                        width: parent.width - 12px;
+                        height: parent.height;
+                        text: root.path;
+                        color: Theme.text-primary;
+                        font-family: Theme.ui-font-family;
+                        font-size: Theme.fs-sm;
+                        vertical-alignment: center;
+                        single-line: true;
+                        accepted => { root.navigate(self.text); }
+                    }
+                }
+                Rectangle {
+                    width: 22px; height: 22px;
+                    border-radius: Theme.radius-sm;
+                    background: up-ta.has-hover ? Theme.bg-hover : transparent;
+                    up-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.up(); }
+                    }
+                    Text { text: "↑"; color: Theme.text-secondary; font-size: Theme.fs-md;
+                           horizontal-alignment: center; vertical-alignment: center; }
+                }
+                Rectangle {
+                    width: 22px; height: 22px;
+                    border-radius: Theme.radius-sm;
+                    background: home-ta.has-hover ? Theme.bg-hover : transparent;
+                    home-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.home(); }
+                    }
+                    Text { text: "\u{E88A}"; // home
+                           font-family: "Material Icons";
+                           color: Theme.text-secondary; font-size: Theme.fs-sm;
+                           horizontal-alignment: center; vertical-alignment: center; }
+                }
+                Rectangle {
+                    width: 22px; height: 22px;
+                    border-radius: Theme.radius-sm;
+                    background: ref-ta.has-hover ? Theme.bg-hover : transparent;
+                    ref-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.refresh(); }
+                    }
+                    Text { text: "\u{E5D5}"; // refresh
+                           font-family: "Material Icons";
+                           color: Theme.text-secondary; font-size: Theme.fs-sm;
+                           horizontal-alignment: center; vertical-alignment: center; }
+                }
+                // Upload: the checked rows, or the clicked row when nothing is checked.
+                Rectangle {
+                    width: root.width > 300px ? 66px : 24px;
+                    height: 22px;
+                    border-radius: Theme.radius-sm;
+                    background: ul-ta.has-hover ? Theme.accent-hover : Theme.accent;
+                    ul-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            if (root.selected-count > 0) {
+                                root.upload-selected();
+                            } else if (root.selected-row >= 0 && root.selected-row < root.entries.length) {
+                                root.upload(root.entries[root.selected-row].full-path);
+                            }
+                        }
+                    }
+                    Text {
+                        text: root.width > 300px ? @tr("Upload") : "\u{E2C6}"; // file_upload
+                        font-family: root.width > 300px ? Theme.ui-font-family : "Material Icons";
+                        color: #ffffff;
+                        font-size: Theme.fs-sm;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+        Rectangle { height: 1px; background: Theme.border-subtle; }
+
+        // --- Column headers -------------------------------------------------
+        Rectangle {
+            height: 20px;
+            background: Theme.bg-root;
+            HorizontalLayout {
+                padding-left: 8px; padding-right: 8px; spacing: 8px;
+                Rectangle { width: 16px; }
+                Text {
+                    text: @tr("Name");
+                    color: Theme.text-muted; font-size: Theme.fs-xs;
+                    horizontal-stretch: 1; min-width: 90px;
+                    horizontal-alignment: left; vertical-alignment: center;
+                }
+                if root.show-size : Text {
+                    text: @tr("Size");
+                    color: Theme.text-muted; font-size: Theme.fs-xs;
+                    width: 64px; horizontal-alignment: right; vertical-alignment: center;
+                }
+                if root.show-modified : Text {
+                    text: @tr("Modified");
+                    color: Theme.text-muted; font-size: Theme.fs-xs;
+                    width: 104px; horizontal-alignment: right; vertical-alignment: center;
+                }
+            }
+        }
+        Rectangle { height: 1px; background: Theme.border-subtle; }
+
+        // --- Rows -----------------------------------------------------------
+        file-area := Rectangle {
+            vertical-stretch: 1;
+            clip: true;
+            ScrollView {
+                width: parent.width;
+                height: parent.height;
+                content-width: self.visible-width;
+                content-height: max(self.visible-height, local-list.preferred-height);
+
+                local-list := VerticalLayout {
+                    spacing: 0;
+
+                    if root.loading : Rectangle {
+                        height: 36px;
+                        Text { text: @tr("Loading..."); color: Theme.text-muted; font-size: Theme.fs-sm;
+                               horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                    if !root.loading && root.entries.length == 0 : Rectangle {
+                        height: 36px;
+                        Text { text: @tr("Empty directory"); color: Theme.text-muted; font-size: Theme.fs-sm;
+                               horizontal-alignment: center; vertical-alignment: center; }
+                    }
+
+                    for entry[i] in root.entries : Rectangle {
+                        height: 24px;
+                        background: entry.selected
+                            ? #4a90e235
+                            : (i == root.selected-row
+                                ? #4a90e240
+                                : (row-ta.has-hover ? #4a90e225
+                                   : (mod(i, 2) == 0 ? transparent : #ffffff08)));
+
+                        row-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            // Drag a row onto the remote half to upload it (the
+                            // whole checked set when the row is one of several
+                            // checked items, like a file manager).
+                            moved => {
+                                if (self.pressed && !root.drag-started
+                                        && (abs(self.mouse-x - self.pressed-x) > 6px
+                                            || abs(self.mouse-y - self.pressed-y) > 6px)) {
+                                    root.drag-started = true;
+                                    root.drag-begin(
+                                        i,
+                                        entry.selected && root.selected-count > 1 ? root.selected-count : 1,
+                                        entry.selected && root.selected-count > 1 ? @tr("Selected items") : entry.name,
+                                        self.absolute-position.x + self.mouse-x,
+                                        self.absolute-position.y + self.mouse-y);
+                                } else if (root.drag-started) {
+                                    root.drag-move(self.absolute-position.x + self.mouse-x,
+                                                   self.absolute-position.y + self.mouse-y);
+                                }
+                            }
+                            clicked => {
+                                root.selected-row = i;
+                                if (root.shift-click-pending) {
+                                    root.shift-click-pending = false;
+                                } else {
+                                    root.select-anchor = i;
+                                }
+                            }
+                            double-clicked => {
+                                if (entry.is-dir) {
+                                    root.navigate(entry.full-path);
+                                } else {
+                                    root.open(entry.full-path);
+                                }
+                            }
+                            pointer-event(ev) => {
+                                if (ev.kind == PointerEventKind.up) {
+                                    if (root.drag-started) {
+                                        root.drag-end(self.absolute-position.x + self.mouse-x,
+                                                      self.absolute-position.y + self.mouse-y);
+                                    }
+                                    root.drag-started = false;
+                                } else if (ev.kind == PointerEventKind.cancel) {
+                                    if (root.drag-started) {
+                                        root.drag-cancel();
+                                    }
+                                    root.drag-started = false;
+                                } else if (ev.kind == PointerEventKind.down) {
+                                    root.drag-started = false;
+                                }
+                                if (ev.kind == PointerEventKind.down
+                                        && ev.button == PointerEventButton.left
+                                        && ev.modifiers.shift) {
+                                    root.shift-click-pending = true;
+                                    root.select-range(root.select-anchor < 0 ? i : root.select-anchor, i);
+                                    if (root.select-anchor < 0) { root.select-anchor = i; }
+                                }
+                                if (ev.kind == PointerEventKind.down
+                                        && ev.button == PointerEventButton.right) {
+                                    root.selected-row = i;
+                                    root.menu-target = entry.full-path;
+                                    root.menu-target-is-dir = entry.is-dir;
+                                    root.menu-x = self.absolute-position.x + self.mouse-x - file-area.absolute-position.x;
+                                    root.menu-y = self.absolute-position.y + self.mouse-y - file-area.absolute-position.y;
+                                    local-menu.show();
+                                }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            padding-left: 8px; padding-right: 8px; spacing: 8px;
+                            // Multi-select checkbox: batch uploads.
+                            Rectangle {
+                                width: 16px;
+                                y: (parent.height - self.height) / 2;
+                                height: 16px;
+                                border-radius: 3px;
+                                border-width: 1px;
+                                border-color: entry.selected ? Theme.accent : Theme.border-strong;
+                                background: entry.selected ? Theme.accent : transparent;
+                                cb-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        if (root.shift-click-pending) {
+                                            root.shift-click-pending = false;
+                                        } else {
+                                            root.toggle-select(i);
+                                            root.select-anchor = i;
+                                        }
+                                    }
+                                    pointer-event(ev) => {
+                                        if (ev.kind == PointerEventKind.down
+                                                && ev.button == PointerEventButton.left
+                                                && ev.modifiers.shift) {
+                                            root.shift-click-pending = true;
+                                            root.select-range(root.select-anchor < 0 ? i : root.select-anchor, i);
+                                            if (root.select-anchor < 0) { root.select-anchor = i; }
+                                        }
+                                    }
+                                }
+                                if entry.selected : Text {
+                                    text: "\u{E5CA}"; // check
+                                    font-family: "Material Icons";
+                                    color: #ffffff;
+                                    font-size: 13px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    width: parent.width; height: parent.height;
+                                }
+                            }
+
+                            HorizontalLayout {
+                                horizontal-stretch: 1;
+                                min-width: 90px;
+                                spacing: 4px;
+                                Text {
+                                    text: entry.is-dir ? "\u{E2C7}" : "\u{E24D}";
+                                    font-family: "Material Icons";
+                                    color: entry.is-dir ? Theme.accent : Theme.text-secondary;
+                                    font-size: Theme.fs-sm;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: entry.name;
+                                    color: entry.is-dir ? Theme.accent : Theme.text-primary;
+                                    font-size: Theme.fs-sm;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            if root.show-size : Text {
+                                text: entry.is-dir ? "" : entry.size;
+                                color: Theme.text-secondary; font-size: Theme.fs-xs;
+                                width: 64px; horizontal-alignment: right; vertical-alignment: center;
+                            }
+                            if root.show-modified : Text {
+                                text: entry.modified;
+                                color: Theme.text-muted; font-size: Theme.fs-xs;
+                                width: 104px; horizontal-alignment: right; vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    // Whitespace below the rows: right-click clears the target.
+                    Rectangle {
+                        vertical-stretch: 1;
+                        min-height: 24px;
+                        ws-ta := TouchArea {
+                            pointer-event(ev) => {
+                                if (ev.kind == PointerEventKind.down
+                                        && ev.button == PointerEventButton.right) {
+                                    root.selected-row = -1;
+                                    root.menu-target = "";
+                                    root.menu-x = self.absolute-position.x + self.mouse-x - file-area.absolute-position.x;
+                                    root.menu-y = self.absolute-position.y + self.mouse-y - file-area.absolute-position.y;
+                                    local-menu.show();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            local-menu := PopupWindow {
+                x: root.menu-x;
+                y: root.menu-y;
+                width: 168px;
+                height: 5 * 27px + 14px;
+                Rectangle {
+                    background: Theme.popup-bg;
+                    border-radius: Theme.radius-sm;
+                    border-width: 1px;
+                    border-color: Theme.border-strong;
+                    drop-shadow-blur: 12px;
+                    drop-shadow-color: #00000060;
+                    VerticalLayout {
+                        padding: 4px;
+                        spacing: 1px;
+                        SftpMenuItem {
+                            label: @tr("Upload to server");
+                            enabled: root.menu-target != "";
+                            clicked => { root.upload(root.menu-target); }
+                        }
+                        SftpMenuItem {
+                            label: @tr("Upload checked items");
+                            enabled: root.selected-count > 0;
+                            clicked => { root.upload-selected(); }
+                        }
+                        SftpMenuItem {
+                            label: @tr("Open");
+                            enabled: root.menu-target != "" && !root.menu-target-is-dir;
+                            clicked => { root.open(root.menu-target); }
+                        }
+                        SftpMenuItem {
+                            label: @tr("Copy path");
+                            enabled: root.menu-target != "";
+                            clicked => { root.copy-path(root.menu-target); }
+                        }
+                        Rectangle { height: 1px; background: Theme.border-subtle; }
+                        SftpMenuItem {
+                            label: @tr("Refresh");
+                            clicked => { root.refresh(); }
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- Status line: only for errors / truncation notices --------------
+        if root.status != "" : Rectangle {
+            height: 18px;
+            background: Theme.bg-panel-alt;
+            Text {
+                x: 6px;
+                width: parent.width - 12px;
+                height: parent.height;
+                text: root.status;
+                color: Theme.text-muted;
+                font-size: Theme.fs-xs;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // SftpPanel — left directory tree + right file listing
 // ---------------------------------------------------------------------------
 
@@ -105,50 +556,71 @@ export component SftpPanel inherits Rectangle {
     in property <bool> collapsed: false;   // when true only the toolbar shows
     in property <bool> show-tree: true;    // hide the directory tree when narrow (#dock)
     in property <bool> compact: false;     // side-docked + collapsed → render nothing but a clean strip (#dock)
-    // Responsive columns: only when docked left/right (narrow, width-adjustable).
-    // Docked top/bottom the panel is wide and can only be resized vertically, so
-    // every column stays there (show-tree is true exactly in that case).
-    // Side-docked, the fixed columns claim their width in value order — Size,
-    // Modified, Permissions, Type, Owner, Group (not the visual column order) —
-    // and any that would push the Name column below `name-min` is dropped
-    // instead, so names stop eliding to "…" on a narrow panel. A column the
-    // user hid never claims space, so a smaller column behind it can take it.
-    // The budget is generous for the wide (tree-visible) case, so the cascade
-    // is a no-op there.
+    // Split view (dual pane): a local-folder browser replaces the directory tree
+    // on the left, the remote listing stays on the right, and each pane can copy
+    // into the other. The remote path bar and its buttons keep working as before,
+    // so the toolbar always describes the *remote* side.
+    in property <bool> dual: false;
+    in property <[SftpEntry]> local-entries;
+    in property <string> local-path: "";
+    in property <string> local-status: "";
+    in property <bool> local-loading: false;
+    in property <int> local-selected-count: 0;
+    // 0 = split the panel in the middle (the default); dragging the divider
+    // stores an explicit width, reported back through `persist-local-pane-width`
+    // so Rust can hit-test drops on the local half with the same geometry.
+    in property <length> local-pane-default: 0px;
+    in-out property <length> local-pane-width: 0px;
+    callback persist-local-pane-width(length);
+    init => { root.local-pane-width = root.local-pane-default; }
+    property <bool> local-resizing: false;
+    // Effective local extent: half the panel by default, the remote half always
+    // keeps ~200px so its Name column and buttons stay usable in a narrow dock.
+    property <length> local-w: clamp(
+        root.local-pane-width > 0px ? root.local-pane-width : root.width / 2,
+        160px,
+        max(160px, root.width - 200px));
+    // Tree is only meaningful in the classic view.
+    property <bool> tree-shown: root.show-tree && !root.dual;
+    // Responsive columns: Name always keeps `name-min` so filenames stay readable.
+    // Optional columns fill whatever is left in priority order (high → low):
+    // Permissions → Type → Size → Modified → Owner → Group. The first *enabled*
+    // column that no longer fits is hidden, together with every lower-priority
+    // column — never the Name. Layout cost: chrome (checkbox + paddings + gap)
+    // 40px; each extra column costs its width plus 8px inter-column spacing.
     in-out property <length> tree-width: 160px;
     callback persist-tree-width(length);
     property <bool> tree-resizing: false;
-    property <length> list-w: root.show-tree ? root.width - root.tree-width - 5px : root.width;
-    property <length> name-min: 120px;     // narrower than this → drop columns
-    // Fixed footprints: the header width plus the gutter before it.
-    property <length> col-chrome: 40px;    // row padding + checkbox + first gutter
-    property <length> col-gutter: 8px;
-    property <length> col-size-w: 72px + root.col-gutter;
-    property <length> col-modified-w: 116px + root.col-gutter;
-    property <length> col-permissions-w: 104px + root.col-gutter;
-    property <length> col-type-w: 100px + root.col-gutter;
-    property <length> col-owner-w: 84px + root.col-gutter;
-    property <length> col-group-w: 84px + root.col-gutter;
-    property <length> col-budget: root.show-tree ? 1200px
-        : root.list-w - root.col-chrome - root.name-min;
-    // What's left for the columns after each claimant, so the next one only
-    // claims when it actually fits.
-    property <bool> show-size-col: root.show-size-col-user && root.col-budget >= root.col-size-w;
-    property <length> col-rest-size: root.show-size-col
-        ? root.col-budget - root.col-size-w : root.col-budget;
-    property <bool> show-modified-col: root.show-modified-col-user && root.col-rest-size >= root.col-modified-w;
-    property <length> col-rest-modified: root.show-modified-col
-        ? root.col-rest-size - root.col-modified-w : root.col-rest-size;
-    property <bool> show-permissions-col: root.show-permissions-col-user && root.col-rest-modified >= root.col-permissions-w;
-    property <length> col-rest-permissions: root.show-permissions-col
-        ? root.col-rest-modified - root.col-permissions-w : root.col-rest-modified;
-    property <bool> show-type-col: root.show-type-col-user && root.col-rest-permissions >= root.col-type-w;
-    property <length> col-rest-type: root.show-type-col
-        ? root.col-rest-permissions - root.col-type-w : root.col-rest-permissions;
-    property <bool> show-owner-col: root.show-owner-col-user && root.col-rest-type >= root.col-owner-w;
-    property <length> col-rest-owner: root.show-owner-col
-        ? root.col-rest-type - root.col-owner-w : root.col-rest-type;
-    property <bool> show-group-col: root.show-group-col-user && root.col-rest-owner >= root.col-group-w;
+    property <length> list-w: root.tree-shown
+        ? root.width - root.tree-width - 5px
+        : (root.dual ? root.width - root.local-w - 5px : root.width);
+    property <length> name-min: 180px;     // guaranteed Name column width
+    property <length> chrome-w: 40px;      // checkbox + paddings + gap into Name
+    property <length> extras-w: max(0px, root.list-w - root.chrome-w - root.name-min);
+    // Per-column layout cost = visual width + 8px spacing.
+    property <length> cost-permissions: 112px;
+    property <length> cost-type: 108px;
+    property <length> cost-size: 80px;
+    property <length> cost-modified: 124px;
+    property <length> cost-owner: 92px;
+    property <length> cost-group: 92px;
+    property <bool> fit-permissions: !root.show-permissions || root.extras-w >= root.cost-permissions;
+    property <bool> show-permissions-col: root.show-permissions && root.fit-permissions;
+    property <length> used-1: root.show-permissions-col ? root.cost-permissions : 0px;
+    property <bool> fit-type: root.fit-permissions && (!root.show-type || root.extras-w - root.used-1 >= root.cost-type);
+    property <bool> show-type-col: root.show-type && root.fit-type;
+    property <length> used-2: root.used-1 + (root.show-type-col ? root.cost-type : 0px);
+    property <bool> fit-size: root.fit-type && (!root.show-size || root.extras-w - root.used-2 >= root.cost-size);
+    property <bool> show-size-col: root.show-size && root.fit-size;
+    property <length> used-3: root.used-2 + (root.show-size-col ? root.cost-size : 0px);
+    property <bool> fit-modified: root.fit-size && (!root.show-modified || root.extras-w - root.used-3 >= root.cost-modified);
+    property <bool> show-modified-col: root.show-modified && root.fit-modified;
+    property <length> used-4: root.used-3 + (root.show-modified-col ? root.cost-modified : 0px);
+    property <bool> fit-owner: root.fit-modified && (!root.show-owner || root.extras-w - root.used-4 >= root.cost-owner);
+    property <bool> show-owner-col: root.show-owner && root.fit-owner;
+    property <length> used-5: root.used-4 + (root.show-owner-col ? root.cost-owner : 0px);
+    property <bool> fit-group: root.fit-owner && (!root.show-group || root.extras-w - root.used-5 >= root.cost-group);
+    property <bool> show-group-col: root.show-group && root.fit-group;
     property <int> selected-row: -1;       // clicked/highlighted file-list row (#70)
     in property <int> selected-count;      // number of checked entries (#100)
     // Keyboard type-ahead (#sftp-typeahead): after clicking a row the panel grabs
@@ -202,12 +674,8 @@ export component SftpPanel inherits Rectangle {
     // The user's own toggle (column menu). The effective `show-*-col` above may
     // drop a column the panel's width can't hold, so the menu marks the
     // preference — otherwise an auto-hidden column reads as "you turned it off".
-    property <bool> show-type-col-user: root.show-type;
-    property <bool> show-size-col-user: root.show-size;
-    property <bool> show-modified-col-user: root.show-modified;
-    property <bool> show-permissions-col-user: root.show-permissions;
-    property <bool> show-owner-col-user: root.show-owner;
-    property <bool> show-group-col-user: root.show-group;
+    property <bool> tunnel-save: false;
+    property <bool> tunnel-auto-start: true;
     property <length> column-menu-x: 8px;
     property <length> column-menu-y: 22px;
 
@@ -259,6 +727,120 @@ export component SftpPanel inherits Rectangle {
     callback places-refresh();
     callback new-folder(string /* parent dir */);
     callback new-file(string /* parent dir */);
+    // Upload the files / folders on the OS clipboard into `dir` (#508).
+    callback paste-upload(string /* remote dir */);
+    // The keymap (src/app/shortcuts.rs): which app action a key is, "" if none.
+    callback match-shortcut(string, bool, bool, bool, bool) -> string;
+    // A key the file list does not handle, for the terminal (focus moves back).
+    callback forward-key(string, bool /* ctrl */, bool /* alt */, bool /* shift */);
+    // Split view: local pane + two-way transfers (the panel forwards these to
+    // the app shell, which owns the local filesystem side).
+    callback toggle-dual();
+    callback local-navigate(string /* path */);
+    callback local-up();
+    callback local-home();
+    callback local-refresh();
+    callback local-open(string /* local path */);
+    callback local-toggle-select(int /* row */);
+    callback local-select-range(int /* from */, int /* to */);
+    callback local-copy-path(string /* local path */);
+    callback local-upload(string /* local path */);
+    callback local-upload-selected();
+    // Remote → the local folder shown in the left pane.
+    callback download-to-local(string /* remote path */);
+    callback download-selected-to-local();
+
+    // --- Split-view drag & drop -------------------------------------------
+    // Dragging a row onto the other half moves the file(s) there: local →
+    // remote uploads into the remote folder, remote → local downloads into the
+    // local folder. A row that belongs to a multi-item check drags the whole
+    // checked set, like a file manager. A remote row dragged outside the panel
+    // still falls back to the OS drag-out (#504).
+    //
+    // Cursor geometry (both the drag ghost and the highlighted drop pane) is
+    // computed in the event handlers and stored: bindings must not peek at
+    // `absolute-position`, which would recurse while the layout is running.
+    property <bool> drag-active: false;
+    property <string> drag-from: "";     // "local" | "remote"
+    property <int> drag-row: -1;
+    property <int> drag-count: 1;
+    property <string> drag-label: "";
+    // A row drag in progress (split-view handoff + gesture threshold bookkeeping).
+    property <bool> drag-out-started: false;
+    property <length> drag-x;
+    property <length> drag-y;
+    property <bool> drop-local: false;
+    property <bool> drop-remote: false;
+    property <length> drop-x;
+    property <length> drop-y;
+    property <length> drop-w;
+    property <length> drop-h;
+    // Top of the panel's content area (below the toolbar): the drag hit test
+    // and the drop highlight both start here. Mirrors the toolbar height in the
+    // layout below.
+    property <length> content-top: root.narrow-toolbar && root.panel-mode == "files" ? 62px : 34px;
+
+    public function begin-drag(from: string, row: int, count: int, label: string,
+                               ax: length, ay: length) {
+        root.drag-from = from;
+        root.drag-row = row;
+        root.drag-count = count;
+        root.drag-label = label;
+        root.drag-active = true;
+        root.update-drag(ax, ay);
+    }
+
+    // Absolute cursor → panel-local ghost position + which pane is under it.
+    // The local half starts at the panel's left edge and is `local-w` wide; the
+    // remote half is everything right of the 5px divider. Only the panel's own
+    // geometry is read (no element ids), so this stays out of the layout pass.
+    public function update-drag(ax: length, ay: length) {
+        if (!root.drag-active) { return; }
+        root.drag-x = ax - root.absolute-position.x;
+        root.drag-y = ay - root.absolute-position.y;
+        let top = root.content-top;
+        let bottom = max(top, root.height - 18px);
+        root.drop-local = root.drag-from == "remote"
+            && root.drag-x >= 0px && root.drag-x <= root.local-w
+            && root.drag-y >= top && root.drag-y <= bottom;
+        root.drop-remote = root.drag-from == "local"
+            && root.drag-x >= root.local-w + 5px && root.drag-x <= root.width
+            && root.drag-y >= top && root.drag-y <= bottom;
+        root.drop-x = root.drop-local ? 0px : root.local-w + 5px;
+        root.drop-y = top;
+        root.drop-w = root.drop-local ? root.local-w : max(0px, root.width - root.local-w - 5px);
+        root.drop-h = max(0px, root.height - top - 18px);
+    }
+
+    public function end-drag(ax: length, ay: length) {
+        if (!root.drag-active) { return; }
+        root.update-drag(ax, ay);
+        if (root.drag-from == "local" && root.drop-remote) {
+            if (root.drag-count > 1) {
+                root.local-upload-selected();
+            } else if (root.drag-row >= 0 && root.drag-row < root.local-entries.length) {
+                root.local-upload(root.local-entries[root.drag-row].full-path);
+            }
+        } else if (root.drag-from == "remote" && root.drop-local) {
+            if (root.drag-count > 1) {
+                root.download-selected-to-local();
+            } else if (root.drag-row >= 0 && root.drag-row < root.entries.length) {
+                root.download-to-local(root.entries[root.drag-row].full-path);
+            }
+        }
+        root.cancel-drag();
+    }
+
+    public function cancel-drag() {
+        root.drag-active = false;
+        root.drag-from = "";
+        root.drag-row = -1;
+        root.drag-count = 1;
+        root.drag-label = "";
+        root.drop-local = false;
+        root.drop-remote = false;
+    }
+
     // Drag-to-dock: empty areas of the panel are a grab handle; coordinates are
     // reported in window space so the parent can compute the target edge (#dock).
     callback dock-drag-move(length /* abs-x */, length /* abs-y */);
@@ -307,9 +889,10 @@ export component SftpPanel inherits Rectangle {
     }
 
     // Drag empty space to re-dock; interactive widgets (file list, tree, toolbar
-    // buttons) sit in front and capture their own events (#dock).
+    // buttons) sit in front and capture their own events (#dock). Move cursor
+    // only while dragging; hovering empty space keeps the arrow (#360).
     dock-bg := TouchArea {
-        mouse-cursor: move;
+        mouse-cursor: self.pressed ? move : default;
         moved => {
             if (self.pressed) {
                 root.dock-drag-move(self.absolute-position.x + self.mouse-x,
@@ -436,6 +1019,29 @@ export component SftpPanel inherits Rectangle {
                     }
                 }
 
+                // Split view toggle: swaps the left directory tree for a local
+                // folder browser so files can be pushed to / pulled from the
+                // host side by side. Highlighted while the split view is on.
+                Rectangle {
+                    visible: root.panel-mode == "files";
+                    width: root.width > 420px ? 76px : 24px;
+                    height: 22px;
+                    border-radius: Theme.radius-sm;
+                    background: root.dual ? Theme.accent : (dual-ta.has-hover ? Theme.bg-hover : transparent);
+                    dual-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.toggle-dual(); }
+                    }
+                    Text {
+                        text: root.width > 420px ? @tr("Split view") : "\u{E8D2}";
+                        font-family: root.width > 420px ? Theme.ui-font-family : "Material Icons";
+                        color: root.dual ? #ffffff : Theme.text-secondary;
+                        font-size: Theme.fs-xs;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
                 // In compact mode keep navigation tabs at the left and primary
                 // actions aligned at the right. The path gets the full second row.
                 if root.narrow-toolbar : Rectangle { horizontal-stretch: 1; }
@@ -443,7 +1049,7 @@ export component SftpPanel inherits Rectangle {
                 // Keep parent navigation discoverable in the narrow layout
                 // instead of hiding this primary action in the overflow menu
                 // (#322). It stays beside the other compact toolbar actions.
-                if root.narrow-toolbar && !root.show-tree && root.panel-mode == "files" : Rectangle {
+                if root.narrow-toolbar && !root.tree-shown && root.panel-mode == "files" : Rectangle {
                     width: 24px; height: 22px;
                     border-radius: Theme.radius-sm;
                     background: compact-up-ta.has-hover ? Theme.bg-hover : transparent;
@@ -1003,7 +1609,7 @@ export component SftpPanel inherits Rectangle {
             spacing: 0;
 
             // ── Left: directory tree (hidden when the panel is narrow) ──────
-            if root.show-tree : VerticalLayout {
+            if root.tree-shown : VerticalLayout {
                 width: root.tree-width;
                 spacing: 0;
 
@@ -1079,7 +1685,7 @@ export component SftpPanel inherits Rectangle {
             }
 
             // Draggable directory-tree divider (#287).
-            if root.show-tree : Rectangle {
+            if root.tree-shown : Rectangle {
                 width: 5px;
                 background: tree-split.pressed ? Theme.accent : Theme.border-subtle;
                 tree-split := TouchArea {
@@ -1100,6 +1706,64 @@ export component SftpPanel inherits Rectangle {
                                 self.absolute-position.x + self.mouse-x - root.absolute-position.x,
                                 120px, min(420px, root.width - 220px));
                         }
+                    }
+                }
+            }
+
+            // ── Left (split view): local folders, resizable ─────────────────
+            if root.dual : LocalPane {
+                width: root.local-w;
+                entries: root.local-entries;
+                path: root.local-path;
+                loading: root.local-loading;
+                status: root.local-status;
+                selected-count: root.local-selected-count;
+                navigate(path)        => { root.local-navigate(path); }
+                up()                  => { root.local-up(); }
+                home()                => { root.local-home(); }
+                refresh()             => { root.local-refresh(); }
+                open(path)            => { root.local-open(path); }
+                toggle-select(i)      => { root.local-toggle-select(i); }
+                select-range(a, b)    => { root.local-select-range(a, b); }
+                copy-path(path)       => { root.local-copy-path(path); }
+                upload(path)          => { root.local-upload(path); }
+                upload-selected()     => { root.local-upload-selected(); }
+                drag-begin(row, count, label, ax, ay) => {
+                    root.begin-drag("local", row, count, label, ax, ay);
+                }
+                drag-move(ax, ay)     => { root.update-drag(ax, ay); }
+                drag-end(ax, ay)      => { root.end-drag(ax, ay); }
+                drag-cancel()         => { root.cancel-drag(); }
+            }
+
+            // Divider between the local and remote halves. Dragging moves it;
+            // double-clicking puts it back in the middle.
+            if root.dual : Rectangle {
+                width: 5px;
+                background: local-split.pressed ? Theme.accent : Theme.border-subtle;
+                local-split := TouchArea {
+                    x: -3px;
+                    width: parent.width + 6px;
+                    mouse-cursor: ew-resize;
+                    pointer-event(ev) => {
+                        if (ev.kind == PointerEventKind.down) {
+                            root.local-resizing = true;
+                        } else if (ev.kind == PointerEventKind.up) {
+                            root.local-resizing = false;
+                            root.persist-local-pane-width(root.local-pane-width);
+                        }
+                    }
+                    moved => {
+                        if (root.local-resizing) {
+                            root.local-pane-width = clamp(
+                                self.absolute-position.x + self.mouse-x - root.absolute-position.x,
+                                160px, max(160px, root.width - 200px));
+                        }
+                    }
+                    double-clicked => {
+                        // Back to an even split.
+                        root.local-pane-width = 0px;
+                        root.persist-local-pane-width(0px);
                     }
                 }
             }
@@ -1279,116 +1943,215 @@ export component SftpPanel inherits Rectangle {
                 file-area := Rectangle {
                     vertical-stretch: 1;
                     clip: true;
-                    // Keyboard type-ahead (#sftp-typeahead). focus-on-click is off:
-                    // focus is grabbed only when a row is clicked (below), so
-                    // clicking whitespace or the toolbar leaves the terminal's
-                    // keyboard untouched, and a focused path-input keeps priority.
-                    list-focus := FocusScope {
+                    // Keyboard focus for the file list (#508): clicking a row or
+                    // the whitespace focuses it, the paste chord uploads the
+                    // clipboard's files, and every other key goes back to the
+                    // terminal so no keystroke is lost. 0×0 at the area origin,
+                    // outside the scroll view, so scrolling never clips it away.
+                    file-keys := FocusScope {
+                        x: 0; y: 0;
+                        width: 0; height: 0;
+                        // Focus on a row click only: clicking whitespace or the
+                        // toolbar must leave the terminal's keyboard untouched,
+                        // and a focused path input keeps priority (#sftp-typeahead).
                         focus-on-click: false;
                         focus-on-tab-navigation: false;
                         key-pressed(event) => {
-                            if (root.panel-mode != "files" || root.loading || root.entries.length == 0) {
-                                reject
-                            } else if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
-                                reject   // AppWindow shortcuts (Ctrl+Tab, new window, zoom…) keep working
-                            } else if (event.text == Key.Escape) {
-                                root.jump-prefix = "";
+                            if (event.text == Key.Shift || event.text == Key.ShiftR
+                                    || event.text == Key.Control || event.text == Key.ControlR
+                                    || event.text == Key.Alt || event.text == Key.AltGr
+                                    || event.text == Key.Meta || event.text == Key.MetaR) {
+                                // A bare modifier: wait for the chord.
                                 accept
-                            } else if (event.text == Key.Return) {
-                                if (root.selected-row >= 0 && root.selected-row < root.entries.length) {
-                                    let hit = root.entries[root.selected-row];
-                                    if (hit.is-dir) { root.navigate(hit.full-path); } else { root.open-file(hit.full-path); }
-                                }
-                                accept
-                            } else if (event.text == Key.UpArrow) {
-                                root.jump-prefix = "";
-                                let idx = max(0, root.selected-row < 0 ? 0 : root.selected-row - 1);
-                                root.selected-row = idx;
-                                root.jump-target = idx;
-                                accept
-                            } else if (event.text == Key.DownArrow) {
-                                root.jump-prefix = "";
-                                let idx = min(root.entries.length - 1, root.selected-row < 0 ? 0 : root.selected-row + 1);
-                                root.selected-row = idx;
-                                root.jump-target = idx;
-                                accept
-                            } else if (event.text.character-count == 1 && event.text != " " && event.text != "\u{9}") {
-                                root.jump-prefix = root.jump-prefix + event.text;
-                                type-ahead-timer.restart();
-                                let idx = root.type-ahead(root.jump-prefix);
-                                if (idx >= 0) {
+                            } else if (root.panel-mode == "files" && !root.loading
+                                    && root.entries.length > 0
+                                    && !event.modifiers.control && !event.modifiers.alt
+                                    && !event.modifiers.meta) {
+                                // Type-ahead + list navigation (#sftp-typeahead): plain
+                                // keys drive the jump prefix, arrows move the selection,
+                                // Enter opens the row. The list grabs focus on a row
+                                // click only, so the terminal keeps the keyboard while
+                                // the pointer sits on whitespace.
+                                if (event.text == Key.Escape) {
+                                    root.jump-prefix = "";
+                                    accept
+                                } else if (event.text == Key.Return) {
+                                    if (root.selected-row >= 0 && root.selected-row < root.entries.length) {
+                                        let hit = root.entries[root.selected-row];
+                                        if (hit.is-dir) { root.navigate(hit.full-path); } else { root.open-file(hit.full-path); }
+                                    }
+                                    accept
+                                } else if (event.text == Key.UpArrow) {
+                                    root.jump-prefix = "";
+                                    let idx = max(0, root.selected-row < 0 ? 0 : root.selected-row - 1);
                                     root.selected-row = idx;
                                     root.jump-target = idx;
-                                } else {
-                                    // No name starts with the whole chunk; fall back to
-                                    // just the newest character so a fast "ca…" typed
-                                    // before the timer fires still lands somewhere.
-                                    let idx2 = root.type-ahead(event.text);
-                                    if (idx2 >= 0) {
-                                        root.selected-row = idx2;
-                                        root.jump-target = idx2;
+                                    accept
+                                } else if (event.text == Key.DownArrow) {
+                                    root.jump-prefix = "";
+                                    let idx = min(root.entries.length - 1, root.selected-row < 0 ? 0 : root.selected-row + 1);
+                                    root.selected-row = idx;
+                                    root.jump-target = idx;
+                                    accept
+                                } else if (event.text.character-count == 1 && event.text != " " && event.text != "\u{9}") {
+                                    root.jump-prefix = root.jump-prefix + event.text;
+                                    type-ahead-timer.restart();
+                                    let idx = root.type-ahead(root.jump-prefix);
+                                    if (idx >= 0) {
+                                        root.selected-row = idx;
+                                        root.jump-target = idx;
+                                    } else {
+                                        // No name starts with the whole chunk; fall back
+                                        // to just the newest character so a fast "ca…"
+                                        // typed before the timer fires still lands.
+                                        let idx2 = root.type-ahead(event.text);
+                                        if (idx2 >= 0) {
+                                            root.selected-row = idx2;
+                                            root.jump-target = idx2;
+                                        }
                                     }
+                                    accept
+                                } else {
+                                    root.forward-key(event.text,
+                                        Theme.is-mac ? event.modifiers.meta : event.modifiers.control,
+                                        event.modifiers.alt, event.modifiers.shift);
+                                    accept
                                 }
+                            } else if (root.match-shortcut(event.text, event.modifiers.control,
+                                        event.modifiers.meta, event.modifiers.alt,
+                                        event.modifiers.shift) == "paste"
+                                    || (event.modifiers.control && !event.modifiers.alt
+                                        && (event.text == "v" || event.text == "V"))) {
+                                root.paste-upload(root.current-path);
                                 accept
                             } else {
-                                reject
+                                root.forward-key(event.text,
+                                    Theme.is-mac ? event.modifiers.meta : event.modifiers.control,
+                                    event.modifiers.alt, event.modifiers.shift);
+                                accept
                             }
                         }
-                        file-scroll-view := ScrollView {
-                            width: parent.width;
-                            height: parent.height;
-                            content-width: self.visible-width;
-                            content-height: max(self.visible-height, file-list.preferred-height);
+                    }
+                    file-scroll-view := ScrollView {
+                        width: parent.width;
+                        height: parent.height;
+                        content-width: self.visible-width;
+                        content-height: max(self.visible-height, file-list.preferred-height);
 
-                            file-list := VerticalLayout {
-                                spacing: 0;
+                        file-list := VerticalLayout {
+                            spacing: 0;
 
-                                if root.loading : Rectangle {
-                                    height: 40px;
-                                    Text { text: @tr("Loading..."); color: Theme.text-muted; font-size: Theme.fs-sm;
-                                           horizontal-alignment: center; vertical-alignment: center; }
-                                }
+                            if root.loading : Rectangle {
+                                height: 40px;
+                                Text { text: @tr("Loading..."); color: Theme.text-muted; font-size: Theme.fs-sm;
+                                       horizontal-alignment: center; vertical-alignment: center; }
+                            }
 
-                                if !root.loading && root.entries.length == 0 : Rectangle {
-                                    height: 40px;
-                                    Text { text: @tr("Empty directory"); color: Theme.text-muted; font-size: Theme.fs-sm;
-                                           horizontal-alignment: center; vertical-alignment: center; }
-                                }
+                            if !root.loading && root.entries.length == 0 : Rectangle {
+                                height: 40px;
+                                Text { text: @tr("Empty directory"); color: Theme.text-muted; font-size: Theme.fs-sm;
+                                       horizontal-alignment: center; vertical-alignment: center; }
+                            }
 
-                                for entry[i] in root.entries : row := Rectangle {
-                                    height: 24px;
-                                    background: entry.selected
-                                        ? #4a90e235
-                                        : (i == root.selected-row
-                                            ? #4a90e240
-                                            : (row-ta.has-hover
-                                                ? #4a90e225
-                                                : (mod(i, 2) == 0 ? transparent : #ffffff08)));
+                            for entry[i] in root.entries : row := Rectangle {
+                                height: 24px;
+                                background: entry.selected
+                                    ? #4a90e235
+                                    : (i == root.selected-row
+                                        ? #4a90e240
+                                        : (row-ta.has-hover
+                                            ? #4a90e225
+                                            : (mod(i, 2) == 0 ? transparent : #ffffff08)));
 
-                                    row-ta := TouchArea {
-                                        mouse-cursor: pointer;
-                                        clicked => { root.selected-row = i; list-focus.focus(); }
-                                        double-clicked => {
-                                            if (entry.is-dir) {
-                                                root.navigate(entry.full-path);
+                                row-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    // In the split view a row can be dropped on the
+                                    // local half (download); otherwise the row is
+                                    // dragged out to the OS file manager (#504) and
+                                    // a split-view drag that leaves the panel hands
+                                    // over to that same OS drag.
+                                    moved => {
+                                        if (self.pressed && !root.drag-out-started
+                                                && (abs(self.mouse-x - self.pressed-x) > 6px
+                                                    || abs(self.mouse-y - self.pressed-y) > 6px)) {
+                                            root.drag-out-started = true;
+                                            if (root.dual) {
+                                                root.begin-drag(
+                                                    "remote",
+                                                    i,
+                                                    entry.selected && root.selected-count > 1 ? root.selected-count : 1,
+                                                    entry.selected && root.selected-count > 1 ? @tr("Selected items") : entry.name,
+                                                    self.absolute-position.x + self.mouse-x,
+                                                    self.absolute-position.y + self.mouse-y);
                                             } else {
-                                                root.open-file(entry.full-path);
+                                                // #504: dragging rows out to the OS file
+                                                // manager is intentionally not implemented
+                                                // in this fork — the gesture is a no-op.
+                                                root.drag-out-started = false;
                                             }
-                                        }
-                                        pointer-event(ev) => {
-                                            if (ev.kind == PointerEventKind.down
-                                                    && ev.button == PointerEventButton.right) {
-                                                root.selected-row = i;
-                                                root.menu-target = entry.full-path;
-                                                root.menu-target-name = entry.name;
-                                                root.menu-target-is-dir = entry.is-dir;
-                                                root.menu-target-mode = entry.mode;
-                                                root.menu-x = self.absolute-position.x + self.mouse-x - file-area.absolute-position.x;
-                                                root.menu-y = self.absolute-position.y + self.mouse-y - file-area.absolute-position.y;
-                                                file-menu.show();
+                                        } else if (root.drag-out-started && root.drag-active) {
+                                            let ax = self.absolute-position.x + self.mouse-x;
+                                            let ay = self.absolute-position.y + self.mouse-y;
+                                            if (ax < root.absolute-position.x
+                                                    || ax > root.absolute-position.x + root.width
+                                                    || ay < root.absolute-position.y
+                                                    || ay > root.absolute-position.y + root.height) {
+                                                root.cancel-drag();
+                                                root.drag-out-started = false;
+                                            } else {
+                                                root.update-drag(ax, ay);
                                             }
                                         }
                                     }
+                                    clicked => {
+                                        root.selected-row = i;
+                                        file-keys.focus();
+                                        if (root.shift-click-pending) {
+                                            root.shift-click-pending = false;
+                                        } else {
+                                            root.select-anchor = i;
+                                        }
+                                    }
+                                    double-clicked => {
+                                        if (entry.is-dir) {
+                                            root.navigate(entry.full-path);
+                                        } else {
+                                            root.open-file(entry.full-path);
+                                        }
+                                    }
+                                    pointer-event(ev) => {
+                                        if (ev.kind == PointerEventKind.up) {
+                                            if (root.drag-out-started && root.drag-active) {
+                                                root.end-drag(self.absolute-position.x + self.mouse-x,
+                                                              self.absolute-position.y + self.mouse-y);
+                                            }
+                                            root.drag-out-started = false;
+                                        } else if (ev.kind == PointerEventKind.cancel) {
+                                            if (root.drag-active) { root.cancel-drag(); }
+                                            root.drag-out-started = false;
+                                        } else if (ev.kind == PointerEventKind.down) {
+                                            root.drag-out-started = false;
+                                        }
+                                        if (ev.kind == PointerEventKind.down
+                                                && ev.button == PointerEventButton.left
+                                                && ev.modifiers.shift) {
+                                            root.shift-click-pending = true;
+                                            root.select-range(root.select-anchor < 0 ? i : root.select-anchor, i);
+                                            if (root.select-anchor < 0) { root.select-anchor = i; }
+                                        }
+                                        if (ev.kind == PointerEventKind.down
+                                                && ev.button == PointerEventButton.right) {
+                                            root.selected-row = i;
+                                            root.menu-target = entry.full-path;
+                                            root.menu-target-name = entry.name;
+                                            root.menu-target-is-dir = entry.is-dir;
+                                            root.menu-target-mode = entry.mode;
+                                            root.menu-x = self.absolute-position.x + self.mouse-x - file-area.absolute-position.x;
+                                            root.menu-y = self.absolute-position.y + self.mouse-y - file-area.absolute-position.y;
+                                            file-menu.show();
+                                        }
+                                    }
+                                }
 
                                     HorizontalLayout {
                                         padding-left: 8px; padding-right: 8px; spacing: 8px;
@@ -1403,7 +2166,7 @@ export component SftpPanel inherits Rectangle {
                                             border-width: 1px;
                                             border-color: entry.selected ? Theme.accent : Theme.border-strong;
                                             background: entry.selected ? Theme.accent : transparent;
-                                            cb-ta := TouchArea {
+                                            remote-cb-ta := TouchArea {
                                                 mouse-cursor: pointer;
                                                 clicked => { root.toggle-select(i); }
                                             }
@@ -1468,10 +2231,8 @@ export component SftpPanel inherits Rectangle {
                                             width: 84px; horizontal-alignment: right; vertical-alignment: center;
                                         }
                                     }
-                                }
+                            }
 
-                                // Whitespace below the rows: right-click here opens the
-                                // menu with no target (item actions greyed out) (#84).
                                 ws := Rectangle {
                                     vertical-stretch: 1;
                                     min-height: 24px;
@@ -1488,7 +2249,6 @@ export component SftpPanel inherits Rectangle {
                                         }
                                     }
                                 }
-                            }
                         }
                     }
 
@@ -1530,8 +2290,8 @@ export component SftpPanel inherits Rectangle {
                     file-menu := PopupWindow {
                         x: root.menu-x;
                         y: root.menu-y;
-                        width: 148px;
-                        height: 14 * 27px + 8px;
+                        width: 186px;
+                        height: (15 + (root.dual ? 2 : 0)) * 27px + 8px;
                         Rectangle {
                             background: Theme.popup-bg;
                             border-radius: Theme.radius-sm;
@@ -1546,6 +2306,18 @@ export component SftpPanel inherits Rectangle {
                                     label: @tr("Download");
                                     enabled: root.menu-target != "";
                                     clicked => { root.download(root.menu-target); }
+                                }
+                                // Split view only: pull straight into the folder
+                                // the local pane is showing (no folder picker).
+                                if root.dual : SftpMenuItem {
+                                    label: @tr("Download to local folder");
+                                    enabled: root.menu-target != "";
+                                    clicked => { root.download-to-local(root.menu-target); }
+                                }
+                                if root.dual : SftpMenuItem {
+                                    label: @tr("Download checked to local folder");
+                                    enabled: root.selected-count > 0;
+                                    clicked => { root.download-selected-to-local(); }
                                 }
                                 SftpMenuItem {
                                     label: @tr("View");
@@ -1594,6 +2366,15 @@ export component SftpPanel inherits Rectangle {
                                     clicked => { root.delete(root.menu-target); }
                                 }
                                 Rectangle { height: 1px; background: Theme.border-subtle; }
+                                // Upload copied files (#508): into the right-clicked
+                                // folder, else the folder being shown.
+                                SftpMenuItem {
+                                    label: @tr("Paste");
+                                    clicked => {
+                                        root.paste-upload(root.menu-target != "" && root.menu-target-is-dir
+                                            ? root.menu-target : root.current-path);
+                                    }
+                                }
                                 SftpMenuItem {
                                     label: @tr("New folder");
                                     clicked => { root.new-folder(root.current-path); }
@@ -1617,6 +2398,7 @@ export component SftpPanel inherits Rectangle {
                 }
             }
         }
+
 
         if root.panel-mode == "tunnels" : Rectangle {
             vertical-stretch: 1;
@@ -1786,4 +2568,50 @@ export component SftpPanel inherits Rectangle {
             }
         }
     }
+
+    // --- Split-view drag feedback -----------------------------------------
+    // Highlight the pane that will receive the drop. Geometry was captured in
+    // `update-drag` (an event handler), never from a binding: peeking at
+    // `absolute-position` here would recurse through the layout.
+    if root.drag-active && (root.drop-local || root.drop-remote) : Rectangle {
+        x: root.drop-x;
+        y: root.drop-y;
+        width: root.drop-w;
+        height: root.drop-h;
+        background: Theme.accent.with-alpha(0.10);
+        border-width: 2px;
+        border-color: Theme.accent;
     }
+
+    // The item being dragged, next to the cursor (no TouchArea: the row that
+    // started the drag keeps the pointer grab until release).
+    if root.drag-active : Rectangle {
+        x: clamp(root.drag-x + 14px, 0px, max(0px, root.width - self.width));
+        y: clamp(root.drag-y + 12px, 0px, max(0px, root.height - self.height));
+        width: drag-ghost.preferred-width + 16px;
+        height: 22px;
+        background: Theme.popup-bg;
+        border-width: 1px;
+        border-color: Theme.accent;
+        border-radius: Theme.radius-sm;
+        drop-shadow-blur: 8px;
+        drop-shadow-color: #00000070;
+        drag-ghost := HorizontalLayout {
+            padding-left: 8px;
+            padding-right: 8px;
+            spacing: 4px;
+            Text {
+                text: root.drag-label;
+                color: Theme.text-primary;
+                font-size: Theme.fs-xs;
+                vertical-alignment: center;
+            }
+            if root.drag-count > 1 : Text {
+                text: root.drag-count;
+                color: Theme.accent;
+                font-size: Theme.fs-xs;
+                vertical-alignment: center;
+            }
+        }
+    }
+}

@@ -399,6 +399,21 @@ pub(super) fn apply_session_event_to_window(
             // regular download, exactly as the Download menu entry would.
             win.invoke_sftp_download(tab_id.into(), path.into());
         }
+        SessionEvent::LocalFilesChanged { path } => {
+            // A download finished writing into a local folder. If the split
+            // view's local pane is showing that folder, re-read it so the new
+            // files appear without a manual refresh.
+            let showing = (0..terminals.row_count()).any(|i| {
+                terminals
+                    .row_data(i)
+                    .is_some_and(|row| {
+                        row.id.as_str() == tab_id && same_dir(row.sftp_local_path.as_str(), &path)
+                    })
+            });
+            if showing {
+                load_dir(win, tab_id, std::path::PathBuf::from(&path));
+            }
+        }
         SessionEvent::SftpTreeUpdate(nodes) => {
             let slint_nodes: Vec<SftpTreeNode> = nodes
                 .iter()

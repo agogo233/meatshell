@@ -559,6 +559,17 @@ export component TerminalView inherits Rectangle {
     // Saved paths for this tab's server (SFTP bookmark menu).
     in property <[string]> sftp-bookmarks: [];
 
+        // Split (dual-pane) view: local folder on the left, remote on the right.
+        in property <bool> sftp-dual: false;
+        in property <string> sftp-local-path: "";
+        in property <[SftpEntry]> sftp-local-entries;
+        in property <string> sftp-local-status: "";
+        in property <bool> sftp-local-loading: false;
+        in property <int> sftp-local-selected-count;
+        // Split-view divider: 0 = even split (default), else an explicit width.
+        in property <length> sftp-local-pane-width: 0px;
+        callback persist-sftp-local-pane-width(length);
+
     // Per-session now (#v0.5): the AppWindow stores these in each TerminalState
     // and writes back via the set-* callbacks, so each tab/pane keeps its own SFTP
     // size + collapse state (resizing/collapsing one no longer affects the others).
@@ -684,6 +695,20 @@ export component TerminalView inherits Rectangle {
     callback sftp-bookmark-add();
     callback sftp-bookmark-jump(string /* path */);
     callback sftp-bookmark-remove(string /* path */);
+        // Split (dual-pane) view: local pane + two-way transfers.
+        callback sftp-toggle-dual();
+        callback sftp-local-navigate(string);
+        callback sftp-local-up();
+        callback sftp-local-home();
+        callback sftp-local-refresh();
+        callback sftp-local-open(string);
+        callback sftp-local-toggle-select(int);
+        callback sftp-local-select-range(int, int);
+        callback sftp-local-copy-path(string);
+        callback sftp-local-upload(string);
+        callback sftp-local-upload-selected();
+        callback sftp-download-to-local(string);
+        callback sftp-download-selected-to-local();
     callback paste-from-clipboard();
     callback copy-terminal-text();
     callback clear-terminal();              // wipe this session's screen buffer

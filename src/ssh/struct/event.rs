@@ -157,6 +157,10 @@ pub enum SessionEvent {
     /// A double-clicked file could not be opened as text (#493): download it
     /// the usual way instead (download folder, conflict prompt and all).
     SftpDownloadInstead { path: String },
+    /// A download finished writing into the local directory `path`. The
+    /// dual-pane view refreshes its local browser when it shows that folder,
+    /// so freshly downloaded files appear without a manual refresh.
+    LocalFilesChanged { path: String },
 }
 
 /// Handle retained by the UI layer to talk to a running session.

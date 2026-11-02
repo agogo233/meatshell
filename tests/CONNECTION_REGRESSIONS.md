@@ -48,6 +48,36 @@ confirmation. The handshake budget pauses for host-key decisions, and cancelling
 a test closes its own pending transport and prompts. Disconnect cleanup is
 best-effort and cannot delay the completed test indefinitely.
 
+## Directory following after sudo
+
+```sh
+cargo test --locked --features headless --bin meatshell ssh::cwd::tests
+```
+
+OSC 7 remains authoritative. If `sudo` discards the login shell's hook, the SSH
+worker also accepts the Bash window-title convention `root@host: /absolute/path`
+(with or without the separator space) through complete OSC 0/2 notifications on
+the original host. Ubuntu's standard Bash PS1 uses `\e]0;\u@\h: \w\a` for this.
+This is a shell title convention, not a general meaning of OSC 0/2: a remote
+program can deliberately set such a title just as it can send OSC 7. Arbitrary
+visible prompt text is never used to infer a directory.
+
+The reader waits for BEL or ST across packet boundaries. Plain command output,
+readline bracketed-paste settings, and `#` characters inside a path cannot
+prematurely complete a notification. Tests cover both title opcodes, every UTF-8
+split boundary, OSC 7 precedence across packets, literal title paths, unrelated
+control strings, interrupted/oversized frames, and shell transitions. No second
+terminal screen is maintained, no commands are sent to the PTY, and SFTP
+privileges do not change.
+
+Home-relative (`~`), abbreviated, and custom titles without a complete path still
+need OSC 7 shell integration; the client must not guess root's HOME. A root shell
+that sends neither OSC 7 nor a matching title cannot be followed by this fallback,
+even if its visible prompt contains a path. Validate the server's PS1, `sudo -s`,
+successive `cd` commands (including names containing `# `), and `exit` when
+testing a desktop build. Synthetic traces do not test sudo policy or access to
+directories the SFTP login user cannot read.
+
 ## Editor invariants
 
 - Only a newly added, never-selected jump row may be omitted from Save/Test

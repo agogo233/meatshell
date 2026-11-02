@@ -32,6 +32,14 @@ pub enum SftpCommand {
         /// existence check (the race the check alone cannot close).
         policy: DedupPolicy,
     },
+    /// Download entries straight into one local directory (the dual-pane view):
+    /// files are written one after another under their own names — no remote
+    /// tar, no archive — and folders are mirrored recursively.
+    DownloadInto {
+        remotes: Vec<String>,
+        local_dir: String,
+        conflict: DownloadConflict,
+    },
     /// Multi-select download (#100): tar the named entries under `remote_dir`
     /// into one archive on the remote, download it, then delete the temp.
     DownloadArchive {

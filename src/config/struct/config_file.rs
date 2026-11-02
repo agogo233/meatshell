@@ -427,6 +427,17 @@ pub struct ConfigFile {
     /// Settings-panel font scale, percent (80–160). 0 = 100% default (v0.5).
     #[serde(default)]
     pub panel_font: u32,
+    /// Turn off SSH keepalives (Settings › Connection, #515). Default false =
+    /// keepalive on, as since #160.
+    #[serde(default)]
+    pub ssh_keepalive_disabled: bool,
+    /// Seconds of server silence before a keepalive is sent. 0 = default (30).
+    #[serde(default)]
+    pub ssh_keepalive_interval: u32,
+    /// Unanswered keepalives before the connection is treated as dead.
+    /// 0 = default (3).
+    #[serde(default)]
+    pub ssh_keepalive_max: u32,
     /// Enable the local stdio MCP server (`meatshell mcp serve`).
     #[serde(default = "default_mcp_preview_enabled")]
     pub mcp_enabled: bool,

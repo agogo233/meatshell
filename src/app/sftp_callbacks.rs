@@ -1,4 +1,8 @@
 use super::*;
+use super::sftp_local::{
+    current_path, home_dir, load_dir, navigate, navigate_up, select_range, selected_paths,
+    toggle_selected,
+};
 
 fn choose_download_conflict(
     remote: &str,
@@ -111,6 +115,314 @@ pub(super) fn configured_dedup_policy(weak: &slint::Weak<AppWindow>) -> DedupPol
         Some("skip") => DedupPolicy::Skip,
         Some("rename") => DedupPolicy::Rename,
         _ => DedupPolicy::Ask,
+    }
+}
+
+/// Ask once for a whole batch of downloads over the same local folder: does the
+/// user want the existing files replaced, kept side by side, or the batch
+/// cancelled? Returns `None` when the dialog was dismissed / cancelled.
+fn choose_batch_download_conflict(
+    owner: DialogOwner,
+    count: usize,
+    local_dir: &str,
+) -> Option<DownloadConflict> {
+    let replace = t("替换", "Replace");
+    let keep_both = t("共存", "Keep both");
+    let cancel = t("取消", "Cancel");
+    let result = owner
+        .message()
+        .set_title(t("文件已存在", "File already exists"))
+        .set_description(format!(
+            "{}\n{}",
+            local_dir,
+            if count == 1 {
+                t(
+                    "目标文件夹里已有同名文件。请选择替换现有文件，或保留两份文件。",
+                    "A file with the same name already exists in the target folder. Choose whether to replace it or keep both."
+                )
+                .to_string()
+            } else {
+                format!(
+                    "{} {}",
+                    count,
+                    t(
+                        "项在目标文件夹里已有同名文件。请选择替换现有文件，或保留两份文件。",
+                        "items already exist in the target folder. Choose whether to replace them or keep both."
+                    )
+                )
+            }
+        ))
+        .set_level(rfd::MessageLevel::Warning)
+        .set_buttons(rfd::MessageButtons::YesNoCancelCustom(
+            replace.to_string(),
+            keep_both.to_string(),
+            cancel.to_string(),
+        ))
+        .show();
+    match result {
+        rfd::MessageDialogResult::Yes => Some(DownloadConflict::Replace),
+        rfd::MessageDialogResult::No => Some(DownloadConflict::KeepBoth),
+        rfd::MessageDialogResult::Custom(value) if value == replace => {
+            Some(DownloadConflict::Replace)
+        }
+        rfd::MessageDialogResult::Custom(value) if value == keep_both => {
+            Some(DownloadConflict::KeepBoth)
+        }
+        _ => None,
+    }
+}
+
+/// Copy local paths into the tab's current remote directory.
+fn upload_local_paths(
+    window: &AppWindow,
+    tab_id: &str,
+    sftp_handles: &SftpHandles,
+    paths: Vec<String>,
+) {
+    if paths.is_empty() {
+        return;
+    }
+    let remote_dir = active_sftp_path(window, tab_id);
+    if remote_dir.is_empty() {
+        return;
+    }
+    if let Ok(handles) = sftp_handles.lock() {
+        let Some(handle) = handles.get(tab_id) else {
+            return;
+        };
+        for path in paths {
+            handle.upload(
+                std::path::PathBuf::from(path),
+                remote_dir.clone(),
+                UploadDecision::Proceed,
+            );
+        }
+        window.set_download_open(true);
+    }
+}
+
+/// Copy remote entries into the folder the tab's local pane is showing.
+fn download_into_local_pane(
+    window: &AppWindow,
+    tab_id: &str,
+    sftp_handles: &SftpHandles,
+    remotes: Vec<String>,
+) {
+    if remotes.is_empty() {
+        return;
+    }
+    let local_dir = current_path(window, tab_id);
+    if local_dir.is_empty() {
+        return;
+    }
+    // One conflict prompt for the whole batch — asking per file would be
+    // miserable for a multi-selection of a hundred items.
+    let overwrites = remotes
+        .iter()
+        .filter(|remote| download_target_path(remote, &local_dir).exists())
+        .count();
+    let conflict = if overwrites == 0 {
+        DownloadConflict::Replace
+    } else {
+        match choose_batch_download_conflict(
+            DialogOwner::of_weak(&window.as_weak()),
+            overwrites,
+            &local_dir,
+        ) {
+            Some(conflict) => conflict,
+            None => return,
+        }
+    };
+    if let Ok(handles) = sftp_handles.lock() {
+        if let Some(handle) = handles.get(tab_id) {
+            handle.download_into(remotes, local_dir, conflict);
+            window.set_download_open(true);
+        }
+    }
+}
+
+/// Wire the split (dual-pane) SFTP view: local folder browsing plus the two
+/// transfer directions. The remote side keeps using the existing SFTP worker.
+fn wire_sftp_split_callbacks(window: &AppWindow, sftp_handles: &SftpHandles) {
+    // Toggle the split view; the first open reads the local folder.
+    {
+        let weak = window.as_weak();
+        window.on_sftp_toggle_dual(move |tab_id: SharedString| {
+            let Some(w) = weak.upgrade() else { return };
+            let terminals = w.get_terminals();
+            let Some(model) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>() else {
+                return;
+            };
+            let tab = tab_id.to_string();
+            let mut enable = false;
+            let mut path = String::new();
+            let mut loaded = false;
+            for i in 0..model.row_count() {
+                let Some(row) = model.row_data(i) else { continue };
+                if row.id.as_str() != tab {
+                    continue;
+                }
+                enable = !row.sftp_dual;
+                path = row.sftp_local_path.to_string();
+                loaded = row.sftp_local_entries.row_count() > 0;
+                break;
+            }
+            update_terminal_row(model, &tab, |row| row.sftp_dual = enable);
+            w.invoke_refresh_sidebar();
+            if enable && !loaded {
+                let start = std::path::PathBuf::from(&path);
+                let dir = if !path.is_empty() && start.is_dir() {
+                    start
+                } else {
+                    home_dir()
+                };
+                load_dir(&w, &tab, dir);
+            }
+        });
+    }
+    {
+        let weak = window.as_weak();
+        window.on_sftp_local_navigate(move |tab_id: SharedString, path: SharedString| {
+            if let Some(w) = weak.upgrade() {
+                navigate(&w, tab_id.as_str(), path.as_str());
+            }
+        });
+    }
+    {
+        let weak = window.as_weak();
+        window.on_sftp_local_up(move |tab_id: SharedString| {
+            if let Some(w) = weak.upgrade() {
+                navigate_up(&w, tab_id.as_str());
+            }
+        });
+    }
+    {
+        let weak = window.as_weak();
+        window.on_sftp_local_home(move |tab_id: SharedString| {
+            if let Some(w) = weak.upgrade() {
+                load_dir(&w, tab_id.as_str(), home_dir());
+            }
+        });
+    }
+    {
+        let weak = window.as_weak();
+        window.on_sftp_local_refresh(move |tab_id: SharedString| {
+            let Some(w) = weak.upgrade() else { return };
+            let path = current_path(&w, tab_id.as_str());
+            let dir = if path.is_empty() {
+                home_dir()
+            } else {
+                std::path::PathBuf::from(path)
+            };
+            load_dir(&w, tab_id.as_str(), dir);
+        });
+    }
+    {
+        window.on_sftp_local_open(move |_tab_id: SharedString, path: SharedString| {
+            // No shell involved: the path is handed to the OS as one opaque
+            // argument (the same helper remote "Open externally" uses).
+            crate::sftp::open_with_os(path.as_str());
+        });
+    }
+    {
+        let weak = window.as_weak();
+        window.on_sftp_local_toggle_select(move |tab_id: SharedString, index: i32| {
+            let Some(w) = weak.upgrade() else { return };
+            let terminals = w.get_terminals();
+            let Some(model) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>() else {
+                return;
+            };
+            toggle_selected(model, tab_id.as_str(), index);
+            w.invoke_refresh_sidebar();
+        });
+    }
+    {
+        let weak = window.as_weak();
+        window.on_sftp_local_select_range(
+            move |tab_id: SharedString, from: i32, to: i32| {
+                let Some(w) = weak.upgrade() else { return };
+                let terminals = w.get_terminals();
+                let Some(model) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>()
+                else {
+                    return;
+                };
+                select_range(model, tab_id.as_str(), from, to);
+                w.invoke_refresh_sidebar();
+            },
+        );
+    }
+    {
+        window.on_sftp_local_copy_path(move |path: SharedString| {
+            // Clipboard writes must never run on the UI thread (#sftp-copy-path-freeze).
+            std::thread::spawn(move || clipboard_set_text(path.to_string()));
+        });
+    }
+    {
+        let sftp_handles = sftp_handles.clone();
+        let weak = window.as_weak();
+        window.on_sftp_local_upload(move |tab_id: SharedString, path: SharedString| {
+            let Some(w) = weak.upgrade() else { return };
+            upload_local_paths(&w, tab_id.as_str(), &sftp_handles, vec![path.to_string()]);
+        });
+    }
+    {
+        let sftp_handles = sftp_handles.clone();
+        let weak = window.as_weak();
+        window.on_sftp_local_upload_selected(move |tab_id: SharedString| {
+            let Some(w) = weak.upgrade() else { return };
+            let terminals = w.get_terminals();
+            let Some(model) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>() else {
+                return;
+            };
+            let paths = selected_paths(model, tab_id.as_str());
+            upload_local_paths(&w, tab_id.as_str(), &sftp_handles, paths);
+        });
+    }
+    {
+        // Divider moved: remember it on the tab so the OS-drop hit test uses the
+        // same local/remote boundary the user sees.
+        let weak = window.as_weak();
+        window.on_persist_sftp_local_pane_width(move |tab_id: SharedString, width: f32| {
+            let Some(w) = weak.upgrade() else { return };
+            let terminals = w.get_terminals();
+            let Some(model) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>() else {
+                return;
+            };
+            update_terminal_row(model, tab_id.as_str(), |row| {
+                row.sftp_local_pane_width = width;
+            });
+        });
+    }
+    {
+        let sftp_handles = sftp_handles.clone();
+        let weak = window.as_weak();
+        window.on_sftp_download_to_local(
+            move |tab_id: SharedString, remote: SharedString| {
+                let Some(w) = weak.upgrade() else { return };
+                download_into_local_pane(
+                    &w,
+                    tab_id.as_str(),
+                    &sftp_handles,
+                    vec![remote.to_string()],
+                );
+            },
+        );
+    }
+    {
+        let sftp_handles = sftp_handles.clone();
+        let weak = window.as_weak();
+        window.on_sftp_download_selected_to_local(move |tab_id: SharedString| {
+            let Some(w) = weak.upgrade() else { return };
+            let terminals = w.get_terminals();
+            let Some(model) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>() else {
+                return;
+            };
+            let remotes = collect_sftp_selected(model, tab_id.as_str());
+            download_into_local_pane(&w, tab_id.as_str(), &sftp_handles, remotes);
+            clear_sftp_selection(model, tab_id.as_str());
+        });
+    }
+}
     }
 }
 
@@ -277,26 +589,10 @@ pub(super) fn wire_sftp_callbacks(
                 let tab_id = tab_id.to_string();
                 let remote_dir = remote_dir.to_string();
                 let sftp_handles = sftp_handles.clone();
-                // Session-sync upload (#sync): when both the sync toggle and the
-                // "sync upload" setting are on, mirror the upload to every other
-                // online session — each into *that session's own* current SFTP
-                // directory (paths differ between sessions, e.g. /home/jeff vs
-                // /home/root, so the active session's path can't be reused).
-                // Gather targets on the UI thread (Slint models aren't Send).
-                let sync_targets: Vec<(String, String)> = weak
+                // Gather sync targets on the UI thread (Slint models aren't Send).
+                let sync_targets = weak
                     .upgrade()
-                    .filter(|w| w.get_sync_input() && w.get_sync_upload_enabled())
-                    .map(|w| {
-                        let paths = terminal_sftp_paths(&w);
-                        let handles = sftp_handles.lock().ok();
-                        handles
-                            .iter()
-                            .flat_map(|h| h.keys())
-                            .filter(|id| *id != &tab_id)
-                            .filter_map(|id| paths.get(id).map(|dir| (id.clone(), dir.clone())))
-                            .filter(|(_, dir)| !dir.is_empty())
-                            .collect()
-                    })
+                    .map(|w| upload_sync_targets(&w, &sftp_handles, &tab_id))
                     .unwrap_or_default();
                 // The duplicate prompt needs the policy and the current listing,
                 // both only reachable on the UI thread.
@@ -353,6 +649,46 @@ pub(super) fn wire_sftp_callbacks(
                 });
             },
         );
+    }
+
+    // Paste files / folders copied in the OS file manager or an IDE to upload
+    // them into the remote directory (#508). Right-click › Paste, or the paste
+    // chord while the file list has focus.
+    {
+        let sftp_handles = sftp_handles.clone();
+        let weak = window.as_weak();
+        window.on_sftp_paste_upload(move |tab_id: SharedString, remote_dir: SharedString| {
+            let Some(w) = weak.upgrade() else { return };
+            let tab_id = tab_id.to_string();
+            let remote_dir = remote_dir.to_string();
+            if remote_dir.is_empty() {
+                return;
+            }
+            let locals = clipboard_upload_paths();
+            if locals.is_empty() {
+                set_sftp_status(
+                    &w,
+                    &tab_id,
+                    t(
+                        "剪贴板里没有文件。请先在文件管理器中复制文件或文件夹，再粘贴到这里。",
+                        "No files on the clipboard. Copy files or folders in your file manager, then paste them here.",
+                    ),
+                );
+                return;
+            }
+            let sync_targets = upload_sync_targets(&w, &sftp_handles, &tab_id);
+            queue_uploads(&sftp_handles, &tab_id, &remote_dir, &locals, &sync_targets);
+            w.set_download_open(true);
+            set_sftp_status(
+                &w,
+                &tab_id,
+                &format!(
+                    "{} {} → {remote_dir}",
+                    t("正在上传", "Uploading"),
+                    upload_summary(&locals)
+                ),
+            );
+        });
     }
 
     // Refresh the current directory listing.
@@ -916,6 +1252,9 @@ pub(super) fn wire_sftp_callbacks(
         });
     }
 
+    // Split (dual-pane) view: local browsing + two-way transfers.
+    wire_sftp_split_callbacks(window, &sftp_handles);
+
     // Built-in editor (#70), detached-window mode. Editor tabs (#494) are
     // wired in editor_tabs::wire_editor_tabs.
     wire_editor_window(editor, sftp_handles);
@@ -1008,3 +1347,177 @@ fn set_tab_bookmarks(terminals: &VecModel<TerminalState>, tab_id: &str, paths: &
 // ---------------------------------------------------------------------------
 // Raw keystroke forwarding and PTY resize
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Upload helpers shared by the upload button and paste-to-upload (#508)
+// ---------------------------------------------------------------------------
+
+/// Session-sync upload (#sync): when both the sync toggle and the "sync
+/// upload" setting are on, every other online session also receives the
+/// upload, each into *its own* current SFTP directory (paths differ between
+/// sessions, e.g. /home/jeff vs /home/root). Empty otherwise.
+fn upload_sync_targets(
+    w: &AppWindow,
+    sftp_handles: &SftpHandles,
+    tab_id: &str,
+) -> Vec<(String, String)> {
+    if !(w.get_sync_input() && w.get_sync_upload_enabled()) {
+        return Vec::new();
+    }
+    let paths = terminal_sftp_paths(w);
+    let Ok(handles) = sftp_handles.lock() else {
+        return Vec::new();
+    };
+    handles
+        .keys()
+        .filter(|id| id.as_str() != tab_id)
+        .filter_map(|id| paths.get(id).map(|dir| (id.clone(), dir.clone())))
+        .filter(|(_, dir)| !dir.is_empty())
+        .collect()
+}
+
+/// Queue `locals` (files or folders) for upload into `remote_dir` of
+/// `tab_id`, and into each sync target's own directory.
+fn queue_uploads(
+    sftp_handles: &SftpHandles,
+    tab_id: &str,
+    remote_dir: &str,
+    locals: &[std::path::PathBuf],
+    sync_targets: &[(String, String)],
+) {
+    let Ok(handles) = sftp_handles.lock() else {
+        return;
+    };
+    if let Some(h) = handles.get(tab_id) {
+        for local in locals {
+            h.upload(local.clone(), remote_dir.to_string());
+        }
+    }
+    for (id, dir) in sync_targets {
+        if let Some(h) = handles.get(id) {
+            for local in locals {
+                h.upload(local.clone(), dir.clone());
+            }
+        }
+    }
+}
+
+/// The files and folders on the OS clipboard (Explorer / Finder / an IDE's
+/// "Copy"), or nothing when it holds no file list.
+fn clipboard_upload_paths() -> Vec<std::path::PathBuf> {
+    let listed = arboard::Clipboard::new()
+        .and_then(|mut clipboard| clipboard.get().file_list())
+        .unwrap_or_default();
+    upload_candidates(listed, |path| path.exists())
+}
+
+/// Keep the paths that still exist, in order, without duplicates.
+fn upload_candidates(
+    paths: Vec<std::path::PathBuf>,
+    exists: impl Fn(&std::path::Path) -> bool,
+) -> Vec<std::path::PathBuf> {
+    let mut seen = std::collections::HashSet::new();
+    paths
+        .into_iter()
+        .filter(|path| exists(path) && seen.insert(path.clone()))
+        .collect()
+}
+
+/// The first path's name and how many more paths follow.
+fn upload_summary_parts(paths: &[std::path::PathBuf]) -> Option<(String, usize)> {
+    let first = paths.first()?;
+    let name = first
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| first.to_string_lossy().into_owned());
+    Some((name, paths.len() - 1))
+}
+
+/// "app.jar" for one path; "app.jar and 2 more" / "app.jar 等 3 项" for several.
+fn upload_summary(paths: &[std::path::PathBuf]) -> String {
+    match upload_summary_parts(paths) {
+        None => String::new(),
+        Some((name, 0)) => name,
+        Some((name, more)) if crate::i18n::is_en() => format!("{name} and {more} more"),
+        Some((name, more)) => format!("{name} 等 {} 项", more + 1),
+    }
+}
+
+/// Show `message` in the SFTP status line of `tab_id`.
+fn set_sftp_status(w: &AppWindow, tab_id: &str, message: &str) {
+    use slint::Model as _;
+    let terminals = w.get_terminals();
+    for i in 0..terminals.row_count() {
+        if let Some(mut row) = terminals.row_data(i) {
+            if row.id.as_str() == tab_id {
+                row.sftp_status = message.into();
+                terminals.set_row_data(i, row);
+                return;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod paste_upload_tests {
+    use super::{upload_candidates, upload_summary_parts};
+    use std::path::PathBuf;
+
+    /// Real OS clipboard: copy two files as a file list (what Explorer /
+    /// Finder do) and read them back. Touches the clipboard, so ignored by
+    /// default: `cargo test -- --ignored clipboard_file_list_round_trip`.
+    #[test]
+    #[ignore]
+    fn clipboard_file_list_round_trip() {
+        let dir = std::env::temp_dir().join(format!("meatshell-paste-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("app.jar");
+        let b = dir.join("conf");
+        std::fs::write(&a, b"jar").unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let mut clipboard = arboard::Clipboard::new().unwrap();
+        let saved_text = clipboard.get_text().ok();
+        clipboard.set().file_list(&[&a, &b]).unwrap();
+        let read = super::clipboard_upload_paths();
+        // Put the user's clipboard text back before asserting.
+        if let Some(text) = saved_text {
+            let _ = clipboard.set_text(text);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        let names: Vec<_> = read.iter().filter_map(|p| p.file_name()).collect();
+        assert_eq!(names, ["app.jar", "conf"], "{read:?}");
+    }
+
+    #[test]
+    fn candidates_keep_existing_paths_in_order_without_duplicates() {
+        let paths = vec![
+            PathBuf::from("C:/build/app.jar"),
+            PathBuf::from("C:/gone.txt"),
+            PathBuf::from("C:/build/conf"),
+            PathBuf::from("C:/build/app.jar"),
+        ];
+        let kept = upload_candidates(paths, |p| !p.ends_with("gone.txt"));
+        assert_eq!(
+            kept,
+            [PathBuf::from("C:/build/app.jar"), PathBuf::from("C:/build/conf")]
+        );
+        assert!(upload_candidates(Vec::new(), |_| true).is_empty());
+    }
+
+    #[test]
+    fn summary_names_the_first_file_and_counts_the_rest() {
+        assert_eq!(upload_summary_parts(&[]), None);
+        assert_eq!(
+            upload_summary_parts(&[PathBuf::from("/a/app.jar")]),
+            Some(("app.jar".to_string(), 0))
+        );
+        assert_eq!(
+            upload_summary_parts(&[
+                PathBuf::from("/a/app.jar"),
+                PathBuf::from("/a/b"),
+                PathBuf::from("c"),
+            ]),
+            Some(("app.jar".to_string(), 2))
+        );
+    }
+}

@@ -224,6 +224,25 @@ export component SystemInfoWindow inherits Window {
     VerticalLayout {
         spacing: 0;
 
+        // macOS title strip: room for the traffic lights over the transparent
+        // native title bar, plus the hidden native title (#360). No TouchArea:
+        // macOS keeps handling the drag.
+        if root.is-mac && !root.custom-titlebar : Rectangle {
+            height: 28px;
+            background: Theme.bg-elevated;
+            Text {
+                x: 76px;
+                width: parent.width - 152px;
+                height: parent.height;
+                text: @tr("System information") + (root.host != "" ? "  -  " + root.host : "");
+                color: Theme.text-secondary;
+                font-size: Theme.fs-sm;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+
         if root.custom-titlebar : Rectangle {
             height: 36px;
             background: Theme.bg-elevated;

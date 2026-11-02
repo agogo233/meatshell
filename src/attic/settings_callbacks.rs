@@ -60,6 +60,9 @@ pub(super) fn apply_saved_appearance(ctx: &WinCtx) {
         window.set_mcp_use_saved_credentials(s.mcp_use_saved_credentials());
         window.set_mcp_allow_commands(s.mcp_allow_commands());
         window.set_mcp_allow_file_transfers(s.mcp_allow_file_transfers());
+        // Settings › MCP: client config with this executable's real path.
+        let (command, args) = crate::mcp::client_launch();
+        window.set_mcp_config_json(crate::mcp::client_config_json(&command, &args).into());
     }
 
     {
@@ -177,6 +180,13 @@ pub(super) fn wire_interface_toggles(
     }
 }
 
+/// Show the saved SSH keepalive setting (#515) in a window's settings page.
+pub(super) fn sync_ssh_keepalive(window: &AppWindow, store: &ConfigStore) {
+    window.set_ssh_keepalive_enabled(store.ssh_keepalive_enabled());
+    window.set_ssh_keepalive_interval(store.ssh_keepalive_interval() as i32);
+    window.set_ssh_keepalive_max(store.ssh_keepalive_max() as i32);
+}
+
 /// Session logging settings (#265).
 pub(super) fn wire_session_log_settings(ctx: &WinCtx) {
     let WinCtx {
@@ -273,6 +283,26 @@ pub(super) fn wire_session_log_settings(ctx: &WinCtx) {
             let mut s = store.borrow_mut();
             s.set_extra_paste_shortcuts_enabled(enabled);
             let _ = s.save();
+        });
+    }
+    // SSH keepalive (Settings › Connection, #515). The store pushes the value
+    // into the SSH layer; connections opened from now on use it.
+    sync_ssh_keepalive(window, &store.borrow());
+    {
+        let store = store.clone();
+        let registry = ctx.registry.clone();
+        let weak = window.as_weak();
+        window.on_set_ssh_keepalive(move |enabled, interval, max| {
+            {
+                let mut s = store.borrow_mut();
+                s.set_ssh_keepalive(enabled, interval.max(0) as u32, max.max(0) as u32);
+                let _ = s.save();
+                // Show the clamped values the store kept.
+                if let Some(w) = weak.upgrade() {
+                    sync_ssh_keepalive(&w, &s);
+                }
+            }
+            registry.broadcast_config_changed();
         });
     }
     {

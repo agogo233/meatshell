@@ -2,6 +2,8 @@
 mod structs;
 #[path = "impls/connection.rs"]
 mod connection;
+#[path = "impls/cwd.rs"]
+mod cwd;
 pub(crate) use connection::{with_automation_cancellation, inherit_automation_cancellation, disconnect_ssh, network_stage, HandshakeHandler, HostKeyWait};
 #[path = "impls/known_hosts.rs"]
 pub(crate) mod known_hosts;
