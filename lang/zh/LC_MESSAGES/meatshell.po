@@ -954,9 +954,6 @@ msgstr "下载选中项到本地文件夹"
 msgid "Selected items"
 msgstr "选中项"
 
-msgid "System information"
-msgstr "系统信息"
-
 msgid "FreeRDP server compatibility (Linux / macOS)"
 msgstr "FreeRDP 服务器兼容设置（Linux / macOS）"
 
