@@ -2251,7 +2251,12 @@ pub(crate) fn open_with_os(path: &str) {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub(crate) fn open_with_os(path: &str) {
+    let _ = std::process::Command::new("open").arg(path).spawn();
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub(crate) fn open_with_os(path: &str) {
     let _ = std::process::Command::new("xdg-open").arg(path).spawn();
 }
