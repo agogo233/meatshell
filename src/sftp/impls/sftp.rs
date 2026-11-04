@@ -157,12 +157,6 @@ fn chmod_attributes(mode: u32) -> FileAttributes {
     }
 }
 
-/// Spawn an SFTP worker on the Tokio runtime.
-///
-/// The worker opens its own SSH connection to the same server, authenticates,
-/// and requests the `sftp` subsystem. Events (directory listings, progress,
-/// errors) are sent back via `events`, which is the same sender used by the
-/// terminal's shell session.
 /// Turn an SFTP-worker failure into a status-bar message.
 ///
 /// SFTP runs on its own SSH connection, fully separate from the shell PTY, so
@@ -196,16 +190,34 @@ fn friendly_sftp_error(err: &anyhow::Error) -> String {
     .iter()
     .any(|k| chain.contains(k));
     if permission_like {
-        t(
-            "SFTP 不可用,请检查是否有访问权限(服务器可能未开放 SFTP)",
-            "SFTP unavailable — check whether you have permission (server may not allow SFTP)",
-        )
-        .to_string()
+        // OpenWrt ships Dropbear, which does not implement the `sftp` subsystem at
+        // all. A generic "check your permissions" hint sends those users chasing a
+        // permission problem they do not have, so call out the actual remedy
+        // (install an SFTP server, or use the SCP-capable transfer mode).
+        if chain.contains("subsystem") || chain.contains("sftp handshake") {
+            t(
+                "服务器未提供 SFTP 服务（OpenWrt/Dropbear 常见）。请安装 openssh-sftp-server，或在会话设置中改用支持 SCP 的传输方式",
+                "The server does not offer SFTP (common on OpenWrt/Dropbear). Install openssh-sftp-server, or switch the session's transfer mode to one that supports SCP",
+            )
+            .to_string()
+        } else {
+            t(
+                "SFTP 不可用,请检查是否有访问权限(服务器可能未开放 SFTP)",
+                "SFTP unavailable — check whether you have permission (server may not allow SFTP)",
+            )
+            .to_string()
+        }
     } else {
         format!("{}: {err:#}", t("SFTP 错误", "SFTP error"))
     }
 }
 
+/// Spawn an SFTP worker on the Tokio runtime.
+///
+/// The worker opens its own SSH connection to the same server, authenticates,
+/// and requests the `sftp` subsystem. Events (directory listings, progress,
+/// errors) are sent back via `events`, which is the same sender used by the
+/// terminal's shell session.
 pub fn spawn_sftp(
     runtime: &tokio::runtime::Handle,
     session: Session,
@@ -218,7 +230,11 @@ pub fn spawn_sftp(
     let events_err = events.clone();
     let join = runtime.spawn(crate::ssh::inherit_automation_cancellation(async move {
         if let Err(err) = run_sftp(session, jump, cmd_rx, self_tx, events, queue).await {
-            let _ = events_err.send(SessionEvent::SftpStatus(friendly_sftp_error(&err)));
+            // Surface as SftpError, not SftpStatus: the status variant leaves the
+            // panel's spinner running, so a failed connect ("SFTP 连接中...") never
+            // resolves and looks like it is stuck mid-handshake. SftpError stops the
+            // spinner and shows the reason, leaving any existing listing in place.
+            let _ = events_err.send(SessionEvent::SftpError(friendly_sftp_error(&err)));
         }
     }));
     SftpHandle {
