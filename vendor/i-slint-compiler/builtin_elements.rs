@@ -2303,6 +2303,11 @@ fn build(l: &mut Loader) {
         out property <int> cursor-position-byte-offset;
         // Internal, undocumented property, only exposed for tests.
         out property <int> anchor-position-byte-offset;
+        // MeatShell editor patch: true while the left button is held down for a
+        // pointer drag inside this input. The editor pane grows a selection on
+        // viewport scroll only while this is set, so scrolling after the mouse is
+        // released leaves the selection alone.
+        out property <bool> pointer-drag-active;
         /// `TextInput` sets this to `true` when it's focused. Only then it receives <Link type="KeyEvent"/>s.
         out property <bool> has-focus;
         /// Invoked when the enter key is pressed.

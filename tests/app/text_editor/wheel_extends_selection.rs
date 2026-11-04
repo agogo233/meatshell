@@ -34,7 +34,8 @@ slint::slint! {
             root.scroll-guard-armed = false;
             let delta-y = root.tracked-scroll-y - root.last-scroll-y;
             root.last-scroll-y = root.tracked-scroll-y;
-            if (delta-y != 0px && edit.anchor-position-byte-offset
+            if (delta-y != 0px && edit.pointer-drag-active
+                    && edit.anchor-position-byte-offset
                     != edit.cursor-position-byte-offset) {
                 let line-height = edit.font-metrics.ascent
                     - edit.font-metrics.descent;
@@ -279,6 +280,77 @@ fn editor_wheel_grows_the_selection() {
         settle(&window);
         let grown_top = ui.get_anchor_offset().min(ui.get_cursor_offset());
         assert!(grown_top < top, "scrolling up must extend the top end");
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn editor_wheel_after_release_leaves_the_selection() {
+    // #388 grew a selection with every viewport scroll, even after the left
+    // button was released: dragging the scrollbar (or wheeling) kept extending
+    // it. The selection must only follow the scroll while a drag is actually in
+    // flight, so the pane gates the growth on the input's pointer-drag-active.
+    std::thread::spawn(|| {
+        let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        slint::platform::set_platform(Box::new(Backend(window.clone()))).unwrap();
+        let ui = EditorWheelSelect::new().unwrap();
+        let pending = Rc::new(std::cell::RefCell::new(0.0f32));
+        ui.on_scroll_select(move |content: slint::SharedString, anchor: i32, focus: i32,
+                             delta_y: f32, line_height: f32| {
+            let (lines, next) = super::super::editor_host::scroll_accumulate(
+                *pending.borrow(), delta_y, line_height);
+            *pending.borrow_mut() = next;
+            let grown = super::super::editor_host::scroll_selection(
+                content.as_str(), anchor, focus, lines);
+            GrownSelection { start: grown.start, end: grown.end }
+        });
+        ui.show().unwrap();
+        window.set_size(slint::PhysicalSize::new(240, 120));
+        settle(&window);
+
+        // Press and drag down to create a selection.
+        let position = slint::LogicalPosition::new(120., 60.);
+        window.dispatch_event(WindowEvent::PointerPressed {
+            position,
+            button: PointerEventButton::Left,
+        });
+        settle(&window);
+        window.dispatch_event(WindowEvent::PointerMoved {
+            position: slint::LogicalPosition::new(120., 90.),
+        });
+        settle(&window);
+        let anchor = ui.get_anchor_offset();
+        let cursor = ui.get_cursor_offset();
+        assert_ne!(anchor, cursor, "the drag must create a selection");
+
+        // Release the mouse, then scroll: the viewport must move while the
+        // selection stays exactly where the drag left it.
+        window.dispatch_event(WindowEvent::PointerReleased {
+            position,
+            button: PointerEventButton::Left,
+        });
+        settle(&window);
+        let extend_before = ui.get_extend_calls();
+        for _ in 0..3 {
+            window.dispatch_event(WindowEvent::PointerScrolled {
+                position,
+                delta_x: 0.,
+                delta_y: -24.,
+            });
+            settle(&window);
+        }
+
+        assert!(
+            ui.get_scroll_y() < 0.0,
+            "the wheel must still scroll the viewport after the mouse is released"
+        );
+        assert_eq!(
+            ui.get_extend_calls(), extend_before,
+            "releasing the mouse must stop scrolls from growing the selection"
+        );
+        assert_eq!(ui.get_anchor_offset(), anchor, "anchor must stay put");
+        assert_eq!(ui.get_cursor_offset(), cursor, "cursor must stay put");
     })
     .join()
     .unwrap();

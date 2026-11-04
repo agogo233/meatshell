@@ -57,6 +57,12 @@ the viewport scrolls; `font-metrics` gives the line height as
 `ascent - descent` (descent is negative), which turns a pixel delta into whole
 lines. Keep them available when rebasing.
 
+A fourth exposed property, `pointer-drag-active`, mirrors the input's internal
+left-button `pressed` state (set on press, cleared on release/exit). The pane
+grows the selection on scroll only while it is true, so scrolling after the
+mouse is released leaves the selection alone while drag-select + wheel (#388)
+still extends it.
+
 ## i-slint-backend-winit
 
 Also the published 1.18.1 crate, with two fixes marked `MeatShell patch`:

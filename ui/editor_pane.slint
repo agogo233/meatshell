@@ -114,7 +114,8 @@ export component EditorPane inherits Rectangle {
             root.scroll-guard-armed = false;
             let delta-y = root.scroll-y - root.last-scroll-y;
             root.last-scroll-y = root.scroll-y;
-            if (delta-y != 0px && edit-input.anchor-position-byte-offset
+            if (delta-y != 0px && edit-input.pointer-drag-active
+                    && edit-input.anchor-position-byte-offset
                     != edit-input.cursor-position-byte-offset) {
                 let line-height = edit-input.font-metrics.ascent
                     - edit-input.font-metrics.descent;
