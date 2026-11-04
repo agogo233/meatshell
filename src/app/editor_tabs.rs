@@ -389,14 +389,14 @@ pub(super) fn wire_editor_tabs(
         },
     );
     // One editor pane serves every editor tab: keep the sub-line scroll
-    // remainder for the shared viewport here as well (see scroll_accumulate).
+    // remainder and any snapped crossing for the shared viewport here too
+    // (see WheelSelectState). A new press at a different byte anchors a new
+    // rubber band, which the state resets on its own.
     {
-        let pending = std::rc::Rc::new(std::cell::RefCell::new(0.0f32));
+        let state = std::rc::Rc::new(editor_host::WheelSelectState::new());
         window.on_editor_scroll_select(
             move |content: SharedString, anchor: i32, focus: i32, delta_y: f32, line_height: f32| {
-                let (lines, next) = scroll_accumulate(*pending.borrow(), delta_y, line_height);
-                *pending.borrow_mut() = next;
-                scroll_selection(content.as_str(), anchor, focus, lines)
+                state.select(content.as_str(), anchor, focus, delta_y, line_height)
             },
         );
     }

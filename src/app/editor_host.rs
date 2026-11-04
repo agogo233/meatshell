@@ -107,14 +107,12 @@ pub(super) fn wire_editor_window(editor: &EditorWindow, sftp_handles: SftpHandle
     );
     // The UI reports one incremental scroll delta per change tick; desktop
     // wheel steps arrive split across many small animation frames, so the
-    // sub-line remainder is kept per editor and folded into the next call.
+    // sub-line remainder and any snapped crossing are kept per editor.
     {
-        let pending = std::rc::Rc::new(std::cell::RefCell::new(0.0f32));
+        let state = std::rc::Rc::new(WheelSelectState::new());
         editor.on_editor_scroll_select(
             move |content: SharedString, anchor: i32, focus: i32, delta_y: f32, line_height: f32| {
-                let (lines, next) = scroll_accumulate(*pending.borrow(), delta_y, line_height);
-                *pending.borrow_mut() = next;
-                scroll_selection(content.as_str(), anchor, focus, lines)
+                state.select(content.as_str(), anchor, focus, delta_y, line_height)
             },
         );
     }
@@ -209,68 +207,181 @@ pub(super) fn scroll_accumulate(prev_px: f32, delta_px: f32, line_height_px: f32
 /// visual lines (positive = the viewport moved up, negative = down).
 ///
 /// `anchor` is the fixed rubber-band end (the side the user pressed); `focus`
-/// is the live end. Scrolling only ever moves `focus`: scrolling fore grows it
-/// away from `anchor`, scrolling back pulls it towards `anchor`, and past it the
-/// selection grows on the other side. A backwards selection thus shrinks on the
-/// way back instead of growing out of the top. The caller owns the bookkeeping:
-/// it reads `focus` from the input's live cursor and writes the returned
-/// offsets back, so the focus-side end keeps its identity across calls. A
-/// scrolling with no selection (`anchor == focus`) leaves the caret alone.
-///
-/// Offsets are byte offsets, the unit `set-selection-offsets` takes, and are
-/// clamped to the document. Wrapping lines are measured against logical
-/// newlines, which is exact near the caret for short lines and approximate on
-/// very long wrapped lines.
+/// is the live end. Rolling only moves `focus`: rolling away from `anchor`
+/// grows the band, rolling back pulls it in, and when one step would land
+/// past `anchor` the live end snaps to `anchor` and the unconsumed lines come
+/// back in `count` so the caller can keep them and let the band grow on the
+/// other side on the next call. The result always keeps the input order
+/// (`start` = anchor side, `end` = live side): writing it back through
+/// `set-selection-offsets` therefore never rewrites the input's anchor field,
+/// so the pressed end cannot drift. Offsets are byte offsets, clamped to the
+/// document; wrapped lines are measured against logical newlines, which is
+/// exact near the ends for short lines and approximate on very long wrapped
+/// lines.
 pub(super) fn scroll_selection(content: &str, anchor: i32, focus: i32, lines: i32) -> EditorFindResult {
     let len = content.len().min(i32::MAX as usize) as i32;
     let anchor = anchor.clamp(0, len) as usize;
     let focus = focus.clamp(0, len) as usize;
-    if anchor == focus || lines == 0 {
+    if lines == 0 {
         return EditorFindResult {
             start: anchor as i32,
             end: focus as i32,
             count: 0,
         };
     }
-    let focus = if lines > 0 {
-        move_selection_back(content, focus, lines)
-    } else {
-        move_selection_forward(content, focus, -lines)
+    let up = lines > 0;
+    // Rolling towards the anchor can cross it; rolling away (and growing an
+    // empty band, which the caller only does after a snap) cannot.
+    let towards = if up { focus > anchor } else { focus < anchor };
+    if !towards {
+        let moved = if up {
+            move_selection_back(content, focus, lines)
+        } else {
+            move_selection_forward(content, focus, -lines)
+        };
+        return EditorFindResult {
+            start: anchor as i32,
+            end: moved as i32,
+            count: 0,
+        };
+    }
+    // Walk towards the anchor and stop at the step that reaches it, so a fast
+    // scroll shrinks the band to nothing before the next call grows the other
+    // side, instead of jumping across the anchor in one frame.
+    let mut p = focus;
+    let mut consumed = 0;
+    let crossed = loop {
+        p = if up { step_back_line(content, p) } else { step_forward_line(content, p) };
+        consumed += 1;
+        if (up && p <= anchor) || (!up && p >= anchor) {
+            break true;
+        }
+        if consumed as i32 == lines.abs() {
+            break false;
+        }
     };
-    let (start, end) = if anchor <= focus { (anchor, focus) } else { (focus, anchor) };
-    EditorFindResult {
-        start: start as i32,
-        end: end as i32,
-        count: 0,
+    if crossed {
+        EditorFindResult {
+            start: anchor as i32,
+            end: anchor as i32,
+            count: lines.abs() - consumed,
+        }
+    } else {
+        EditorFindResult {
+            start: anchor as i32,
+            end: p as i32,
+            count: 0,
+        }
     }
 }
 
-/// Move a selection end back `lines` logical lines, toward the start of the document. Each step
-/// lands on a line boundary: an end inside a line snaps to that line's start, and an end already
-/// on a line start steps back to the previous line's start.
+/// One logical-line step towards the start of the document: an end inside a
+/// line snaps to that line's start, an end already on a line start moves to
+/// the previous line's start.
+fn step_back_line(content: &str, p: usize) -> usize {
+    let p = p.min(content.len());
+    if p == 0 {
+        return 0;
+    }
+    let line_start = content[..p].rfind('\n').map_or(0, |i| i + 1);
+    if line_start < p {
+        line_start
+    } else {
+        content[..p - 1].rfind('\n').map_or(0, |i| i + 1)
+    }
+}
+
+/// One logical-line step towards the end of the document: the character after
+/// the next newline, or the end of the document.
+fn step_forward_line(content: &str, p: usize) -> usize {
+    let p = p.min(content.len());
+    if p >= content.len() {
+        return p;
+    }
+    let line_end = content[p..].find('\n').map_or(content.len(), |i| p + i);
+    (line_end + 1).min(content.len())
+}
+
+/// Move a selection end back `lines` logical lines, toward the start of the
+/// document.
 fn move_selection_back(content: &str, pos: usize, lines: i32) -> usize {
     let mut p = pos.min(content.len());
-    let mut left = lines;
-    while left > 0 && p > 0 {
-        let line_start = content[..p].rfind('\n').map_or(0, |i| i + 1);
-        p = if line_start < p {
-            line_start
-        } else {
-            content[..p - 1].rfind('\n').map_or(0, |i| i + 1)
-        };
-        left -= 1;
+    for _ in 0..lines.max(0) {
+        p = step_back_line(content, p);
     }
     p
 }
 
-/// Move a selection end forward `lines` logical lines, toward the end of the document.
+/// Move a selection end forward `lines` logical lines, toward the end of the
+/// document.
 fn move_selection_forward(content: &str, pos: usize, lines: i32) -> usize {
     let mut p = pos.min(content.len());
-    let mut left = lines;
-    while left > 0 && p < content.len() {
-        let line_end = content[p..].find('\n').map_or(content.len(), |i| p + i);
-        p = (line_end + 1).min(content.len());
-        left -= 1;
+    for _ in 0..lines.max(0) {
+        p = step_forward_line(content, p);
     }
     p
+}
+
+/// Per-editor scroll-extension state for the `editor-scroll-select` callback.
+/// A desktop wheel arrives split across many small animation frames, so each
+/// call only reports its own incremental delta and the sub-line remainder is
+/// folded in here; a scroll that snapped the live end onto the anchor owes
+/// its unused lines, kept as `carry_lines` until the next call. Session
+/// state resets when the anchor byte changes (a new press elsewhere) or when
+/// the live end moves back on its own; a re-press at the same byte keeps the
+/// previous session's flags, so wheeling from that press can grow a band out
+/// of the press point rather than staying a plain caret.
+pub(super) struct WheelSelectState {
+    pending_px: std::cell::RefCell<f32>,
+    carry_lines: std::cell::Cell<i32>,
+    last_anchor: std::cell::Cell<i32>,
+    had_selection: std::cell::Cell<bool>,
+}
+
+impl WheelSelectState {
+    pub(super) fn new() -> Self {
+        Self {
+            pending_px: std::cell::RefCell::new(0.0),
+            carry_lines: std::cell::Cell::new(0),
+            last_anchor: std::cell::Cell::new(i32::MIN),
+            had_selection: std::cell::Cell::new(false),
+        }
+    }
+
+    /// Fold this call's scroll into the selection: `focus` starts from the
+    /// input's live end, `anchor` is the press point the band is pinned to.
+    pub(super) fn select(
+        &self,
+        content: &str,
+        anchor: i32,
+        focus: i32,
+        delta_y: f32,
+        line_height: f32,
+    ) -> EditorFindResult {
+        if self.last_anchor.get() != anchor {
+            self.last_anchor.set(anchor);
+            self.carry_lines.set(0);
+            self.had_selection.set(false);
+        }
+        if focus != anchor {
+            self.carry_lines.set(0);
+        }
+        let (lines, next) = scroll_accumulate(*self.pending_px.borrow(), delta_y, line_height);
+        *self.pending_px.borrow_mut() = next;
+        let total = lines + self.carry_lines.get();
+        let grown = if focus == anchor && !self.had_selection.get() {
+            // No selection yet in this drag: wheeling must keep the caret
+            // alone, not grow one out of the press point.
+            EditorFindResult {
+                start: anchor,
+                end: focus,
+                count: 0,
+            }
+        } else {
+            self.had_selection.set(true);
+            scroll_selection(content, anchor, focus, total)
+        };
+        self.carry_lines.set(grown.count);
+        grown
+    }
 }

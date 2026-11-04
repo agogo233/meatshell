@@ -23,6 +23,8 @@ slint::slint! {
     property <bool> scroll-guard-armed: false;
     property <int> scroll-depth: 0;
     callback scroll-select(string, int, int, length, length) -> GrownSelection;
+    // Mirror the pane gate: the drag, not the selection, enables the
+    // rubber-band, so a snapped band may cross its anchor on the next call.
     changed tracked-scroll-y => {
         let guard-diff = root.tracked-scroll-y - root.scroll-guard-target;
         if (root.scroll-guard-armed && guard-diff < 0.5px && guard-diff > -0.5px) {
@@ -34,9 +36,7 @@ slint::slint! {
             root.scroll-guard-armed = false;
             let delta-y = root.tracked-scroll-y - root.last-scroll-y;
             root.last-scroll-y = root.tracked-scroll-y;
-            if (delta-y != 0px && edit.pointer-drag-active
-                    && edit.anchor-position-byte-offset
-                    != edit.cursor-position-byte-offset) {
+            if (delta-y != 0px && edit.pointer-drag-active) {
                 let line-height = edit.font-metrics.ascent
                     - edit.font-metrics.descent;
                 if (line-height > 0px) {
@@ -46,7 +46,12 @@ slint::slint! {
                         edit.anchor-position-byte-offset,
                         edit.cursor-position-byte-offset,
                         delta-y, line-height);
-                    edit.set-selection-offsets(grown.start, grown.end);
+                    // Mirror the pane: skip same-value writes so the edge
+                    // scroll cannot pin the viewport on the caret.
+                    if (grown.start != edit.anchor-position-byte-offset
+                            || grown.end != edit.cursor-position-byte-offset) {
+                        edit.set-selection-offsets(grown.start, grown.end);
+                    }
                     root.scroll-depth = root.scroll-depth - 1;
                 }
             }
@@ -135,10 +140,12 @@ fn editor_scroll_selection_back_pulls_focus_towards_anchor() {
 #[test]
 fn editor_scroll_selection_back_fore_grows_a_backwards_selection() {
     // anchor 10 / focus 6 is a backwards selection; the live end is the one on
-    // top, so scrolling fore moves it further up and past the track.
+    // top, so scrolling fore moves it further up. The result keeps the input
+    // order: anchor first, live end second.
     let grown = super::super::editor_host::scroll_selection("a\nbb\nccc\ndddd\nffff", 10, 6, 2);
-    assert_eq!(grown.start, 2);
-    assert_eq!(grown.end, 10);
+    assert_eq!(grown.start, 10);
+    assert_eq!(grown.end, 2);
+    assert_eq!(grown.count, 0);
 }
 
 #[test]
@@ -149,11 +156,43 @@ fn editor_scroll_selection_forward_grows_past_the_focus() {
 }
 
 #[test]
+fn editor_scroll_selection_snoozes_at_the_anchor() {
+    // Scrolling back far enough to cross the anchor snaps the live end onto it
+    // (an empty band) and hands the unconsumed lines back in `count` so the
+    // next call can grow the other side.
+    let grown = super::super::editor_host::scroll_selection("a\nbb\nccc\ndddd\nffff", 5, 12, 3);
+    assert_eq!(grown.start, 5);
+    assert_eq!(grown.end, 5);
+    assert_eq!(grown.count, 1);
+    let grown = super::super::editor_host::scroll_selection("a\nbb\nccc\ndddd\nffff", 14, 0, -5);
+    assert_eq!(grown.start, 14);
+    assert_eq!(grown.end, 14);
+    assert_eq!(grown.count, 1);
+    // The very step that reaches the anchor owes nothing.
+    let grown = super::super::editor_host::scroll_selection("a\nbb\nccc\ndddd\nffff", 4, 12, 3);
+    assert_eq!(grown.start, 4);
+    assert_eq!(grown.end, 4);
+    assert_eq!(grown.count, 0);
+}
+
+#[test]
+fn editor_scroll_selection_grows_out_of_a_snap() {
+    // After a snap the band is empty and the next call grows it on the other
+    // side, from the anchor.
+    let grown = super::super::editor_host::scroll_selection("a\nbb\nccc\ndddd\nffff", 5, 5, 2);
+    assert_eq!(grown.start, 5);
+    assert_eq!(grown.end, 0);
+    let grown = super::super::editor_host::scroll_selection("a\nbb\nccc\ndddd\nffff", 5, 5, -2);
+    assert_eq!(grown.start, 5);
+    assert_eq!(grown.end, 14);
+}
+
+#[test]
 fn editor_scroll_selection_clamps_to_the_document() {
     let text = "a\nbb\nccc\ndddd\nffff";
     let upward = super::super::editor_host::scroll_selection(text, 8, 4, 90);
-    assert_eq!(upward.start, 0);
-    assert_eq!(upward.end, 8);
+    assert_eq!(upward.start, 8);
+    assert_eq!(upward.end, 0);
     let downward = super::super::editor_host::scroll_selection(text, 0, 4, -90);
     assert_eq!(downward.start, 0);
     assert_eq!(downward.end as usize, text.len());
@@ -211,16 +250,13 @@ fn editor_wheel_grows_the_selection() {
         let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
         slint::platform::set_platform(Box::new(Backend(window.clone()))).unwrap();
         let ui = EditorWheelSelect::new().unwrap();
-        // Mirror the real host: accumulate the sub-line remainder so a notch's
-        // animation frames grow the selection by the scrolled distance.
-        let pending = Rc::new(std::cell::RefCell::new(0.0f32));
+        // Mirror the real host state: the sub-line remainder and any snapped
+        // crossing are kept across calls, so a notch's animation frames move
+        // the band by the scrolled distance.
+        let state = Rc::new(super::super::editor_host::WheelSelectState::new());
         ui.on_scroll_select(move |content: slint::SharedString, anchor: i32, focus: i32,
                              delta_y: f32, line_height: f32| {
-            let (lines, next) = super::super::editor_host::scroll_accumulate(
-                *pending.borrow(), delta_y, line_height);
-            *pending.borrow_mut() = next;
-            let grown = super::super::editor_host::scroll_selection(
-                content.as_str(), anchor, focus, lines);
+            let grown = state.select(content.as_str(), anchor, focus, delta_y, line_height);
             GrownSelection { start: grown.start, end: grown.end }
         });
         ui.show().unwrap();
@@ -308,14 +344,10 @@ fn editor_wheel_after_release_leaves_the_selection() {
         let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
         slint::platform::set_platform(Box::new(Backend(window.clone()))).unwrap();
         let ui = EditorWheelSelect::new().unwrap();
-        let pending = Rc::new(std::cell::RefCell::new(0.0f32));
+        let state = Rc::new(super::super::editor_host::WheelSelectState::new());
         ui.on_scroll_select(move |content: slint::SharedString, anchor: i32, focus: i32,
                              delta_y: f32, line_height: f32| {
-            let (lines, next) = super::super::editor_host::scroll_accumulate(
-                *pending.borrow(), delta_y, line_height);
-            *pending.borrow_mut() = next;
-            let grown = super::super::editor_host::scroll_selection(
-                content.as_str(), anchor, focus, lines);
+            let grown = state.select(content.as_str(), anchor, focus, delta_y, line_height);
             GrownSelection { start: grown.start, end: grown.end }
         });
         ui.show().unwrap();
@@ -379,14 +411,10 @@ fn editor_wheel_pulls_back_then_grows_below_the_anchor() {
         let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
         slint::platform::set_platform(Box::new(Backend(window.clone()))).unwrap();
         let ui = EditorWheelSelect::new().unwrap();
-        let pending = Rc::new(std::cell::RefCell::new(0.0f32));
+        let state = Rc::new(super::super::editor_host::WheelSelectState::new());
         ui.on_scroll_select(move |content: slint::SharedString, anchor: i32, focus: i32,
                              delta_y: f32, line_height: f32| {
-            let (lines, next) = super::super::editor_host::scroll_accumulate(
-                *pending.borrow(), delta_y, line_height);
-            *pending.borrow_mut() = next;
-            let grown = super::super::editor_host::scroll_selection(
-                content.as_str(), anchor, focus, lines);
+            let grown = state.select(content.as_str(), anchor, focus, delta_y, line_height);
             GrownSelection { start: grown.start, end: grown.end }
         });
         ui.show().unwrap();
@@ -446,6 +474,70 @@ fn editor_wheel_pulls_back_then_grows_below_the_anchor() {
         assert!(
             crossed_top < anchor,
             "rolling back past the anchor must grow on the other side"
+        );
+        assert_eq!(
+            ui.get_anchor_offset(),
+            anchor,
+            "crossing must not rewrite the input's anchor end"
+        );
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn editor_wheel_press_without_drag_makes_no_selection() {
+    // Holding the button without moving must keep the caret in place, even
+    // while wheeling: there is no selection to stretch, so the wheel only
+    // scrolls the viewport.
+    std::thread::spawn(|| {
+        let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        slint::platform::set_platform(Box::new(Backend(window.clone()))).unwrap();
+        let ui = EditorWheelSelect::new().unwrap();
+        let state = Rc::new(super::super::editor_host::WheelSelectState::new());
+        ui.on_scroll_select(move |content: slint::SharedString, anchor: i32, focus: i32,
+                             delta_y: f32, line_height: f32| {
+            let grown = state.select(content.as_str(), anchor, focus, delta_y, line_height);
+            GrownSelection { start: grown.start, end: grown.end }
+        });
+        ui.show().unwrap();
+        window.set_size(slint::PhysicalSize::new(240, 120));
+        settle(&window);
+
+        let position = slint::LogicalPosition::new(120., 60.);
+        window.dispatch_event(WindowEvent::PointerPressed {
+            position,
+            button: PointerEventButton::Left,
+        });
+        settle(&window);
+        for _ in 0..3 {
+            window.dispatch_event(WindowEvent::PointerScrolled {
+                position,
+                delta_x: 0.,
+                delta_y: -24.,
+            });
+            settle(&window);
+        }
+
+        assert!(
+            ui.get_scroll_y() < -60.0,
+            "the wheel must keep scrolling the viewport while the button is held"
+        );
+        assert_eq!(
+            ui.get_anchor_offset(),
+            ui.get_cursor_offset(),
+            "wheeling without dragging must not create a selection"
+        );
+
+        // The rubber band still works once the drag actually moves.
+        window.dispatch_event(WindowEvent::PointerMoved {
+            position: slint::LogicalPosition::new(120., 90.),
+        });
+        settle(&window);
+        assert_ne!(
+            ui.get_anchor_offset(),
+            ui.get_cursor_offset(),
+            "dragging must create a selection again"
         );
     })
     .join()

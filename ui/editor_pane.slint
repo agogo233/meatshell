@@ -89,9 +89,12 @@ export component EditorPane inherits Rectangle {
     // re-enter the Windows accessibility adapter (#386).
     property <bool> focus-pending: false;
     // Viewport offset mirrored here so the change can be watched; scrolling only
-    // moves the viewport, so a selection is grown by the revealed lines. The
-    // host accumulates the per-event deltas (desktop wheels arrive as many small
-    // animation frames), so each change reports its own incremental delta.
+    // moves the viewport, so a drag-selection is stretched or pulled back by the
+    // revealed lines, around the pressed anchor. The host accumulates the
+    // per-event deltas (desktop wheels arrive as many small animation frames),
+    // so each change reports its own incremental delta. The gate is the drag
+    // itself, not the selection: wheeling without a selection keeps the caret,
+    // and a band snapped onto its anchor must be allowed to cross it.
     property <length> scroll-y: ed-scroll.content-y;
     property <length> last-scroll-y: 0;
     // The edge scroll driven by the caret must not grow the selection. A plain
@@ -114,9 +117,7 @@ export component EditorPane inherits Rectangle {
             root.scroll-guard-armed = false;
             let delta-y = root.scroll-y - root.last-scroll-y;
             root.last-scroll-y = root.scroll-y;
-            if (delta-y != 0px && edit-input.pointer-drag-active
-                    && edit-input.anchor-position-byte-offset
-                    != edit-input.cursor-position-byte-offset) {
+            if (delta-y != 0px && edit-input.pointer-drag-active) {
                 let line-height = edit-input.font-metrics.ascent
                     - edit-input.font-metrics.descent;
                 if (line-height > 0px) {
@@ -125,7 +126,12 @@ export component EditorPane inherits Rectangle {
                         edit-input.anchor-position-byte-offset,
                         edit-input.cursor-position-byte-offset,
                         delta-y, line-height);
-                    edit-input.set-selection-offsets(grown.start, grown.end);
+                    // Skip same-value writes: they fire cursor-position-changed
+                    // and the edge scroll would pin the viewport on the caret.
+                    if (grown.start != edit-input.anchor-position-byte-offset
+                            || grown.end != edit-input.cursor-position-byte-offset) {
+                        edit-input.set-selection-offsets(grown.start, grown.end);
+                    }
                     root.scroll-depth = root.scroll-depth - 1;
                 }
             }
