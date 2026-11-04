@@ -124,16 +124,25 @@ fn editor_scroll_selection_keeps_a_plain_caret() {
 }
 
 #[test]
-fn editor_scroll_selection_upward_extends_the_top_end() {
-    // anchor 10 / focus 6 is a backwards selection; scrolling up moves the lower
-    // (top-of-document) end back by two lines and keeps the roles in place.
-    let grown = super::super::editor_host::scroll_selection("a\nbb\nccc\ndddd\nffff", 10, 6, 2);
-    assert_eq!(grown.start, 10);
-    assert_eq!(grown.end, 2);
+fn editor_scroll_selection_back_pulls_focus_towards_anchor() {
+    // Normal drag (anchor on top, focus below): scrolling back pulls the live
+    // end back towards the fixed anchor instead of extending the top end.
+    let grown = super::super::editor_host::scroll_selection("a\nbb\nccc\ndddd\nffff", 2, 14, 1);
+    assert_eq!(grown.start, 2);
+    assert_eq!(grown.end, 9);
 }
 
 #[test]
-fn editor_scroll_selection_downward_extends_the_bottom_end() {
+fn editor_scroll_selection_back_fore_grows_a_backwards_selection() {
+    // anchor 10 / focus 6 is a backwards selection; the live end is the one on
+    // top, so scrolling fore moves it further up and past the track.
+    let grown = super::super::editor_host::scroll_selection("a\nbb\nccc\ndddd\nffff", 10, 6, 2);
+    assert_eq!(grown.start, 2);
+    assert_eq!(grown.end, 10);
+}
+
+#[test]
+fn editor_scroll_selection_forward_grows_past_the_focus() {
     let grown = super::super::editor_host::scroll_selection("a\nbb\nccc\ndddd\nffff", 0, 5, -2);
     assert_eq!(grown.start, 0);
     assert_eq!(grown.end, 14);
@@ -143,8 +152,8 @@ fn editor_scroll_selection_downward_extends_the_bottom_end() {
 fn editor_scroll_selection_clamps_to_the_document() {
     let text = "a\nbb\nccc\ndddd\nffff";
     let upward = super::super::editor_host::scroll_selection(text, 8, 4, 90);
-    assert_eq!(upward.start, 8);
-    assert_eq!(upward.end, 0);
+    assert_eq!(upward.start, 0);
+    assert_eq!(upward.end, 8);
     let downward = super::super::editor_host::scroll_selection(text, 0, 4, -90);
     assert_eq!(downward.start, 0);
     assert_eq!(downward.end as usize, text.len());
@@ -271,7 +280,8 @@ fn editor_wheel_grows_the_selection() {
         "small accumulated frames must eventually grow the selection"
     );
 
-    // Scroll back up: the top end must grow.
+    // Scroll back up: the rubber-band focus must pull back towards the anchor
+    // (the top end must not extend out of the document head past the anchor).
         window.dispatch_event(WindowEvent::PointerScrolled {
             position,
             delta_x: 0.,
@@ -279,7 +289,10 @@ fn editor_wheel_grows_the_selection() {
         });
         settle(&window);
         let grown_top = ui.get_anchor_offset().min(ui.get_cursor_offset());
-        assert!(grown_top < top, "scrolling up must extend the top end");
+        assert_eq!(
+            grown_top, top,
+            "scrolling up must pull the focus back, not extend the top end"
+        );
     })
     .join()
     .unwrap();
@@ -351,6 +364,89 @@ fn editor_wheel_after_release_leaves_the_selection() {
         );
         assert_eq!(ui.get_anchor_offset(), anchor, "anchor must stay put");
         assert_eq!(ui.get_cursor_offset(), cursor, "cursor must stay put");
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn editor_wheel_pulls_back_then_grows_below_the_anchor() {
+    // The 24px frames below accumulate exactly like the real host does: pressing
+    // down and rolling fore grows the selection past the cursor, then rolling
+    // back pulls the focus back towards the anchor without touching the top,
+    // and rolling back past it grows out of the head.
+    std::thread::spawn(|| {
+        let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        slint::platform::set_platform(Box::new(Backend(window.clone()))).unwrap();
+        let ui = EditorWheelSelect::new().unwrap();
+        let pending = Rc::new(std::cell::RefCell::new(0.0f32));
+        ui.on_scroll_select(move |content: slint::SharedString, anchor: i32, focus: i32,
+                             delta_y: f32, line_height: f32| {
+            let (lines, next) = super::super::editor_host::scroll_accumulate(
+                *pending.borrow(), delta_y, line_height);
+            *pending.borrow_mut() = next;
+            let grown = super::super::editor_host::scroll_selection(
+                content.as_str(), anchor, focus, lines);
+            GrownSelection { start: grown.start, end: grown.end }
+        });
+        ui.show().unwrap();
+        window.set_size(slint::PhysicalSize::new(240, 120));
+        settle(&window);
+
+        let position = slint::LogicalPosition::new(120., 60.);
+        window.dispatch_event(WindowEvent::PointerPressed {
+            position,
+            button: PointerEventButton::Left,
+        });
+        settle(&window);
+        window.dispatch_event(WindowEvent::PointerMoved {
+            position: slint::LogicalPosition::new(120., 74.),
+        });
+        settle(&window);
+        let anchor = ui.get_anchor_offset();
+        let cursor = ui.get_cursor_offset();
+        assert_ne!(anchor, cursor, "the drag must create a selection");
+        assert!(cursor > anchor, "dragging down puts the anchor on top");
+
+        // Roll fore: the selection must grow past the cursor.
+        for _ in 0..3 {
+            window.dispatch_event(WindowEvent::PointerScrolled {
+                position,
+                delta_x: 0.,
+                delta_y: -24.,
+            });
+            settle(&window);
+        }
+        let grown = ui.get_cursor_offset();
+        assert!(grown > cursor, "rolling fore must grow past the cursor");
+
+        // Roll back some: the focus pulls back but never below the anchor.
+        for _ in 0..2 {
+            window.dispatch_event(WindowEvent::PointerScrolled {
+                position,
+                delta_x: 0.,
+                delta_y: 24.,
+            });
+            settle(&window);
+        }
+        let top = ui.get_anchor_offset().min(ui.get_cursor_offset());
+        assert_eq!(top, anchor, "rolling back must not extend the top end");
+
+        // Roll back far enough to cross the anchor: the selection grows out of
+        // the head (the live end passes below the on-anchor value).
+        for _ in 0..5 {
+            window.dispatch_event(WindowEvent::PointerScrolled {
+                position,
+                delta_x: 0.,
+                delta_y: 24.,
+            });
+            settle(&window);
+        }
+        let crossed_top = ui.get_anchor_offset().min(ui.get_cursor_offset());
+        assert!(
+            crossed_top < anchor,
+            "rolling back past the anchor must grow on the other side"
+        );
     })
     .join()
     .unwrap();

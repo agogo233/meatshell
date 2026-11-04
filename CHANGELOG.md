@@ -5,6 +5,9 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ## [Unreleased]
 
+- **修复拖选时反向滚动把选区往错误方向继续拉长。** 拖选文字时用滚轮翻页，此前滚轮向任何方向滚都会把选区两端分别向上下各自抻长，反向滚回时选区顶部也跟着向上延长、无法收回。现在改为“橡皮筋”模型：拖选起点（锚点）固定，只有沿鼠标那端的选区边界随滚动伸缩——正向滚动继续扩选，反向滚动把选区收回来，收到锚点后再反向滚才会从另一侧重新长出去。
+- **Fix the wheel extending the wrong end when scrolling back during a drag-selection.** Wheeling to flip pages mid-drag used to stretch both ends of the selection in their own directions, so scrolling back kept growing the top end instead of pulling the selection in. The selection is now rubber-banded around the drag anchor: the anchor stays fixed, only the live end follows the scrolls — rolling fore keeps growing it, rolling back pulls it in, and only after it reaches the anchor does further scrolling grow the selection out of the other side.
+
 - **移除应用内更新功能。** 工具栏的更新按钮、设置里的更新页、启动时的版本检查、下载镜像与一键安装（AUR / 自更新 / MSI）全部移除；应用不再自行检查或下载新版。升级请直接从本仓库（agogo233/meatshell）的 Releases 页下载，旧配置里残留的更新相关项会被静默忽略，无需手动清理。关于面板的项目主页链接统一指向本仓库。
 - **The in-app update feature has been removed.** The toolbar update button, the Settings → Updates page, the startup version check, download mirrors and one-click installers (AUR / self-update / MSI) are all gone; the app no longer checks for or downloads new versions on its own. To upgrade, download from this repository's (agogo233/meatshell) Releases page. Update-related leftovers in old config files are silently ignored — no manual cleanup needed. The About panel's project link now points at this repository.
 

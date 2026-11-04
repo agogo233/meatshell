@@ -205,14 +205,22 @@ pub(super) fn scroll_accumulate(prev_px: f32, delta_px: f32, line_height_px: f32
     (lines, total - lines as f32 * line_height_px)
 }
 
-/// Extend a selection by `lines` whole visual lines revealed by a viewport
-/// scroll (positive = the viewport moved up, so text above is revealed).
+/// Stretch or pull back a selection as the viewport scrolls by `lines` whole
+/// visual lines (positive = the viewport moved up, negative = down).
 ///
-/// The end on the revealed side moves: scrolling up extends the top end, scrolling down the
-/// bottom end. `anchor` keeps whichever side it sat on, so a backwards selection keeps growing
-/// backwards. Offsets are byte offsets, the unit `set-selection-offsets` takes, and are clamped
-/// to the document. Wrapping lines are measured against logical newlines, which is exact for
-/// short lines and only approximate on very long wrapped lines.
+/// `anchor` is the fixed rubber-band end (the side the user pressed); `focus`
+/// is the live end. Scrolling only ever moves `focus`: scrolling fore grows it
+/// away from `anchor`, scrolling back pulls it towards `anchor`, and past it the
+/// selection grows on the other side. A backwards selection thus shrinks on the
+/// way back instead of growing out of the top. The caller owns the bookkeeping:
+/// it reads `focus` from the input's live cursor and writes the returned
+/// offsets back, so the focus-side end keeps its identity across calls. A
+/// scrolling with no selection (`anchor == focus`) leaves the caret alone.
+///
+/// Offsets are byte offsets, the unit `set-selection-offsets` takes, and are
+/// clamped to the document. Wrapping lines are measured against logical
+/// newlines, which is exact near the caret for short lines and approximate on
+/// very long wrapped lines.
 pub(super) fn scroll_selection(content: &str, anchor: i32, focus: i32, lines: i32) -> EditorFindResult {
     let len = content.len().min(i32::MAX as usize) as i32;
     let anchor = anchor.clamp(0, len) as usize;
@@ -224,13 +232,12 @@ pub(super) fn scroll_selection(content: &str, anchor: i32, focus: i32, lines: i3
             count: 0,
         };
     }
-    let (lo, hi) = if anchor <= focus { (anchor, focus) } else { (focus, anchor) };
-    let (lo, hi) = if lines > 0 {
-        (move_selection_back(content, lo, lines), hi)
+    let focus = if lines > 0 {
+        move_selection_back(content, focus, lines)
     } else {
-        (lo, move_selection_forward(content, hi, -lines))
+        move_selection_forward(content, focus, -lines)
     };
-    let (start, end) = if anchor <= focus { (lo, hi) } else { (hi, lo) };
+    let (start, end) = if anchor <= focus { (anchor, focus) } else { (focus, anchor) };
     EditorFindResult {
         start: start as i32,
         end: end as i32,
