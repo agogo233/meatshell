@@ -2006,6 +2006,12 @@ export component SftpPanel inherits Rectangle {
                                     root.selected-row = idx;
                                     root.jump-target = idx;
                                     accept
+                                } else if (event.text == Key.F2) {
+                                    if (root.selected-row >= 0 && root.selected-row < root.entries.length) {
+                                        let hit = root.entries[root.selected-row];
+                                        root.rename-request(hit.full-path, hit.name);
+                                    }
+                                    accept
                                 } else if (event.text.character-count == 1 && event.text != " " && event.text != "\u{9}") {
                                     root.jump-prefix = root.jump-prefix + event.text;
                                     type-ahead-timer.restart();
