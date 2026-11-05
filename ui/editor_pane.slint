@@ -249,18 +249,28 @@ export component EditorPane inherits Rectangle {
                     padding-left: 8px; padding-right: 8px;
                     padding-top: 5px; padding-bottom: 5px; spacing: 6px;
                     Text { text: @tr("Find"); color: Theme.text-muted; vertical-alignment: center; }
-                    TextInput {
+                    Rectangle {
                         horizontal-stretch: 1;
-                        single-line: true;
-                        vertical-alignment: center;
-                        font-family: Theme.ui-font-family;
-                        font-size: Theme.fs-md;
-                        color: Theme.text-primary;
-                        text <=> root.editor-find-query;
-                        edited => {
-                            root.editor-find-position = -1;
-                            root.editor-match-count = root.editor-count-matches(
-                                root.editor-content, root.editor-find-query);
+                        background: Theme.bg-root;
+                        border-radius: Theme.radius-sm;
+                        border-width: 1px;
+                        border-color: find-q-input.has-focus
+                            ? Theme.accent : Theme.border-strong;
+                        find-q-input := TextInput {
+                            x: 6px;
+                            width: parent.width - 12px;
+                            height: parent.height;
+                            single-line: true;
+                            vertical-alignment: center;
+                            font-family: Theme.ui-font-family;
+                            font-size: Theme.fs-md;
+                            color: Theme.text-primary;
+                            text <=> root.editor-find-query;
+                            edited => {
+                                root.editor-find-position = -1;
+                                root.editor-match-count = root.editor-count-matches(
+                                    root.editor-content, root.editor-find-query);
+                            }
                         }
                     }
                     Text {
@@ -305,14 +315,24 @@ export component EditorPane inherits Rectangle {
                         Text { text: "↓"; color: Theme.text-primary; horizontal-alignment: center; vertical-alignment: center; }
                     }
                     Text { text: @tr("Replace"); color: Theme.text-muted; vertical-alignment: center; }
-                    TextInput {
+                    Rectangle {
                         horizontal-stretch: 1;
-                        single-line: true;
-                        vertical-alignment: center;
-                        font-family: Theme.ui-font-family;
-                        font-size: Theme.fs-md;
-                        color: Theme.text-primary;
-                        text <=> root.editor-replace-text;
+                        background: Theme.bg-root;
+                        border-radius: Theme.radius-sm;
+                        border-width: 1px;
+                        border-color: replace-q-input.has-focus
+                            ? Theme.accent : Theme.border-strong;
+                        replace-q-input := TextInput {
+                            x: 6px;
+                            width: parent.width - 12px;
+                            height: parent.height;
+                            single-line: true;
+                            vertical-alignment: center;
+                            font-family: Theme.ui-font-family;
+                            font-size: Theme.fs-md;
+                            color: Theme.text-primary;
+                            text <=> root.editor-replace-text;
+                        }
                     }
                     Rectangle {
                         width: 88px;
