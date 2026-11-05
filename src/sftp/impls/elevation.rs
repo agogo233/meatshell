@@ -214,6 +214,21 @@ impl Elevation {
         };
         Ok(status.unwrap_or(255))
     }
+
+    /// Like [`Self::exec_shell`], but also return the command's output. Used by
+    /// the SCP fallback backend, whose directory listing reads `stat`'s stdout.
+    pub(super) async fn exec_shell_output<H: client::Handler>(
+        &self,
+        handle: &client::Handle<H>,
+        cmd: &str,
+    ) -> Result<(u32, String)> {
+        match &self.sudo {
+            Some(sudo) => {
+                exec_status_output(handle, &sudo.wrap(cmd), sudo.stdin().as_deref()).await
+            }
+            None => exec_status_output(handle, cmd, None).await,
+        }
+    }
 }
 
 /// Is sudo usable without a password, or with the session's login password?
@@ -293,6 +308,43 @@ async fn exec_status<H: client::Handler>(
         }
     }
     Ok(status)
+}
+
+/// Like [`exec_status`], but also collect the channel's stdout + stderr. The
+/// SCP fallback backend needs `stat`/`find` output, not just the exit code.
+async fn exec_status_output<H: client::Handler>(
+    handle: &client::Handle<H>,
+    cmd: &str,
+    stdin: Option<&str>,
+) -> Result<(u32, String)> {
+    let mut channel = handle
+        .channel_open_session()
+        .await
+        .context("open exec channel")?;
+    channel
+        .exec(true, cmd.as_bytes())
+        .await
+        .context("exec remote command")?;
+    if let Some(stdin) = stdin {
+        channel
+            .data(stdin.as_bytes())
+            .await
+            .context("write stdin")?;
+    }
+    let _ = channel.eof().await;
+    let mut status = 0u32;
+    let mut output = Vec::new();
+    while let Some(msg) = channel.wait().await {
+        match msg {
+            russh::ChannelMsg::Data { data } | russh::ChannelMsg::ExtendedData { data, .. } => {
+                output.extend_from_slice(&data)
+            }
+            russh::ChannelMsg::ExitStatus { exit_status } => status = exit_status,
+            russh::ChannelMsg::Close => break,
+            _ => {}
+        }
+    }
+    Ok((status, String::from_utf8_lossy(&output).into_owned()))
 }
 
 /// Single-quoted POSIX shell word.

@@ -1,3 +1,5 @@
+#[path = "impls/common.rs"]
+mod common;
 #[path = "impls/elevation.rs"]
 mod elevation;
 #[path = "impls/sftp.rs"]
@@ -7,6 +9,6 @@ mod transfer;
 
 pub(crate) use sftp::*;
 pub(crate) use transfer::{
-    DedupPolicy, DownloadConflict, DragTransfer, ExportEntry, SftpCommand, SftpHandle,
-    SftpHandles, SftpLastCwd, SftpQueueConfig, UploadDecision,
+    DedupPolicy, DownloadConflict, DragTransfer, ExportEntry, SftpCommand, SftpHandle, SftpHandles,
+    SftpLastCwd, SftpQueueConfig, UploadDecision,
 };
