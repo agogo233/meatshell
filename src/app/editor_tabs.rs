@@ -190,6 +190,7 @@ pub(super) fn wire_editor_tabs(
                                 d.readonly = readonly;
                                 recolour(d, dark);
                             }
+                            d.save_ack = 0;
                         });
                         id
                     }
@@ -208,6 +209,7 @@ pub(super) fn wire_editor_tabs(
                             language: SharedString::default(),
                             syntax_source: SharedString::default(),
                             syntax_spans: SharedString::default(),
+                            save_ack: 0,
                         };
                         recolour(&mut doc, dark);
                         docs.push(doc);
@@ -316,6 +318,15 @@ pub(super) fn wire_editor_tabs(
             if let Some(w) = weak.upgrade() {
                 set_tab_saved(&w, &models.tabs, id.as_str(), true);
             }
+        });
+    }
+
+    // The EditorPane pill's auto-dismiss fired: clear the matching doc row so a
+    // stale badge can't reappear when the tab is re-shown or moved.
+    {
+        let models = models.clone();
+        window.on_editor_doc_save_ack_dismiss(move |id: SharedString| {
+            update_doc(&models.docs, id.as_str(), |d| d.save_ack = 0);
         });
     }
 

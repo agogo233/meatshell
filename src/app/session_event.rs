@@ -338,12 +338,40 @@ pub(super) fn apply_session_event_to_window(
             message,
         } => {
             // Built-in editor save outcome (#70). The status bar is colour-coded
-            // via `sftp-status-kind` (1 saved / 2 failed).
+            // via `sftp-status-kind` (1 saved / 2 failed), and the editor's own
+            // transient save pill (`editor-save-ack`) mirrors the result for the
+            // file that is still open, in whichever host it lives.
             let kind = if ok { 1 } else { 2 };
             update_terminal(&|t| {
                 t.sftp_status = message.clone().into();
                 t.sftp_status_kind = kind;
             });
+            // Editor tabs (#494): tag the document row whose path matches, so the
+            // pane's pill shows beside the Save button. A failure also re-marks
+            // the row dirty (nothing was written), as the detached host does.
+            if let Some(docs) = win.get_editor_docs().as_any().downcast_ref::<VecModel<EditorDoc>>() {
+                for i in 0..docs.row_count() {
+                    if let Some(mut row) = docs.row_data(i) {
+                        if row.path.as_str() == path.as_str() {
+                            row.save_ack = kind;
+                            if !ok {
+                                row.dirty = true;
+                            }
+                            docs.set_row_data(i, row);
+                            break;
+                        }
+                    }
+                }
+            }
+            // Detached editor window: mirror the same result to its pill; a
+            // failure re-marks dirty so the close-confirm and unsaved dot stay
+            // honest (the optimistic clear was wrong).
+            if editor.get_editor_open() && editor.get_editor_path().as_str() == path.as_str() {
+                editor.set_editor_save_ack(kind);
+                if !ok {
+                    editor.set_editor_dirty(true);
+                }
+            }
         }
         SessionEvent::SftpFileText {
             path,

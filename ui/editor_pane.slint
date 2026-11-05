@@ -24,6 +24,7 @@ export struct EditorDoc {
     language: string,
     syntax-source: string,
     syntax-spans: string,
+    save-ack: int,       // 0 none / 1 saved / 2 failed (transient pill)
 }
 
 // Body of the built-in file viewer/editor (#70), shared by the detached
@@ -62,6 +63,11 @@ export component EditorPane inherits Rectangle {
     in-out property <int> editor-match-count: 0;
     in-out property <int> editor-find-position: -1;
     in-out property <bool> highlight-pending: false;
+    // Transient save result pill (#70): 0 none / 1 saved / 2 failed. The host
+    // sets it; the dismiss timer below asks the host to clear its source so a
+    // stale badge can't leak across opens or tab switches.
+    in-out property <int> editor-save-ack: 0;
+    callback save-ack-dismiss();
 
     callback save-file();
     callback request-close();
@@ -221,6 +227,33 @@ export component EditorPane inherits Rectangle {
                         }
                         Text { text: @tr("Save"); color: #ffffff; font-size: Theme.fs-sm;
                                horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                    if !root.editor-readonly && root.can-save && root.editor-save-ack != 0 : Rectangle {
+                        width: root.editor-save-ack == 1 ? 72px : 98px;
+                        height: 28px;
+                        y: (parent.height - self.height) / 2;
+                        border-radius: Theme.radius-sm;
+                        background: root.editor-save-ack == 1
+                            ? Theme.success.with-alpha(0.18)
+                            : Theme.danger.with-alpha(0.18);
+                        HorizontalLayout {
+                            padding-left: 6px; padding-right: 6px; spacing: 4px;
+                            Text {
+                                text: root.editor-save-ack == 1 ? "\u{E876}" : "\u{E5CD}";
+                                font-family: "Material Icons";
+                                color: root.editor-save-ack == 1 ? Theme.success : Theme.danger;
+                                font-size: Theme.fs-sm;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: root.editor-save-ack == 1 ? @tr("Saved") : @tr("Save failed");
+                                color: root.editor-save-ack == 1 ? Theme.success : Theme.danger;
+                                font-size: Theme.fs-sm;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
                     }
                     if root.show-close : Rectangle {
                         width: 28px;
@@ -447,6 +480,26 @@ export component EditorPane inherits Rectangle {
             root.highlight-pending = false;
             root.editor-highlight(root.editor-content);
             root.editor-bracket-check(edit-input.cursor-position-byte-offset);
+        }
+    }
+
+    // Auto-dismiss the save pill; re-armed on every non-zero set so back-to-back
+    // saves restart the countdown instead of the first one clearing the second
+    // early. The host clears its own copy via save-ack-dismiss so a stale
+    // badge can't reappear when the pane is re-shown — the pane never writes
+    // editor-save-ack itself because tab-mode binds it one-way to the doc row.
+    changed editor-save-ack => {
+        if (root.editor-save-ack != 0) {
+            ed-save-ack-timer.running = false;
+            ed-save-ack-timer.running = true;
+        }
+    }
+    ed-save-ack-timer := Timer {
+        interval: 1800ms;
+        running: false;
+        triggered => {
+            root.save-ack-dismiss();
+            ed-save-ack-timer.running = false;
         }
     }
 }

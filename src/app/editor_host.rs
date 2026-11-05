@@ -19,6 +19,7 @@ pub(super) fn open_document(
     editor.set_editor_content(content.into());
     editor.set_editor_readonly(!edit);
     editor.set_editor_dirty(false);
+    editor.set_editor_save_ack(0);
     editor.set_editor_open(true);
     let _ = editor.show();
     editor.window().with_winit_window(|ww| ww.focus_window());
@@ -94,6 +95,7 @@ pub(super) fn wire_editor_window(editor: &EditorWindow, sftp_handles: SftpHandle
             e.set_editor_replace_text("".into());
             e.set_editor_match_count(0);
             e.set_editor_find_position(-1);
+            e.set_editor_save_ack(0);
         });
     }
 
