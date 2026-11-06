@@ -336,7 +336,7 @@ impl TermBuffer {
         }
         // history rows occupy absolute indices [0, hist_len).
         for (abs, line) in self.history.iter().enumerate() {
-            collect_ci_matches(&line.0, &q, abs, q_chars, &mut self.find_positions);
+            collect_ci_matches(line.plain(), &q, abs, q_chars, &mut self.find_positions);
         }
         // live screen rows follow the history.
         let (live, _) = self.live_rows();
