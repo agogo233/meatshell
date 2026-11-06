@@ -33,6 +33,12 @@ pub(crate) fn scp_stat_command(path: &str) -> String {
     )
 }
 
+/// Stat one remote path (not a directory listing) in the pipeline's
+/// `stat -c` format, so [`parse_scp_stat_output`] can read the line.
+pub(crate) fn scp_stat_single_command(path: &str) -> String {
+    format!("stat -c '%F|%s|%a|%u|%g|%Y|%n' {}", sh_quote(path))
+}
+
 /// Parse the `stat -c` output of [`scp_stat_command`] into [`RemoteEntry`]s.
 ///
 /// Malformed lines (stray stderr, a path the stat could not read) are skipped.
@@ -175,16 +181,6 @@ pub(crate) fn scp_frame_name_ok(name: &str) -> bool {
 /// `C%04o <size> <name>\n` — the header announcing one file.
 pub(crate) fn scp_c_frame(mode: u32, size: u64, name: &str) -> String {
     format!("C{:04o} {} {}\n", mode & 0o7777, size, name)
-}
-
-/// `D%04o 0 <name>\n` — one directory level (the size field is always 0).
-pub(crate) fn scp_d_frame(mode: u32, name: &str) -> String {
-    format!("D{:04o} 0 {}\n", mode & 0o7777, name)
-}
-
-/// `E\n` — closes one directory level.
-pub(crate) fn scp_e_frame() -> &'static str {
-    "E\n"
 }
 
 /// One parsed download frame: the kind byte plus its line payload.
@@ -377,6 +373,10 @@ mod tests {
             "mv -f '/from f' '/to t'"
         );
         assert_eq!(scp_remove_command("/a b"), "rm -f '/a b'");
+        assert_eq!(
+            scp_stat_single_command("/tmp/a b"),
+            "stat -c '%F|%s|%a|%u|%g|%Y|%n' '/tmp/a b'"
+        );
     }
 
     #[test]

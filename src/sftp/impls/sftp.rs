@@ -32,7 +32,13 @@ use crate::config::{AuthMethod, Session};
 use crate::i18n::t;
 use crate::ssh::{format_mtime, format_size, RemoteEntry, RemoteTreeNode, SessionEvent};
 
+use super::common::{
+    parse_scp_stat_output, scp_c_frame, scp_download_command, scp_frame_name_ok, scp_mkdir_command,
+    scp_move_command, scp_parse_frame, scp_remove_command, scp_stat_single_command, scp_test_dir,
+    scp_test_exists, scp_tmp_name, scp_upload_command, ScpFrame,
+};
 use super::elevation::Elevation;
+use super::scp::ScpPeer;
 use super::transfer::{
     DedupPolicy, DownloadConflict, SftpCommand, SftpHandle, SftpQueueConfig, UploadDecision,
 };
@@ -1896,13 +1902,15 @@ async fn probe_scp(handle: &client::Handle<SftpClientHandler>) -> Result<Option<
     Ok((status == 0).then_some(()))
 }
 
-/// Browse-only SCP fallback loop, entered when the server has no `sftp`
-/// subsystem but does have `scp` (the OpenWrt/Dropbear case).
+/// SCP fallback loop, entered when the server has no `sftp` subsystem but
+/// does have `scp` (the OpenWrt/Dropbear case).
 ///
-/// This mirrors the browse half of `run_sftp`: initial listing, directory-tree
-/// init, and the `ListDir` / `RefreshDir` / `ToggleTreeNode` commands. All
-/// file-mutating and transfer commands are refused with a "not supported in
-/// SCP mode" status — that is the explicit scope of the fallback for now.
+/// Mirrors `run_sftp`: initial listing, directory-tree init, the browse
+/// commands (`ListDir` / `RefreshDir` / `ToggleTreeNode`), and the transfer
+/// commands (`Download` / `DownloadInto` / `Upload` / `UploadEdited` /
+/// `ReadText` / `WriteText` / `CancelTransfer`) over the wire-protocol
+/// engine in `super::scp`. Remaining operations (file ops, drag-out,
+/// archives) are still refused with a "not supported in SCP mode" status.
 async fn run_scp_browse(
     handle: Arc<SftpLink>,
     events: UnboundedSender<SessionEvent>,
@@ -2091,6 +2099,595 @@ async fn run_scp_browse(
                 let _ = events.send(SessionEvent::SftpTreeUpdate(nodes));
             }
 
+            SftpCommand::CancelTransfer(id) => {
+                if let Some(flag) = lock_or_recover(&cancels).get(&id) {
+                    flag.store(true, Ordering::Relaxed);
+                }
+            }
+
+            SftpCommand::Download {
+                remote,
+                local_dir,
+                conflict,
+                policy,
+            } => {
+                // The SCP twin of the SFTP Download arm: same conflict chain,
+                // same rows, same cancel registration (#100, #116-2).
+                let handle = handle.clone();
+                let events = events.clone();
+                let slots = transfer_slots.clone();
+                let rate_kbps = queue.rate_limit_kbps;
+                let preserve_mtime = queue.preserve_mtime;
+                let file_id = Uuid::new_v4().to_string();
+                let cancel = Arc::new(AtomicBool::new(false));
+                lock_or_recover(&cancels).insert(file_id.clone(), cancel.clone());
+                let cancels_done = cancels.clone();
+                transfers.spawn(async move {
+                    let _permit = match slots.acquire().await {
+                        Ok(p) => p,
+                        Err(_) => {
+                            lock_or_recover(&cancels_done).remove(&file_id);
+                            return;
+                        }
+                    };
+                    let is_dir = scp_remote_is_dir(&handle, &remote);
+                    if is_dir {
+                        let dirname = base_name(&remote);
+                        // #100.3: an empty folder downloads nothing — just say
+                        // so rather than silently creating an empty local dir.
+                        let empty = scp_list_dir(&handle, &remote)
+                            .await
+                            .map(|e| e.is_empty())
+                            .unwrap_or(false);
+                        if empty {
+                            let _ = events.send(SessionEvent::SftpStatus(format!(
+                                "{}: {}",
+                                t("空文件夹", "Empty folder"),
+                                dirname
+                            )));
+                            lock_or_recover(&cancels_done).remove(&file_id);
+                            return;
+                        }
+                        let _ = events.send(SessionEvent::SftpStatus(format!(
+                            "{} {}/...",
+                            t("下载文件夹", "Downloading folder"),
+                            dirname
+                        )));
+                        match scp_download_dir(
+                            &handle,
+                            &remote,
+                            &local_dir,
+                            &events,
+                            rate_kbps,
+                            preserve_mtime,
+                            &cancel,
+                        )
+                        .await
+                        {
+                            Ok(true) => {
+                                let _ = events.send(SessionEvent::SftpStatus(format!(
+                                    "{}: {}",
+                                    t("下载完成", "Downloaded"),
+                                    dirname
+                                )));
+                            }
+                            Ok(false) => {
+                                let _ = events.send(SessionEvent::SftpStatus(format!(
+                                    "{}: {}",
+                                    t("已取消", "Cancelled"),
+                                    dirname
+                                )));
+                            }
+                            Err(e) => {
+                                let _ = events.send(SessionEvent::SftpStatus(format!(
+                                    "{}: {e}",
+                                    t("下载失败", "Download failed")
+                                )));
+                            }
+                        }
+                    } else {
+                        // Sanitize the server-supplied name before it touches
+                        // the local filesystem (#26) — same rule as SFTP.
+                        let filename = sanitize_filename(&base_name(&remote));
+                        let requested = download_target_path(&remote, &local_dir);
+                        let local_path = match conflict {
+                            DownloadConflict::Absent if requested.is_file() => match policy {
+                                DedupPolicy::Overwrite => requested,
+                                DedupPolicy::Skip => {
+                                    let _ = events.send(SessionEvent::SftpStatus(format!(
+                                        "{}: {}",
+                                        t(
+                                            "已跳过（目标已存在）",
+                                            "Skipped (target already exists)"
+                                        ),
+                                        filename
+                                    )));
+                                    lock_or_recover(&cancels_done).remove(&file_id);
+                                    return;
+                                }
+                                // Rename and Ask both keep both copies: the
+                                // worker cannot prompt, and silently
+                                // overwriting is the one outcome it must not
+                                // choose.
+                                _ => available_download_path(&requested),
+                            },
+                            DownloadConflict::Absent => requested,
+                            DownloadConflict::Replace => requested,
+                            DownloadConflict::KeepBoth => available_download_path(&requested),
+                            DownloadConflict::Fail => requested,
+                        };
+                        let local_path_text = local_path.to_string_lossy().to_string();
+                        let id = file_id.clone();
+                        let _ = events.send(SessionEvent::SftpStatus(format!(
+                            "{} {}...",
+                            t("下载", "Downloading"),
+                            filename
+                        )));
+                        match scp_download_single(
+                            &handle,
+                            &remote,
+                            &local_path_text,
+                            &filename,
+                            &id,
+                            &events,
+                            &cancel,
+                            rate_kbps,
+                            preserve_mtime,
+                            conflict == DownloadConflict::Fail,
+                        )
+                        .await
+                        {
+                            Ok(true) => {
+                                let _ = events.send(SessionEvent::SftpStatus(format!(
+                                    "{}: {}",
+                                    t("下载完成", "Downloaded"),
+                                    filename
+                                )));
+                            }
+                            Ok(false) => {
+                                let _ = events.send(SessionEvent::SftpStatus(format!(
+                                    "{}: {}",
+                                    t("已取消", "Cancelled"),
+                                    filename
+                                )));
+                            }
+                            Err(e) => {
+                                emit_transfer(
+                                    &events,
+                                    &id,
+                                    &filename,
+                                    false,
+                                    0,
+                                    0,
+                                    2,
+                                    &e.to_string(),
+                                );
+                                let _ = events.send(SessionEvent::SftpStatus(format!(
+                                    "{}: {e}",
+                                    t("下载失败", "Download failed")
+                                )));
+                            }
+                        }
+                    }
+                    // Let a dual-pane local browser refresh if it shows this dir.
+                    let _ = events.send(SessionEvent::LocalFilesChanged {
+                        path: local_dir.clone(),
+                    });
+                    lock_or_recover(&cancels_done).remove(&file_id);
+                });
+            }
+
+            SftpCommand::DownloadInto {
+                remotes,
+                local_dir,
+                conflict,
+            } => {
+                // Dual-pane "← 下载": one task, entries one after another —
+                // the SCP twin of the SFTP DownloadInto arm.
+                let handle = handle.clone();
+                let events = events.clone();
+                let cancels_done = cancels.clone();
+                let rate_kbps = queue.rate_limit_kbps;
+                let preserve_mtime = queue.preserve_mtime;
+                transfers.spawn(async move {
+                    let total = remotes.len();
+                    let mut ok = 0usize;
+                    let mut failed = 0usize;
+                    for remote in &remotes {
+                        let id = Uuid::new_v4().to_string();
+                        let cancel = Arc::new(AtomicBool::new(false));
+                        cancels_done
+                            .lock()
+                            .unwrap()
+                            .insert(id.clone(), cancel.clone());
+                        let name = base_name(remote);
+                        let _ = events.send(SessionEvent::SftpStatus(format!(
+                            "{} {}...",
+                            t("下载", "Downloading"),
+                            name
+                        )));
+                        match scp_download_one_into(
+                            &handle,
+                            remote,
+                            &local_dir,
+                            conflict,
+                            &events,
+                            &cancel,
+                            &id,
+                            rate_kbps,
+                            preserve_mtime,
+                        )
+                        .await
+                        {
+                            Ok(true) => {
+                                ok += 1;
+                                let _ = events.send(SessionEvent::SftpStatus(format!(
+                                    "{}: {}",
+                                    t("下载完成", "Downloaded"),
+                                    name
+                                )));
+                            }
+                            Ok(false) => {
+                                let _ = events.send(SessionEvent::SftpStatus(format!(
+                                    "{}: {}",
+                                    t("已取消", "Cancelled"),
+                                    name
+                                )));
+                            }
+                            Err(e) => {
+                                failed += 1;
+                                emit_transfer(&events, &id, &name, false, 0, 0, 2, &e.to_string());
+                                let _ = events.send(SessionEvent::SftpStatus(format!(
+                                    "{}: {e}",
+                                    t("下载失败", "Download failed")
+                                )));
+                            }
+                        }
+                        cancels_done.lock().unwrap().remove(&id);
+                    }
+                    if total > 1 {
+                        let _ = events.send(SessionEvent::SftpStatus(if failed == 0 {
+                            format!(
+                                "{}: {} {}",
+                                t("下载完成", "Downloaded"),
+                                ok,
+                                t("项", "items")
+                            )
+                        } else {
+                            format!(
+                                "{}: {}/{} {}",
+                                t("下载失败", "Download failed"),
+                                failed,
+                                total,
+                                t("项", "items")
+                            )
+                        }));
+                    }
+                    // Let the local pane pick up the new files.
+                    let _ = events.send(SessionEvent::LocalFilesChanged {
+                        path: local_dir.clone(),
+                    });
+                });
+            }
+
+            SftpCommand::Upload {
+                local,
+                remote_dir,
+                cleanup_after,
+                decision,
+            } => {
+                // The SCP twin of the SFTP Upload arm. Folder uploads mirror
+                // with remote `mkdir -p` plus one temp+`mv` push per file, so
+                // a failed or cancelled upload never damages an existing
+                // remote file (#100, #116-2).
+                let handle = handle.clone();
+                let events = events.clone();
+                let slots = transfer_slots.clone();
+                let rate_kbps = queue.rate_limit_kbps;
+                let dedup = queue.dedup;
+                let owner_cache = owner_cache.clone();
+                let names_ready_rx = names_ready_rx.clone();
+                let up_id = Uuid::new_v4().to_string();
+                let cancel = Arc::new(AtomicBool::new(false));
+                lock_or_recover(&cancels).insert(up_id.clone(), cancel.clone());
+                let cancels_done = cancels.clone();
+                transfers.spawn(async move {
+                    let _permit = match slots.acquire().await {
+                        Ok(p) => p,
+                        Err(_) => {
+                            lock_or_recover(&cancels_done).remove(&up_id);
+                            return;
+                        }
+                    };
+                    let is_dir = tokio::fs::metadata(&local)
+                        .await
+                        .map(|m| m.is_dir())
+                        .unwrap_or(false);
+                    if is_dir {
+                        // Folder uploads merge into the remote tree; the
+                        // duplicate policy applies to single files only.
+                        let dirname = match local_file_name_utf8(&local) {
+                            Ok(name) => name,
+                            Err(e) => {
+                                let _ = events.send(SessionEvent::SftpStatus(format!(
+                                    "{}: {e}",
+                                    t("上传失败", "Upload failed")
+                                )));
+                                if let Some(path) = cleanup_after.as_deref() {
+                                    cleanup_import_path(path).await;
+                                }
+                                lock_or_recover(&cancels_done).remove(&up_id);
+                                return;
+                            }
+                        };
+                        let _ = events.send(SessionEvent::SftpStatus(format!(
+                            "{} {}/...",
+                            t("上传文件夹", "Uploading folder"),
+                            dirname
+                        )));
+                        let res = scp_upload_dir(
+                            &handle,
+                            &local,
+                            &remote_dir,
+                            &events,
+                            rate_kbps,
+                            &cancel,
+                        )
+                        .await;
+                        // Refresh the listing whatever happened (mirrors the
+                        // SFTP arm: cancelled uploads clean up behind them).
+                        if let Ok(entries) = scp_list_dir(&handle, &remote_dir).await {
+                            publish_dir_entries(
+                                &handle,
+                                &owner_cache,
+                                &names_ready_rx,
+                                &events,
+                                remote_dir.clone(),
+                                entries,
+                            )
+                            .await;
+                        }
+                        match res {
+                            Ok((_, failed, false)) if failed == 0 => {
+                                let _ = events.send(SessionEvent::SftpStatus(format!(
+                                    "{}: {}",
+                                    t("上传完成", "Uploaded"),
+                                    dirname
+                                )));
+                            }
+                            Ok((ok, failed, false)) => {
+                                let _ = events.send(SessionEvent::SftpStatus(format!(
+                                    "{}: {}/{} {}",
+                                    t("上传失败", "Upload failed"),
+                                    failed,
+                                    ok + failed,
+                                    t("项", "items")
+                                )));
+                            }
+                            Ok((_, _, true)) => {
+                                let _ = events.send(SessionEvent::SftpStatus(format!(
+                                    "{}: {}",
+                                    t("已取消", "Cancelled"),
+                                    dirname
+                                )));
+                            }
+                            Err(e) => {
+                                let _ = events.send(SessionEvent::SftpStatus(format!(
+                                    "{}: {e}",
+                                    t("上传失败", "Upload failed")
+                                )));
+                            }
+                        }
+                    } else {
+                        let filename = match local_file_name_utf8(&local) {
+                            Ok(name) => name,
+                            Err(e) => {
+                                let _ = events.send(SessionEvent::SftpStatus(format!(
+                                    "{}: {e}",
+                                    t("上传失败", "Upload failed")
+                                )));
+                                if let Some(path) = cleanup_after.as_deref() {
+                                    cleanup_import_path(path).await;
+                                }
+                                lock_or_recover(&cancels_done).remove(&up_id);
+                                return;
+                            }
+                        };
+                        let requested =
+                            format!("{}/{}", remote_dir.trim_end_matches('/'), filename);
+                        // Resolve the duplicate-target policy against the live
+                        // server state before anything is sent.
+                        let (remote_path, no_clobber) = match scp_resolve_upload_target(
+                            &handle, requested, decision, dedup, &events, &filename,
+                        )
+                        .await
+                        {
+                            Some((path, no_clobber)) => (path, no_clobber),
+                            None => {
+                                if let Some(path) = cleanup_after.as_deref() {
+                                    cleanup_import_path(path).await;
+                                }
+                                lock_or_recover(&cancels_done).remove(&up_id);
+                                return;
+                            }
+                        };
+                        let filename = base_name(&remote_path);
+                        let id = up_id.clone();
+                        let _ = events.send(SessionEvent::SftpStatus(format!(
+                            "{} {}...",
+                            t("上传", "Uploading"),
+                            filename
+                        )));
+                        match scp_push_file(
+                            &handle,
+                            &local,
+                            &remote_path,
+                            &filename,
+                            &id,
+                            &events,
+                            &cancel,
+                            rate_kbps,
+                            no_clobber,
+                        )
+                        .await
+                        {
+                            Ok(true) => {
+                                if let Ok(entries) = scp_list_dir(&handle, &remote_dir).await {
+                                    publish_dir_entries(
+                                        &handle,
+                                        &owner_cache,
+                                        &names_ready_rx,
+                                        &events,
+                                        remote_dir.clone(),
+                                        entries,
+                                    )
+                                    .await;
+                                }
+                                let _ = events.send(SessionEvent::SftpStatus(format!(
+                                    "{}: {}",
+                                    t("上传完成", "Uploaded"),
+                                    filename
+                                )));
+                            }
+                            Ok(false) => {
+                                // Refresh so the cleaned-up temp disappears.
+                                if let Ok(entries) = scp_list_dir(&handle, &remote_dir).await {
+                                    publish_dir_entries(
+                                        &handle,
+                                        &owner_cache,
+                                        &names_ready_rx,
+                                        &events,
+                                        remote_dir.clone(),
+                                        entries,
+                                    )
+                                    .await;
+                                }
+                                let _ = events.send(SessionEvent::SftpStatus(format!(
+                                    "{}: {}",
+                                    t("已取消", "Cancelled"),
+                                    filename
+                                )));
+                            }
+                            Err(e) => {
+                                emit_transfer(
+                                    &events,
+                                    &id,
+                                    &filename,
+                                    true,
+                                    0,
+                                    0,
+                                    2,
+                                    &e.to_string(),
+                                );
+                                let _ = events.send(SessionEvent::SftpStatus(format!(
+                                    "{}: {e}",
+                                    t("上传失败", "Upload failed")
+                                )));
+                            }
+                        }
+                    }
+                    if let Some(path) = cleanup_after.as_deref() {
+                        cleanup_import_path(path).await;
+                    }
+                    lock_or_recover(&cancels_done).remove(&up_id);
+                });
+            }
+
+            SftpCommand::UploadEdited { local, remote } => {
+                // Re-upload an externally edited file to its exact original
+                // path (#318): no dedup, a plain overwrite.
+                let handle = handle.clone();
+                let events = events.clone();
+                let slots = transfer_slots.clone();
+                let rate_kbps = queue.rate_limit_kbps;
+                let owner_cache = owner_cache.clone();
+                let names_ready_rx = names_ready_rx.clone();
+                transfers.spawn(async move {
+                    let _permit = match slots.acquire().await {
+                        Ok(p) => p,
+                        Err(_) => return,
+                    };
+                    let filename = base_name(&remote);
+                    let remote_dir = parent_dir(&remote);
+                    let id = Uuid::new_v4().to_string();
+                    // Folder uploads aren't cancellable from the UI; neither
+                    // is this (same throwaway flag as the SFTP arm).
+                    let no_cancel = Arc::new(AtomicBool::new(false));
+                    match scp_push_file(
+                        &handle, &local, &remote, &filename, &id, &events, &no_cancel, rate_kbps,
+                        false,
+                    )
+                    .await
+                    {
+                        Ok(true) => {
+                            if let Ok(entries) = scp_list_dir(&handle, &remote_dir).await {
+                                publish_dir_entries(
+                                    &handle,
+                                    &owner_cache,
+                                    &names_ready_rx,
+                                    &events,
+                                    remote_dir,
+                                    entries,
+                                )
+                                .await;
+                            }
+                            let _ = events.send(SessionEvent::SftpStatus(format!(
+                                "{}: {}",
+                                t("已上传修改", "Re-uploaded changes"),
+                                filename
+                            )));
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            let _ = events.send(SessionEvent::SftpStatus(format!(
+                                "{}: {e}",
+                                t("上传修改失败", "Failed to re-upload changes")
+                            )));
+                        }
+                    }
+                });
+            }
+
+            SftpCommand::ReadText { remote, edit } => {
+                let name = base_name(&remote);
+                let _ = events.send(SessionEvent::SftpStatus(format!(
+                    "{} {}...",
+                    t("打开", "Opening"),
+                    name
+                )));
+                let (content, error) = match scp_read_text_guarded(&handle, &remote).await {
+                    Ok(text) => (text, String::new()),
+                    Err(msg) => (String::new(), msg),
+                };
+                let _ = events.send(SessionEvent::SftpFileText {
+                    path: remote,
+                    name,
+                    content,
+                    edit,
+                    error,
+                });
+            }
+
+            SftpCommand::WriteText { remote, content } => {
+                let name = base_name(&remote);
+                match scp_write_text(&handle, &remote, &content).await {
+                    Ok(_) => {
+                        let _ = events.send(SessionEvent::SftpSaveResult {
+                            path: remote,
+                            ok: true,
+                            message: format!("{}: {}", t("已保存", "Saved"), name),
+                        });
+                    }
+                    Err(e) => {
+                        let _ = events.send(SessionEvent::SftpSaveResult {
+                            path: remote,
+                            ok: false,
+                            message: format!("{}: {e:#}", t("保存失败", "Save failed")),
+                        });
+                    }
+                }
+            }
+
             other => {
                 // Unblock the drag-out flow if it ever reaches SCP mode: a
                 // reply channel with no answer would leave the UI waiting.
@@ -2176,6 +2773,1053 @@ async fn scp_list_dirs_only(handle: &SftpLink, path: &str) -> Result<Vec<(String
         .filter(|e| e.is_dir)
         .map(|e| (e.name, e.full_path))
         .collect())
+}
+
+// ---------------------------------------------------------------------------
+// SCP transfers
+// ---------------------------------------------------------------------------
+
+/// Monotonic counter making each upload's temp name unique process-wide.
+static SCP_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Does `path` exist on the remote? A probe status other than 0/1 is an
+/// error: between "free" and "taken" we must not guess.
+async fn scp_remote_exists(handle: &client::Handle<SftpClientHandler>, path: &str) -> Result<bool> {
+    let (status, output) = exec_remote_output(handle, &scp_test_exists(path)).await?;
+    match status {
+        0 => Ok(true),
+        1 => Ok(false),
+        other => Err(anyhow!(
+            "{} (test -e: {other}): {}",
+            t(
+                "无法确认远端文件是否存在",
+                "cannot determine whether the remote path exists"
+            ),
+            output.trim()
+        )),
+    }
+}
+
+/// Is `path` a remote directory? An unusable probe falls through to "file",
+/// mirroring the SFTP side (metadata error → not a dir); and `scp -f` on a
+/// directory without -r refuses with a clean error anyway.
+async fn scp_remote_is_dir(handle: &client::Handle<SftpClientHandler>, path: &str) -> bool {
+    match exec_remote_output(handle, &scp_test_dir(path)).await {
+        Ok((status, _)) => status == 0,
+        Err(_) => false,
+    }
+}
+
+/// Create one remote directory level for a folder upload (`mkdir -p`).
+async fn scp_mkdir_remote(handle: &client::Handle<SftpClientHandler>, path: &str) -> Result<()> {
+    let (status, output) = exec_remote_output(handle, &scp_mkdir_command(path)).await?;
+    if status != 0 {
+        Err(anyhow!(
+            "{} {path}: {}",
+            t("创建远端目录失败", "failed to create the remote directory"),
+            output.trim()
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Promote an uploaded temp file to its final name (`mv -f` in the same
+/// directory, so it is a rename, not a copy).
+async fn scp_move_remote(
+    handle: &client::Handle<SftpClientHandler>,
+    from: &str,
+    to: &str,
+) -> Result<()> {
+    let (status, output) = exec_remote_output(handle, &scp_move_command(from, to)).await?;
+    if status != 0 {
+        Err(anyhow!(
+            "{} {to}: {}",
+            t("移动远端文件失败", "failed to move the remote file"),
+            output.trim()
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Best-effort `rm -f` of an upload temp file after a failure or cancel.
+async fn scp_remove_remote(handle: &client::Handle<SftpClientHandler>, path: &str) {
+    if let Err(e) = exec_remote_output(handle, &scp_remove_command(path)).await {
+        tracing::debug!("failed to clean scp temp {path}: {e}");
+    }
+}
+
+/// First free remote name: `a.txt` → `a (1).txt`, … — the exec-probe twin of
+/// [`available_remote_path`], bounded at 100 probes. A failed probe counts
+/// as "free", exactly like the SFTP original treats a failed stat.
+async fn scp_available_remote_path(
+    handle: &client::Handle<SftpClientHandler>,
+    requested: &str,
+) -> String {
+    let (prefix, name) = match requested.trim_end_matches('/').rsplit_once('/') {
+        Some((dir, base)) => (format!("{dir}/"), base),
+        None => (String::new(), requested.trim_end_matches('/')),
+    };
+    let (stem, extension) = match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem, Some(ext)),
+        _ => (name, None),
+    };
+    let candidate = |suffix: u32| match extension {
+        Some(ext) if !ext.is_empty() => format!("{prefix}{stem} ({suffix}).{ext}"),
+        _ => format!("{prefix}{stem} ({suffix})"),
+    };
+    for suffix in 1..=100u32 {
+        let free = candidate(suffix);
+        if !matches!(scp_remote_exists(handle, &free).await, Ok(true)) {
+            return free;
+        }
+    }
+    candidate(100)
+}
+
+/// The exec-probe twin of [`resolve_upload_target`]: resolve an upload's
+/// target against the live server state. `None` = do not start the transfer.
+/// Returns the final path plus whether it must land without clobbering.
+async fn scp_resolve_upload_target(
+    handle: &client::Handle<SftpClientHandler>,
+    requested: String,
+    decision: UploadDecision,
+    policy: DedupPolicy,
+    events: &UnboundedSender<SessionEvent>,
+    name: &str,
+) -> Option<(String, bool)> {
+    let effective = match decision {
+        UploadDecision::Proceed => {
+            if !scp_remote_exists(handle, &requested).await.unwrap_or(false) {
+                return Some((requested, true));
+            }
+            policy
+        }
+        UploadDecision::Overwrite => return Some((requested, false)),
+        UploadDecision::KeepBoth => DedupPolicy::Rename,
+        UploadDecision::Skip => {
+            skipped_upload_status(events, name);
+            return None;
+        }
+    };
+    match effective {
+        DedupPolicy::Skip => {
+            skipped_upload_status(events, name);
+            None
+        }
+        DedupPolicy::Overwrite => Some((requested, false)),
+        // Rename, and Ask where the UI saw no conflict: the worker cannot
+        // prompt, so a target that appeared after the click is kept alongside
+        // (matching the download side) rather than silently replaced.
+        DedupPolicy::Rename | DedupPolicy::Ask => {
+            let path = scp_available_remote_path(handle, &requested).await;
+            let _ = events.send(SessionEvent::SftpStatus(format!(
+                "{}: {} → {}",
+                t("已保留两份", "Kept both"),
+                name,
+                base_name(&path)
+            )));
+            Some((path, true))
+        }
+    }
+}
+
+/// Permission bits for a C frame: the file's real bits on Unix, a plain 0644
+/// elsewhere (the Windows side has no mode to carry).
+#[cfg(unix)]
+fn scp_local_mode(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.permissions().mode() & 0o7777)
+        .unwrap_or(0o644)
+}
+
+/// Permission bits for a C frame where the local filesystem has none.
+#[cfg(not(unix))]
+fn scp_local_mode(_path: &Path) -> u32 {
+    0o644
+}
+
+/// Set a local file's mtime — mirrors the download-side handling in
+/// `download_impl` (a blocking syscall moved off the async worker).
+async fn scp_set_local_mtime(path: &str, secs: u64) {
+    let when = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+    let path = path.to_string();
+    let _ = tokio::task::spawn_blocking(move || {
+        if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&path) {
+            let _ = f.set_modified(when);
+        }
+    })
+    .await;
+}
+
+/// Read the message line that follows an error frame byte (1 or 2); both
+/// carry one line of error text from the remote scp.
+async fn scp_error_line(peer: &mut ScpPeer) -> String {
+    match peer.read_line().await {
+        Ok(Some(line)) => {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                t("远端报告了一个错误", "the remote reported an error").into()
+            } else {
+                trimmed.to_string()
+            }
+        }
+        _ => t("远端报告了一个错误", "the remote reported an error").into(),
+    }
+}
+
+/// Header exchange of a single-file `scp -f` download: our initial ack, any
+/// T frames (only sent with -p), then the C frame announcing size and name.
+/// Returns the announced size and the last mtime seen.
+async fn scp_read_file_header(peer: &mut ScpPeer) -> Result<(u64, Option<u64>)> {
+    // The source reads its first ack before sending anything.
+    peer.ack().await?;
+    let mut mtime = None;
+    loop {
+        let Some(kind) = peer.read_byte().await? else {
+            anyhow::bail!(
+                "{}",
+                t(
+                    "远端提前关闭了连接",
+                    "the remote closed the connection early"
+                )
+            );
+        };
+        match kind {
+            b'T' => {
+                let line = peer.read_line().await?.unwrap_or_default();
+                if let Some(ScpFrame::Times { mtime: secs }) = scp_parse_frame(b'T', &line) {
+                    mtime = Some(secs);
+                }
+                peer.ack().await?;
+            }
+            b'C' => {
+                let line = peer.read_line().await?.unwrap_or_default();
+                match scp_parse_frame(b'C', &line) {
+                    Some(ScpFrame::File { size, .. }) => {
+                        peer.ack().await?;
+                        return Ok((size, mtime));
+                    }
+                    _ => anyhow::bail!(
+                        "{}: {line:?}",
+                        t("无法解析 scp 文件头", "unparseable scp header")
+                    ),
+                }
+            }
+            1 | 2 => {
+                let msg = scp_error_line(peer).await;
+                anyhow::bail!("{msg}");
+            }
+            other => anyhow::bail!("{} {other:#04x}", t("意外 scp 帧", "unexpected scp frame")),
+        }
+    }
+}
+
+/// Stream one file announced by a C frame into `target`: the row states and
+/// 150 ms cadence of `download_impl` over an open [`ScpPeer`] — the data
+/// bytes, the terminating `\x00`, and our final ack. Called with the C frame
+/// already parsed and acked. `Ok(false)` = cancelled (partial removed).
+#[allow(clippy::too_many_arguments)]
+async fn scp_receive_file(
+    peer: &mut ScpPeer,
+    target: &Path,
+    name: &str,
+    id: &str,
+    total: u64,
+    events: &UnboundedSender<SessionEvent>,
+    rate_kbps: u32,
+    cancel: &Arc<AtomicBool>,
+    create_new: bool,
+) -> Result<bool> {
+    use tokio::io::AsyncWriteExt;
+
+    const CHUNK: usize = 32 * 1024;
+
+    let mut local_file = if create_new {
+        // Atomic create-if-absent: no exists()-then-write race window, and no
+        // file left behind when the target already exists.
+        tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(target)
+            .await
+            .with_context(|| {
+                format!(
+                    "{}: {}",
+                    t("下载目标文件已存在", "download target already exists"),
+                    target.display()
+                )
+            })?
+    } else {
+        tokio::fs::File::create(target)
+            .await
+            .with_context(|| format!("create local {}", target.display()))?
+    };
+
+    emit_transfer(events, id, name, false, 0, total, 0, "");
+
+    let streamed = async {
+        let mut pacer = RatePacer::new(rate_kbps);
+        let mut done: u64 = 0;
+        let mut last = Instant::now();
+        let mut chunk: Vec<u8> = Vec::with_capacity(CHUNK);
+        while done < total {
+            if cancel.load(Ordering::Relaxed) {
+                emit_transfer(
+                    events,
+                    id,
+                    name,
+                    false,
+                    done,
+                    total,
+                    4,
+                    t("已取消", "Cancelled"),
+                );
+                return Ok::<bool, anyhow::Error>(false);
+            }
+            chunk.clear();
+            let want = ((total - done) as usize).min(CHUNK);
+            let n = peer.read_chunk(&mut chunk, want).await?;
+            if n == 0 {
+                anyhow::bail!(
+                    "{}",
+                    t(
+                        "远端提前关闭了连接",
+                        "the remote closed the connection early"
+                    )
+                );
+            }
+            local_file.write_all(&chunk).await?;
+            done += n as u64;
+            pacer.pace(n as u64, cancel).await;
+            if last.elapsed() >= Duration::from_millis(150) {
+                last = Instant::now();
+                emit_transfer(events, id, name, false, done, total, 0, "");
+            }
+        }
+        Ok(true)
+    }
+    .await;
+
+    match streamed {
+        Ok(true) => {}
+        Ok(false) => {
+            drop(local_file);
+            let _ = tokio::fs::remove_file(target).await;
+            return Ok(false);
+        }
+        Err(e) => {
+            drop(local_file);
+            let _ = tokio::fs::remove_file(target).await;
+            return Err(e);
+        }
+    }
+
+    // The source's terminating \x00, then our final ack.
+    match peer.read_byte().await? {
+        Some(0) => {}
+        Some(1) | Some(2) => {
+            drop(local_file);
+            let _ = tokio::fs::remove_file(target).await;
+            let msg = scp_error_line(peer).await;
+            return Err(anyhow!("{msg}"));
+        }
+        Some(other) => {
+            drop(local_file);
+            let _ = tokio::fs::remove_file(target).await;
+            anyhow::bail!(
+                "{} {other:#04x}",
+                t("意外 scp 终止字节", "unexpected scp terminator")
+            );
+        }
+        None => {
+            drop(local_file);
+            let _ = tokio::fs::remove_file(target).await;
+            anyhow::bail!(
+                "{}",
+                t(
+                    "远端提前关闭了连接",
+                    "the remote closed the connection early"
+                )
+            );
+        }
+    }
+    peer.ack().await?;
+    local_file.flush().await.context("flush local file")?;
+    emit_transfer(events, id, name, false, total, total, 1, "");
+    Ok(true)
+}
+
+/// Download one remote file over `scp -q [-p] -f` into `local` (the resolved
+/// final path) — the twin of `download_impl`, minus the pipelining the scp
+/// protocol cannot do. `Ok(false)` = cancelled.
+#[allow(clippy::too_many_arguments)]
+async fn scp_download_single(
+    handle: &client::Handle<SftpClientHandler>,
+    remote: &str,
+    local: &str,
+    name: &str,
+    id: &str,
+    events: &UnboundedSender<SessionEvent>,
+    cancel: &Arc<AtomicBool>,
+    rate_kbps: u32,
+    preserve_mtime: bool,
+    fail_if_exists: bool,
+) -> Result<bool> {
+    let mut peer = ScpPeer::open(handle, &scp_download_command(remote, false, preserve_mtime))
+        .await
+        .context("start remote scp")?;
+    let (total, mtime) = scp_read_file_header(&mut peer).await?;
+    let received = scp_receive_file(
+        &mut peer,
+        Path::new(local),
+        name,
+        id,
+        total,
+        events,
+        rate_kbps,
+        cancel,
+        fail_if_exists,
+    )
+    .await?;
+    if !received {
+        peer.close().await;
+        return Ok(false);
+    }
+    if preserve_mtime {
+        if let Some(secs) = mtime {
+            scp_set_local_mtime(local, secs).await;
+        }
+    }
+    let status = peer.finish().await?;
+    if !matches!(status, Some(0)) {
+        // Every byte is in and acked, so keep the file; surface the odd exit
+        // instead of pretending nothing happened.
+        return Err(peer.with_stderr(anyhow!(
+            "{}",
+            t(
+                "远端 scp 异常退出（文件可能不完整）",
+                "the remote scp exited abnormally (the file may be incomplete)"
+            )
+        )));
+    }
+    Ok(true)
+}
+
+/// Recursively download a remote directory tree over one `scp -q [-p] -r -f`
+/// connection — the twin of `download_dir`. The remote D frames (the root's
+/// included) create the local mirror, and every frame name is sanitized
+/// before it touches the filesystem (#26), so a hostile server cannot escape
+/// the chosen folder. Remote error frames are recorded while the walk
+/// continues (the scp source skips unreadable entries itself). `Ok(false)`
+/// = cancelled (the partial file is cleaned up, mirrored dirs stay).
+async fn scp_download_dir(
+    handle: &client::Handle<SftpClientHandler>,
+    remote_root: &str,
+    local_parent: &str,
+    events: &UnboundedSender<SessionEvent>,
+    rate_kbps: u32,
+    preserve_mtime: bool,
+    cancel: &Arc<AtomicBool>,
+) -> Result<bool> {
+    let mut peer = ScpPeer::open(
+        handle,
+        &scp_download_command(remote_root, true, preserve_mtime),
+    )
+    .await
+    .context("start remote scp")?;
+    // The source reads its first ack before sending anything.
+    peer.ack().await?;
+
+    // `local_parent` is where the root's own D frame lands; deeper D frames
+    // nest on top of it (same layout as download_dir's local_parent/root).
+    let mut stack: Vec<PathBuf> = vec![PathBuf::from(local_parent)];
+    let mut errors: Vec<String> = Vec::new();
+    let mut pending_mtime: Option<u64> = None;
+    let mut cancelled = false;
+
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            cancelled = true;
+            break;
+        }
+        let Some(kind) = peer.read_byte().await? else {
+            break;
+        };
+        match kind {
+            b'T' => {
+                let line = peer.read_line().await?.unwrap_or_default();
+                if let Some(ScpFrame::Times { mtime }) = scp_parse_frame(b'T', &line) {
+                    pending_mtime = Some(mtime);
+                }
+                peer.ack().await?;
+            }
+            b'D' => {
+                let line = peer.read_line().await?.unwrap_or_default();
+                peer.ack().await?;
+                // An unparsable D would corrupt the E nesting: abort rather
+                // than place its children in the wrong directory.
+                let frame = scp_parse_frame(b'D', &line).ok_or_else(|| {
+                    anyhow!(
+                        "{}: {line:?}",
+                        t("无法解析 scp 目录帧", "unparseable scp directory frame")
+                    )
+                })?;
+                let ScpFrame::Dir { name, .. } = frame else {
+                    anyhow::bail!(
+                        "{}: {line:?}",
+                        t("无法解析 scp 目录帧", "unparseable scp directory frame")
+                    );
+                };
+                let local_name = sanitize_filename(&name);
+                let dir = stack.last().cloned().unwrap_or_default().join(&local_name);
+                if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+                    errors.push(format!(
+                        "{}: {e}",
+                        t("创建本地目录失败", "failed to create the local directory")
+                    ));
+                }
+                // Push even on failure: the pending E frame must still match.
+                stack.push(dir);
+            }
+            b'C' => {
+                let line = peer.read_line().await?.unwrap_or_default();
+                let frame = scp_parse_frame(b'C', &line).ok_or_else(|| {
+                    anyhow!(
+                        "{}: {line:?}",
+                        t("无法解析 scp 文件头", "unparseable scp header")
+                    )
+                })?;
+                let ScpFrame::File { size, name, .. } = frame else {
+                    anyhow::bail!(
+                        "{}: {line:?}",
+                        t("无法解析 scp 文件头", "unparseable scp header")
+                    );
+                };
+                peer.ack().await?;
+                let file_name = sanitize_filename(&name);
+                let target = stack.last().cloned().unwrap_or_default().join(&file_name);
+                let id = Uuid::new_v4().to_string();
+                match scp_receive_file(
+                    &mut peer, &target, &file_name, &id, size, events, rate_kbps, cancel, false,
+                )
+                .await
+                {
+                    Ok(true) => {
+                        if preserve_mtime {
+                            if let Some(secs) = pending_mtime.take() {
+                                scp_set_local_mtime(&target.to_string_lossy(), secs).await;
+                            }
+                        }
+                    }
+                    Ok(false) => {
+                        cancelled = true;
+                        break;
+                    }
+                    Err(e) => {
+                        let msg = format!("{e:#}");
+                        emit_transfer(events, &id, &file_name, false, 0, size, 2, &msg);
+                        errors.push(format!("{file_name}: {msg}"));
+                    }
+                }
+                pending_mtime = None;
+            }
+            b'E' => {
+                let _ = peer.read_line().await?; // "E" carries no payload
+                peer.ack().await?;
+                if stack.len() > 1 {
+                    stack.pop();
+                }
+            }
+            1 | 2 => {
+                // That entry failed on the remote; the source continues with
+                // the next one — record and carry on (download-side only).
+                let msg = scp_error_line(&mut peer).await;
+                errors.push(msg);
+            }
+            other => {
+                return Err(anyhow!(
+                    "{} {other:#04x}",
+                    t("意外 scp 帧", "unexpected scp frame")
+                ));
+            }
+        }
+    }
+
+    if cancelled {
+        peer.close().await;
+        return Ok(false);
+    }
+    let status = peer.finish().await?;
+    if !errors.is_empty() {
+        let n = errors.len();
+        let detail = errors.join("; ");
+        return Err(peer.with_stderr(anyhow!(
+            "{}: {n} — {detail}",
+            t("部分文件下载失败", "some files failed to download")
+        )));
+    }
+    if !matches!(status, Some(0)) {
+        return Err(peer.with_stderr(anyhow!(
+            "{}",
+            t("远端 scp 异常退出", "the remote scp exited abnormally")
+        )));
+    }
+    Ok(true)
+}
+
+/// Download one remote entry (a file or a whole folder) into an existing
+/// local folder — the SCP twin of `download_one_into`. An empty folder IS
+/// created here (the pane shows what is on the server).
+#[allow(clippy::too_many_arguments)]
+async fn scp_download_one_into(
+    handle: &client::Handle<SftpClientHandler>,
+    remote: &str,
+    local_dir: &str,
+    conflict: DownloadConflict,
+    events: &UnboundedSender<SessionEvent>,
+    cancel: &Arc<AtomicBool>,
+    id: &str,
+    rate_kbps: u32,
+    preserve_mtime: bool,
+) -> Result<bool> {
+    if scp_remote_is_dir(handle, remote) {
+        let dirname = base_name(remote);
+        let _ = events.send(SessionEvent::SftpStatus(format!(
+            "{} {}/...",
+            t("下载文件夹", "Downloading folder"),
+            dirname
+        )));
+        return scp_download_dir(
+            handle,
+            remote,
+            local_dir,
+            events,
+            rate_kbps,
+            preserve_mtime,
+            cancel,
+        )
+        .await;
+    }
+    // The server controls the name, so sanitize it before it becomes a local
+    // path (#26) — same rule as the regular download path.
+    let filename = sanitize_filename(&base_name(remote));
+    let requested = download_target_path(remote, local_dir);
+    let local_path = match conflict {
+        DownloadConflict::Absent => requested,
+        DownloadConflict::Replace => requested,
+        DownloadConflict::KeepBoth => available_download_path(&requested),
+        // Refuse-if-exists is enforced by scp_receive_file's create_new.
+        DownloadConflict::Fail => requested,
+    };
+    scp_download_single(
+        handle,
+        remote,
+        &local_path.to_string_lossy(),
+        &filename,
+        id,
+        events,
+        cancel,
+        rate_kbps,
+        preserve_mtime,
+        conflict == DownloadConflict::Fail,
+    )
+    .await
+}
+
+/// Upload one local file to `remote_final` over `scp -q -t`: stream it to a
+/// temp name in the target directory, then `mv -f` it into place, so a
+/// failed or cancelled upload never damages an existing file. Mirrors
+/// `upload_pipelined`'s row states and cadence. `Ok(false)` = cancelled.
+#[allow(clippy::too_many_arguments)]
+async fn scp_push_file(
+    handle: &client::Handle<SftpClientHandler>,
+    local: &Path,
+    remote_final: &str,
+    name: &str,
+    id: &str,
+    events: &UnboundedSender<SessionEvent>,
+    cancel: &Arc<AtomicBool>,
+    rate_kbps: u32,
+    no_clobber: bool,
+) -> Result<bool> {
+    use tokio::io::AsyncReadExt;
+
+    const CHUNK: usize = 32 * 1024;
+
+    // A frame cannot carry a newline, and separators would corrupt the path.
+    if !scp_frame_name_ok(name) {
+        anyhow::bail!(
+            "{}",
+            t(
+                "文件名无法通过 scp 传输",
+                "the file name cannot travel over scp"
+            )
+        );
+    }
+    let total = tokio::fs::metadata(local)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let mode = scp_local_mode(local);
+    let mut reader = tokio::fs::File::open(local)
+        .await
+        .with_context(|| format!("open local {}", local.display()))?;
+
+    let seq = SCP_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let remote_parent = parent_dir(remote_final);
+    let tmp = format!(
+        "{}/{}",
+        remote_parent.trim_end_matches('/'),
+        scp_tmp_name(name, seq)
+    );
+
+    let mut peer = ScpPeer::open(handle, &scp_upload_command(&tmp))
+        .await
+        .context("start remote scp")?;
+
+    let pushed = async {
+        // The sink writes its first ack byte before reading anything.
+        peer.expect_ack().await?;
+        // The C frame; a non-zero ack means the sink could not open the
+        // target and NO data may follow — the push is abandoned.
+        peer.send(scp_c_frame(mode, total, name).as_bytes()).await?;
+        peer.expect_ack().await?;
+
+        emit_transfer(events, id, name, true, 0, total, 0, "");
+        let mut pacer = RatePacer::new(rate_kbps);
+        let mut done: u64 = 0;
+        let mut last = Instant::now();
+        let mut buf = vec![0u8; CHUNK];
+        while done < total {
+            if cancel.load(Ordering::Relaxed) {
+                emit_transfer(
+                    events,
+                    id,
+                    name,
+                    true,
+                    done,
+                    total,
+                    4,
+                    t("已取消", "Cancelled"),
+                );
+                return Ok::<bool, anyhow::Error>(false);
+            }
+            let want = ((total - done) as usize).min(CHUNK);
+            let n = reader.read(&mut buf[..want]).await?;
+            if n == 0 {
+                anyhow::bail!(
+                    "{}",
+                    t(
+                        "本地文件在读取中变短",
+                        "the local file shrank while reading"
+                    )
+                );
+            }
+            peer.send(&buf[..n]).await?;
+            done += n as u64;
+            pacer.pace(n as u64, cancel).await;
+            if last.elapsed() >= Duration::from_millis(150) {
+                last = Instant::now();
+                emit_transfer(events, id, name, true, done, total, 0, "");
+            }
+        }
+        // Terminating \x00, then the sink's final ack.
+        peer.send(&b"\x00"[..]).await?;
+        peer.expect_ack().await?;
+        let status = peer.finish().await?;
+        if !matches!(status, Some(0)) {
+            anyhow::bail!(
+                "{}",
+                t("远端 scp 异常退出", "the remote scp exited abnormally")
+            );
+        }
+        Ok(true)
+    }
+    .await;
+
+    match pushed {
+        Ok(true) => {}
+        Ok(false) => {
+            peer.close().await;
+            scp_remove_remote(handle, &tmp).await;
+            return Ok(false);
+        }
+        Err(e) => {
+            peer.close().await;
+            scp_remove_remote(handle, &tmp).await;
+            return Err(peer.with_stderr(e));
+        }
+    }
+    // Promote the temp. With no_clobber the earlier probe said "free", but
+    // another client may have created the target since — re-probe and
+    // renumber instead of replacing (the exec twin of open_upload_target's
+    // exclusive create).
+    let mut final_path = remote_final.to_string();
+    if no_clobber && scp_remote_exists(handle, &final_path).await.unwrap_or(true) {
+        final_path = scp_available_remote_path(handle, &final_path).await;
+    }
+    if let Err(e) = scp_move_remote(handle, &tmp, &final_path).await {
+        scp_remove_remote(handle, &tmp).await;
+        return Err(e);
+    }
+    emit_transfer(events, id, name, true, total, total, 1, "");
+    Ok(true)
+}
+
+/// Recursively upload a local directory tree into `remote_parent` over scp
+/// (#50) — the twin of `upload_dir` with per-file isolation: each remote
+/// level is created with `mkdir -p`, each file goes through the temp + `mv`
+/// push with its own row, and a failed file is recorded while the walk
+/// continues (that isolation is exactly why uploads go through temp names).
+/// Symlinks and special files are skipped, like `upload_dir`. Returns
+/// (ok, failed, cancelled).
+async fn scp_upload_dir(
+    handle: &client::Handle<SftpClientHandler>,
+    local_root: &Path,
+    remote_parent: &str,
+    events: &UnboundedSender<SessionEvent>,
+    rate_kbps: u32,
+    cancel: &Arc<AtomicBool>,
+) -> Result<(usize, usize, bool)> {
+    let root_name = local_file_name_utf8(local_root)?;
+    if !scp_frame_name_ok(&root_name) {
+        anyhow::bail!(
+            "{}",
+            t(
+                "文件夹名无法通过 scp 传输",
+                "the folder name cannot travel over scp"
+            )
+        );
+    }
+    let remote_root = format!("{}/{}", remote_parent.trim_end_matches('/'), root_name);
+    scp_mkdir_remote(handle, &remote_root).await?;
+    let mut stack = vec![(local_root.to_path_buf(), remote_root)];
+    let mut ok = 0usize;
+    let mut failed = 0usize;
+    while let Some((ldir, rdir)) = stack.pop() {
+        let mut rd = tokio::fs::read_dir(&ldir)
+            .await
+            .with_context(|| format!("read local dir {}", ldir.display()))?;
+        while let Some(entry) = rd.next_entry().await.context("read dir entry")? {
+            if cancel.load(Ordering::Relaxed) {
+                return Ok((ok, failed, true));
+            }
+            let lpath = entry.path();
+            let name = local_file_name_utf8(&lpath)?;
+            let rchild = format!("{}/{}", rdir, name);
+            let ft = entry.file_type().await.context("file type")?;
+            if ft.is_dir() {
+                if !scp_frame_name_ok(&name) {
+                    failed += 1;
+                    let _ = events.send(SessionEvent::SftpStatus(format!(
+                        "{}: {}",
+                        t(
+                            "已跳过（名称无法通过 scp 传输）",
+                            "Skipped (name cannot travel over scp)"
+                        ),
+                        name
+                    )));
+                    continue;
+                }
+                // A dir we cannot create (permissions, a file in the way)
+                // fails its whole subtree — skip it rather than abort.
+                if let Err(e) = scp_mkdir_remote(handle, &rchild).await {
+                    let _ = events.send(SessionEvent::SftpStatus(format!(
+                        "{}: {e}",
+                        t("创建远端目录失败", "failed to create the remote directory")
+                    )));
+                    continue;
+                }
+                stack.push((lpath, rchild));
+            } else if ft.is_file() {
+                let id = Uuid::new_v4().to_string();
+                match scp_push_file(
+                    handle, &lpath, &rchild, &name, &id, events, cancel, rate_kbps, false,
+                )
+                .await
+                {
+                    Ok(true) => ok += 1,
+                    Ok(false) => return Ok((ok, failed, true)),
+                    Err(e) => {
+                        failed += 1;
+                        let msg = format!("{e:#}");
+                        emit_transfer(events, &id, &name, true, 0, 0, 2, &msg);
+                        let _ = events.send(SessionEvent::SftpStatus(format!(
+                            "{}: {msg}",
+                            t("上传失败", "Upload failed")
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    Ok((ok, failed, false))
+}
+
+/// Download one remote file's bytes into memory, capped at `cap` — bails if
+/// the C frame announces more (or the stream delivers more), so an untrusted
+/// size can never balloon the allocation.
+async fn scp_fetch_bytes(
+    handle: &client::Handle<SftpClientHandler>,
+    remote: &str,
+    cap: u64,
+) -> Result<Vec<u8>> {
+    let mut peer = ScpPeer::open(handle, &scp_download_command(remote, false, false))
+        .await
+        .context("start remote scp")?;
+    let (total, _) = scp_read_file_header(&mut peer).await?;
+    if total > cap {
+        anyhow::bail!(
+            "{}",
+            t("文件超出读取上限", "the file exceeds the read limit")
+        );
+    }
+    let mut out = Vec::with_capacity(total.min(cap) as usize);
+    let mut chunk: Vec<u8> = Vec::new();
+    while (out.len() as u64) < total {
+        chunk.clear();
+        let want = ((total - out.len() as u64) as usize).min(32 * 1024);
+        let n = peer.read_chunk(&mut chunk, want).await?;
+        if n == 0 {
+            anyhow::bail!(
+                "{}",
+                t(
+                    "远端提前关闭了连接",
+                    "the remote closed the connection early"
+                )
+            );
+        }
+        out.extend_from_slice(&chunk);
+    }
+    match peer.read_byte().await? {
+        Some(0) => {}
+        Some(1) | Some(2) => {
+            let msg = scp_error_line(&mut peer).await;
+            anyhow::bail!("{msg}");
+        }
+        Some(other) => {
+            anyhow::bail!(
+                "{} {other:#04x}",
+                t("意外 scp 终止字节", "unexpected scp terminator")
+            );
+        }
+        None => anyhow::bail!(
+            "{}",
+            t(
+                "远端提前关闭了连接",
+                "the remote closed the connection early"
+            )
+        ),
+    }
+    peer.ack().await?;
+    let status = peer.finish().await?;
+    if !matches!(status, Some(0)) {
+        anyhow::bail!(
+            "{}",
+            t("远端 scp 异常退出", "the remote scp exited abnormally")
+        );
+    }
+    Ok(out)
+}
+
+/// Read a remote file as UTF-8 text for the built-in editor over scp — the
+/// twin of `read_text_guarded`, with the same guards (512 KB cap, binary
+/// rejection, line caps) applied to the fetched bytes.
+async fn scp_read_text_guarded(
+    handle: &client::Handle<SftpClientHandler>,
+    remote: &str,
+) -> std::result::Result<String, String> {
+    // Stat first so a huge file is rejected before a byte moves.
+    let (status, output) = exec_remote_output(handle, &scp_stat_single_command(remote))
+        .await
+        .map_err(|e| format!("{}: {e}", t("打开失败", "Open failed")))?;
+    if status != 0 || output.trim().is_empty() {
+        return Err(format!(
+            "{}: {}",
+            t("打开失败", "Open failed"),
+            output.trim()
+        ));
+    }
+    let size = parse_scp_stat_output(&output)
+        .first()
+        .map(|e| e.size)
+        .unwrap_or(0);
+    if size > MAX_BUILTIN_EDITOR_BYTES as u64 {
+        return Err(editor_rejection_message(EditorTextRejection::TooLarge));
+    }
+    // Read at most one byte past the limit so an untrusted file that grew
+    // between the stat and the read is caught exactly like the SFTP path.
+    let bytes = scp_fetch_bytes(handle, remote, MAX_BUILTIN_EDITOR_BYTES as u64 + 1)
+        .await
+        .map_err(|e| format!("{}: {e}", t("读取失败", "Read failed")))?;
+    validate_editor_text(bytes).map_err(editor_rejection_message)
+}
+
+/// Overwrite a remote file with the given text over scp — the twin of
+/// `write_text_file`: upload to a temp name, then `mv -f` into place, so a
+/// failed save never leaves a truncated original behind.
+async fn scp_write_text(
+    handle: &client::Handle<SftpClientHandler>,
+    remote: &str,
+    content: &str,
+) -> Result<()> {
+    let name = base_name(remote);
+    if !scp_frame_name_ok(&name) {
+        anyhow::bail!(
+            "{}",
+            t(
+                "远端文件名无法通过 scp 传输",
+                "the remote file name cannot travel over scp"
+            )
+        );
+    }
+    let bytes = content.as_bytes();
+    let seq = SCP_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let remote_parent = parent_dir(remote);
+    let tmp = format!(
+        "{}/{}",
+        remote_parent.trim_end_matches('/'),
+        scp_tmp_name(&name, seq)
+    );
+
+    let mut peer = ScpPeer::open(handle, &scp_upload_command(&tmp))
+        .await
+        .context("start remote scp")?;
+
+    let pushed = async {
+        peer.expect_ack().await?;
+        peer.send(scp_c_frame(0o644, bytes.len() as u64, &name).as_bytes())
+            .await?;
+        peer.expect_ack().await?;
+        if !bytes.is_empty() {
+            peer.send(bytes).await?;
+        }
+        peer.send(&b"\x00"[..]).await?;
+        peer.expect_ack().await?;
+        let status = peer.finish().await?;
+        if !matches!(status, Some(0)) {
+            anyhow::bail!(
+                "{}",
+                t("远端 scp 异常退出", "the remote scp exited abnormally")
+            );
+        }
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+
+    if let Err(e) = pushed {
+        peer.close().await;
+        scp_remove_remote(handle, &tmp).await;
+        return Err(peer.with_stderr(e));
+    }
+    if let Err(e) = scp_move_remote(handle, &tmp, remote).await {
+        scp_remove_remote(handle, &tmp).await;
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// Upper bounds for one drag-out (#504), so dropping `/` by accident cannot
