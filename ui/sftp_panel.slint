@@ -2243,34 +2243,7 @@ export component SftpPanel inherits Rectangle {
                                             width: parent.width; height: parent.height;
                                         }
                                     }
-
-                                    HorizontalLayout {
-                                        padding-left: 8px; padding-right: 8px; spacing: 8px;
-                                        // Multi-select checkbox (#100). Its own TouchArea
-                                        // sits above the row, so toggling doesn't trigger
-                                        // navigate/select.
-                                        Rectangle {
-                                            width: 16px;
-                                            y: (parent.height - self.height) / 2;
-                                            height: 16px;
-                                            border-radius: 3px;
-                                            border-width: 1px;
-                                            border-color: entry.selected ? Theme.accent : Theme.border-strong;
-                                            background: entry.selected ? Theme.accent : transparent;
-                                            remote-cb-ta := TouchArea {
-                                                mouse-cursor: pointer;
-                                                clicked => { root.toggle-select(i); }
-                                            }
-                                            if entry.selected : Text {
-                                                text: "\u{E5CA}"; // check
-                                                font-family: "Material Icons";
-                                                color: #ffffff;
-                                                font-size: 13px;
-                                                horizontal-alignment: center;
-                                                vertical-alignment: center;
-                                                width: parent.width; height: parent.height;
-                                            }
-                                        }
+                                    }
 
                                         HorizontalLayout {
                                             horizontal-stretch: 1;
