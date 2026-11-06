@@ -2130,7 +2130,7 @@ async fn run_scp_browse(
                             return;
                         }
                     };
-                    let is_dir = scp_remote_is_dir(&handle, &remote);
+                    let is_dir = scp_remote_is_dir(&handle, &remote).await;
                     if is_dir {
                         let dirname = base_name(&remote);
                         // #100.3: an empty folder downloads nothing — just say
@@ -3383,7 +3383,7 @@ async fn scp_download_one_into(
     rate_kbps: u32,
     preserve_mtime: bool,
 ) -> Result<bool> {
-    if scp_remote_is_dir(handle, remote) {
+    if scp_remote_is_dir(handle, remote).await {
         let dirname = base_name(remote);
         let _ = events.send(SessionEvent::SftpStatus(format!(
             "{} {}/...",
