@@ -101,6 +101,127 @@ fn parse_scp_stat_line(line: &str) -> Option<RemoteEntry> {
     })
 }
 
+/// `ls -lAn` command used when the busybox `stat` applet is missing.
+pub(crate) fn scp_long_command(path: &str) -> String {
+    format!("ls -lAn -- {}", sh_quote(path))
+}
+
+/// `ls -A` command. Just enough to prove a directory has direct children, so it
+/// can cross-check an unexpectedly empty SFTP `read_dir` without making a full
+/// metadata round-trip.
+pub(crate) fn scp_list_names_command(path: &str) -> String {
+    format!("ls -A -- {}", sh_quote(path))
+}
+
+/// Parse `ls -lAn` output into [`RemoteEntry`]s.
+///
+/// Only the columns needed by the panel are retained. `ls` has no portable epoch
+/// column, so `modified` is deliberately left at zero rather than guessed from its
+/// abbreviated date text.
+pub(crate) fn parse_scp_long_output(output: &str, parent: &str) -> Vec<RemoteEntry> {
+    output
+        .lines()
+        .filter_map(|line| parse_scp_long_line(line, parent))
+        .collect()
+}
+
+fn parse_scp_long_line(line: &str, parent: &str) -> Option<RemoteEntry> {
+    let line = line.trim_end_matches('\r');
+    if line.is_empty() || line == "total" || line.starts_with("total ") {
+        return None;
+    }
+    let mut fields = line.split_whitespace();
+    let mode_text = fields.next()?;
+    if mode_text.len() != 10 {
+        return None;
+    }
+    let type_bits = match mode_text.chars().next()? {
+        'd' => 0o040_000,
+        '-' => 0o100_000,
+        'l' => 0o120_000,
+        'p' => 0o010_000,
+        's' => 0o140_000,
+        'b' => 0o060_000,
+        'c' => 0o020_000,
+        _ => return None,
+    };
+    let mode = parse_perm_string(mode_text.get(1..)?)?;
+    let _links = fields.next()?.parse::<u32>().ok()?;
+    let uid = fields.next()?.parse::<u32>().ok()?;
+    let gid = fields.next()?.parse::<u32>().ok()?;
+    let size = fields.next()?.parse::<u64>().ok()?;
+    let _mon = fields.next()?;
+    let _day = fields.next()?;
+    let _time_or_year = fields.next()?;
+    let rest = line[byte_index_after_fields(line, 8)?..].trim();
+    if rest.is_empty() {
+        return None;
+    }
+    let name_end = match rest.split_once(" -> ") {
+        Some((name, _)) if type_bits == 0o120_000 => name.trim_end(),
+        _ => rest,
+    };
+    if name_end.is_empty() || name_end == "." || name_end == ".." {
+        return None;
+    }
+    let name = name_end.to_string();
+    let full_path = format!("{}/{}", parent.trim_end_matches('/'), name);
+    let permissions_mode = type_bits | (mode & 0o7777);
+    Some(RemoteEntry {
+        name,
+        full_path,
+        is_dir: type_bits == 0o040_000,
+        size,
+        modified: 0,
+        mode: mode & 0o7777,
+        permissions_mode,
+        uid: Some(uid),
+        gid: Some(gid),
+        owner: None,
+        group: None,
+        file_type: file_type_from_mode(permissions_mode).to_string(),
+    })
+}
+
+/// Parse `ls -l`'s 9-char permission field (`rwxrwxrwx`, plus `s`/`t` special
+/// bits) into a `0o077`-range mode. Each slot contributes its position weight
+/// when its bit is set. `s`/`t` (lowercase) sit in an exec slot with exec
+/// set; `S`/`T` (uppercase) have exec clear. The setuid/sticky bits themselves
+/// (0o4000/0o2000) are not tracked — the panel only shows the nine rwx bits.
+fn parse_perm_string(perm: &str) -> Option<u32> {
+    let chars: Vec<char> = perm.chars().take(9).collect();
+    if chars.len() != 9 {
+        return None;
+    }
+    // 1 when the slot's rwx bit is set, 0 when clear.
+    let bit = |c: char| -> Option<u32> {
+        match c {
+            'r' | 'w' | 'x' | 's' | 't' => Some(1),
+            'S' | 'T' | '-' => Some(0),
+            _ => None,
+        }
+    };
+    const WEIGHTS: [u32; 9] = [
+        0o400, 0o200, 0o100, 0o040, 0o020, 0o010, 0o004, 0o002, 0o001,
+    ];
+    let mut mode = 0u32;
+    for (c, weight) in chars.iter().zip(WEIGHTS) {
+        mode += bit(*c)? * weight;
+    }
+    Some(mode)
+}
+
+/// Return the byte position after the first `count` whitespace-separated fields.
+fn byte_index_after_fields(line: &str, count: usize) -> Option<usize> {
+    let mut index = 0usize;
+    for _ in 0..count {
+        index += line[index..].find(|c: char| !c.is_whitespace())?;
+        index += line[index..].find(|c: char| c.is_whitespace())?;
+    }
+    index += line[index..].find(|c: char| !c.is_whitespace())?;
+    Some(index)
+}
+
 /// File-type bits for a `stat %F` string. Unknown strings default to a regular
 /// file so an unrecognised server never turns a readable file into a "dir".
 fn stat_type_bits(f_type: &str) -> u32 {
@@ -271,6 +392,22 @@ pub(crate) fn scp_move_command(from: &str, to: &str) -> String {
     format!("mv -f {} {}", sh_quote(from), sh_quote(to))
 }
 
+/// `touch <path>` — create an empty file after an existence probe.
+pub(crate) fn scp_touch_command(path: &str) -> String {
+    format!("touch {}", sh_quote(path))
+}
+
+/// `rm -rf <path>` — recursively remove a file or directory. Paths are quoted
+/// and are never a bare root: callers reject empty/root paths before sending it.
+pub(crate) fn scp_remove_recursive_command(path: &str) -> String {
+    format!("rm -rf {}", sh_quote(path))
+}
+
+/// `chmod <octal> <path>` — change permission bits.
+pub(crate) fn scp_chmod_command(path: &str, mode: u32) -> String {
+    format!("chmod {:o} {}", mode & 0o7777, sh_quote(path))
+}
+
 /// `rm -f <path>` — drop a temp file after a failed/cancelled upload.
 pub(crate) fn scp_remove_command(path: &str) -> String {
     format!("rm -f {}", sh_quote(path))
@@ -355,6 +492,56 @@ mod tests {
     }
 
     #[test]
+    fn ls_fallback_parses_entries() {
+        let entries = parse_scp_long_output(
+            "total 8\n\
+             drwxr-xr-x 2 0 0 4096 Jan  1  2024 logs\n\
+             -rw-r--r-- 1 1000 1000 1234 Jan  1 08:00 my report.txt\n\
+             lrwxrwxrwx 1 0 0 9 Jan  1  2024 link -> /root/logs\n",
+            "/root",
+        );
+        assert_eq!(entries.len(), 3);
+        assert!(entries[0].is_dir && entries[0].name == "logs");
+        assert_eq!(entries[1].size, 1234);
+        assert_eq!(entries[1].modified, 0);
+        assert_eq!(entries[2].name, "link");
+        assert_eq!(entries[2].file_type, "link");
+    }
+
+    #[test]
+    fn ls_fallback_skips_unparseable_lines() {
+        assert!(parse_scp_long_output("total 0\nnot a listing\n", "/root").is_empty());
+    }
+
+    #[test]
+    fn ls_fallback_parses_setuid_and_sticky() {
+        let entries = parse_scp_long_output(
+            "-rwsr-xr-x 1 0 0 12 Jan  1 08:00 tool\n\
+             -rw-r--r-T 1 0 0 0 Jan  1 08:00 swap\n",
+            "/bin",
+        );
+        assert_eq!(entries.len(), 2);
+        // `s` (setuid, exec set) keeps the owner-exec bit → 755; `T` (sticky,
+        // exec clear) drops the other-exec bit → 644. The 0o4000/0o2000 bits
+        // are not tracked, so both compare against the 0o777 rwx value.
+        assert_eq!(entries[0].mode, 0o755);
+        assert_eq!(entries[1].mode, 0o644);
+    }
+
+    #[test]
+    fn perm_string_maps_rwx_to_bits() {
+        assert_eq!(parse_perm_string("rwxr-xr-x"), Some(0o755));
+        assert_eq!(parse_perm_string("rw-r--r--"), Some(0o644));
+        assert_eq!(parse_perm_string("--------"), Some(0));
+        // `s` keeps the owner-exec bit, `S` clears it (setuid bit not tracked).
+        assert_eq!(parse_perm_string("rwsr-xr-x"), Some(0o755));
+        assert_eq!(parse_perm_string("rwSrw-r--"), Some(0o664));
+        // `T` clears the other-exec bit (sticky bit not tracked).
+        assert_eq!(parse_perm_string("rwxrwxr-T"), Some(0o774));
+        assert_eq!(parse_perm_string("short"), None);
+    }
+
+    #[test]
     fn transfer_commands_quote_their_paths() {
         assert_eq!(
             scp_download_command("/tmp/a b", false, false),
@@ -373,6 +560,11 @@ mod tests {
             "mv -f '/from f' '/to t'"
         );
         assert_eq!(scp_remove_command("/a b"), "rm -f '/a b'");
+        assert_eq!(scp_remove_recursive_command("/a b"), "rm -rf '/a b'");
+        assert_eq!(scp_touch_command("/a b"), "touch '/a b'");
+        assert_eq!(scp_chmod_command("/a b", 0o755), "chmod 755 '/a b'");
+        assert_eq!(scp_long_command("/a b"), "ls -lAn -- '/a b'");
+        assert_eq!(scp_list_names_command("/a b"), "ls -A -- '/a b'");
         assert_eq!(
             scp_stat_single_command("/tmp/a b"),
             "stat -c '%F|%s|%a|%u|%g|%Y|%n' '/tmp/a b'"

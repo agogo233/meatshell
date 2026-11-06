@@ -569,11 +569,76 @@ async fn run_sftp(
     let sftp = std::sync::Arc::new(sftp);
     let handle = std::sync::Arc::new(SftpLink { handle, elevation });
 
+    let home = sftp
+        .canonicalize(".")
+        .await
+        .unwrap_or_else(|_| "/".to_string());
+    // A failed home listing is not fatal: the panel stays usable (the user can
+    // navigate elsewhere), exactly like before the SCP probe was added.
+    let home_entries: Option<Vec<RemoteEntry>> = match list_dir_impl(&sftp, &home).await {
+        Ok(entries) => Some(entries),
+        Err(e) => {
+            let _ = events.send(SessionEvent::SftpError(list_error_msg(&home, &e)));
+            None
+        }
+    };
+    // When SFTP's `read_dir` comes back empty but the directory actually has
+    // entries (Dropbear's minimal SFTP server), cross-check with `ls -A` and
+    // switch to SCP mode. Every probe step degrades to "stay in SFTP mode" on
+    // failure so a transient exec-channel problem never kills a healthy
+    // session.
+    if let Some(entries) = &home_entries {
+        if entries.is_empty()
+            && session.sftp_mode.is_empty()
+            && !handle.elevation.is_custom()
+            && probe_scp(&handle.handle).await.ok().flatten().is_some()
+        {
+            match exec_remote_output(
+                &handle.handle,
+                &super::common::scp_list_names_command(&home),
+            )
+            .await
+            {
+                Ok((status, output)) => {
+                    let out = output.trim();
+                    if status == 0 && !out.is_empty() {
+                        tracing::warn!(
+                            "sftp {}:{} read_dir returned empty but directory has entries; switching to SCP fallback",
+                            session.host,
+                            session.port
+                        );
+                        let _ = events.send(SessionEvent::SftpStatus(
+                            t(
+                                "SFTP 目录读取不可用，已切换 SCP 模式...",
+                                "SFTP directory listing is unavailable; switched to SCP mode...",
+                            )
+                            .into(),
+                        ));
+                        return run_scp_browse(handle, events, commands, self_tx, queue).await;
+                    }
+                    if status != 0 && !out.is_empty() {
+                        tracing::warn!(
+                            "sftp {}:{} empty-listing cross-check failed: {}",
+                            session.host,
+                            session.port,
+                            out
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "sftp {}:{} empty-listing cross-check unavailable; staying in SFTP mode: {e}",
+                        session.host,
+                        session.port
+                    );
+                }
+            }
+        }
+    }
+
     // Owner/group names live for the whole SFTP connection so every listing
     // after the first can paint names without another `getent` round-trip.
     let owner_cache: SharedOwnerCache = Arc::new(Mutex::new(OwnerNameCache::default()));
-    // Kick off a full passwd/group dump immediately — it overlaps the first
-    // read_dir / tree walk so names are usually ready before the first paint.
     let (names_ready_tx, names_ready_rx) = tokio::sync::watch::channel(false);
     {
         let handle = handle.clone();
@@ -584,46 +649,33 @@ async fn run_sftp(
         });
     }
 
-    // Per-transfer cancel flags, keyed by transfer id. A download task registers
-    // its flag here; a CancelTransfer command flips it; the task removes it on
-    // exit (#100 cancel download).
     let cancels: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>> =
         Arc::new(Mutex::new(HashMap::new()));
-
-    // Resolve the home directory and do an initial listing.
-    let home = sftp
-        .canonicalize(".")
-        .await
-        .unwrap_or_else(|_| "/".to_string());
     let _ = events.send(SessionEvent::SftpStatus(format!(
         "{} {}...",
         t("SFTP 加载", "SFTP loading"),
         home
     )));
-    match list_dir_impl(&sftp, &home).await {
-        Ok(entries) => {
-            // Prefer painting names with the listing: wait briefly for the
-            // connect-time full getent dump that started above.
-            wait_owner_prefetch(&names_ready_rx, Duration::from_secs(3)).await;
-            let mut entries = entries;
-            let need = lock_or_recover(&owner_cache).apply(&mut entries);
-            let _ = events.send(SessionEvent::SftpEntries {
+    if let Some(entries) = home_entries {
+        // Prefer painting names with the listing: wait briefly for the
+        // connect-time full getent dump that started above. (A failed home
+        // listing already sent its `SftpError` above; the loop stays usable.)
+        wait_owner_prefetch(&names_ready_rx, Duration::from_secs(3)).await;
+        let mut entries = entries;
+        let need = lock_or_recover(&owner_cache).apply(&mut entries);
+        let _ = events.send(SessionEvent::SftpEntries {
+            path: home.clone(),
+            entries: entries.clone(),
+        });
+        // Defer any remaining remote name lookup so directory-tree init can
+        // run first; the command loop's EnrichEntries repaints with names.
+        if !need.is_complete() {
+            let _ = self_tx.send(SftpCommand::EnrichEntries {
                 path: home.clone(),
-                entries: entries.clone(),
+                entries,
             });
-            // Defer any remaining remote name lookup so directory-tree init can
-            // run first; the command loop's EnrichEntries repaints with names.
-            if !need.is_complete() {
-                let _ = self_tx.send(SftpCommand::EnrichEntries {
-                    path: home.clone(),
-                    entries,
-                });
-            }
-            let _ = events.send(SessionEvent::SftpStatus(home.clone()));
         }
-        Err(e) => {
-            let _ = events.send(SessionEvent::SftpError(list_error_msg(&home, &e)));
-        }
+        let _ = events.send(SessionEvent::SftpStatus(home.clone()));
     }
 
     // --- Directory tree initialization -------------------------------------
@@ -1906,11 +1958,14 @@ async fn probe_scp(handle: &client::Handle<SftpClientHandler>) -> Result<Option<
 /// does have `scp` (the OpenWrt/Dropbear case).
 ///
 /// Mirrors `run_sftp`: initial listing, directory-tree init, the browse
-/// commands (`ListDir` / `RefreshDir` / `ToggleTreeNode`), and the transfer
+/// commands (`ListDir` / `RefreshDir` / `ToggleTreeNode`), the transfer
 /// commands (`Download` / `DownloadInto` / `Upload` / `UploadEdited` /
 /// `ReadText` / `WriteText` / `CancelTransfer`) over the wire-protocol
-/// engine in `super::scp`. Remaining operations (file ops, drag-out,
-/// archives) are still refused with a "not supported in SCP mode" status.
+/// engine in `super::scp`, and the file-management commands (`Delete` /
+/// `Rename` / `Chmod` / `MkDir` / `TouchFile` / `OpenOrDownload` / `CopyTo`)
+/// as remote shell commands through the same privileges as the SFTP channel.
+/// Remaining operations (external open, drag-out, archives) are still refused
+/// with a "not supported in SCP mode" status.
 async fn run_scp_browse(
     handle: Arc<SftpLink>,
     events: UnboundedSender<SessionEvent>,
@@ -2685,6 +2740,326 @@ async fn run_scp_browse(
                 }
             }
 
+            SftpCommand::Delete(path) => {
+                // Never issue `rm -rf` for the filesystem root or an empty path:
+                // under sudo elevation that would be catastrophic.
+                if path.is_empty() || path == "/" {
+                    let _ = events.send(SessionEvent::SftpStatus(
+                        t(
+                            "无法删除文件系统根目录",
+                            "cannot delete the filesystem root",
+                        )
+                        .into(),
+                    ));
+                    continue;
+                }
+                let filename = base_name(&path);
+                let _ = events.send(SessionEvent::SftpStatus(format!(
+                    "{} {}...",
+                    t("删除", "Deleting"),
+                    filename
+                )));
+                let cmd = super::common::scp_remove_recursive_command(&path);
+                match scp_mgmt_command(&handle, &cmd).await {
+                    Ok(()) => {
+                        let parent = parent_dir(&path);
+                        if let Ok(entries) = scp_list_dir(&handle, &parent).await {
+                            publish_dir_entries(
+                                &handle,
+                                &owner_cache,
+                                &names_ready_rx,
+                                &events,
+                                parent.clone(),
+                                entries,
+                            )
+                            .await;
+                        }
+                        // Drop the deleted node and its cached descendants, then
+                        // re-list the parent so it disappears without a reconnect (#189).
+                        let prefix = format!("{}/", path.trim_end_matches('/'));
+                        tree_dirs.retain(|p, _| p != &path && !p.starts_with(&prefix));
+                        tree_expanded.retain(|p| p != &path && !p.starts_with(&prefix));
+                        if tree_dirs.contains_key(&parent) {
+                            tree_dirs.insert(
+                                parent.clone(),
+                                scp_list_dirs_only(&handle, &parent)
+                                    .await
+                                    .unwrap_or_default(),
+                            );
+                        }
+                        emit_tree(&tree_dirs, &tree_expanded, &events);
+                        let _ = events.send(SessionEvent::SftpStatus(format!(
+                            "{}: {}",
+                            t("已删除", "Deleted"),
+                            filename
+                        )));
+                    }
+                    Err(msg) => {
+                        let _ = events.send(SessionEvent::SftpStatus(format!(
+                            "{}: {}",
+                            t("删除失败", "Delete failed"),
+                            msg
+                        )));
+                    }
+                }
+            }
+
+            SftpCommand::Rename { from, to } => {
+                let refresh = parent_dir(&from);
+                // `mv -f` would silently overwrite an existing target; like the
+                // SFTP backend, refuse to clobber (#69).
+                let target_taken = scp_remote_exists(&handle.handle, &to)
+                    .await
+                    .unwrap_or(false);
+                if target_taken {
+                    let _ = events.send(SessionEvent::SftpStatus(format!(
+                        "{}: {}",
+                        t(
+                            "重命名失败: 目标已存在",
+                            "Rename failed: target already exists"
+                        ),
+                        base_name(&to)
+                    )));
+                } else {
+                    let cmd = super::common::scp_move_command(&from, &to);
+                    match scp_mgmt_command(&handle, &cmd).await {
+                        Ok(()) => {
+                            let _ = events.send(SessionEvent::SftpStatus(format!(
+                                "{}: {}",
+                                t("已重命名", "Renamed"),
+                                base_name(&to)
+                            )));
+                            // Sync the tree: drop the old name and its cached
+                            // descendants, then re-list both parents (a rename
+                            // can cross directories).
+                            let prefix = format!("{}/", from.trim_end_matches('/'));
+                            tree_dirs.retain(|p, _| p != &from && !p.starts_with(&prefix));
+                            tree_expanded.retain(|p| p != &from && !p.starts_with(&prefix));
+                            let to_parent = parent_dir(&to);
+                            let mut parents = vec![refresh.clone()];
+                            if to_parent != refresh {
+                                parents.push(to_parent);
+                            }
+                            for p in parents {
+                                if tree_dirs.contains_key(&p) {
+                                    tree_dirs.insert(
+                                        p.clone(),
+                                        scp_list_dirs_only(&handle, &p).await.unwrap_or_default(),
+                                    );
+                                }
+                            }
+                            emit_tree(&tree_dirs, &tree_expanded, &events);
+                        }
+                        Err(msg) => {
+                            let _ = events.send(SessionEvent::SftpStatus(format!(
+                                "{}: {}",
+                                t("重命名失败", "Rename failed"),
+                                msg
+                            )));
+                        }
+                    }
+                }
+                if let Ok(entries) = scp_list_dir(&handle, &refresh).await {
+                    publish_dir_entries(
+                        &handle,
+                        &owner_cache,
+                        &names_ready_rx,
+                        &events,
+                        refresh,
+                        entries,
+                    )
+                    .await;
+                }
+            }
+
+            SftpCommand::Chmod { path, mode } => {
+                let refresh = parent_dir(&path);
+                let cmd = super::common::scp_chmod_command(&path, mode);
+                match scp_mgmt_command(&handle, &cmd).await {
+                    Ok(()) => {
+                        let _ = events.send(SessionEvent::SftpStatus(format!(
+                            "{}: {} → {:o}",
+                            t("已修改权限", "Permissions changed"),
+                            base_name(&path),
+                            mode
+                        )));
+                    }
+                    Err(msg) => {
+                        let _ = events.send(SessionEvent::SftpStatus(format!(
+                            "{}: {}",
+                            t("修改权限失败", "chmod failed"),
+                            msg
+                        )));
+                    }
+                }
+                if let Ok(entries) = scp_list_dir(&handle, &refresh).await {
+                    publish_dir_entries(
+                        &handle,
+                        &owner_cache,
+                        &names_ready_rx,
+                        &events,
+                        refresh,
+                        entries,
+                    )
+                    .await;
+                }
+            }
+
+            SftpCommand::MkDir(path) => {
+                let refresh = parent_dir(&path);
+                let cmd = super::common::scp_mkdir_command(&path);
+                match scp_mgmt_command(&handle, &cmd).await {
+                    Ok(()) => {
+                        let _ = events.send(SessionEvent::SftpStatus(format!(
+                            "{}: {}",
+                            t("已新建文件夹", "Folder created"),
+                            base_name(&path)
+                        )));
+                        if tree_dirs.contains_key(&refresh) {
+                            tree_dirs.insert(
+                                refresh.clone(),
+                                scp_list_dirs_only(&handle, &refresh)
+                                    .await
+                                    .unwrap_or_default(),
+                            );
+                        }
+                        emit_tree(&tree_dirs, &tree_expanded, &events);
+                    }
+                    Err(msg) => {
+                        let _ = events.send(SessionEvent::SftpStatus(format!(
+                            "{}: {}",
+                            t("新建文件夹失败", "Create folder failed"),
+                            msg
+                        )));
+                    }
+                }
+                if let Ok(entries) = scp_list_dir(&handle, &refresh).await {
+                    publish_dir_entries(
+                        &handle,
+                        &owner_cache,
+                        &names_ready_rx,
+                        &events,
+                        refresh,
+                        entries,
+                    )
+                    .await;
+                }
+            }
+
+            SftpCommand::TouchFile(path) => {
+                let refresh = parent_dir(&path);
+                // `touch` never truncates an existing file (safe, unlike the SFTP
+                // backend's create()); probe first so the success message is
+                // accurate, mirroring the SFTP twin.
+                let exists = scp_remote_exists(&handle.handle, &path)
+                    .await
+                    .unwrap_or(false);
+                if exists {
+                    let _ = events.send(SessionEvent::SftpStatus(format!(
+                        "{}: {}",
+                        t("文件已存在", "File already exists"),
+                        base_name(&path)
+                    )));
+                } else {
+                    let cmd = super::common::scp_touch_command(&path);
+                    match scp_mgmt_command(&handle, &cmd).await {
+                        Ok(()) => {
+                            let _ = events.send(SessionEvent::SftpStatus(format!(
+                                "{}: {}",
+                                t("已新建文件", "File created"),
+                                base_name(&path)
+                            )));
+                        }
+                        Err(msg) => {
+                            let _ = events.send(SessionEvent::SftpStatus(format!(
+                                "{}: {}",
+                                t("新建文件失败", "Create file failed"),
+                                msg
+                            )));
+                        }
+                    }
+                }
+                if let Ok(entries) = scp_list_dir(&handle, &refresh).await {
+                    publish_dir_entries(
+                        &handle,
+                        &owner_cache,
+                        &names_ready_rx,
+                        &events,
+                        refresh,
+                        entries,
+                    )
+                    .await;
+                }
+            }
+
+            SftpCommand::OpenOrDownload { remote } => {
+                let name = base_name(&remote);
+                let _ = events.send(SessionEvent::SftpStatus(format!(
+                    "{} {}...",
+                    t("打开", "Opening"),
+                    name
+                )));
+                // Anything the built-in editor would refuse (binary, not UTF-8,
+                // too large, unreadable) is downloaded instead — the SCP twin of
+                // the SFTP double-click path.
+                match scp_read_text_guarded(&handle.handle, &remote).await {
+                    Ok(content) => {
+                        let _ = events.send(SessionEvent::SftpFileText {
+                            path: remote,
+                            name,
+                            content,
+                            edit: true,
+                            error: String::new(),
+                        });
+                    }
+                    Err(reason) => {
+                        tracing::debug!("scp double-click {remote}: not text ({reason})");
+                        let _ = events.send(SessionEvent::SftpDownloadInstead { path: remote });
+                    }
+                }
+            }
+
+            SftpCommand::CopyTo {
+                remotes,
+                target,
+                target_dir,
+            } => {
+                let handle = handle.clone();
+                let events = events.clone();
+                transfers.spawn(async move {
+                    let label = format!("{} {}", remotes.len(), t("项", "items"));
+                    let _ = events.send(SessionEvent::SftpStatus(format!(
+                        "{} {}...",
+                        t("复制到其他会话", "Copying to another session"),
+                        label
+                    )));
+                    for remote in &remotes {
+                        // Staging is an internal hop (remote → local temp → remote):
+                        // run it full-speed with no mtime preservation, matching
+                        // the SFTP twin. The queue's rate/mtime settings apply to
+                        // the upload leg the target session performs.
+                        match stage_remote_for_scp_copy(&handle, remote, &events, 0, false).await {
+                            Ok((local, cleanup_root)) => {
+                                let _ = target.send(SftpCommand::Upload {
+                                    local,
+                                    remote_dir: target_dir.clone(),
+                                    cleanup_after: Some(cleanup_root),
+                                    // The target session's worker applies its own
+                                    // queue policy to the staged copy.
+                                    decision: UploadDecision::Proceed,
+                                });
+                            }
+                            Err(e) => {
+                                let _ = events.send(SessionEvent::SftpStatus(format!(
+                                    "{}: {e}",
+                                    t("复制失败", "Copy failed")
+                                )));
+                            }
+                        }
+                    }
+                });
+            }
+
             other => {
                 // Unblock the drag-out flow if it ever reaches SCP mode: a
                 // reply channel with no answer would leave the UI waiting.
@@ -2733,27 +3108,45 @@ async fn scp_home(handle: &SftpLink) -> Result<String> {
     })
 }
 
-/// List `path`'s direct children over the SCP backend's `find` + `stat` chain.
+/// List `path`'s direct children over the SCP backend's `find` + `stat` chain,
+/// falling back to `ls -lAn` when BusyBox `stat` is unavailable.
 async fn scp_list_dir(handle: &SftpLink, path: &str) -> Result<Vec<RemoteEntry>> {
     let cmd = super::common::scp_stat_command(path);
-    let (status, output) = handle
+    let (_status, output) = handle
         .elevation
         .exec_shell_output(&handle.handle, &cmd)
         .await
         .with_context(|| format!("scp list {path}"))?;
-    if status != 0 && output.trim().is_empty() {
-        // Empty dir: `find` lists nothing, `xargs` runs `stat` with no operand
-        // (its stderr is suppressed), so output is empty and the status is the
-        // stat failure. A genuinely empty folder is a valid, browse-first result.
-        return Ok(Vec::new());
-    }
-    let entries = super::common::parse_scp_stat_output(&output);
-    if entries.is_empty() && !output.trim().is_empty() {
-        anyhow::bail!("scp list {path}: {output}");
+    let mut entries = super::common::parse_scp_stat_output(&output);
+    if entries.is_empty() {
+        // `stat` may be absent (BusyBox/OpenWrt) or the directory may be
+        // genuinely empty. An unparseable error also lands here; the `ls`
+        // fallback separates those cases below.
+        let (ls_status, ls_output) = handle
+            .elevation
+            .exec_shell_output(&handle.handle, &super::common::scp_long_command(path))
+            .await
+            .with_context(|| format!("scp list {path}"))?;
+        if ls_status != 0 && ls_output.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let ls_entries = super::common::parse_scp_long_output(&ls_output, path);
+        if ls_entries.is_empty() {
+            // An empty directory legitimately prints only the `total` line
+            // (or nothing). Report an error only when there are entry lines we
+            // failed to parse.
+            let unparsed = ls_output.lines().any(|l| {
+                let line = l.trim();
+                !line.is_empty() && !line.starts_with("total")
+            });
+            if unparsed {
+                anyhow::bail!("scp list {path}: {ls_output}");
+            }
+        }
+        entries = ls_entries;
     }
     // Same order as the SFTP backend: directories first, then files, both
     // alphabetical, so the panel and tree paint identically in both modes.
-    let mut entries = super::common::parse_scp_stat_output(&output);
     entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
         (true, false) => std::cmp::Ordering::Less,
         (false, true) => std::cmp::Ordering::Greater,
@@ -2844,6 +3237,25 @@ async fn scp_move_remote(
 async fn scp_remove_remote(handle: &client::Handle<SftpClientHandler>, path: &str) {
     if let Err(e) = exec_remote_output(handle, &scp_remove_command(path)).await {
         tracing::debug!("failed to clean scp temp {path}: {e}");
+    }
+}
+
+/// Run one file-management shell command (`rm` / `mv` / `chmod` / `mkdir` /
+/// `touch`) through the same privileges as the SFTP channel — `sudo`-wrapped
+/// when the session is elevated to root, plain otherwise (#438) — and return
+/// the remote failure detail when it exits non-zero.
+async fn scp_mgmt_command(handle: &SftpLink, cmd: &str) -> std::result::Result<(), String> {
+    match handle
+        .elevation
+        .exec_shell_output(&handle.handle, cmd)
+        .await
+    {
+        Ok((0, _)) => Ok(()),
+        Ok((status, output)) if !output.trim().is_empty() => {
+            Err(format!("[exit {status}] {}", output.trim()))
+        }
+        Ok((status, _)) => Err(format!("exit {status}")),
+        Err(e) => Err(e.to_string()),
     }
 }
 
@@ -4600,6 +5012,67 @@ async fn stage_remote_for_copy(
         let local = local_path.to_string_lossy().to_string();
         download_impl(
             handle, remote, &local, &name, &id, events, &no_cancel, 0, false, false,
+        )
+        .await?;
+    }
+
+    Ok((local_path, cleanup_root))
+}
+
+/// Stage a remote entry into a local temp dir over the SCP wire-protocol
+/// engine (remote → local hop), ready to be forwarded to another session's
+/// `Upload` arm — the SCP twin of `stage_remote_for_copy`.
+async fn stage_remote_for_scp_copy(
+    handle: &SftpLink,
+    remote: &str,
+    events: &UnboundedSender<SessionEvent>,
+    rate_kbps: u32,
+    preserve_mtime: bool,
+) -> Result<(PathBuf, PathBuf)> {
+    let cleanup_root =
+        std::env::temp_dir().join(format!("meatshell-remote-copy-{}", Uuid::new_v4()));
+    tokio::fs::create_dir_all(&cleanup_root)
+        .await
+        .with_context(|| format!("failed to create temp dir {}", cleanup_root.display()))?;
+
+    let name = sanitize_filename(&base_name(remote));
+    let local_path = cleanup_root.join(&name);
+    let local_parent = cleanup_root.to_string_lossy().to_string();
+    let no_cancel = Arc::new(AtomicBool::new(false));
+    let id = Uuid::new_v4().to_string();
+    if scp_remote_is_dir(&handle.handle, remote).await {
+        tokio::fs::create_dir_all(&local_path)
+            .await
+            .with_context(|| format!("failed to create temp dir {}", local_path.display()))?;
+        let empty = scp_list_dir(handle, remote)
+            .await
+            .map(|entries| entries.is_empty())
+            .unwrap_or(false);
+        if !empty {
+            scp_download_dir(
+                &handle.handle,
+                remote,
+                &local_parent,
+                events,
+                rate_kbps,
+                preserve_mtime,
+                &no_cancel,
+            )
+            .await?;
+        }
+    } else {
+        let local = local_path.to_string_lossy().to_string();
+        scp_download_single(
+            &handle.handle,
+            remote,
+            &local,
+            &name,
+            &id,
+            events,
+            &no_cancel,
+            rate_kbps,
+            preserve_mtime,
+            false,
         )
         .await?;
     }
