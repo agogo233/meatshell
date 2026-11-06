@@ -25,7 +25,8 @@ const SCP_IO_TIMEOUT: Duration = Duration::from_secs(30);
 const SCP_MAX_LINE: usize = 64 * 1024;
 
 /// Cap on the stderr collected for error messages: stderr can grow without
-/// bound on a chatty remote, and only the tail ever matters.
+/// bound on a chatty remote, and the beginning of an scp error is the
+/// informative part.
 const SCP_MAX_STDERR: usize = 8 * 1024;
 
 /// Buffered reader/writer over one exec channel running a remote `scp`.
@@ -78,32 +79,37 @@ impl ScpPeer {
                 .await
                 .map_err(|_| anyhow!("scp {}", t("通道读取超时", "channel read timed out")))?
                 .ok_or_else(|| anyhow!("scp {}", t("连接已关闭", "connection closed")))?;
-            match msg {
-                ChannelMsg::Data { data } => {
-                    if data.is_empty() {
-                        continue;
-                    }
-                    self.buf = data.to_vec();
-                    self.pos = 0;
-                }
-                ChannelMsg::ExtendedData { data, .. } => {
-                    if self.stderr.len() < SCP_MAX_STDERR {
-                        let keep = (SCP_MAX_STDERR - self.stderr.len()).min(data.len());
-                        self.stderr.extend_from_slice(&data[..keep]);
-                    }
-                }
-                ChannelMsg::ExitStatus { exit_status } => {
-                    self.exit = Some(exit_status);
-                }
-                ChannelMsg::Close => {
-                    self.closed = true;
-                    return Ok(false);
-                }
-                // `Eof` and anything else: keep waiting for the messages above.
-                _ => {}
+            if self.absorb(msg) {
+                self.closed = true;
+                return Ok(false);
             }
+            // An empty Data message loops for the next one.
         }
         Ok(true)
+    }
+
+    /// Absorb one channel message: buffer Data, cap-collect stderr, record
+    /// the exit status. Returns true when the channel closed. `Eof` and
+    /// anything else decide nothing — the next message does.
+    fn absorb(&mut self, msg: ChannelMsg) -> bool {
+        match msg {
+            ChannelMsg::Data { data } => {
+                self.buf = data.to_vec();
+                self.pos = 0;
+            }
+            ChannelMsg::ExtendedData { data, .. } => {
+                if self.stderr.len() < SCP_MAX_STDERR {
+                    let keep = (SCP_MAX_STDERR - self.stderr.len()).min(data.len());
+                    self.stderr.extend_from_slice(&data[..keep]);
+                }
+            }
+            ChannelMsg::ExitStatus { exit_status } => {
+                self.exit = Some(exit_status);
+            }
+            ChannelMsg::Close => return true,
+            _ => {}
+        }
+        false
     }
 
     /// Consume one byte; `Ok(None)` = the channel ended.
@@ -199,11 +205,30 @@ impl ScpPeer {
 
     /// Drain to the channel's end and return the exit status (`None` when
     /// the remote never reported one). Call once the protocol finished, so a
-    /// failed remote scp cannot hide behind a clean byte exchange.
+    /// failed remote scp cannot hide behind a clean byte exchange. The drain
+    /// is bounded by one `SCP_IO_TIMEOUT` overall: a remote that keeps
+    /// streaming instead of exiting surfaces as an error, and one that just
+    /// drops the connection ends cleanly here.
     pub(super) async fn finish(&mut self) -> Result<Option<u32>> {
+        let deadline = tokio::time::Instant::now() + SCP_IO_TIMEOUT;
         while !self.closed {
-            if !self.pump().await? {
+            let msg = match tokio::time::timeout_at(deadline, self.channel.wait()).await {
+                Ok(msg) => msg,
+                Err(_) => {
+                    return Err(anyhow!(
+                        "scp {}",
+                        t(
+                            "等待远端退出超时",
+                            "timed out waiting for the remote to exit"
+                        )
+                    ));
+                }
+            };
+            let Some(msg) = msg else {
                 break;
+            };
+            if self.absorb(msg) {
+                self.closed = true;
             }
             // The protocol is over; discard whatever else the remote sent.
             self.pos = self.buf.len();
@@ -211,14 +236,14 @@ impl ScpPeer {
         Ok(self.exit)
     }
 
-    /// The collected stderr tail (appended to error messages by callers).
-    pub(super) fn stderr_tail(&self) -> String {
+    /// The collected stderr text (appended to error messages by callers).
+    pub(super) fn stderr_text(&self) -> String {
         String::from_utf8_lossy(&self.stderr).into_owned()
     }
 
     /// Decorate an error with the stderr collected on the channel, if any.
     pub(super) fn with_stderr(&self, error: anyhow::Error) -> anyhow::Error {
-        let tail = self.stderr_tail();
+        let tail = self.stderr_text();
         let trimmed = tail.trim();
         if trimmed.is_empty() {
             error

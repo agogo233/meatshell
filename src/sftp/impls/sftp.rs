@@ -2296,10 +2296,7 @@ async fn run_scp_browse(
                     for remote in &remotes {
                         let id = Uuid::new_v4().to_string();
                         let cancel = Arc::new(AtomicBool::new(false));
-                        cancels_done
-                            .lock()
-                            .unwrap()
-                            .insert(id.clone(), cancel.clone());
+                        lock_or_recover(&cancels_done).insert(id.clone(), cancel.clone());
                         let name = base_name(remote);
                         let _ = events.send(SessionEvent::SftpStatus(format!(
                             "{} {}...",
@@ -2343,7 +2340,7 @@ async fn run_scp_browse(
                                 )));
                             }
                         }
-                        cancels_done.lock().unwrap().remove(&id);
+                        lock_or_recover(&cancels_done).remove(&id);
                     }
                     if total > 1 {
                         let _ = events.send(SessionEvent::SftpStatus(if failed == 0 {
@@ -3080,7 +3077,7 @@ async fn scp_receive_file(
                 return Ok::<bool, anyhow::Error>(false);
             }
             chunk.clear();
-            let want = ((total - done) as usize).min(CHUNK);
+            let want = usize::try_from(total - done).unwrap_or(CHUNK).min(CHUNK);
             let n = peer.read_chunk(&mut chunk, want).await?;
             if n == 0 {
                 anyhow::bail!(
@@ -3258,9 +3255,9 @@ async fn scp_download_dir(
             }
             b'D' => {
                 let line = peer.read_line().await?.unwrap_or_default();
-                peer.ack().await?;
-                // An unparsable D would corrupt the E nesting: abort rather
-                // than place its children in the wrong directory.
+                // Parse before acking: an unparsable D would corrupt the E
+                // nesting, and a remote left waiting for its ack dies with
+                // the channel instead of streaming children at us.
                 let frame = scp_parse_frame(b'D', &line).ok_or_else(|| {
                     anyhow!(
                         "{}: {line:?}",
@@ -3273,6 +3270,7 @@ async fn scp_download_dir(
                         t("无法解析 scp 目录帧", "unparseable scp directory frame")
                     );
                 };
+                peer.ack().await?;
                 let local_name = sanitize_filename(&name);
                 let dir = stack.last().cloned().unwrap_or_default().join(&local_name);
                 if let Err(e) = tokio::fs::create_dir_all(&dir).await {
@@ -3493,6 +3491,10 @@ async fn scp_push_file(
         let mut done: u64 = 0;
         let mut last = Instant::now();
         let mut buf = vec![0u8; CHUNK];
+        // The frame announced `total`, so exactly that many bytes may
+        // follow: a local file that grows mid-upload keeps its remote copy
+        // at the announced size (the sink would misparse any extra byte as
+        // the next frame), and one that shrinks fails cleanly below.
         while done < total {
             if cancel.load(Ordering::Relaxed) {
                 emit_transfer(
@@ -3507,7 +3509,7 @@ async fn scp_push_file(
                 );
                 return Ok::<bool, anyhow::Error>(false);
             }
-            let want = ((total - done) as usize).min(CHUNK);
+            let want = usize::try_from(total - done).unwrap_or(CHUNK).min(CHUNK);
             let n = reader.read(&mut buf[..want]).await?;
             if n == 0 {
                 anyhow::bail!(
