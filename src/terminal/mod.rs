@@ -69,6 +69,6 @@ pub(crate) use render::{
     DISCONNECTED_MAX_HISTORY, MAX_HISTORY, RAW_CAP,
 };
 pub(crate) use state::{
-    BuiltScreen, CompiledOutputRule, CsiState, HistSpan, Line, OutputHighlightPreset, RenderGates,
-    TabRenderGate, TermBuffer, TermBufferHandle, TermBuffers,
+    BuiltScreen, CompiledOutputRule, CsiState, HistLine, HistSpan, Line, OutputHighlightPreset,
+    RenderGates, TabRenderGate, TermBuffer, TermBufferHandle, TermBuffers,
 };
