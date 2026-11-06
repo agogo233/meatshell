@@ -2,6 +2,8 @@
 mod common;
 #[path = "impls/elevation.rs"]
 mod elevation;
+#[path = "impls/scp.rs"]
+mod scp;
 #[path = "impls/sftp.rs"]
 mod sftp;
 #[path = "struct/transfer.rs"]
