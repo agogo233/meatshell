@@ -544,7 +544,7 @@ async fn run_sftp(
                         )
                         .into(),
                     ));
-                    return run_scp_browse(handle, events, commands, self_tx).await;
+                    return run_scp_browse(handle, events, commands, self_tx, queue).await;
                 }
             }
             return Err(err);
@@ -1908,6 +1908,7 @@ async fn run_scp_browse(
     events: UnboundedSender<SessionEvent>,
     mut commands: UnboundedReceiver<SftpCommand>,
     self_tx: UnboundedSender<SftpCommand>,
+    queue: SftpQueueConfig,
 ) -> Result<()> {
     // Owner/group names live for the whole SCP connection, exactly like SFTP.
     let owner_cache: SharedOwnerCache = Arc::new(Mutex::new(OwnerNameCache::default()));
@@ -1986,11 +1987,23 @@ async fn run_scp_browse(
         let _ = events.send(SessionEvent::SftpTreeUpdate(nodes));
     }
 
+    // Transfers run on their own tasks so the command loop stays free to
+    // list / switch directories meanwhile — mirroring run_sftp (#116-2).
+    let permits = queue.concurrency.clamp(1, 4) as usize;
+    let transfer_slots = Arc::new(tokio::sync::Semaphore::new(permits));
+    // Transfer ids → cancel flags; a CancelTransfer command flips one.
+    let cancels: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    // Own every transfer task. Dropping/aborting the worker cancels transfers
+    // too, rather than leaving detached writes alive after the connection is
+    // gone — same ownership rule as run_sftp.
+    let mut transfers = tokio::task::JoinSet::new();
+
     // --- Command loop (browse-only) ----------------------------------------
     loop {
-        let cmd = match commands.recv().await {
-            Some(command) => command,
-            None => break,
+        let cmd = tokio::select! {
+            command = commands.recv() => match command { Some(command) => command, None => break },
+            _ = transfers.join_next(), if !transfers.is_empty() => continue,
         };
         match cmd {
             SftpCommand::Close => break,
@@ -2079,6 +2092,20 @@ async fn run_scp_browse(
             }
 
             other => {
+                // Unblock the drag-out flow if it ever reaches SCP mode: a
+                // reply channel with no answer would leave the UI waiting.
+                if let SftpCommand::WalkForExport { reply, .. } = &other {
+                    let _ = reply.send(Err(t(
+                        "SCP 模式暂不支持拖拽导出",
+                        "drag-out is not supported in SCP mode yet",
+                    )
+                    .into()));
+                }
+                // Finish a drag row instead of leaving it "running" forever.
+                if let SftpCommand::FinishDragTransfer(progress) = &other {
+                    lock_or_recover(&cancels).remove(&progress.id);
+                    progress.emit_final(&events);
+                }
                 let _ = events.send(SessionEvent::SftpStatus(format!(
                     "{}",
                     t(
@@ -2091,6 +2118,8 @@ async fn run_scp_browse(
         }
     }
 
+    transfers.abort_all();
+    while transfers.join_next().await.is_some() {}
     crate::ssh::disconnect_ssh(&handle, "bye").await;
     Ok(())
 }
