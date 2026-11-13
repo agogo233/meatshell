@@ -38,10 +38,14 @@ fn main() {
     }
     // Bundle the gettext `.po` translations under `lang/` so the UI's `@tr(...)`
     // strings can switch language at runtime via slint::select_bundled_translation.
-    // Source language is Chinese (the msgids); `lang/<lc>/LC_MESSAGES/meatshell.po`
-    // provides other locales.  No per-component context, so msgids are the raw
-    // Chinese strings.
+    // `lang/<lc>/LC_MESSAGES/meatshell.po` provides other locales.  No per-
+    // component context, so msgids are the raw English source strings.
     println!("cargo:rerun-if-changed=lang");
+    // The slint compiler only emits rerun-if-changed for the entry point
+    // (ui/app.slint); its imports (session_dialog.slint, …) are NOT tracked,
+    // so a fresh CI run that restores a cached target/ from rust-cache would
+    // otherwise compile the stale generated code and lose every UI change.
+    println!("cargo:rerun-if-changed=ui");
     slint_build::compile_with_config(
         "ui/app.slint",
         slint_build::CompilerConfiguration::new()

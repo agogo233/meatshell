@@ -74,16 +74,76 @@ pub(super) fn validate_output_highlight_rule(
     Ok(())
 }
 
-/// Build the filtered history-view rows for the dropdown, oldest first with the
-/// newest command at the bottom (#55, #101). The command-history model shares
-/// the same storage order so ↑/↓ recall keeps its shell-like semantics.
+/// Build the filtered history-view rows for the dropdown. Empty query returns
+/// every command oldest-first (newest last, #55/#101). A non-empty query ranks
+/// commands by a fuzzy score — substring matches beat subsequence matches, and
+/// start-of-word / consecutive-character runs score higher — sorted ascending so
+/// the best match lands at the bottom, where the dropdown highlights by default.
 pub(super) fn history_view_rows(history: &[String], query: &str) -> Vec<SharedString> {
     let q = query.trim().to_lowercase();
-    history
+    if q.is_empty() {
+        return history.iter().map(|command| command.clone().into()).collect();
+    }
+    let mut scored: Vec<(i64, usize, String)> = history
         .iter()
-        .filter(|command| q.is_empty() || command.to_lowercase().contains(&q))
-        .map(|command| command.clone().into())
-        .collect()
+        .enumerate()
+        .filter_map(|(index, command)| {
+            fuzzy_score(&command.to_lowercase(), &q).map(|score| (score, index, command.clone()))
+        })
+        .collect();
+    // Ascending score; ties keep the original (oldest→newest) order.
+    scored.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    scored.into_iter().map(|(_, _, command)| command.into()).collect()
+}
+
+/// Fuzzy score of `q` (lowercased) against `text` (lowercased). `None` when the
+/// query is neither a substring nor a subsequence. Higher is a better match.
+fn fuzzy_score(text: &str, q: &str) -> Option<i64> {
+    if q.is_empty() {
+        return Some(0);
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let qchars: Vec<char> = q.chars().collect();
+
+    // Substring match: strong signal, boosted by an early / word-start hit.
+    if let Some(pos) = text.find(q) {
+        let mut score = 1000i64;
+        if pos == 0 {
+            score += 400;
+        } else if chars
+            .get(text[..pos].chars().count() - 1)
+            .is_some_and(|c| *c == ' ' || *c == '\t')
+        {
+            score += 200;
+        }
+        // Earlier occurrences rank slightly higher.
+        score -= pos.min(150) as i64;
+        return Some(score);
+    }
+
+    // Subsequence match: weaker, rewarded for consecutive runs and word starts.
+    let mut score = 100i64;
+    let mut qi = 0usize;
+    let mut prev_match: Option<usize> = None;
+    for (ti, &c) in chars.iter().enumerate() {
+        if qi < qchars.len() && c == qchars[qi] {
+            if let Some(p) = prev_match {
+                if ti == p + 1 {
+                    score += 15; // consecutive run
+                }
+            }
+            if ti == 0 || matches!(chars.get(ti - 1), Some(' ') | Some('\t') | Some('_') | Some('-') | Some('/')) {
+                score += 40; // word-start hit
+            }
+            prev_match = Some(ti);
+            qi += 1;
+        }
+    }
+    if qi == qchars.len() {
+        Some(score)
+    } else {
+        None
+    }
 }
 
 /// Build the filtered history-view model for the dropdown: case-insensitive
@@ -124,13 +184,26 @@ pub(super) fn compute_find_matches(rows: &[String], query: &str) -> Vec<TermMatc
     if query.is_empty() {
         return out;
     }
-    let q: Vec<char> = query.chars().map(|c| c.to_ascii_lowercase()).collect();
+    // Unicode folding, to match the history-mode index: a plain
+    // `to_ascii_lowercase` counted "É" as a hit without painting a highlight
+    // for it. Folding must stay one char in, one char out — `İ` and `ß` fold
+    // to two or more chars, and the grid-column offsets below index into a
+    // prefix built from the unfolded characters, so a multi-char fold would
+    // run past the end and panic. Those few glyphs keep their original shape.
+    fn fold_char(c: char) -> char {
+        let mut chars = c.to_lowercase();
+        match (chars.next(), chars.next()) {
+            (Some(f), None) => f,
+            _ => c,
+        }
+    }
+    let q: Vec<char> = query.chars().map(fold_char).collect();
     if q.is_empty() {
         return out;
     }
     for (r, line) in rows.iter().enumerate() {
         let chars: Vec<char> = line.chars().collect();
-        let lower: Vec<char> = chars.iter().map(|c| c.to_ascii_lowercase()).collect();
+        let lower: Vec<char> = chars.iter().map(|c| fold_char(*c)).collect();
         let prefix = cell_prefix(&chars);
         let mut i = 0usize;
         while i + q.len() <= lower.len() {
@@ -165,12 +238,12 @@ pub(super) fn apply_terminal_resize(
     cols: u32,
     rows: u32,
 ) {
-    *last_term_size.lock().unwrap() = (cols, rows);
+    *lock_or_recover(&last_term_size) = (cols, rows);
     if let Some(handle) = handles.borrow().get(tab_id) {
         handle.resize(cols, rows);
     }
     if let Some(h) = term_buf(bufs, tab_id) {
-        let mut buf = h.lock().unwrap();
+        let mut buf = lock_or_recover(&h);
         let (old_rows, old_cols) = buf.parser.screen().dims();
         let (new_rows, new_cols) = (rows as u16, cols as u16);
         if (new_rows, new_cols) != (old_rows, old_cols) {
@@ -192,24 +265,47 @@ pub(super) fn apply_terminal_resize(
 
 /// Recompute spans + cursor + find/selection highlights for one tab from its
 /// current vt100 screen (respecting scrollback) and push them to the model.
-/// Used by scroll + selection callbacks (Output has its own equivalent inline).
+/// Used by the scroll + selection callbacks and by every output flush (see
+/// `do_tab_render_flush`), so it is the single place the caret cell and its
+/// DECTCEM visibility reach the model.
 pub(super) fn rebuild_tab_display(win: &AppWindow, bufs: &TermBuffers, tab_id: &str) {
     let data = with_term_buf(bufs, tab_id, |buf| {
         let cols = buf.parser.screen().dims().1;
-        let b = buf.render(); // also refreshes buf.displayed_text
+        let b = buf.render(); // also refreshes buf.displayed_text + buf.action_links
         let matches = compute_find_matches(&buf.displayed_text, &buf.find_query);
+        let links: Vec<TermMatch> = buf
+            .action_links
+            .iter()
+            .map(|h| TermMatch {
+                row: h.row,
+                col: h.col,
+                len: h.len,
+            })
+            .collect();
         let sel = buf.selection_rects_visible(cols);
+        // Extent-based (not visible-rect-based): a selection scrolled out of
+        // view still extracts text, so the ctx-menu item must stay available.
+        let has_sel = buf.selection_has_extent();
+        let (fa, ft) = (buf.find_active, buf.find_positions.len() as i32);
+        let bp = buf.backpressure;
+        // The buffer tracks "a command is running" from OSC 133 on the pump
+        // thread; re-push it so a full row rebuild (which starts at `false`)
+        // doesn't briefly un-suppress history suggestions mid-command. Named
+        // to dodge the `cr` cursor-row binding below.
+        let cmd_running = buf.command_running;
         // One row's worth of work, so it is safe on every frame (#535).
         let current = buf.find_current_rect().unwrap_or_default();
-        (b, matches, sel, current)
+        (b, matches, links, sel, has_sel, fa, ft, bp, cmd_running, current)
     });
-    let Some((b, matches, sel, current)) = data else {
+    let Some((b, matches, links, sel, has_sel, fa, ft, bp, cmd_running, current)) = data else {
         return;
     };
     let spans = std::cell::Cell::new(Some(b.spans));
     let fm = ModelRc::from(Rc::new(VecModel::from(matches)));
+    let lm = ModelRc::from(Rc::new(VecModel::from(links)));
     let sm = ModelRc::from(Rc::new(VecModel::from(sel)));
     let (cr, cc, ru, alt) = (b.cursor_row, b.cursor_col, b.rows_used, b.is_alt);
+    let caret_visible = b.cursor_visible;
     let (smax, soff) = (b.scroll_max, b.scroll_offset);
     set_terminal_row(win, tab_id, move |row| {
         if let Some(spans) = spans.take() {
@@ -224,6 +320,7 @@ pub(super) fn rebuild_tab_display(win: &AppWindow, bufs: &TermBuffers, tab_id: &
         }
         row.cursor_row = cr;
         row.cursor_col = cc;
+        row.cursor_visible = caret_visible;
         row.rows_used = ru;
         row.is_alt_screen = alt;
         row.mouse_tracked = b.mouse_tracked;
@@ -236,8 +333,14 @@ pub(super) fn rebuild_tab_display(win: &AppWindow, bufs: &TermBuffers, tab_id: &
         if !model_matches(&row.selection, &sm) {
             row.selection = sm.clone();
         }
+        row.link_matches = lm.clone();
+        row.has_selection = has_sel;
         row.scroll_max = smax;
         row.scroll_offset = soff;
+        row.find_active = fa;
+        row.find_total = ft;
+        row.backpressure = bp;
+        row.command_running = cmd_running;
     });
     win.window().request_redraw();
 }
@@ -370,14 +473,15 @@ fn plan_span_slots(old: &[TermSpan], spans: Vec<TermSpan>) -> Vec<TermSpan> {
 pub(super) fn refresh_terminal_selection(win: &AppWindow, bufs: &TermBuffers, tab_id: &str) {
     let selection = with_term_buf(bufs, tab_id, |buf| {
         let cols = buf.parser.screen().dims().1;
-        buf.selection_rects_visible(cols)
+        (buf.selection_rects_visible(cols), buf.selection_has_extent())
     });
-    let Some(selection) = selection else {
+    let Some((selection, has_sel)) = selection else {
         return;
     };
     let model = ModelRc::from(Rc::new(VecModel::from(selection)));
     set_terminal_row(win, tab_id, move |row| {
         row.selection = model.clone();
+        row.has_selection = has_sel;
     });
     win.window().request_redraw();
 }
@@ -404,12 +508,12 @@ pub(super) fn theme_pref_is_dark(store: &ConfigStore) -> bool {
 pub(super) fn apply_dark_mode(window: &AppWindow, bufs: &TermBuffers, dark: bool) {
     window.set_dark_mode(dark);
     {
-        let handles: Vec<_> = bufs.lock().unwrap().values().cloned().collect();
+        let handles: Vec<_> = lock_or_recover(&bufs).values().cloned().collect();
         for h in handles {
-            h.lock().unwrap().is_dark = dark;
+            lock_or_recover(&h).is_dark = dark;
         }
     }
-    let tab_ids: Vec<String> = bufs.lock().unwrap().keys().cloned().collect();
+    let tab_ids: Vec<String> = lock_or_recover(&bufs).keys().cloned().collect();
     for tid in tab_ids {
         rebuild_tab_display(window, bufs, &tid);
     }
@@ -423,12 +527,12 @@ pub(super) fn apply_output_highlight(
 ) {
     let mode = OutputHighlightPreset::from_settings(enabled, preset);
     {
-        let handles: Vec<_> = bufs.lock().unwrap().values().cloned().collect();
+        let handles: Vec<_> = lock_or_recover(&bufs).values().cloned().collect();
         for handle in handles {
-            handle.lock().unwrap().output_highlight = mode;
+            lock_or_recover(&handle).output_highlight = mode;
         }
     }
-    let tab_ids: Vec<String> = bufs.lock().unwrap().keys().cloned().collect();
+    let tab_ids: Vec<String> = lock_or_recover(&bufs).keys().cloned().collect();
     for tab_id in tab_ids {
         rebuild_tab_display(window, bufs, &tab_id);
     }
@@ -441,12 +545,35 @@ pub(super) fn apply_custom_output_rules(
 ) {
     let compiled = compile_output_rules(rules);
     {
-        let handles: Vec<_> = bufs.lock().unwrap().values().cloned().collect();
+        let handles: Vec<_> = lock_or_recover(&bufs).values().cloned().collect();
         for handle in handles {
-            handle.lock().unwrap().custom_highlight_rules = compiled.clone();
+            lock_or_recover(&handle).custom_highlight_rules = compiled.clone();
         }
     }
-    let tab_ids: Vec<String> = bufs.lock().unwrap().keys().cloned().collect();
+    let tab_ids: Vec<String> = lock_or_recover(&bufs).keys().cloned().collect();
+    for tab_id in tab_ids {
+        rebuild_tab_display(window, bufs, &tab_id);
+    }
+}
+
+/// Push the current action-link flags to every terminal buffer and refresh the
+/// window-level master switch, then re-render so underlines appear/disappear
+/// immediately. `flags` is all-false when the feature is off or the platform is
+/// excluded, which also clears existing hits on the next render.
+pub(super) fn apply_action_links(
+    window: &AppWindow,
+    bufs: &TermBuffers,
+    flags: crate::terminal::ActionLinkFlags,
+    enabled: bool,
+) {
+    {
+        let handles: Vec<_> = lock_or_recover(&bufs).values().cloned().collect();
+        for handle in handles {
+            lock_or_recover(&handle).action_link_flags = flags;
+        }
+    }
+    window.set_action_links_enabled(enabled);
+    let tab_ids: Vec<String> = lock_or_recover(&bufs).keys().cloned().collect();
     for tab_id in tab_ids {
         rebuild_tab_display(window, bufs, &tab_id);
     }
@@ -600,5 +727,33 @@ mod span_model_tests {
         let mut rows: Vec<i32> = slots.iter().map(|s| s.row).collect();
         rows.sort();
         assert_eq!(rows, vec![0, 1, 2]);
+    }
+}
+/// Build the per-kind action-link enable flags from config. The master switch
+/// collapses to all-false (so `scan_action_links` short-circuits) when the
+/// feature is off or the platform is excluded.
+pub(crate) fn action_link_flags(store: &ConfigStore) -> crate::terminal::ActionLinkFlags {
+    if !store.action_links_enabled() {
+        return crate::terminal::ActionLinkFlags::default();
+    }
+    crate::terminal::ActionLinkFlags {
+        ipv4: store.action_links_ipv4(),
+        host_port: store.action_links_host_port(),
+        url: store.action_links_url(),
+    }
+}
+pub(crate) fn set_terminal_row(win: &AppWindow, tab_id: &str, mutator: impl Fn(&mut TerminalState)) {
+    let terminals = win.get_terminals();
+    let Some(model) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>() else {
+        return;
+    };
+    for i in 0..model.row_count() {
+        if let Some(mut row) = model.row_data(i) {
+            if row.id.as_str() == tab_id {
+                mutator(&mut row);
+                model.set_row_data(i, row);
+                break;
+            }
+        }
     }
 }

@@ -213,6 +213,7 @@ fn editor_doc(id: &str, owner: &str, path: &str, content: &str, dirty: bool) -> 
         language: super::super::editor_syntax::language(path).into(),
         syntax_source: content.into(),
         syntax_spans: super::super::editor_syntax::themed_spans(content, path, true).into(),
+        save_ack: 0,
     }
 }
 

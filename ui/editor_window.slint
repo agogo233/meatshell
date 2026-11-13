@@ -46,12 +46,15 @@ export component EditorWindow inherits Window {
     in-out property <string> editor-replace-text;
     in-out property <int> editor-match-count: 0;
     in-out property <int> editor-find-position: -1;
+    in-out property <int> editor-save-ack: 0;
 
     callback save-file();
     callback close-editor();
     callback editor-highlight(string);
+    callback editor-bracket-check(int);
     callback editor-count-matches(string, string) -> int;
     callback editor-find-step(string, string, int, bool) -> EditorFindResult;
+    callback editor-scroll-select(string, int, int, length, length) -> EditorFindResult;
     callback editor-replace-all(string, string);
     callback win-drag();
     callback win-resize-se();
@@ -159,6 +162,33 @@ export component EditorWindow inherits Window {
                         Text { text: @tr("Save"); color: #ffffff; font-size: Theme.fs-sm;
                                horizontal-alignment: center; vertical-alignment: center; }
                     }
+                    if !root.editor-readonly && root.editor-save-ack != 0 : Rectangle {
+                        width: root.editor-save-ack == 1 ? 72px : 98px;
+                        height: 28px;
+                        y: (parent.height - self.height) / 2;
+                        border-radius: Theme.radius-sm;
+                        background: root.editor-save-ack == 1
+                            ? Theme.success.with-alpha(0.18)
+                            : Theme.danger.with-alpha(0.18);
+                        HorizontalLayout {
+                            padding-left: 6px; padding-right: 6px; spacing: 4px;
+                            Text {
+                                text: root.editor-save-ack == 1 ? "\u{E876}" : "\u{E5CD}";
+                                font-family: "Material Icons";
+                                color: root.editor-save-ack == 1 ? Theme.success : Theme.danger;
+                                font-size: Theme.fs-sm;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: root.editor-save-ack == 1 ? @tr("Saved") : @tr("Save failed");
+                                color: root.editor-save-ack == 1 ? Theme.success : Theme.danger;
+                                font-size: Theme.fs-sm;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+                    }
                     Rectangle {
                         width: 46px; height: 36px;
                         background: close-ta.has-hover ? #e81123 : transparent;
@@ -188,12 +218,18 @@ export component EditorWindow inherits Window {
                 editor-replace-text <=> root.editor-replace-text;
                 editor-match-count <=> root.editor-match-count;
                 editor-find-position <=> root.editor-find-position;
+                editor-save-ack <=> root.editor-save-ack;
+                save-ack-dismiss => { root.editor-save-ack = 0; }
                 save-file => { root.save-file(); }
                 request-close => { root.request-close(); }
                 editor-highlight(text) => { root.editor-highlight(text); }
+                editor-bracket-check(caret) => { root.editor-bracket-check(caret); }
                 editor-count-matches(content, query) => { return root.editor-count-matches(content, query); }
                 editor-find-step(content, query, current, reverse) => {
                     return root.editor-find-step(content, query, current, reverse);
+                }
+                editor-scroll-select(content, anchor, focus, delta-y, line-height) => {
+                    return root.editor-scroll-select(content, anchor, focus, delta-y, line-height);
                 }
                 editor-replace-all(query, replacement) => { root.editor-replace-all(query, replacement); }
             }

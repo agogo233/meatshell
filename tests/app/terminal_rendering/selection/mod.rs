@@ -10,6 +10,33 @@ fn right_click_without_a_selection_requests_paste() {
 }
 
 #[test]
+fn clear_selection_drops_state_and_reports_extent() {
+    let mut buffer = make_buf(2, 20, &[], &["one two"], 0);
+    buffer.sel_anchor = Some((0, 0));
+    buffer.sel_focus = Some((0, 2));
+    buffer.sel_ranges.push(((0, 0), (0, 2)));
+    assert!(buffer.clear_selection(), "an extent selection reports true");
+    assert!(buffer.sel_anchor.is_none());
+    assert!(buffer.sel_focus.is_none());
+    assert!(buffer.sel_ranges.is_empty());
+    // Idempotent: a second call with no selection reports false.
+    assert!(!buffer.clear_selection());
+}
+
+#[test]
+fn clear_selection_still_drops_zero_area_anchor() {
+    // A plain click is a zero-area selection (anchor == focus); it has no
+    // extent, but its anchor/focus still render a single-cell highlight that
+    // must not linger after a keystroke.
+    let mut buffer = make_buf(2, 20, &[], &["one"], 0);
+    buffer.sel_anchor = Some((0, 1));
+    buffer.sel_focus = Some((0, 1));
+    assert!(!buffer.clear_selection(), "zero-area reports false");
+    assert!(buffer.sel_anchor.is_none());
+    assert!(buffer.sel_focus.is_none());
+}
+
+#[test]
 fn right_click_copies_selection_and_clears_it() {
     let mut buffer = make_buf(2, 20, &[], &["one two"], 0);
     buffer.sel_anchor = Some((0, 0));

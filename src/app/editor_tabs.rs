@@ -10,6 +10,7 @@
 
 use super::*;
 use std::cell::Cell;
+use std::collections::HashMap;
 
 /// Models the editor tabs touch to add, focus and re-flatten tabs.
 pub(super) struct EditorTabModels {
@@ -189,6 +190,7 @@ pub(super) fn wire_editor_tabs(
                                 d.readonly = readonly;
                                 recolour(d, dark);
                             }
+                            d.save_ack = 0;
                         });
                         id
                     }
@@ -207,6 +209,7 @@ pub(super) fn wire_editor_tabs(
                             language: SharedString::default(),
                             syntax_source: SharedString::default(),
                             syntax_spans: SharedString::default(),
+                            save_ack: 0,
                         };
                         recolour(&mut doc, dark);
                         docs.push(doc);
@@ -262,6 +265,32 @@ pub(super) fn wire_editor_tabs(
         });
     }
 
+    // Bracket-pair highlight, one last pair per document: recompute only when
+    // the caret sits next to a bracket (the O(1) fast path inside
+    // `bracket_pair` keeps ordinary caret moves free).
+    {
+        let weak = window.as_weak();
+        let models = models.clone();
+        let mut last_pairs: HashMap<String, Option<(usize, usize)>> = HashMap::new();
+        window.on_editor_doc_bracket_check(move |id: SharedString, caret: i32| {
+            let Some(w) = weak.upgrade() else { return };
+            let dark = w.get_dark_mode();
+            let Some(doc) = find_doc(&models.docs, id.as_str()) else {
+                return;
+            };
+            let pair = editor_syntax::bracket_pair(doc.content.as_str(), caret, doc.path.as_str());
+            if pair.is_none() && last_pairs.get(id.as_str()).is_some_and(Option::is_none) {
+                return;
+            }
+            last_pairs.insert(id.to_string(), pair);
+            let spans =
+                editor_syntax::spans_for(doc.content.as_str(), doc.path.as_str(), dark, pair);
+            update_doc(&models.docs, id.as_str(), |d| {
+                d.syntax_spans = spans.into();
+            });
+        });
+    }
+
     // Save through the SFTP channel of the terminal the file came from.
     {
         let weak = window.as_weak();
@@ -289,6 +318,15 @@ pub(super) fn wire_editor_tabs(
             if let Some(w) = weak.upgrade() {
                 set_tab_saved(&w, &models.tabs, id.as_str(), true);
             }
+        });
+    }
+
+    // The EditorPane pill's auto-dismiss fired: clear the matching doc row so a
+    // stale badge can't reappear when the tab is re-shown or moved.
+    {
+        let models = models.clone();
+        window.on_editor_doc_save_ack_dismiss(move |id: SharedString| {
+            update_doc(&models.docs, id.as_str(), |d| d.save_ack = 0);
         });
     }
 
@@ -361,4 +399,16 @@ pub(super) fn wire_editor_tabs(
             find_step(content.as_str(), query.as_str(), current, reverse)
         },
     );
+    // One editor pane serves every editor tab: keep the sub-line scroll
+    // remainder and any snapped crossing for the shared viewport here too
+    // (see WheelSelectState). A new press at a different byte anchors a new
+    // rubber band, which the state resets on its own.
+    {
+        let state = std::rc::Rc::new(editor_host::WheelSelectState::new());
+        window.on_editor_scroll_select(
+            move |content: SharedString, anchor: i32, focus: i32, delta_y: f32, line_height: f32| {
+                state.select(content.as_str(), anchor, focus, delta_y, line_height)
+            },
+        );
+    }
 }

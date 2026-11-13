@@ -24,6 +24,7 @@ export struct EditorDoc {
     language: string,
     syntax-source: string,
     syntax-spans: string,
+    save-ack: int,       // 0 none / 1 saved / 2 failed (transient pill)
 }
 
 // Body of the built-in file viewer/editor (#70), shared by the detached
@@ -62,13 +63,26 @@ export component EditorPane inherits Rectangle {
     in-out property <int> editor-match-count: 0;
     in-out property <int> editor-find-position: -1;
     in-out property <bool> highlight-pending: false;
+    // Transient save result pill (#70): 0 none / 1 saved / 2 failed. The host
+    // sets it; the dismiss timer below asks the host to clear its source so a
+    // stale badge can't leak across opens or tab switches.
+    in-out property <int> editor-save-ack: 0;
+    callback save-ack-dismiss();
 
     callback save-file();
     callback request-close();
     callback content-changed();          // the user typed; host marks dirty
     callback editor-highlight(string);
+    // Recompute the bracket-pair highlight from the caret byte offset. The
+    // host merges the pair into the syntax spans, so the caret moves cheaply
+    // when it is not next to a bracket.
+    callback editor-bracket-check(int);
     callback editor-count-matches(string, string) -> int;
     callback editor-find-step(string, string, int, bool) -> EditorFindResult;
+    // Grow the selection by the lines revealed while the viewport scrolls. The
+    // text input never sees the wheel itself (#388), so the byte offsets are
+    // computed from the scroll delta and pushed back here.
+    callback editor-scroll-select(string, int, int, length, length) -> EditorFindResult;
     callback editor-replace-all(string, string);
 
     public function focus-editor() { edit-input.focus(); }
@@ -80,6 +94,55 @@ export component EditorPane inherits Rectangle {
     // Focus on the next UI turn; focusing from init or a change handler can
     // re-enter the Windows accessibility adapter (#386).
     property <bool> focus-pending: false;
+    // Viewport offset mirrored here so the change can be watched; scrolling only
+    // moves the viewport, so a drag-selection is stretched or pulled back by the
+    // revealed lines, around the pressed anchor. The host accumulates the
+    // per-event deltas (desktop wheels arrive as many small animation frames),
+    // so each change reports its own incremental delta. The gate is the drag
+    // itself, not the selection: wheeling without a selection keeps the caret,
+    // and a band snapped onto its anchor must be allowed to cross it.
+    property <length> scroll-y: ed-scroll.content-y;
+    property <length> last-scroll-y: 0;
+    // The edge scroll driven by the caret must not grow the selection. A plain
+    // boolean is useless here: `changed scroll-y` runs on a later tick, long
+    // after the guard has been cleared. Instead the target offset the caret
+    // scroll requested is remembered and consumed when it actually lands.
+    property <length> scroll-guard-target: 0px;
+    property <bool> scroll-guard-armed: false;
+    property <int> scroll-depth: 0;
+    changed scroll-y => {
+        let guard-diff = root.scroll-y - root.scroll-guard-target;
+        if (root.scroll-guard-armed && guard-diff < 0.5px && guard-diff > -0.5px) {
+            // The caret's edge scroll landed: sync the baseline so the jump is
+            // not counted as a user scroll.
+            root.scroll-guard-armed = false;
+            root.last-scroll-y = root.scroll-y;
+        } else if (root.scroll-depth > 0) {
+            root.last-scroll-y = root.scroll-y;
+        } else {
+            root.scroll-guard-armed = false;
+            let delta-y = root.scroll-y - root.last-scroll-y;
+            root.last-scroll-y = root.scroll-y;
+            if (delta-y != 0px && edit-input.pointer-drag-active) {
+                let line-height = edit-input.font-metrics.ascent
+                    - edit-input.font-metrics.descent;
+                if (line-height > 0px) {
+                    root.scroll-depth = root.scroll-depth + 1;
+                    let grown = root.editor-scroll-select(root.editor-content,
+                        edit-input.anchor-position-byte-offset,
+                        edit-input.cursor-position-byte-offset,
+                        delta-y, line-height);
+                    // Skip same-value writes: they fire cursor-position-changed
+                    // and the edge scroll would pin the viewport on the caret.
+                    if (grown.start != edit-input.anchor-position-byte-offset
+                            || grown.end != edit-input.cursor-position-byte-offset) {
+                        edit-input.set-selection-offsets(grown.start, grown.end);
+                    }
+                    root.scroll-depth = root.scroll-depth - 1;
+                }
+            }
+        }
+    }
     init => {
         root.load-doc();
         if root.shown { root.focus-pending = true; }
@@ -88,6 +151,7 @@ export component EditorPane inherits Rectangle {
         root.load-doc();
         root.editor-find-position = -1;
         root.editor-match-count = root.editor-count-matches(root.editor-content, root.editor-find-query);
+        root.editor-bracket-check(edit-input.cursor-position-byte-offset);
     }
     changed shown => {
         if root.shown {
@@ -164,6 +228,33 @@ export component EditorPane inherits Rectangle {
                         Text { text: @tr("Save"); color: #ffffff; font-size: Theme.fs-sm;
                                horizontal-alignment: center; vertical-alignment: center; }
                     }
+                    if !root.editor-readonly && root.can-save && root.editor-save-ack != 0 : Rectangle {
+                        width: root.editor-save-ack == 1 ? 72px : 98px;
+                        height: 28px;
+                        y: (parent.height - self.height) / 2;
+                        border-radius: Theme.radius-sm;
+                        background: root.editor-save-ack == 1
+                            ? Theme.success.with-alpha(0.18)
+                            : Theme.danger.with-alpha(0.18);
+                        HorizontalLayout {
+                            padding-left: 6px; padding-right: 6px; spacing: 4px;
+                            Text {
+                                text: root.editor-save-ack == 1 ? "\u{E876}" : "\u{E5CD}";
+                                font-family: "Material Icons";
+                                color: root.editor-save-ack == 1 ? Theme.success : Theme.danger;
+                                font-size: Theme.fs-sm;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: root.editor-save-ack == 1 ? @tr("Saved") : @tr("Save failed");
+                                color: root.editor-save-ack == 1 ? Theme.success : Theme.danger;
+                                font-size: Theme.fs-sm;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+                    }
                     if root.show-close : Rectangle {
                         width: 28px;
                         height: 28px;
@@ -191,18 +282,28 @@ export component EditorPane inherits Rectangle {
                     padding-left: 8px; padding-right: 8px;
                     padding-top: 5px; padding-bottom: 5px; spacing: 6px;
                     Text { text: @tr("Find"); color: Theme.text-muted; vertical-alignment: center; }
-                    TextInput {
+                    Rectangle {
                         horizontal-stretch: 1;
-                        single-line: true;
-                        vertical-alignment: center;
-                        font-family: Theme.ui-font-family;
-                        font-size: Theme.fs-md;
-                        color: Theme.text-primary;
-                        text <=> root.editor-find-query;
-                        edited => {
-                            root.editor-find-position = -1;
-                            root.editor-match-count = root.editor-count-matches(
-                                root.editor-content, root.editor-find-query);
+                        background: Theme.bg-root;
+                        border-radius: Theme.radius-sm;
+                        border-width: 1px;
+                        border-color: find-q-input.has-focus
+                            ? Theme.accent : Theme.border-strong;
+                        find-q-input := TextInput {
+                            x: 6px;
+                            width: parent.width - 12px;
+                            height: parent.height;
+                            single-line: true;
+                            vertical-alignment: center;
+                            font-family: Theme.ui-font-family;
+                            font-size: Theme.fs-md;
+                            color: Theme.text-primary;
+                            text <=> root.editor-find-query;
+                            edited => {
+                                root.editor-find-position = -1;
+                                root.editor-match-count = root.editor-count-matches(
+                                    root.editor-content, root.editor-find-query);
+                            }
                         }
                     }
                     Text {
@@ -247,14 +348,24 @@ export component EditorPane inherits Rectangle {
                         Text { text: "↓"; color: Theme.text-primary; horizontal-alignment: center; vertical-alignment: center; }
                     }
                     Text { text: @tr("Replace"); color: Theme.text-muted; vertical-alignment: center; }
-                    TextInput {
+                    Rectangle {
                         horizontal-stretch: 1;
-                        single-line: true;
-                        vertical-alignment: center;
-                        font-family: Theme.ui-font-family;
-                        font-size: Theme.fs-md;
-                        color: Theme.text-primary;
-                        text <=> root.editor-replace-text;
+                        background: Theme.bg-root;
+                        border-radius: Theme.radius-sm;
+                        border-width: 1px;
+                        border-color: replace-q-input.has-focus
+                            ? Theme.accent : Theme.border-strong;
+                        replace-q-input := TextInput {
+                            x: 6px;
+                            width: parent.width - 12px;
+                            height: parent.height;
+                            single-line: true;
+                            vertical-alignment: center;
+                            font-family: Theme.ui-font-family;
+                            font-size: Theme.fs-md;
+                            color: Theme.text-primary;
+                            text <=> root.editor-replace-text;
+                        }
                     }
                     Rectangle {
                         width: 88px;
@@ -306,18 +417,6 @@ export component EditorPane inherits Rectangle {
                     Rectangle {
                         horizontal-stretch: 1;
                         clip: true;
-                        // TextInput owns the pointer grab while selecting and
-                        // ignores wheel events. Catch the rejected wheel behind
-                        // it and scroll the editor (#388).
-                        TouchArea {
-                            scroll-event(event) => {
-                                ed-scroll.content-y = clamp(
-                                    ed-scroll.content-y + event.delta-y,
-                                    min(0px, ed-scroll.visible-height - ed-scroll.content-height),
-                                    0px);
-                                accept
-                            }
-                        }
                         ed-scroll := ScrollView {
                             content-width: self.visible-width;
                             content-height: max(self.visible-height, edit-input.preferred-height + 16px);
@@ -339,7 +438,10 @@ export component EditorPane inherits Rectangle {
                                 cursor-position-changed(position) => {
                                     // Keep a keyboard/drag selection endpoint visible;
                                     // during a pointer grab this also scrolls as the
-                                    // mouse leaves the top or bottom edge (#388).
+                                    // mouse leaves the top or bottom edge (#388). The
+                                    // remembered target keeps that edge scroll from
+                                    // also growing the selection.
+                                    let before-y = ed-scroll.content-y;
                                     let cursor-y = position.y + self.y + ed-scroll.content-y;
                                     if (cursor-y < 12px) {
                                         ed-scroll.content-y = min(0px,
@@ -350,6 +452,12 @@ export component EditorPane inherits Rectangle {
                                             ed-scroll.content-y
                                                 - (cursor-y - ed-scroll.visible-height + 12px));
                                     }
+                                    if (ed-scroll.content-y != before-y) {
+                                        root.scroll-guard-target = ed-scroll.content-y;
+                                        root.scroll-guard-armed = true;
+                                    }
+                                    root.editor-bracket-check(
+                                        edit-input.cursor-position-byte-offset);
                                 }
                                 edited => {
                                     root.content-changed();
@@ -371,6 +479,27 @@ export component EditorPane inherits Rectangle {
         triggered => {
             root.highlight-pending = false;
             root.editor-highlight(root.editor-content);
+            root.editor-bracket-check(edit-input.cursor-position-byte-offset);
+        }
+    }
+
+    // Auto-dismiss the save pill; re-armed on every non-zero set so back-to-back
+    // saves restart the countdown instead of the first one clearing the second
+    // early. The host clears its own copy via save-ack-dismiss so a stale
+    // badge can't reappear when the pane is re-shown — the pane never writes
+    // editor-save-ack itself because tab-mode binds it one-way to the doc row.
+    changed editor-save-ack => {
+        if (root.editor-save-ack != 0) {
+            ed-save-ack-timer.running = false;
+            ed-save-ack-timer.running = true;
+        }
+    }
+    ed-save-ack-timer := Timer {
+        interval: 1800ms;
+        running: false;
+        triggered => {
+            root.save-ack-dismiss();
+            ed-save-ack-timer.running = false;
         }
     }
 }

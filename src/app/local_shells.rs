@@ -189,10 +189,16 @@ fn detected_args(key: &str) -> Vec<String> {
 }
 
 fn program_stem(program: &str) -> String {
-    Path::new(program)
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| program.to_string())
+    // `Path::file_stem` only understands the host platform's separators, so a
+    // Windows-style program string (`C:\msys64\usr\bin\zsh.exe`) would not
+    // split on Linux and the whole path would leak into the Quick connect
+    // subtitle. Split on both separators, then strip the extension the same
+    // way `file_stem` does (a leading dot is not an extension).
+    let file_name = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    match file_name.rsplit_once('.') {
+        Some((stem, _)) if !stem.is_empty() => stem.to_string(),
+        _ => file_name.to_string(),
+    }
 }
 
 fn shell_session(id: &str, name: &str, program: String, args: Vec<String>) -> Session {

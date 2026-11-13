@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 
 use crate::terminal::charset::CharsetTracker;
+use crate::terminal::{ActionLinkFlags, ActionLinkHit};
 use crate::ui::TermSpan;
 
 #[cfg(any(target_os = "windows", test))]
@@ -15,6 +16,24 @@ pub(crate) enum CtrlKeySide {
 pub(crate) struct TermBuffer {
     pub(crate) parser: vt100::Parser,
     pub(crate) find_query: String,
+    /// History-mode search: every match as (absolute row, char start, char len)
+    /// across scrollback + live screen. Empty in buffer mode.
+    pub(crate) find_positions: Vec<(usize, usize, usize)>,
+    /// Index into `find_positions` of the current match (-1 = none).
+    pub(crate) find_active: i32,
+    /// Set when output, scrollback eviction or a reflow shifts absolute rows,
+    /// so the next history-mode navigation re-scans instead of jumping to a
+    /// stale row. Cleared by `recompute_find_positions`.
+    pub(crate) find_dirty: bool,
+    /// When true, search spans the whole scrollback with next/prev navigation;
+    /// when false, only the visible window is highlighted (legacy behaviour).
+    pub(crate) search_history_mode: bool,
+    /// True between OSC 133 `C` (command start) and `D`/`A` (end / next prompt).
+    /// Used to suppress command-history suggestions while a program is running.
+    pub(crate) command_running: bool,
+    /// True while the output pump is actively pacing on UI flushes (a large
+    /// backlog has built up). Drives the "large-output protection" banner.
+    pub(crate) backpressure: bool,
     /// The find match Enter/▲/▼ is on, as (combined-buffer row, char index)
     /// (#535). Combined rows keep their index as output scrolls into history.
     pub(crate) find_cursor: Option<(usize, usize)>,
@@ -44,6 +63,12 @@ pub(crate) struct TermBuffer {
     /// stepping a fixed amount per event.
     pub(crate) scroll_accum: f32,
     pub(crate) displayed_text: Vec<String>,
+    /// Action-link hits for the currently rendered window (recomputed in
+    /// `render()` from `displayed_text`). Empty on the alternate screen.
+    pub(crate) action_links: Vec<ActionLinkHit>,
+    /// Per-kind enable flags pushed from config; the master switch is folded
+    /// in by the caller (all-false when disabled).
+    pub(crate) action_link_flags: ActionLinkFlags,
     pub(crate) csi_state: CsiState,
     pub(crate) csi_pending: Vec<u8>,
     pub(crate) raw: VecDeque<u8>,
@@ -120,6 +145,15 @@ pub(crate) struct BuiltScreen {
     pub(crate) spans: Vec<TermSpan>,
     pub(crate) cursor_row: i32,
     pub(crate) cursor_col: i32,
+    /// Whether the remote app wants the terminal caret painted, i.e. the
+    /// negation of vt100's DECTCEM state (`CSI ? 25 h` / `CSI ? 25 l`).
+    /// Full-screen programs (btop/htop) hide the caret and normally restore it
+    /// on exit; a shell never sends `?25h` itself, so if one of them dies
+    /// without cleaning up the caret stays hidden for the rest of the session —
+    /// exactly as in a real terminal. Only the caret's painting is gated on
+    /// this; `cursor_row` / `cursor_col` stay tracked so the hidden IME anchor
+    /// keeps following the real insertion point.
+    pub(crate) cursor_visible: bool,
     pub(crate) rows_used: i32,
     pub(crate) is_alt: bool,
     pub(crate) mouse_tracked: bool,

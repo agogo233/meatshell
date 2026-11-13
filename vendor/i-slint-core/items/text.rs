@@ -807,6 +807,10 @@ pub struct TextInput {
     preferred_x_pos: Cell<Coord>,
     /// 0 = not pressed, 1 = single press, 2 = double clicked+press , ...
     pressed: Cell<u8>,
+    // MeatShell editor patch: mirrors `pressed` so the editor pane can grow a
+    // selection on scroll only while the user is actually dragging (the viewport
+    // must not extend a selection after the mouse has been released).
+    pub pointer_drag_active: Property<bool>,
     undo_items: Cell<SharedVector<UndoItem>>,
     redo_items: Cell<SharedVector<UndoItem>>,
     /// Mirror of `text` as of the last internal edit. Used by the change handler installed
@@ -922,6 +926,8 @@ impl Item for TextInput {
                     self.byte_offset_for_position(*position, window_adapter, self_rc);
                 let clicked_offset = clicked_offset as i32;
                 self.as_ref().pressed.set((click_count % 3) + 1);
+                // MeatShell editor patch: a left-button drag is now active.
+                self.pointer_drag_active.set(true);
 
                 if !window_adapter.window().0.context().0.modifiers.get().shift() {
                     self.as_ref().anchor_position_byte_offset.set(clicked_offset);
@@ -952,6 +958,8 @@ impl Item for TextInput {
             }
             MouseEvent::Released { button: PointerEventButton::Left, .. } => {
                 self.as_ref().pressed.set(0);
+                // MeatShell editor patch: the left button drag ended.
+                self.pointer_drag_active.set(false);
                 self.copy_clipboard(window_adapter, Clipboard::SelectionClipboard);
                 #[cfg(any(target_os = "android", target_os = "ios"))]
                 self.ensure_focus_and_ime(window_adapter, self_rc);
@@ -972,7 +980,11 @@ impl Item for TextInput {
                 );
                 self.paste_clipboard(window_adapter, self_rc, Clipboard::SelectionClipboard);
             }
-            MouseEvent::Exit => self.as_ref().pressed.set(0),
+            MouseEvent::Exit => {
+                self.as_ref().pressed.set(0);
+                // MeatShell editor patch: the grab ended, so no drag is in flight.
+                self.pointer_drag_active.set(false);
+            }
             MouseEvent::Moved { position, .. } => {
                 let pressed = self.as_ref().pressed.get();
                 if pressed > 0 {

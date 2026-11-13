@@ -1,10 +1,18 @@
 use crate::terminal::ScreenDims as _;
 use crate::terminal::{
     build_row, cell_prefix, char_after_cell_end, char_at_cell_start, detect_scroll,
-    highlight_plain_output, render_term_span, BuiltScreen, CsiState, HistLine, Line, TermBuffer,
-    MAX_HISTORY, RAW_CAP,
+    highlight_plain_output, render_term_span, scan_action_links, BuiltScreen, CsiState, HistLine, Line,
+    TermBuffer, MAX_HISTORY, RAW_CAP,
 };
 use crate::ui::TermMatch;
+
+/// History-mode match cap. A single letter can hit millions of times across a
+/// 100k-line scrollback, and each hit is an owned (usize, usize, usize)
+/// collected behind the UI-thread lock — enough to allocate hundreds of MB
+/// and stall the output pump for the whole scan. Scanning stops at the first
+/// `MAX_FIND_POSITIONS` hits, which is far beyond any navigation a person
+/// reaches; the counter then reports that ceiling instead of the true total.
+const MAX_FIND_POSITIONS: usize = 50_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TerminalQuery {
@@ -41,13 +49,61 @@ fn terminal_query(sequence: &[u8]) -> Option<TerminalQuery> {
     }
 }
 
+/// Append every case-insensitive occurrence of `q` (already lowercased) in
+/// `text` to `out` as (abs_row, char_start, char_len). Byte/char conversion is
+/// done on the lowercased copy so CJK queries keep their column alignment.
+fn collect_ci_matches(
+    text: &str,
+    q: &str,
+    abs_row: usize,
+    q_chars: usize,
+    out: &mut Vec<(usize, usize, usize)>,
+) {
+    // Fast path: terminal output is overwhelmingly ASCII, and a history scan
+    // runs this per line (up to MAX_HISTORY) on every keystroke — a
+    // `to_lowercase()` String per line showed up in profiles. For pure-ASCII
+    // text the byte column equals the char column, so no per-match counting
+    // pass is needed either.
+    if q.is_ascii() && text.is_ascii() {
+        let bytes = text.as_bytes();
+        let qb = q.as_bytes();
+        if qb.is_empty() || bytes.len() < qb.len() {
+            return;
+        }
+        let mut i = 0usize;
+        while i + qb.len() <= bytes.len() && out.len() < MAX_FIND_POSITIONS {
+            if bytes[i..i + qb.len()]
+                .iter()
+                .zip(qb)
+                .all(|(a, b)| a.eq_ignore_ascii_case(b))
+            {
+                out.push((abs_row, i, q_chars));
+                i += qb.len();
+            } else {
+                i += 1;
+            }
+        }
+        return;
+    }
+    let lower = text.to_lowercase();
+    let mut search_from = 0usize;
+    // Running char count of everything before `search_from`. The old code
+    // re-counted `lower[..abs_byte].chars()` per match, which is O(matches x
+    // line); a long tail of hits on one line (repeated tokens) made the CJK
+    // history scan visibly quadratic.
+    let mut char_base = 0usize;
+    while out.len() < MAX_FIND_POSITIONS {
+        let Some(byte_pos) = lower[search_from..].find(q) else { break };
+        let abs_byte = search_from + byte_pos;
+        let char_start = char_base + lower[search_from..abs_byte].chars().count();
+        out.push((abs_row, char_start, q_chars));
+        let next = search_from + byte_pos + q.len();
+        char_base += lower[search_from..next].chars().count();
+        search_from = next;
+    }
+}
+
 impl TermBuffer {
-    /// Release all retained terminal output and recreate the parser at the
-    /// current size. This is used when the user explicitly clears the
-    /// terminal, or reconnects into what is effectively a brand new session,
-    /// so a dead tab does not keep a large scrollback allocation alive until
-    /// it is closed. Both of those cases *want* a blank screen. A plain
-    /// disconnect does not — see `release_history_keep_screen` below (#451).
     /// Start or stop this tab's session log to match the global setting and
     /// the session's own override (#265). Starting mid-session seeds the log
     /// with the current screen; stopping closes the file with a footer.
@@ -135,31 +191,61 @@ impl TermBuffer {
         text
     }
 
+    /// Release all retained terminal output and recreate the parser at the
+    /// current size. This is used when the user explicitly clears the
+    /// terminal, or reconnects into what is effectively a brand new session,
+    /// so a dead tab does not keep a large scrollback allocation alive until
+    /// it is closed. Both of those cases *want* a blank screen. A plain
+    /// disconnect keeps the history instead — see #f654b61.
     pub(crate) fn release_scrollback(&mut self) {
         let (rows, cols) = self.parser.screen().dims();
         self.parser = crate::terminal::vt_parser(rows, cols, 5000);
         self.reset_light_state();
     }
 
-    /// Like `release_scrollback`, but keeps the live screen grid intact
-    /// instead of recreating the parser. Used when a session disconnects
-    /// (#451): the tab stays open for Enter-to-reconnect and a "Disconnected
-    /// — press Enter to reconnect" hint is printed right after this call, so
-    /// it should append to whatever the user was looking at when the
-    /// connection dropped, not land on a screen this call just wiped. Still
-    /// frees the two genuinely unbounded structures — the raw replay stream
-    /// (up to `RAW_CAP`) and rendered scrollback history (up to
-    /// `MAX_HISTORY` lines) — so an idle disconnected tab doesn't keep a
-    /// large allocation alive. The live screen itself is already bounded by
-    /// rows×cols, so keeping it costs nothing.
+    /// Like `release_scrollback`, but keeps the live screen grid and the full
+    /// scrollback history intact instead of recreating the parser. Used when
+    /// a tab is closed (#f654b61 / #451): a plain disconnect now retains the
+    /// history so the user can review what happened before the drop, and the
+    /// live screen itself is already bounded by rows×cols, so keeping it
+    /// costs nothing.
     pub(crate) fn release_history_keep_screen(&mut self) {
         self.reset_light_state();
+    }
+
+    /// Drop the oldest scrollback lines beyond `cap`, keeping the newest. A
+    /// disconnected tab is trimmed to this bound so a long session's full
+    /// scrollback (up to MAX_HISTORY, ~20 MB of spans) is released while the
+    /// tab stays open for review. Rows shift when history is dropped, so the
+    /// history-mode search index (absolute rows) must be invalidated.
+    pub(crate) fn trim_history(&mut self, cap: usize) {
+        if self.history.len() > cap {
+            let drop = self.history.len() - cap;
+            for _ in 0..drop {
+                self.history.pop_front();
+            }
+            // find_positions are absolute (history, row) offsets that shift
+            // when the front of the deque is dropped.
+            self.find_positions.clear();
+            self.find_active = -1;
+            self.find_dirty = true;
+            // The view offset is also an absolute history index: a user
+            // scrolled far back would otherwise point past the new front.
+            self.view_offset = self.view_offset.min(self.history.len());
+        }
     }
 
     /// Shared bookkeeping reset between the two variants above: everything
     /// except the decision of whether to also recreate `self.parser`.
     fn reset_light_state(&mut self) {
         self.find_query.clear();
+        self.find_positions.clear();
+        self.find_active = -1;
+        self.find_dirty = false;
+        // A fresh screen has no running command and no output pressure; the
+        // next OSC 133 / pump cycle re-sets both.
+        self.command_running = false;
+        self.backpressure = false;
         self.find_cursor = None;
         self.history = std::collections::VecDeque::new();
         self.prev = Vec::new();
@@ -168,6 +254,7 @@ impl TermBuffer {
         self.sel_focus = None;
         self.sel_ranges.clear();
         self.displayed_text = Vec::new();
+        self.action_links = Vec::new();
         self.csi_state = CsiState::Normal;
         self.csi_pending = Vec::new();
         self.raw = std::collections::VecDeque::new();
@@ -236,8 +323,7 @@ impl TermBuffer {
 
     /// Map a visible row (0..rows) to its absolute combined-row index.
     pub(crate) fn vis_to_abs(&self, vis_row: u16) -> usize {
-        let (_, live_used) = self.live_rows();
-        self.view_top_abs(live_used) + vis_row as usize
+        self.view_top_abs(0) + vis_row as usize
     }
 
     /// Highlight rectangles for the current selection, clipped to the visible
@@ -314,6 +400,86 @@ impl TermBuffer {
         };
         let top = match_idx.min(combined_len.saturating_sub(rows));
         let new_offset = combined_len.saturating_sub(rows + top);
+        if self.view_offset == new_offset {
+            return false;
+        }
+        self.view_offset = new_offset;
+        true
+    }
+
+    /// Recompute every match of `find_query` across scrollback + live rows for
+    /// history-mode search. Stores (absolute row, char start, char len) and
+    /// resets the active index to the first match. No-op on the alt screen.
+    pub(crate) fn recompute_find_positions(&mut self) {
+        self.find_positions.clear();
+        self.find_active = -1;
+        self.find_dirty = false;
+        if self.find_query.is_empty() || self.parser.screen().alternate_screen() {
+            return;
+        }
+        let q = self.find_query.to_lowercase();
+        let q_chars = q.chars().count();
+        if q_chars == 0 {
+            return;
+        }
+        // history rows occupy absolute indices [0, hist_len).
+        for (abs, line) in self.history.iter().enumerate() {
+            collect_ci_matches(line.plain(), &q, abs, q_chars, &mut self.find_positions);
+        }
+        // live screen rows follow the history.
+        let (live, _) = self.live_rows();
+        let base = self.history.len();
+        for (r, line) in live.iter().enumerate() {
+            collect_ci_matches(&line.0, &q, base + r, q_chars, &mut self.find_positions);
+        }
+        if !self.find_positions.is_empty() {
+            self.find_active = 0;
+        }
+    }
+
+    /// Move the active match by `dir` (+1 next / -1 prev) and scroll it into
+    /// view. Returns true when the view changed.
+    pub(crate) fn find_goto(&mut self, dir: i32) -> bool {
+        if self.find_dirty {
+            // Output, eviction or a reflow shifted the absolute rows since the
+            // last scan: re-scan and land on the first match rather than
+            // advance from an index that no longer means anything. The scan is
+            // deliberately lazy (here, on a user action) — not per render —
+            // so sustained output doesn't re-read the whole scrollback.
+            self.recompute_find_positions();
+            if self.find_positions.is_empty() {
+                return false;
+            }
+            let (abs_row, _, _) = self.find_positions[0];
+            return self.scroll_to_abs_row(abs_row);
+        }
+        let total = self.find_positions.len();
+        if total == 0 {
+            return false;
+        }
+        let cur = self.find_active.max(0) as usize;
+        let next = if dir > 0 {
+            (cur + 1) % total
+        } else {
+            (cur + total - 1) % total
+        };
+        self.find_active = next as i32;
+        let (abs_row, _, _) = self.find_positions[next];
+        self.scroll_to_abs_row(abs_row)
+    }
+
+    /// Scroll so `abs_row` sits near the vertical centre of the viewport.
+    pub(crate) fn scroll_to_abs_row(&mut self, abs_row: usize) -> bool {
+        let rows = self.parser.screen().dims().0 as usize;
+        let combined_len = self.history.len() + rows;
+        if combined_len <= rows {
+            let changed = self.view_offset != 0;
+            self.view_offset = 0;
+            return changed;
+        }
+        let max_top = combined_len - rows;
+        let top = abs_row.saturating_sub(rows / 2).min(max_top);
+        let new_offset = combined_len - rows - top;
         if self.view_offset == new_offset {
             return false;
         }
@@ -463,6 +629,18 @@ impl TermBuffer {
         self.sel_focus = None;
         self.sel_ranges.clear();
         Some(text)
+    }
+
+    /// Drop the local drag-selection. Returns true when a selection with
+    /// extent existed (so the caller knows to refresh the UI). A zero-area
+    /// selection (a plain click) has no extent but still clears its anchor/
+    /// focus so a later drag starts from a clean slate (#residual-selection).
+    pub(crate) fn clear_selection(&mut self) -> bool {
+        let had_extent = self.selection_has_extent();
+        self.sel_anchor = None;
+        self.sel_focus = None;
+        self.sel_ranges.clear();
+        had_extent
     }
 
     pub(crate) fn extract_selection_text(&self) -> String {
@@ -800,6 +978,12 @@ impl TermBuffer {
             self.sel_anchor = None;
             self.sel_focus = None;
             self.sel_ranges.clear();
+            // Stored positions are absolute scrollback rows: with the history
+            // gone they point at lines that no longer exist, so the index is
+            // dropped too (a stale count would show on screen for one frame).
+            self.find_positions.clear();
+            self.find_active = -1;
+            self.find_dirty = true;
         }
         self.cap_raw();
         self.feed_batched(bytes);
@@ -875,6 +1059,8 @@ impl TermBuffer {
         self.sel_anchor = None;
         self.sel_focus = None;
         self.sel_ranges.clear();
+        // Same for history-mode search: every absolute row may have moved.
+        self.find_dirty = true;
         self.feed_batched(&stream);
     }
 
@@ -950,6 +1136,12 @@ impl TermBuffer {
             if evicted > 0 {
                 self.shift_marks_after_eviction(evicted);
             }
+            // Captured rows shift the live-area absolute indices of any stored
+            // match (and eviction shifts every index): history-mode positions
+            // go stale, re-scanned lazily on the next navigation.
+            if k > 0 {
+                self.find_dirty = true;
+            }
             // `view_offset` is measured backwards from the live bottom.  If
             // output scrolls while the user is reading history, keeping the
             // same offset would move their viewport forward by `k` rows. Move
@@ -966,11 +1158,15 @@ impl TermBuffer {
     /// Render the terminal grid for the current scrollback `view_offset`
     /// (0 = live).  Caches the displayed plain text for find/selection.
     pub(crate) fn render(&mut self) -> BuiltScreen {
-        let (is_alt, rows, cols, cur_row, cur_col) = {
+        let (is_alt, rows, cols, cur_row, cur_col, caret) = {
             let s = self.parser.screen();
             let (r, c) = s.dims();
             let (cr, cc) = s.cursor_position();
-            (s.alternate_screen(), r, c, cr, cc)
+            // DECTCEM (`CSI ? 25 l`): full-screen programs that repaint the whole
+            // grid hide the caret and never restore it, so honouring it is what
+            // keeps a blinking block from sitting wherever their first frame
+            // happened to leave the VT cursor.
+            (s.alternate_screen(), r, c, cr, cc, !s.hide_cursor())
         };
 
         // --- Live view (also alt-screen): render the current grid -----------
@@ -999,6 +1195,13 @@ impl TermBuffer {
                 displayed.push(plain.trim_end().to_string());
             }
             self.displayed_text = displayed;
+            // Action links are suppressed on the alternate screen (TUI apps own
+            // the grid and their own mouse/keyboard handling).
+            self.action_links = if is_alt {
+                Vec::new()
+            } else {
+                scan_action_links(&self.displayed_text, &self.action_link_flags)
+            };
             let rows_used = if is_alt {
                 rows as i32
             } else {
@@ -1008,6 +1211,7 @@ impl TermBuffer {
                 spans,
                 cursor_row: cur_row as i32,
                 cursor_col: cur_col as i32,
+                cursor_visible: caret,
                 rows_used,
                 is_alt,
                 mouse_tracked: self.mouse_tracked,
@@ -1054,12 +1258,12 @@ impl TermBuffer {
             displayed.push(String::new());
         }
         self.displayed_text = displayed;
+        self.action_links = scan_action_links(&self.displayed_text, &self.action_link_flags);
         BuiltScreen {
             spans,
-            cursor_row: (self.parser.screen().cursor_position().0 as i32
-                + self.view_offset as i32)
-                .min(self.parser.screen().dims().0 as i32),
-            cursor_col: self.parser.screen().cursor_position().1 as i32,
+            cursor_row: -1, // hide the live cursor while viewing history
+            cursor_col: 0,
+            cursor_visible: false,
             rows_used: win as i32,
             is_alt: false,
             mouse_tracked: self.mouse_tracked,

@@ -7,6 +7,10 @@ use crate::terminal::{HistSpan, Line};
 pub(crate) const RAW_CAP: usize = 2 * 1024 * 1024;
 /// Per-session rendered scrollback cap.
 pub(crate) const MAX_HISTORY: usize = 100_000;
+/// Scrollback kept for a *disconnected* tab: it stays open for review and
+/// Enter-to-reconnect, but a long-running session's 100k lines (~20 MB of
+/// spans) is wasted once the connection is gone. Active tabs keep MAX_HISTORY.
+pub(crate) const DISCONNECTED_MAX_HISTORY: usize = 10_000;
 
 pub(crate) fn cell_prefix(chars: &[char]) -> Vec<usize> {
     let mut prefix = Vec::with_capacity(chars.len() + 1);

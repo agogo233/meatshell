@@ -21,6 +21,12 @@ fn make_buf(
     TermBuffer {
         parser,
         find_query: String::new(),
+        find_positions: Vec::new(),
+        find_active: -1,
+        find_dirty: false,
+        search_history_mode: false,
+        command_running: false,
+        backpressure: false,
         find_cursor: None,
         is_dark: false,
         output_highlight: OutputHighlightPreset::Log,
@@ -38,6 +44,8 @@ fn make_buf(
         view_offset,
         scroll_accum: 0.0,
         displayed_text: Vec::new(),
+        action_links: Vec::new(),
+        action_link_flags: crate::terminal::ActionLinkFlags::default(),
         csi_state: CsiState::Normal,
         csi_pending: Vec::new(),
         raw: std::collections::VecDeque::new(),
@@ -75,6 +83,74 @@ fn releasing_scrollback_drops_retained_history_and_replay_bytes() {
     assert!(buffer.sel_focus.is_none());
     assert!(buffer.sel_ranges.is_empty());
     assert_eq!(buffer.view_offset, 0);
+}
+
+#[test]
+fn history_search_indexes_all_rows_and_navigates() {
+    let mut buffer = make_buf(
+        3,
+        20,
+        &["alpha foo", "beta", "gamma foo bar"],
+        &["delta foo"],
+        0,
+    );
+    buffer.search_history_mode = true;
+    buffer.find_query = "foo".to_string();
+    buffer.recompute_find_positions();
+    // three matches: history rows 0 and 2, plus the live row (abs index 3).
+    assert_eq!(buffer.find_positions.len(), 3);
+    assert_eq!(buffer.find_active, 0);
+    assert_eq!(buffer.find_positions[0].0, 0);
+    assert_eq!(buffer.find_positions[2].0, 3);
+
+    // Next moves the active index and scrolls the target into view.
+    assert!(buffer.find_goto(1));
+    assert_eq!(buffer.find_active, 1);
+    assert!(buffer.find_goto(1));
+    assert_eq!(buffer.find_active, 2);
+    // Wrap-around.
+    assert!(buffer.find_goto(1));
+    assert_eq!(buffer.find_active, 0);
+    // Previous wraps backwards.
+    assert!(buffer.find_goto(-1));
+    assert_eq!(buffer.find_active, 2);
+}
+
+#[test]
+fn history_search_empty_query_clears_positions() {
+    let mut buffer = make_buf(3, 20, &["foo"], &["foo"], 0);
+    buffer.find_query = "foo".to_string();
+    buffer.recompute_find_positions();
+    assert!(!buffer.find_positions.is_empty());
+    buffer.find_query = "".to_string();
+    buffer.recompute_find_positions();
+    assert!(buffer.find_positions.is_empty());
+    assert_eq!(buffer.find_active, -1);
+}
+
+#[test]
+fn history_search_cjk_queries_report_char_columns() {
+    // CJK queries take the non-ASCII path: hits must report *character*
+    // columns (highlight geometry), not byte offsets — and the running char
+    // counter must stay correct across repeated hits on one line (the old
+    // implementation re-counted from the line start per match).
+    let mut buffer = make_buf(
+        3,
+        40,
+        &["aa提示aa提示", "提示"],
+        &["提示"],
+        0,
+    );
+    buffer.search_history_mode = true;
+    buffer.find_query = "提示".to_string();
+    buffer.recompute_find_positions();
+    assert_eq!(buffer.find_positions.len(), 4);
+    // Row 0: two hits at char columns 2 and 6 ("aa" = 2 chars, "提示" = 2).
+    assert_eq!(buffer.find_positions[0], (0, 2, 2));
+    assert_eq!(buffer.find_positions[1], (0, 6, 2));
+    // Row 1 at column 0; the live row follows the history (abs index 2).
+    assert_eq!(buffer.find_positions[2], (1, 0, 2));
+    assert_eq!(buffer.find_positions[3], (2, 0, 2));
 }
 
 #[test]

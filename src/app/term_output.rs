@@ -1,4 +1,6 @@
-//! Terminal output ingest, session-log wiring and per-tab render pacing.
+//! Terminal output ingestion, scrollback navigation and coalesced render
+//! scheduling for one app window. Split out of app.rs to match the
+//! upstream module boundary (term_output).
 
 use crate::terminal::ScreenDims as _;
 use super::*;
@@ -38,8 +40,7 @@ pub(super) const RENDER_MIN_INTERVAL: std::time::Duration = std::time::Duration:
 /// this responsive if the normal rate is ever lowered again.
 pub(super) const INTERACTIVE_RENDER_MIN_INTERVAL: std::time::Duration =
     std::time::Duration::from_millis(8);
-pub(super) const INTERACTIVE_ECHO_WINDOW: std::time::Duration =
-    std::time::Duration::from_millis(180);
+pub(super) const INTERACTIVE_ECHO_WINDOW: std::time::Duration = std::time::Duration::from_millis(180);
 /// A scrolled-back viewport is content-anchored, so sustained output only
 /// needs occasional model refreshes for its scrollbar metadata (#306).
 pub(super) const SCROLLED_RENDER_MIN_INTERVAL: std::time::Duration =
@@ -73,7 +74,7 @@ pub(super) fn with_pump_lock<R>(
             std::thread::sleep(std::time::Duration::from_micros(100));
         }
     }
-    let mut guard = handle.lock().unwrap();
+    let mut guard = lock_or_recover(handle);
     f(&mut guard)
 }
 
@@ -83,13 +84,13 @@ pub(super) fn lock_for_ui(
 ) -> std::sync::MutexGuard<'_, TermBuffer> {
     use std::sync::atomic::Ordering;
     UI_LOCK_WAITERS.fetch_add(1, Ordering::AcqRel);
-    let guard = handle.lock();
+    let guard = lock_or_recover(handle);
     UI_LOCK_WAITERS.fetch_sub(1, Ordering::AcqRel);
-    guard.unwrap()
+    guard
 }
 
 pub(super) fn term_buf(bufs: &TermBuffers, tab_id: &str) -> Option<TermBufferHandle> {
-    bufs.lock().unwrap().get(tab_id).cloned()
+    lock_or_recover(&bufs).get(tab_id).cloned()
 }
 
 pub(super) fn tab_render_interval(bufs: &TermBuffers, tab_id: &str) -> std::time::Duration {
@@ -101,11 +102,10 @@ pub(super) fn tab_render_interval(bufs: &TermBuffers, tab_id: &str) -> std::time
         Ok(buf) if std::time::Instant::now() < buf.interactive_echo_until => {
             INTERACTIVE_RENDER_MIN_INTERVAL
         }
-        // A busy ingest lock just means output is streaming in. Falling back
-        // to the 10 Hz scrolled-back rate here made every log flood render at
-        // ~10 fps; the pump already yields to each UI flush (see
-        // `wait_for_ui_flush`), so the normal rate is safe.
-        Ok(_) | Err(_) => RENDER_MIN_INTERVAL,
+        Ok(_) => RENDER_MIN_INTERVAL,
+        // A busy ingest lock is itself a firehose signal. Deferring this
+        // snapshot prevents the UI thread from joining the contention.
+        Err(_) => SCROLLED_RENDER_MIN_INTERVAL,
     };
     interval
 }
@@ -173,13 +173,7 @@ pub(super) fn session_log_spec(session: &Session) -> Option<crate::terminal::Ses
             } else {
                 format!("{}@", session.user.trim())
             };
-            format!(
-                "{} {}{}:{}",
-                kind.as_str(),
-                user,
-                session.host,
-                session.port
-            )
+            format!("{} {}{}:{}", kind.as_str(), user, session.host, session.port)
         }
     };
     let name = if session.name.trim().is_empty() {
@@ -196,32 +190,19 @@ pub(super) fn session_log_spec(session: &Session) -> Option<crate::terminal::Ses
 
 /// Bring one tab's session log in line with the current settings; a failure
 /// is printed into that terminal rather than interrupting the session.
-pub(super) fn apply_session_log_to_buffer(
-    buffer: &mut TermBuffer,
-    enabled: bool,
-    dir: &std::path::Path,
-) {
+pub(super) fn apply_session_log_to_buffer(buffer: &mut TermBuffer, enabled: bool, dir: &std::path::Path) {
     if let Err(err) = buffer.apply_session_log(enabled, dir) {
-        tracing::warn!(
-            "session log: cannot create file in {}: {err}",
-            dir.display()
-        );
+        tracing::warn!("session log: cannot create file in {}: {err}", dir.display());
         let notice = format!(
             "\r\n\x1b[33m{} {} ({err})\x1b[0m\r\n",
-            t(
-                "[会话日志] 无法创建日志文件:",
-                "[session log] could not create log file in"
-            ),
+            t("[会话日志] 无法创建日志文件:", "[session log] could not create log file in"),
             dir.display()
         );
         let _ = buffer.ingest(notice.as_bytes());
     }
 }
 
-pub(super) fn record_ingested_chunk(
-    chunk_len: usize,
-    ingested_since_checkpoint: &mut usize,
-) -> bool {
+pub(super) fn record_ingested_chunk(chunk_len: usize, ingested_since_checkpoint: &mut usize) -> bool {
     debug_assert!(*ingested_since_checkpoint < INGEST_FRAME_BUDGET);
     if chunk_len == 0 {
         return false;
@@ -273,7 +254,7 @@ pub(super) fn register_tab_render_request(
     gates: &RenderGates,
 ) -> Option<(Arc<TabRenderGate>, TabRenderTicket, bool)> {
     let gate = {
-        let map = gates.lock().unwrap();
+        let map = lock_or_recover(&gates);
         map.get(tab_id).cloned()
     }?;
     let (generation, should_schedule) = gate.request()?;
