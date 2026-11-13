@@ -1412,17 +1412,21 @@ export component SftpPanel inherits Rectangle {
         root.jump-target = -1;
     }
 
-    // Bring the type-ahead target into view. Rows are a fixed 24px tall, so the
+    // Fixed file-row height: the single source of truth shared by the row
+    // Rectangle below and the type-ahead scroll arithmetic.
+    property <length> file-row-height: 24px;
+
+    // Bring the type-ahead target into view. Rows are a fixed height, so the
     // needed scroll is pure arithmetic on the ScrollView's content-y (mirrors
     // the `bring-into-view` trick the std ListView uses; Slint has no scroll-to
     // API). Multiplied out so `+=` isn't needed in this expression language.
     changed jump-target => {
         if (root.jump-target >= 0 && root.jump-target < root.entries.length) {
-            let item-top = file-scroll-view.content-y + root.jump-target * 24px;
+            let item-top = file-scroll-view.content-y + root.jump-target * root.file-row-height;
             if (item-top < 0px) {
                 file-scroll-view.content-y = file-scroll-view.content-y - item-top;
-            } else if (item-top + 24px > file-scroll-view.visible-height) {
-                file-scroll-view.content-y = file-scroll-view.content-y - (item-top + 24px - file-scroll-view.visible-height);
+            } else if (item-top + root.file-row-height > file-scroll-view.visible-height) {
+                file-scroll-view.content-y = file-scroll-view.content-y - (item-top + root.file-row-height - file-scroll-view.visible-height);
             }
         }
     }
@@ -2647,7 +2651,7 @@ export component SftpPanel inherits Rectangle {
                             }
 
                             for entry[i] in root.entries : row := Rectangle {
-                                height: 24px;
+                                height: root.file-row-height;
                                 background: entry.selected
                                     ? #4a90e235
                                     : (i == root.selected-row

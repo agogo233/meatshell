@@ -851,38 +851,6 @@ fn osc133_partial_tail(text: &str) -> usize {
     0
 }
 
-/// Percent-decode a URL path segment (e.g. `%20` → space).
-fn url_decode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c == '%' {
-            let h1 = chars.next();
-            let h2 = chars.next();
-            match (h1, h2) {
-                (Some(a), Some(b)) => {
-                    let hex = format!("{a}{b}");
-                    if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                        result.push(byte as char);
-                    } else {
-                        result.push('%');
-                        result.push(a);
-                        result.push(b);
-                    }
-                }
-                (Some(a), None) => {
-                    result.push('%');
-                    result.push(a);
-                }
-                _ => result.push('%'),
-            }
-        } else {
-            result.push(c);
-        }
-    }
-    result
-}
-
 async fn kill_remote_process(
     handle: Arc<tokio::sync::Mutex<Handle<ClientHandler>>>,
     pid: u32,
@@ -1971,7 +1939,7 @@ pub(crate) async fn push_authorized_keys(
     let (mut handle, mut jump_handle, mut remote_forwards) =
         connect_ssh(&session, &jump, config.clone(), &events).await?;
 
-    match authenticate_session(
+    let auth = match authenticate_session(
         &mut handle,
         &mut jump_handle,
         &mut remote_forwards,
@@ -1980,8 +1948,18 @@ pub(crate) async fn push_authorized_keys(
         config,
         &events,
     )
-    .await?
+    .await
     {
+        Ok(auth) => auth,
+        // An authentication-stage error leaves the transport half-open too;
+        // give the peer a clean disconnect instead of relying on the drop.
+        Err(e) => {
+            disconnect_ssh(&handle, "push auth error").await;
+            disconnect_jump_chain(&jump_handle, "push auth error").await;
+            return Err(e);
+        }
+    };
+    match auth {
         AuthResult::Success => {}
         // A cancelled or rejected login leaves the transport half-open (the
         // session tab stays "connecting"); drop both handles before returning
@@ -2033,9 +2011,17 @@ pub(crate) async fn push_authorized_keys(
         exit_code
     };
 
-    let exit_code = tokio::time::timeout(std::time::Duration::from_secs(30), collect)
-        .await
-        .map_err(|_| anyhow!("{}", t("推送超时", "push timed out")))?
+    let collected = match tokio::time::timeout(std::time::Duration::from_secs(30), collect).await {
+        Ok(exit_code) => exit_code,
+        // The remote may still be executing the append; close both links
+        // explicitly instead of dropping the half-open transport silently.
+        Err(_elapsed) => {
+            disconnect_ssh(&handle, "push timed out").await;
+            disconnect_jump_chain(&jump_handle, "push timed out").await;
+            return Err(anyhow!("{}", t("推送超时", "push timed out")));
+        }
+    };
+    let exit_code = collected
         // No ExitStatus before Close means the server never reported a result;
         // treat it as a failure rather than a success.
         .unwrap_or(1);

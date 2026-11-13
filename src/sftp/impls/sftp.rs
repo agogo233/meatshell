@@ -590,9 +590,24 @@ async fn run_sftp(
                             .await;
                         }
                         Err(ScpProbeOutcome::NoScp) => {}
-                        Err(ScpProbeOutcome::ProbeFailed(e)) => return Err(e),
+                        Err(ScpProbeOutcome::ProbeFailed(e)) => {
+                            // The SCP probe failing must not mask why SFTP was
+                            // rejected: keep the original error on top.
+                            return Err(err.context(e.to_string()));
+                        }
                     }
                 }
+                // A timed-out handshake is a slow link, not proof of a missing
+                // subsystem: point the user at the manual SCP mode instead of
+                // a bare timeout.
+                let err = if err.chain().any(|e| e.to_string().contains("timed out")) {
+                    err.context(t(
+                        "连接响应慢：请重试；若服务器确实未提供 SFTP，可手动切换到 SCP 模式。",
+                        "The connection is slow to respond: retry; if the server really has no SFTP, switch to SCP mode manually.",
+                    ))
+                } else {
+                    err
+                };
                 return Err(err);
             }
         }
@@ -2022,16 +2037,19 @@ async fn run_sftp(
 }
 
 /// Does this SFTP-handshake failure look like "the server has no `sftp`
-/// subsystem" (rather than a network/auth problem we must not re-route)?
-/// Dropbear's missing sftp-server shows up as a refused subsystem request or a
-/// channel that opens then dies mid-handshake.
+/// subsystem" (rather than a network problem we must not re-route)? A missing
+/// sftp-server (Dropbear et al) shows up as a refused subsystem request — our
+/// own "request sftp subsystem" context — or a channel that opens then dies
+/// mid-handshake. Transport resets and timeouts are NOT proof of a missing
+/// subsystem: re-probing SCP on a possibly-dead connection would only stall,
+/// so anything else must surface as-is.
 fn scp_unavailable_like(err: &anyhow::Error) -> bool {
     let chain = err
         .chain()
         .map(|e| e.to_string().to_lowercase())
         .collect::<Vec<_>>()
         .join(" | ");
-    ["subsystem", "sftp handshake", "sftp channel"]
+    ["request sftp subsystem", "sftp handshake"]
         .iter()
         .any(|k| chain.contains(k))
 }
