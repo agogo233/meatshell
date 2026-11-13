@@ -5,6 +5,11 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ## [Unreleased]
 
+- **Esc 键恢复"清除终端本地选区"语义。** 终端里有选中高亮时按 Esc，此前没有任何反应（高亮一直残留，要再点一下鼠标才能清掉）；现在按一下即清除本地高亮，且不会把 Esc 发给远端程序——vim、less 等全屏程序不会因此退出或误响应；没有选区时 Esc 照常透传给远端。
+- **Esc restores dropping the terminal's local selection.** With a selection highlight on screen, Esc used to do nothing and the highlight lingered until another mouse click; it now clears the local highlight at once without sending anything to the remote, so full-screen programs like vim/less are not interrupted. With no selection, Esc still reaches the remote as usual.
+- **修复会话列表双击建立两条连接。** 快速双击同一个会话此前会触发两次连接：SSH/Telnet 会开出两个标签页、登录两次（对限制并发的堡垒机可能互踢）；RDP 会拉起两个系统远程桌面窗口互相顶掉。现在 500 毫秒内的重复点击只建立第一条连接；点击不同会话、或稍作停顿后再点，行为不变。
+- **Fix a double click on a session row opening two connections.** Rapidly double-clicking one session used to connect twice: SSH/Telnet opened two tabs with two logins (which can kick each other off on concurrency-limited bastions), and RDP launched two system remote-desktop windows that kick each other off. Within 500 ms only the first click now connects; different sessions and later clicks behave as before.
+
 - **修复无 busybox `stat` 的设备文件面板首屏目录为空、手动刷新才显示。** 打开面板的“探测 + 取 home + 列目录”合并命令只通过 `stat` 列举，而 OpenWrt/BusyBox 可能没有该工具，导致首屏静默空白（与真空目录无法区分）。现在 `stat` 输出为空时自动改用 `ls -lAn` 长格式重列一次（与手动刷新的回退行为一致），正常设备零额外开销。
 - **Fix the first file-panel paint being empty (needing a manual refresh) on hosts without busybox `stat`.** The merged probe+home+listing command lists through `stat` only, which OpenWrt/BusyBox may not ship, so the first paint was silently blank (indistinguishable from an empty home). A `stat`-free result now re-lists once via the `ls -lAn` long format — the same fallback manual refresh already used — with zero extra cost on normal hosts.
 
