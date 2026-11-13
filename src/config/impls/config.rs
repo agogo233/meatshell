@@ -35,7 +35,6 @@ use chacha20poly1305::{
 };
 use directories::ProjectDirs;
 use rand::rngs::OsRng;
-#[cfg(test)]
 use uuid::Uuid;
 
 use super::structs::*;
@@ -250,17 +249,27 @@ fn normalize_hex_color(value: &str) -> Option<String> {
 
 /// A brand-new config (no file yet, or the old one was corrupt). Seeds the
 /// new-user default layout (#new-user-defaults): ms wallpaper, welcome page as
-/// a left sidebar, resource panel docked right, 15% wallpaper transparency, and
-/// marks the migration done so it isn't re-applied.
+/// a left sidebar, resource panel docked right, 15% wallpaper transparency,
+/// and marks the migration done so it isn't re-applied.
 fn fresh_config() -> ConfigFile {
-    ConfigFile {
-        wallpaper: "builtin:ms".to_string(),
-        welcome_as_sidebar: true,
-        sidebar_dock: "right".to_string(),
-        wallpaper_overlay: DEFAULT_WALLPAPER_OVERLAY,
-        defaults_rev: DEFAULTS_REV,
-        ..ConfigFile::default()
-    }
+    // Deserialize `{}` rather than `ConfigFile::default()`: the derived
+    // Default ignores the `#[serde(default = "default_true")]` markers and
+    // would hand a brand-new install the default-ON features switched OFF.
+    let mut cfg: ConfigFile = match serde_json::from_str("{}") {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            // Only reachable if a field is added without a serde default;
+            // degrade to the derive rather than bricking startup.
+            tracing::error!("ConfigFile field without a serde default broke fresh config: {e}");
+            ConfigFile::default()
+        }
+    };
+    cfg.wallpaper = "builtin:ms".to_string();
+    cfg.welcome_as_sidebar = true;
+    cfg.sidebar_dock = "right".to_string();
+    cfg.wallpaper_overlay = DEFAULT_WALLPAPER_OVERLAY;
+    cfg.defaults_rev = DEFAULTS_REV;
+    cfg
 }
 
 /// One-time push of the new default layout to *existing* users — but only for
@@ -318,6 +327,19 @@ fn normalize_highlight_color(color: &str) -> &'static str {
         "gray" => "gray",
         _ => "red",
     }
+}
+
+/// Action links are not exposed on macOS until the modifier-click platform gap
+/// (Slint not surfacing Cmd/meta in `pointer-event`) is resolved. Kept behind
+/// one cfg so the switch is trivial to flip later.
+#[cfg(not(target_os = "macos"))]
+fn action_links_platform_ok() -> bool {
+    true
+}
+
+#[cfg(target_os = "macos")]
+fn action_links_platform_ok() -> bool {
+    false
 }
 
 /// Remove duplicate entries in place, keeping the *last* (most recent)
@@ -395,10 +417,15 @@ impl ConfigStore {
     const ENC_PREFIX: &'static str = "enc:v1:";
 
     /// Marks a password encrypted with the **portable export key** (issue #46).
+    /// Legacy read-only format: the writer (`export_json`) is gone — the UI
+    /// exports Argon2id portable bundles (`on_export_sessions`), and the fixed
+    /// key is kept solely so old `enc:exp:v1:` files still import and load.
     const EXPORT_PREFIX: &'static str = "enc:exp:v1:";
 
-    /// Fixed 32-byte key for portable exports. Baked into the binary so an
-    /// exported file decrypts on any machine. Obfuscation only — see `ExportFile`.
+    /// Fixed 32-byte key used by the legacy portable export format (#46).
+    /// Kept ONLY to decrypt `enc:exp:v1:` blobs written by older versions
+    /// (import path + `open_secret` re-seal at load); nothing writes this
+    /// format anymore — see `EXPORT_PREFIX` and `docs` in README.
     const EXPORT_KEY: [u8; 32] = *b"meatshell.export.portable.key.01";
 
     // ── Encryption helpers ────────────────────────────────────────────────
@@ -436,29 +463,99 @@ impl ConfigStore {
         String::from_utf8(plain).ok()
     }
 
-    /// Decode readable local ciphertext and mark the result as plaintext. Keep
-    /// undecodable existing blobs unchanged so an unrelated save cannot destroy
-    /// them. Imported blobs are handled more strictly by the import validator.
-    fn decrypt_local_secrets(key: &[u8; 32], cfg: &mut ConfigFile) {
-        for session in &mut cfg.sessions {
-            if let Some(plain) = Self::try_decrypt(key, session.password.as_str()) {
-                session.password = Secret::new(plain);
-            }
-            if let Some(plain) = Self::try_decrypt(key, session.private_key_inline.as_str()) {
-                session.private_key_inline = Secret::new(plain);
-            }
-            for trigger in &mut session.triggers {
-                if let Some(plain) = Self::try_decrypt(key, trigger.response.as_str()) {
-                    trigger.response = Secret::new(plain);
+    // [upstream] 上游在此处定义 decrypt_local_secrets（仅 try_decrypt 本地密钥）；
+    // 其语义被本地 open_config_secrets/open_secret 完全覆盖（后者还处理
+    // enc:exp:v1: 恢复与 lost/recovered 计数），且双方共享同一收尾 `}`，
+    // 无法同时保留，故采用本地版本。
+    /// Open one stored secret in place at load. Values without our prefix
+    /// (legacy plaintext, empty) are left alone; an `enc:v1:` blob that cannot
+    /// be opened — the key was regenerated after a lost/corrupt `secret.key` —
+    /// is cleared and counted, because kept verbatim it would be saved back
+    /// and later used as a literal password. A foreign `enc:exp:v1:` blob
+    /// (stored verbatim by an older version's cross-machine import) is
+    /// recovered with the built-in export key; only a corrupted one is cleared.
+    fn open_secret(key: &[u8; 32], value: &mut Secret, lost: &mut usize, recovered: &mut usize) {
+        if value.as_str().starts_with(Self::EXPORT_PREFIX) {
+            match Self::decrypt_export(value.as_str()) {
+                Some(plain) => {
+                    *value = Secret::new(plain);
+                    // Clear text in the cache, so the caller reseals this field
+                    // with the local key instead of persisting the fixed-key
+                    // blob again.
+                    *recovered += 1;
+                }
+                None => {
+                    *value = Secret::new(String::new());
+                    *lost += 1;
                 }
             }
+            return;
         }
-        if let Some(plain) = Self::try_decrypt(key, cfg.webdav_password.as_str()) {
-            cfg.webdav_password = Secret::new(plain);
+        if !value.as_str().starts_with(Self::ENC_PREFIX) {
+            return;
+        }
+        match Self::try_decrypt(key, value.as_str()) {
+            Some(plain) => *value = Secret::new(plain),
+            None => {
+                *value = Secret::new(String::new());
+                *lost += 1;
+            }
+        }
+    }
+
+    /// Open every stored secret of a whole config in place. Fixed-key blobs
+    /// come back as plain text here, so the caller has to re-seal them with
+    /// this machine's key at the next save — the recovered count is what
+    /// decides whether that extra save is worth it.
+    fn open_config_secrets(
+        key: &[u8; 32],
+        cfg: &mut ConfigFile,
+        lost: &mut usize,
+        recovered: &mut usize,
+    ) {
+        for session in &mut cfg.sessions {
+            Self::open_secret(key, &mut session.password, lost, recovered);
+            Self::open_secret(key, &mut session.private_key_inline, lost, recovered);
+            Self::open_secret(key, &mut session.proxy, lost, recovered);
+            for trigger in &mut session.triggers {
+                Self::open_secret(key, &mut trigger.response, lost, recovered);
+            }
+        }
+        Self::open_secret(key, &mut cfg.webdav_password, lost, recovered);
+        Self::open_secret(key, &mut cfg.ai_api_key, lost, recovered);
+    }
+
+    /// Take the number of secrets that could not be decrypted at load, so the
+    /// UI warns exactly once per process run.
+    pub fn take_lost_secrets(&mut self) -> usize {
+        std::mem::take(&mut self.lost_secrets)
+    }
+
+    /// Take the number of fixed-key (`enc:exp:v1:`) blobs recovered at load, so
+    /// the UI announces the one-time re-encryption exactly once per run.
+    pub fn take_recovered_secrets(&mut self) -> usize {
+        std::mem::take(&mut self.recovered_secrets)
+    }
+
+    /// Clear a value that still carries one of our encryption prefixes after
+    /// every decryption attempt failed (imported from a machine with a
+    /// different key). Used as a literal password, such a blob only ever fails
+    /// confusingly at connect time.
+    fn strip_undecryptable(value: &mut Secret) {
+        let s = value.as_str();
+        if s.starts_with(Self::ENC_PREFIX) || s.starts_with(Self::EXPORT_PREFIX) {
+            *value = Secret::new(String::new());
         }
     }
 
     // ── Key file management ───────────────────────────────────────────────
+
+    fn unix_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
 
     /// Load the 32-byte key from `<config_dir>/secret.key`, or generate and
     /// persist a fresh one.  On Unix the key file is created with mode `0600`
@@ -476,7 +573,32 @@ impl ConfigStore {
                 key.copy_from_slice(&bytes);
                 return Ok(key);
             }
-            anyhow::bail!("secret.key has wrong length; refusing to replace the encryption key");
+            // A truncated or foreign key can no longer decrypt anything it once
+            // encrypted, so overwriting it would silently blank every saved
+            // password.  Keep a copy first so a restore is still possible; if the
+            // backup itself fails we still proceed rather than blocking startup.
+            // The random suffix keeps two corrupt keys from the same second from
+            // overwriting each other.
+            let mut suffix = [0u8; 4];
+            OsRng.fill_bytes(&mut suffix);
+            let backup = key_path.with_file_name(format!(
+                "secret.key.bak-{}-{}",
+                Self::unix_secs(),
+                URL_SAFE_NO_PAD.encode(suffix)
+            ));
+            match fs::copy(&key_path, &backup) {
+                Ok(_) => tracing::warn!(
+                    "secret.key has wrong length — backed up to {} before regenerating",
+                    backup.display()
+                ),
+                Err(e) => tracing::warn!(
+                    "secret.key has wrong length and backing it up to {} failed ({e}) — \
+                     regenerating without a backup",
+                    backup.display()
+                ),
+            }
+        // [upstream] 上游在此处直接 bail（"secret.key has wrong length; refusing to replace the encryption key"）；
+        // 本地采用备份旧密钥后重新生成的策略（更完整，可恢复），语义不可兼得，故保留本地实现。
         }
 
         if fs::read_to_string(config_dir.join("sessions.json"))
@@ -485,13 +607,30 @@ impl ConfigStore {
         }
         let mut key = [0u8; 32];
         OsRng.fill_bytes(&mut key);
-        fs::write(&key_path, &key)
-            .with_context(|| format!("failed to write {}", key_path.display()))?;
+        // Create with the final permissions up front: writing first and
+        // chmod-ing after leaves a window where the key is world-readable.
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
+            use std::io::Write as _;
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&key_path)
+                .with_context(|| format!("failed to create {}", key_path.display()))?;
+            file.write_all(&key)
+                .with_context(|| format!("failed to write {}", key_path.display()))?;
+            // `.mode()` only applies on creation; force the bits in case the
+            // file already existed with looser permissions.
             fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600))
                 .with_context(|| format!("failed to set permissions on {}", key_path.display()))?;
+        }
+        #[cfg(not(unix))]
+        {
+            fs::write(&key_path, &key)
+                .with_context(|| format!("failed to write {}", key_path.display()))?;
         }
         tracing::info!("generated new encryption key at {}", key_path.display());
         Ok(key)
@@ -524,11 +663,34 @@ impl ConfigStore {
         let key = Self::load_or_create_key(&config_dir)?;
 
         let mut migrated = false;
+        // Original on-disk file kept aside when some encrypted secrets cannot
+        // be opened (a regenerated `secret.key`): the cache clears those
+        // values, so the next save would erase the only copy of them.
+        let mut pre_rekey: Option<String> = None;
+        // Secrets that carried our encryption prefix but could not be opened
+        // with the current key (a regenerated `secret.key`); surfaced once to
+        // the user instead of silently becoming literal passwords.
+        let mut lost_secrets = 0usize;
+        // Fixed-key blobs recovered at load: they come back as plain text, so
+        // they must be re-sealed under the local key or the file keeps holding
+        // the public export key's format.
+        let mut recovered_secrets = 0usize;
         let cache = if path.exists() {
             let raw = fs::read_to_string(&path)
                 .with_context(|| format!("failed to read {}", path.display()))?;
             match serde_json::from_str::<ConfigFile>(&raw) {
                 Ok(mut cfg) => {
+                    // Decrypt any encrypted passwords; leave legacy plaintext
+                    // values untouched (they will be encrypted on next save).
+                    Self::open_config_secrets(
+                        &key,
+                        &mut cfg,
+                        &mut lost_secrets,
+                        &mut recovered_secrets,
+                    );
+                    if lost_secrets > 0 {
+                        pre_rekey = Some(raw.clone());
+                    }
                     // Give legacy port forwards a stable id so the runtime can
                     // start/stop them individually.
                     for session in &mut cfg.sessions {
@@ -539,7 +701,6 @@ impl ConfigStore {
                             }
                         }
                     }
-                    Self::decrypt_local_secrets(&key, &mut cfg);
                     // Clean up any duplicate history accumulated before #113,
                     // keeping the last (most recent) occurrence of each command.
                     dedup_keep_last(&mut cfg.command_history);
@@ -567,17 +728,52 @@ impl ConfigStore {
             backup_dir,
             cache,
             key,
+            lost_secrets,
+            recovered_secrets,
         };
         drop(load_lock);
+        // If any secret could not be opened, the save below may overwrite the
+        // original encrypted blobs with the cleared values; keep an archive so
+        // they stay recoverable if the old key turns up later.
+        if let Some(original) = pre_rekey {
+            Self::archive_pre_rekey(&store.path, &original);
+        }
         store.apply_ssh_keepalive();
         // Persist the migration so it runs exactly once (and so a later opt-out —
         // e.g. turning the welcome sidebar back off — isn't reverted next launch).
-        if migrated {
+        // The recovered fixed-key blobs ride along: the cache now holds plain
+        // text, and the file still holds the old format. Best effort — if the
+        // write fails they are re-opened and re-counted at the next launch.
+        if migrated || store.recovered_secrets > 0 {
             if let Err(e) = store.save() {
-                tracing::warn!("failed to persist default-layout migration: {e:#}");
+                tracing::warn!("failed to persist config migration: {e:#}");
             }
         }
         Ok(store)
+    }
+
+    /// Archive the original on-disk configuration next to it
+    /// (`sessions.json.pre-rekey`) before the cleared cache overwrites it.
+    /// Best effort — an unwritable backup still loses nothing beyond what the
+    /// overwrite itself would lose.
+    fn archive_pre_rekey(path: &Path, original: &str) {
+        let backup = path.with_extension("json.pre-rekey");
+        if let Err(e) = fs::write(&backup, original) {
+            tracing::warn!(
+                "failed to archive undecodable secrets to {}: {e}",
+                backup.display()
+            );
+            return;
+        }
+        // The archive is a verbatim copy of the live config (encrypted
+        // credentials included): it must not sit at the 0644 default that
+        // `fs::write` gives it, or it outlives the key rotation in a mode
+        // others can read.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&backup, fs::Permissions::from_mode(0o600));
+        }
     }
 
     fn config_path() -> Result<PathBuf> {
@@ -1000,6 +1196,15 @@ impl ConfigStore {
         self.cache.json_format_disabled = !enabled;
     }
 
+    /// Whether the built-in SFTP editor paints the syntax-highlight overlay.
+    pub fn editor_highlight_enabled(&self) -> bool {
+        !self.cache.editor_highlight_disabled
+    }
+
+    pub fn set_editor_highlight_enabled(&mut self, enabled: bool) {
+        self.cache.editor_highlight_disabled = !enabled;
+    }
+
     /// Global default for session logging (#265).
     pub fn session_log_enabled(&self) -> bool {
         self.cache.session_log_enabled
@@ -1050,6 +1255,9 @@ impl ConfigStore {
     }
 
     pub fn add_output_highlight_rule(&mut self, mut rule: OutputHighlightRule) {
+        if rule.id.trim().is_empty() {
+            rule.id = Uuid::new_v4().to_string();
+        }
         rule.pattern = rule.pattern.trim().to_string();
         rule.color = normalize_highlight_color(&rule.color).to_string();
         self.cache.output_highlight_rules.push(rule);
@@ -1065,6 +1273,374 @@ impl ConfigStore {
         if let Some(rule) = self.cache.output_highlight_rules.get_mut(index) {
             rule.enabled = enabled;
         }
+    }
+
+    /// Serialize the current custom highlight rules for export as pretty JSON.
+    /// The emitted shape is a bare `[OutputHighlightRule, …]` array; the
+    /// importer also accepts a `{ "output_highlight_rules": [...] }` wrapper so
+    /// users can swap rule snippets in and out of `sessions.json` freely.
+    pub fn export_output_highlight_rules(&self) -> Result<String> {
+        serde_json::to_string_pretty(&self.cache.output_highlight_rules)
+            .context("failed to serialize highlight rules")
+    }
+
+    /// Import highlight rules from a JSON export (array or wrapped object).
+    /// Returns `(imported, updated, skipped)`:
+    ///   - `imported` — rules added to the list (respects the 128 cap),
+    ///   - `updated`  — rules merged into an existing rule (same id, falling
+    ///     back to a content-signature match for legacy un-ided rules),
+    ///   - `skipped`  — entries rejected by validation or by a malformed
+    ///     shape (a bad entry never aborts the batch).
+    pub fn import_output_highlight_rules(&mut self, json: &str) -> Result<(usize, usize, usize)> {
+        // Parse entry by entry: one typo'd field in a hand-edited file should
+        // drop that rule, not the whole import.
+        fn parse_rules(entries: Vec<serde_json::Value>) -> (Vec<OutputHighlightRule>, usize) {
+            let mut rules = Vec::new();
+            let mut malformed = 0usize;
+            for entry in entries {
+                match serde_json::from_value(entry) {
+                    Ok(rule) => rules.push(rule),
+                    Err(e) => {
+                        tracing::warn!("highlight import: skipping malformed rule: {e}");
+                        malformed += 1;
+                    }
+                }
+            }
+            (rules, malformed)
+        }
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(json).context("highlight import is not valid JSON")?;
+        let (rules, malformed) = match parsed {
+            serde_json::Value::Array(entries) => parse_rules(entries),
+            serde_json::Value::Object(map) => {
+                let entries = map
+                    .get("output_highlight_rules")
+                    .and_then(|value| value.as_array())
+                    .context(
+                        "highlight import object is missing an output_highlight_rules array",
+                    )?;
+                parse_rules(entries.clone())
+            }
+            _ => anyhow::bail!("highlight import must be a JSON array or object"),
+        };
+
+        const MAX_RULES: usize = 128;
+        let mut imported = 0usize;
+        let mut updated = 0usize;
+        let mut skipped = malformed;
+
+        for mut rule in rules {
+            // Validate before touching state: blank patterns and broken
+            // regexes are skipped (the app-layer dialog reports live errors with
+            // translated messages; here we only need the accept/reject decision).
+            if rule.pattern.trim().is_empty() || rule.pattern.chars().count() > 512 {
+                skipped += 1;
+                continue;
+            }
+            if rule.regex
+                && regex::RegexBuilder::new(&rule.pattern)
+                    .case_insensitive(!rule.case_sensitive)
+                    .build()
+                    .is_err()
+            {
+                skipped += 1;
+                continue;
+            }
+            rule.pattern = rule.pattern.trim().to_string();
+            rule.color = normalize_highlight_color(&rule.color).to_string();
+            // Remember whether the incoming rule carried an id BEFORE we mint
+            // one, so a legacy (id-less) export stays idempotent across repeat
+            // imports even after the stored copy gains an id on first import.
+            let incoming_had_id = !rule.id.trim().is_empty();
+            if rule.id.trim().is_empty() {
+                rule.id = Uuid::new_v4().to_string();
+            }
+
+            // Merge into an existing rule when the id matches; a legacy rule
+            // without an id falls back to a content-signature match so re-import
+            // of an old export stays idempotent.
+            let existing = self.cache.output_highlight_rules.iter_mut().find(|r| {
+                r.id == rule.id
+                    || (!incoming_had_id
+                        && r.pattern == rule.pattern
+                        && r.regex == rule.regex
+                        && r.case_sensitive == rule.case_sensitive
+                        && r.whole_line == rule.whole_line
+                        && r.color == rule.color)
+            });
+            if let Some(existing) = existing {
+                // Same id (or same content for a legacy rule) means the import
+                // updates this rule: replace the whole content, not just the
+                // enabled flag, so editing an exported pattern and re-importing
+                // actually changes the pattern. A legacy content-match keeps the
+                // stored id so the rule's identity survives the import.
+                let keep_id = !incoming_had_id && !existing.id.is_empty();
+                let id = existing.id.clone();
+                *existing = rule;
+                if keep_id {
+                    existing.id = id;
+                }
+                updated += 1;
+                continue;
+            }
+
+            if self.cache.output_highlight_rules.len() >= MAX_RULES {
+                skipped += 1;
+                continue;
+            }
+            self.cache.output_highlight_rules.push(rule);
+            imported += 1;
+        }
+
+        Ok((imported, updated, skipped))
+    }
+
+    // ── Action links ──────────────────────────────────────────────────────
+
+    /// Whether terminal action links are enabled. macOS is excluded until the
+    /// modifier-click platform gap is resolved (see `action_links_platform_ok`).
+    pub fn action_links_enabled(&self) -> bool {
+        self.cache.action_links_enabled && action_links_platform_ok()
+    }
+
+    pub fn set_action_links_enabled(&mut self, enabled: bool) {
+        self.cache.action_links_enabled = enabled;
+    }
+
+    pub fn action_links_ipv4(&self) -> bool {
+        self.cache.action_links_enabled && self.cache.action_links_ipv4
+    }
+
+    /// Raw per-kind preference (ignores the master switch) — used to restore
+    /// the settings-panel checkbox state independently of the master toggle.
+    pub fn action_links_ipv4_pref(&self) -> bool {
+        self.cache.action_links_ipv4
+    }
+
+    pub fn action_links_host_port_pref(&self) -> bool {
+        self.cache.action_links_host_port
+    }
+
+    pub fn action_links_url_pref(&self) -> bool {
+        self.cache.action_links_url
+    }
+
+    pub fn set_action_links_ipv4(&mut self, enabled: bool) {
+        self.cache.action_links_ipv4 = enabled;
+    }
+
+    pub fn action_links_host_port(&self) -> bool {
+        self.cache.action_links_enabled && self.cache.action_links_host_port
+    }
+
+    pub fn set_action_links_host_port(&mut self, enabled: bool) {
+        self.cache.action_links_host_port = enabled;
+    }
+
+    pub fn action_links_url(&self) -> bool {
+        self.cache.action_links_enabled && self.cache.action_links_url
+    }
+
+    pub fn set_action_links_url(&mut self, enabled: bool) {
+        self.cache.action_links_url = enabled;
+    }
+
+    // ── Terminal search ───────────────────────────────────────────────────
+
+    pub fn search_history_mode(&self) -> bool {
+        self.cache.search_history_mode
+    }
+
+    pub fn set_search_history_mode(&mut self, enable: bool) {
+        self.cache.search_history_mode = enable;
+    }
+
+    pub fn search_history_limit(&self) -> u32 {
+        if self.cache.search_history_limit == 0 {
+            5000
+        } else {
+            self.cache.search_history_limit
+        }
+    }
+
+    // ── Large-output backpressure ─────────────────────────────────────────
+
+    pub fn output_backpressure_enabled(&self) -> bool {
+        self.cache.output_backpressure_enabled
+    }
+
+    pub fn set_output_backpressure_enabled(&mut self, enabled: bool) {
+        self.cache.output_backpressure_enabled = enabled;
+    }
+
+    // ── SFTP transfer queue ───────────────────────────────────────────────
+
+    pub fn sftp_queue_concurrency(&self) -> u32 {
+        // `0` means "never set" (legacy configs / serde default) → the UI
+        // default of 2, so an untouched install doesn't silently drop to one
+        // worker.
+        match self.cache.sftp_queue_concurrency {
+            0 => 2,
+            n => n.clamp(1, 4),
+        }
+    }
+
+    pub fn set_sftp_queue_concurrency(&mut self, workers: u32) {
+        self.cache.sftp_queue_concurrency = workers;
+    }
+
+    pub fn sftp_queue_rate_limit_kbps(&self) -> u32 {
+        self.cache.sftp_queue_rate_limit_kbps
+    }
+
+    pub fn set_sftp_queue_rate_limit_kbps(&mut self, kbps: u32) {
+        self.cache.sftp_queue_rate_limit_kbps = kbps;
+    }
+
+    pub fn sftp_queue_dedup(&self) -> &str {
+        match self.cache.sftp_queue_dedup.as_str() {
+            "overwrite" | "skip" | "rename" => &self.cache.sftp_queue_dedup,
+            _ => "ask",
+        }
+    }
+
+    pub fn set_sftp_queue_dedup(&mut self, policy: String) {
+        self.cache.sftp_queue_dedup = match policy.as_str() {
+            "overwrite" | "skip" | "rename" => policy,
+            _ => "ask".to_string(),
+        };
+    }
+
+    pub fn sftp_queue_preserve_mtime(&self) -> bool {
+        self.cache.sftp_queue_preserve_mtime
+    }
+
+    pub fn set_sftp_queue_preserve_mtime(&mut self, preserve: bool) {
+        self.cache.sftp_queue_preserve_mtime = preserve;
+    }
+
+    // ── Grace auto-reconnect (#P3-H) ──────────────────────────────────────
+    pub fn auto_reconnect_enabled(&self) -> bool {
+        self.cache.auto_reconnect_enabled
+    }
+
+    pub fn set_auto_reconnect_enabled(&mut self, enabled: bool) {
+        self.cache.auto_reconnect_enabled = enabled;
+    }
+
+    pub fn auto_reconnect_max_attempts(&self) -> u32 {
+        match self.cache.auto_reconnect_max_attempts {
+            0 => 5,
+            n => n.clamp(1, 50),
+        }
+    }
+
+    pub fn set_auto_reconnect_max_attempts(&mut self, n: u32) {
+        self.cache.auto_reconnect_max_attempts = n;
+    }
+
+    pub fn auto_reconnect_interval_secs(&self) -> u64 {
+        match self.cache.auto_reconnect_interval_secs {
+            0 => 5,
+            n => n.clamp(2, 3600),
+        }
+    }
+
+    pub fn set_auto_reconnect_interval_secs(&mut self, n: u64) {
+        self.cache.auto_reconnect_interval_secs = n;
+    }
+
+    /// Bookmarked paths for one server, most-recent last. Empty slice when the
+    /// server has no bookmarks yet. Keys are trimmed like `add_sftp_bookmark`
+    /// stores them, so lookups never miss on stray whitespace.
+    pub fn sftp_bookmarks(&self, server: &str) -> &[String] {
+        let server = server.trim();
+        self.cache
+            .sftp_bookmarks
+            .iter()
+            .find(|g| g.server == server)
+            .map(|g| g.paths.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn add_sftp_bookmark(&mut self, server: String, path: String) {
+        let server = server.trim().to_string();
+        let path = path.trim().to_string();
+        if server.is_empty() || path.is_empty() {
+            return;
+        }
+        const CAP: usize = 64;
+        if let Some(group) = self
+            .cache
+            .sftp_bookmarks
+            .iter_mut()
+            .find(|g| g.server == server)
+        {
+            group.paths.retain(|b| b != &path);
+            group.paths.push(path);
+            let len = group.paths.len();
+            if len > CAP {
+                group.paths.drain(0..len - CAP);
+            }
+        } else {
+            self.cache.sftp_bookmarks.push(SftpBookmarkGroup {
+                server,
+                paths: vec![path],
+            });
+        }
+    }
+
+    pub fn remove_sftp_bookmark(&mut self, server: &str, path: &str) {
+        let server = server.trim();
+        let path = path.trim();
+        let Some(group) = self
+            .cache
+            .sftp_bookmarks
+            .iter()
+            .position(|g| g.server == server)
+        else {
+            return;
+        };
+        self.cache.sftp_bookmarks[group]
+            .paths
+            .retain(|b| b != path);
+        // Drop the whole group once its last path is removed so the config
+        // doesn't accumulate empty per-server entries.
+        if self.cache.sftp_bookmarks[group].paths.is_empty() {
+            self.cache.sftp_bookmarks.remove(group);
+        }
+    }
+
+    // ── Command-history length filters ────────────────────────────────────
+
+    pub fn command_history_min_len(&self) -> usize {
+        self.cache.command_history_min_len as usize
+    }
+
+    pub fn set_command_history_min_len(&mut self, min: u32) {
+        self.cache.command_history_min_len = min;
+    }
+
+    pub fn command_history_max_len(&self) -> usize {
+        self.cache.command_history_max_len as usize
+    }
+
+    pub fn set_command_history_max_len(&mut self, max: u32) {
+        self.cache.command_history_max_len = max;
+    }
+
+    /// Whether `raw` is within the configured command-history length window.
+    pub fn command_history_accepts(&self, raw: &str) -> bool {
+        let min = self.command_history_min_len();
+        let max = self.command_history_max_len();
+        if min != 0 && raw.chars().count() < min {
+            return false;
+        }
+        if max != 0 && raw.chars().count() > max {
+            return false;
+        }
+        true
     }
 
     /// Global UI scale in percent (#100). Defaults to 100.
@@ -1317,11 +1893,18 @@ impl ConfigStore {
         &self.cache.command_history
     }
 
-    /// Append a command to the history: skips blanks, de-duplicates globally so
-    /// each command appears once, and re-appends at the end so the most-recently
-    /// used command is always last. Capped so it can't grow without bound (#113).
+    /// Append a command to the history: skips blanks, enforces the configured
+    /// min/max length window, de-duplicates globally so each command appears
+    /// once, and re-appends at the end so the most-recently used command is
+    /// always last. Capped so it can't grow without bound (#113).
     pub fn push_command_history(&mut self, cmd: String) {
-        if cmd.trim().is_empty() {
+        // Filter and store the same trimmed text: `"ls "` and `"ls"` must not
+        // become two separate history entries.
+        let cmd = cmd.trim().to_string();
+        if cmd.is_empty() {
+            return;
+        }
+        if !self.command_history_accepts(&cmd) {
             return;
         }
         // Drop any earlier occurrence, then push → no duplicates and "last used"
@@ -1430,35 +2013,6 @@ impl ConfigStore {
     }
     pub fn set_welcome_collapsed(&mut self, v: bool) {
         self.cache.welcome_collapsed = Some(v);
-    }
-    /// Whether the startup new-version check is enabled (#184).
-    pub fn update_check_enabled(&self) -> bool {
-        !self.cache.update_check_disabled
-    }
-    pub fn set_update_check_enabled(&mut self, enabled: bool) {
-        self.cache.update_check_disabled = !enabled;
-    }
-    /// Update download mirrors; the built-in list until the user edits it.
-    /// Desktop only: headless builds have no `update` module.
-    #[cfg(not(feature = "headless"))]
-    pub fn update_mirrors(&self) -> Vec<String> {
-        self.cache.update_mirrors.clone().unwrap_or_else(|| {
-            crate::update::mirror::DEFAULT_MIRRORS
-                .iter()
-                .map(|s| s.to_string())
-                .collect()
-        })
-    }
-    /// `None` restores the built-in list.
-    pub fn set_update_mirrors(&mut self, mirrors: Option<Vec<String>>) {
-        self.cache.update_mirrors = mirrors;
-    }
-    /// The picked download source (`""` = GitHub); `None` = fastest, automatically.
-    pub fn update_mirror_choice(&self) -> Option<String> {
-        self.cache.update_mirror_choice.clone()
-    }
-    pub fn set_update_mirror_choice(&mut self, choice: Option<String>) {
-        self.cache.update_mirror_choice = choice;
     }
     pub fn mcp_enabled(&self) -> bool {
         self.cache.mcp_enabled
@@ -1587,7 +2141,9 @@ impl ConfigStore {
         if w <= 0.0 {
             default_sftp_width()
         } else {
-            w
+            // A saved width from an older layout can be far below what the
+            // file list can render (#505): clamp rather than show a strip.
+            w.max(300.0)
         }
     }
     pub fn set_sftp_panel_width(&mut self, v: f32) {
@@ -1772,6 +2328,22 @@ impl ConfigStore {
         self.cache.window_width = w;
         self.cache.window_height = h;
     }
+    /// Last window position in logical px; `(0,0)` means unset (use the default).
+    pub fn window_position(&self) -> (f32, f32) {
+        (self.cache.window_x, self.cache.window_y)
+    }
+    pub fn set_window_position(&mut self, x: f32, y: f32) {
+        self.cache.window_x = x;
+        self.cache.window_y = y;
+    }
+    /// Monitor scale factor the last window position was saved under; `0.0`
+    /// means unset (older configs) and the caller falls back to the live scale.
+    pub fn window_scale(&self) -> f32 {
+        self.cache.window_scale
+    }
+    pub fn set_window_scale(&mut self, s: f32) {
+        self.cache.window_scale = s;
+    }
 
     /// Collapse the SFTP panel on startup (default false) (#78).
     pub fn collapse_sftp_default(&self) -> bool {
@@ -1839,6 +2411,79 @@ impl ConfigStore {
             remote_path.trim().trim_start_matches('/').to_string()
         };
         self.cache.webdav_accept_invalid_certs = accept_invalid_certs;
+    }
+
+    // ── AI assistant chat settings ────────────────────────────────────────
+
+    pub fn ai_base_url(&self) -> &str {
+        &self.cache.ai_base_url
+    }
+
+    pub fn ai_model(&self) -> &str {
+        &self.cache.ai_model
+    }
+
+    pub fn ai_api_key(&self) -> &str {
+        self.cache.ai_api_key.as_str()
+    }
+
+    pub fn set_ai_settings(&mut self, base_url: String, api_key: String, model: String) {
+        self.cache.ai_base_url = base_url.trim().trim_end_matches('/').to_string();
+        self.cache.ai_api_key = Secret::new(api_key);
+        self.cache.ai_model = model.trim().to_string();
+    }
+
+    pub fn ai_panel_open(&self) -> bool {
+        self.cache.ai_panel_open
+    }
+
+    pub fn set_ai_panel_open(&mut self, open: bool) {
+        self.cache.ai_panel_open = open;
+    }
+
+    pub fn ai_panel_collapsed(&self) -> bool {
+        self.cache.ai_panel_collapsed
+    }
+
+    pub fn set_ai_panel_collapsed(&mut self, collapsed: bool) {
+        self.cache.ai_panel_collapsed = collapsed;
+    }
+
+    pub fn ai_panel_width(&self) -> f32 {
+        let width = self.cache.ai_panel_width;
+        if width <= 0.0 {
+            default_ai_panel_width()
+        } else {
+            width
+        }
+    }
+
+    pub fn set_ai_panel_width(&mut self, width: f32) {
+        self.cache.ai_panel_width = width;
+    }
+
+    pub fn ai_panel_height(&self) -> f32 {
+        let height = self.cache.ai_panel_height;
+        if height <= 0.0 {
+            default_ai_panel_height()
+        } else {
+            height
+        }
+    }
+
+    pub fn set_ai_panel_height(&mut self, height: f32) {
+        self.cache.ai_panel_height = height;
+    }
+
+    pub fn ai_panel_dock(&self) -> String {
+        match self.cache.ai_panel_dock.trim() {
+            "left" | "right" | "top" | "bottom" => self.cache.ai_panel_dock.clone(),
+            _ => "left".into(),
+        }
+    }
+
+    pub fn set_ai_panel_dock(&mut self, dock: String) {
+        self.cache.ai_panel_dock = dock;
     }
 
     /// Per-edge stacks of simultaneously-expanded docked panels (#dock-stack).
@@ -1918,7 +2563,9 @@ impl ConfigStore {
             self.cache.collapsed_session_groups = Some(groups);
         }
 
-        let groups = self.cache.collapsed_session_groups.as_mut().unwrap();
+        // The `is_none()` branch above guarantees Some here; keep the expect
+        // explicit so a future refactor that drops the guard fails loudly.
+        let groups = self.cache.collapsed_session_groups.as_mut().expect("collapsed_session_groups initialised above");
         groups.retain(|group| group != name);
         if collapsed {
             groups.push(name.to_string());
@@ -2010,11 +2657,11 @@ impl ConfigStore {
     }
 
     pub fn save(&self) -> Result<()> {
+        // Build a disk copy where every non-empty credential is encrypted.
         let _lock = lock_config(&self.path)?;
         if read_config_snapshot(&self.path)? != *self.disk_snapshot.borrow() {
             anyhow::bail!("Configuration changed in another process; reload before saving. Existing connections were preserved.");
         }
-        // Build a disk copy where every non-empty password is encrypted.
         let mut disk = self.cache.clone();
         for session in &mut disk.sessions {
             if !session.password.is_empty()
@@ -2028,6 +2675,12 @@ impl ConfigStore {
             {
                 let enc = Self::encrypt(&self.key, session.private_key_inline.as_str())?;
                 session.private_key_inline = Secret::new(enc);
+            }
+            if !session.proxy.is_empty()
+                && !session.proxy.as_str().starts_with(Self::ENC_PREFIX)
+            {
+                let enc = Self::encrypt(&self.key, session.proxy.as_str())?;
+                session.proxy = Secret::new(enc);
             }
             for trigger in &mut session.triggers {
                 if !trigger.response.is_empty()
@@ -2043,6 +2696,10 @@ impl ConfigStore {
         {
             let enc = Self::encrypt(&self.key, disk.webdav_password.as_str())?;
             disk.webdav_password = Secret::new(enc);
+        }
+        if !disk.ai_api_key.is_empty() && !disk.ai_api_key.as_str().starts_with(Self::ENC_PREFIX) {
+            let enc = Self::encrypt(&self.key, disk.ai_api_key.as_str())?;
+            disk.ai_api_key = Secret::new(enc);
         }
         let raw = serde_json::to_string_pretty(&disk)?;
         // Write to a sibling temp file then rename — cheap atomicity.
@@ -2116,23 +2773,9 @@ impl ConfigStore {
 
     // ── Portable export / import (issue #46) ──────────────────────────────
 
-    /// Encrypt a password with the portable export key → `"enc:exp:v1:<b64>"`.
-    fn encrypt_export(plaintext: &str) -> Result<String> {
-        let cipher = ChaCha20Poly1305::new((&Self::EXPORT_KEY).into());
-        let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
-        let ciphertext = cipher
-            .encrypt(&nonce, plaintext.as_bytes())
-            .map_err(|e| anyhow::anyhow!("export encrypt error: {e}"))?;
-        let mut blob = nonce.to_vec();
-        blob.extend_from_slice(&ciphertext);
-        Ok(format!(
-            "{}{}",
-            Self::EXPORT_PREFIX,
-            URL_SAFE_NO_PAD.encode(&blob)
-        ))
-    }
-
-    /// Decrypt a value produced by [`Self::encrypt_export`]; `None` if it isn't one.
+    /// Decrypt a `enc:exp:v1:` value written by a legacy portable export
+    /// (fixed-key format, pre-Argon2id bundles); `None` if it isn't one.
+    /// Read-only compatibility: new exports never produce this prefix.
     fn decrypt_export(s: &str) -> Option<String> {
         let b64 = s.strip_prefix(Self::EXPORT_PREFIX)?;
         let blob = URL_SAFE_NO_PAD.decode(b64).ok()?;
@@ -2146,43 +2789,218 @@ impl ConfigStore {
         String::from_utf8(plain).ok()
     }
 
-    /// Export all sessions to a portable JSON file. Passwords are re-encrypted
-    /// with the built-in export key; everything else stays plaintext so the
-    /// file is human-readable and editable. Returns the number of sessions.
-    pub fn export_json(&self) -> Result<(String, usize)> {
-        let mut out = ExportFile {
-            meatshell_export: 1,
-            sessions: self.cache.sessions.clone(),
-        };
-        for s in &mut out.sessions {
-            // `cache` holds plaintext passwords; obfuscate with the export key.
-            if !s.password.is_empty() {
-                let enc = Self::encrypt_export(s.password.as_str())?;
-                s.password = Secret::new(enc);
-            }
-            if !s.private_key_inline.is_empty() {
-                let enc = Self::encrypt_export(s.private_key_inline.as_str())?;
-                s.private_key_inline = Secret::new(enc);
-            }
-            for trigger in &mut s.triggers {
-                if !trigger.response.is_empty() {
-                    let enc = Self::encrypt_export(trigger.response.as_str())?;
-                    trigger.response = Secret::new(enc);
-                }
-            }
-            // `last_used` is machine-local noise — don't carry it across.
-            s.last_used = None;
+
+    /// Decode a GBK/GB2312 byte stream only when the bytes actually look
+    /// like Chinese text: every character is a pair of high bytes, so an
+    /// ANSI export containing CJK has several adjacent ≥0x80 pairs, while
+    /// CP1252 text has only isolated accents (é, ß, …) between ASCII. The
+    /// clean-decode requirement rejects the remaining Western byte
+    /// sequences, which end up dangling or hitting invalid trail bytes
+    /// (`%`, `#`, `=`, CR — the very separators MobaXterm writes).
+    fn decode_gbk(bytes: &[u8]) -> Option<String> {
+        let high = bytes.iter().filter(|b| **b >= 0x80).count();
+        let pairs = bytes
+            .windows(2)
+            .filter(|w| w[0] >= 0x80 && w[1] >= 0x80)
+            .count();
+        if pairs < 2 || pairs * 5 < high * 2 {
+            return None;
         }
-        Ok((serde_json::to_string_pretty(&out)?, out.sessions.len()))
+        encoding_rs::GBK
+            .decode_without_bom_handling_and_without_replacement(bytes)
+            .map(|value| value.into_owned())
     }
 
-    /// Export all sessions to a portable JSON file. Passwords are re-encrypted
-    /// with the built-in export key; everything else stays plaintext so the
-    /// file is human-readable and editable. Returns the number of sessions.
-    pub fn export_to(&self, path: &Path) -> Result<usize> {
-        let (raw, count) = self.export_json()?;
+    // ── Passphrase-encrypted portable bundle (#P3-I) ──────────────────────
+    //
+    // Unlike the fixed-key export above (obfuscation only), a *bundle* is
+    // sealed with a key derived from a user passphrase via Argon2id, so it can
+    // be carried between machines or pushed to WebDAV without exposing secrets.
+
+    /// Derive a 32-byte AEAD key from `passphrase` + `salt` using Argon2id.
+    fn bundle_key(passphrase: &str, salt: &[u8]) -> Result<zeroize::Zeroizing<[u8; 32]>> {
+        use argon2::{Algorithm, Argon2, Params, Version};
+        // m=64 MiB, t=3, p=1 — a deliberate cost for a rarely-run operation.
+        let params = Params::new(64 * 1024, 3, 1, Some(32))
+            .map_err(|e| anyhow::anyhow!("invalid Argon2 params: {e}"))?;
+        let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+        let mut material = zeroize::Zeroizing::new([0u8; 32]);
+        argon
+            .hash_password_into(passphrase.as_bytes(), salt, &mut *material)
+            .map_err(|e| anyhow::anyhow!("Argon2 KDF failed: {e}"))?;
+        Ok(material)
+    }
+
+    /// Serialize the current config for bundling. Cheap and store-bound, so it
+    /// runs on the UI thread; the expensive half is [`Self::seal_bundle`].
+    pub fn bundle_payload(&self) -> Result<Vec<u8>> {
+        Ok(serde_json::to_vec(&self.cache)?)
+    }
+
+    /// Seal an already-serialized payload (sessions + settings, secrets in
+    /// plaintext) into a passphrase-encrypted bundle string:
+    /// `base64url("MPB1" ‖ salt ‖ nonce ‖ ct)`. No store access, so the Argon2
+    /// KDF and the AEAD can run on a worker thread while the UI stays live.
+    pub fn seal_bundle(passphrase: &str, payload: &[u8]) -> Result<String> {
+        use rand::RngCore as _;
+        if passphrase.is_empty() {
+            return Err(anyhow::anyhow!("empty passphrase"));
+        }
+        let mut salt = [0u8; 16];
+        OsRng.fill_bytes(&mut salt);
+        let key = Self::bundle_key(passphrase, &salt)?;
+        let cipher = ChaCha20Poly1305::new((&*key).into());
+        let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
+        let ct = cipher
+            .encrypt(&nonce, payload)
+            .map_err(|e| anyhow::anyhow!("bundle encrypt error: {e}"))?;
+        let mut blob = Vec::with_capacity(4 + salt.len() + nonce.len() + ct.len());
+        blob.extend_from_slice(b"MPB1");
+        blob.extend_from_slice(&salt);
+        blob.extend_from_slice(&nonce);
+        blob.extend_from_slice(&ct);
+        Ok(URL_SAFE_NO_PAD.encode(&blob))
+    }
+
+    /// Seal the entire config into a bundle (UI-thread convenience wrapper over
+    /// [`Self::bundle_payload`] + [`Self::seal_bundle`]).
+    pub fn export_bundle(&self, passphrase: &str) -> Result<String> {
+        Self::seal_bundle(passphrase, &self.bundle_payload()?)
+    }
+
+    /// Open a bundle into a config without touching the store — the
+    /// worker-thread half of a bundle import (the UI-thread half is
+    /// [`Self::apply_bundle`]).
+    pub fn decrypt_bundle(passphrase: &str, pack: &str) -> Result<ConfigFile> {
+        let blob = URL_SAFE_NO_PAD
+            .decode(pack.trim())
+            .map_err(|_| anyhow::anyhow!("not a valid bundle"))?;
+        if blob.len() < 4 + 16 + 12 || !blob.starts_with(b"MPB1") {
+            return Err(anyhow::anyhow!("not a meatshell bundle"));
+        }
+        let salt = &blob[4..20];
+        let (nonce_bytes, ct) = blob[20..].split_at(12);
+        let key = Self::bundle_key(passphrase, salt)?;
+        let cipher = ChaCha20Poly1305::new((&*key).into());
+        let nonce = chacha20poly1305::Nonce::from_slice(nonce_bytes);
+        let plain = cipher
+            .decrypt(nonce, ct)
+            .map_err(|_| anyhow::anyhow!("wrong passphrase or corrupt bundle"))?;
+        Ok(serde_json::from_slice(&plain)?)
+    }
+
+    /// Replace the current config with a decrypted bundle. The outgoing config
+    /// file is copied to `<name>.pre-bundle` first: a bundle that decrypts
+    /// cleanly but is not the one the user meant should still be recoverable.
+    pub fn apply_bundle(&mut self, cfg: ConfigFile) -> Result<usize> {
+        let n = cfg.sessions.len();
+        if self.path.exists() {
+            let backup = self.path.with_extension("json.pre-bundle");
+            if let Err(e) = fs::copy(&self.path, &backup) {
+                tracing::warn!("config backup before bundle import failed: {e}");
+            }
+        }
+        self.cache = cfg;
+        self.save()?;
+        Ok(n)
+    }
+
+    /// Export quick commands + group names to a portable JSON string. No
+    /// secrets are involved, so (unlike [`Self::export_json`]) the file stays
+    /// plaintext. Returns the number of commands.
+    pub fn quick_commands_export_json(&self) -> Result<(String, usize)> {
+        let out = QuickCommandsExportFile {
+            meatshell_quick_commands: 1,
+            commands: self.cache.quick_commands.clone(),
+            groups: self.cache.quick_groups.clone(),
+        };
+        Ok((serde_json::to_string_pretty(&out)?, out.commands.len()))
+    }
+
+    /// Export quick commands to a portable JSON file at a user-chosen path.
+    pub fn quick_commands_export_to(&self, path: &Path) -> Result<usize> {
+        let (raw, count) = self.quick_commands_export_json()?;
         fs::write(path, raw).with_context(|| format!("failed to write {}", path.display()))?;
         Ok(count)
+    }
+
+    /// Import quick commands from a MeatShell export (wrapper object) or a
+    /// bare `QuickCommand` array. Merge semantics: blank name/command entries
+    /// and exact name+command+group duplicates are skipped; the file's
+    /// `groups` list (empty-group placeholders) is merged into the group
+    /// names. The store is saved if anything changed. Returns `(added,
+    /// skipped)`.
+    pub fn quick_commands_import_json(&mut self, raw: &str) -> Result<(usize, usize)> {
+        let (commands, groups) = match serde_json::from_str::<QuickCommandsExportFile>(raw) {
+            Ok(file) => (file.commands, file.groups),
+            Err(wrapper_error) => {
+                // Fall back to a bare array so hand-written / third-party
+                // lists import without the version wrapper.
+                let commands = serde_json::from_str::<Vec<QuickCommand>>(raw).with_context(
+                    || {
+                        format!(
+                            "not a valid MeatShell quick-commands export file; MeatShell parser: {wrapper_error}"
+                        )
+                    },
+                )?;
+                (commands, Vec::new())
+            }
+        };
+
+        let mut added = 0usize;
+        let mut skipped = 0usize;
+        for c in commands {
+            // Same validation as the interactive Add flow: trimmed name/group,
+            // non-blank name + command.
+            let name = c.name.trim().to_string();
+            let group = c.group.trim().to_string();
+            if name.is_empty() || c.command.trim().is_empty() {
+                skipped += 1;
+                continue;
+            }
+            // Dedup against the growing list, so repeats inside the file
+            // itself are skipped too.
+            let dup = self.cache.quick_commands.iter().any(|x| {
+                x.name == name && x.command == c.command && x.group == group
+            });
+            if dup {
+                skipped += 1;
+                continue;
+            }
+            // Same ceiling as the highlight-rule import: a huge file must not
+            // bloat the config (and the menu) without bound.
+            if self.cache.quick_commands.len() >= 128 {
+                skipped += 1;
+                continue;
+            }
+            self.cache.quick_commands.push(QuickCommand {
+                name,
+                command: c.command,
+                group,
+                send_enter: c.send_enter,
+            });
+            added += 1;
+        }
+        // Empty groups only exist in `quick_groups`; groups referenced by
+        // commands are derived by the model itself.
+        let groups_before = self.cache.quick_groups.len();
+        for g in &groups {
+            self.add_quick_group(g.clone());
+        }
+        // Same trade-off as `import_json`: on save failure the cache already
+        // holds the merged entries (a later save persists them); the error is
+        // surfaced to the user via the hint.
+        if added > 0 || self.cache.quick_groups.len() != groups_before {
+            self.save()?;
+        }
+        Ok((added, skipped))
+    }
+
+    /// Import quick commands from a MeatShell export file at a user path.
+    pub fn quick_commands_import_from(&mut self, path: &Path) -> Result<(usize, usize)> {
+        let raw = fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        self.quick_commands_import_json(&raw)
     }
 }
 
@@ -2207,6 +3025,39 @@ mod tests {
             disk_snapshot: std::cell::RefCell::new(None),
             cache: ConfigFile::default(),
             key: [7u8; 32],
+            lost_secrets: 0,
+            recovered_secrets: 0,
+        }
+    }
+
+    /// One credential encrypted exactly like the removed legacy writer did:
+    /// `enc:exp:v1:` = ChaCha20-Poly1305 under the built-in (fixed) export key.
+    /// Pins the reader against that format — if the key or construction ever
+    /// changes, the calling test fails deliberately.
+    fn enc_exp_v1_fixture(plain: &str) -> String {
+        let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
+        let mut blob = nonce.to_vec();
+        blob.extend_from_slice(
+            &ChaCha20Poly1305::new((&ConfigStore::EXPORT_KEY).into())
+                .encrypt(&nonce, plain.as_bytes())
+                .unwrap(),
+        );
+        format!("enc:exp:v1:{}", URL_SAFE_NO_PAD.encode(&blob))
+    }
+
+    /// A store seeded like a brand-new install. `temp_store` uses the derived
+    /// `Default`, which misses the `default_true` serde markers; tests that
+    /// assert default-ON behaviour must start from `fresh_config`.
+    fn fresh_store() -> ConfigStore {
+        let path = std::env::temp_dir().join(format!("ms-test-{}.json", Uuid::new_v4()));
+        ConfigStore {
+            path,
+            backup_dir: None,
+            cache: fresh_config(),
+            disk_snapshot: std::cell::RefCell::new(None),
+            key: [7u8; 32],
+            lost_secrets: 0,
+            recovered_secrets: 0,
         }
     }
 
@@ -2721,6 +3572,8 @@ mod tests {
                 ..ConfigFile::default()
             },
             key: [7u8; 32],
+            lost_secrets: 0,
+            recovered_secrets: 0,
         };
         std::fs::write(primary.join("secret.key"), [7u8; 32]).unwrap();
         store.save().unwrap();
@@ -2783,7 +3636,13 @@ mod tests {
         let mut store = temp_store();
         assert!(store.output_highlight_enabled());
         assert!(store.json_format_output());
+        assert!(store.editor_highlight_enabled());
         assert_eq!(store.output_highlight_preset(), "log");
+
+        store.set_editor_highlight_enabled(false);
+        assert!(!store.editor_highlight_enabled());
+        store.set_editor_highlight_enabled(true);
+        assert!(store.editor_highlight_enabled());
 
         store.set_output_highlight_enabled(false);
         store.set_output_highlight_preset("devops".to_string());
@@ -2796,6 +3655,7 @@ mod tests {
         assert_eq!(store.output_highlight_preset(), "log");
 
         store.add_output_highlight_rule(OutputHighlightRule {
+            id: String::new(),
             pattern: "  connection refused  ".to_string(),
             regex: false,
             case_sensitive: false,
@@ -2850,7 +3710,87 @@ mod tests {
     }
 
     #[test]
-    fn export_import_roundtrip_preserves_password() {
+    fn corrupt_key_is_backed_up_before_regeneration() {
+        let dir = std::env::temp_dir().join(format!("ms-key-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key_path = dir.join("secret.key");
+        let corrupt = [0u8; 31];
+        std::fs::write(&key_path, corrupt).unwrap();
+
+        let fresh = ConfigStore::load_or_create_key(&dir).unwrap();
+        assert_eq!(fresh.len(), 32);
+        // Slice compare: [u8; 32] and [u8; 31] have no PartialEq between them.
+        assert_ne!(&fresh[..], &corrupt[..]);
+
+        let backups: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().starts_with("secret.key.bak-"))
+            .collect();
+        assert_eq!(backups.len(), 1, "exactly one backup of the corrupt key");
+        assert_eq!(std::fs::read(backups[0].path()).unwrap(), corrupt);
+        assert_eq!(std::fs::read(&key_path).unwrap().len(), 32);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn intact_key_is_kept_without_a_backup() {
+        let dir = std::env::temp_dir().join(format!("ms-key-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key_path = dir.join("secret.key");
+        let intact = [9u8; 32];
+        std::fs::write(&key_path, intact).unwrap();
+
+        assert_eq!(ConfigStore::load_or_create_key(&dir).unwrap(), intact);
+        let backups = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().starts_with("secret.key.bak-"))
+            .count();
+        assert_eq!(backups, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_key_is_generated_without_a_backup() {
+        let dir = std::env::temp_dir().join(format!("ms-key-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let key = ConfigStore::load_or_create_key(&dir).unwrap();
+        assert_eq!(std::fs::read(dir.join("secret.key")).unwrap(), key.to_vec());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn proxy_credentials_are_encrypted_on_disk() {
+        let mut store = temp_store();
+        store.cache.sessions.push(Session {
+            name: "via-proxy".into(),
+            host: "gateway.internal".into(),
+            user: "ops".into(),
+            proxy: Secret::new("socks5://me:p4ss@proxy.corp:1080"),
+            ..Session::new_empty()
+        });
+        store.save().unwrap();
+
+        let raw = std::fs::read_to_string(&store.path).unwrap();
+        assert!(!raw.contains("p4ss"));
+        let disk: ConfigFile = serde_json::from_str(&raw).unwrap();
+        let encrypted = disk.sessions[0].proxy.as_str();
+        assert!(encrypted.starts_with(ConfigStore::ENC_PREFIX));
+        assert_eq!(
+            ConfigStore::try_decrypt(&store.key, encrypted).as_deref(),
+            Some("socks5://me:p4ss@proxy.corp:1080")
+        );
+
+        let _ = std::fs::remove_file(&store.path);
+    }
+
+    #[test]
+    fn legacy_export_import_roundtrip_preserves_password() {
         let mut a = temp_store();
         a.cache.sessions.push(Session {
             name: "pve".into(),
@@ -2858,23 +3798,40 @@ mod tests {
             port: 22,
             user: "root".into(),
             password: Secret::new("s3cr3t"),
+            proxy: Secret::new("socks5://me:p4ss@proxy.corp:1080"),
             ..Session::new_empty()
         });
 
         let export_path = std::env::temp_dir().join(format!("ms-exp-{}.json", Uuid::new_v4()));
-        assert_eq!(a.export_to(&export_path).unwrap(), 1);
+        // Hand-built legacy fixture: the fixed-key writer (`export_json` /
+        // `export_to`) is gone — the UI exports Argon2id bundles — but the
+        // reader must keep opening old portable exports, so pin it here.
+        let mut exported = a.cache.sessions.clone();
+        for s in &mut exported {
+            s.password = Secret::new(enc_exp_v1_fixture(s.password.as_str()));
+            s.proxy = Secret::new(enc_exp_v1_fixture(s.proxy.as_str()));
+            s.last_used = None;
+        }
+        let raw = serde_json::to_string_pretty(&serde_json::json!({
+            "meatshell_export": 1,
+            "sessions": exported,
+        }))
+        .unwrap();
+        std::fs::write(&export_path, &raw).unwrap();
 
-        // The file keeps host/user plaintext but the password is obfuscated.
-        let raw = std::fs::read_to_string(&export_path).unwrap();
+        // The file keeps host/user plaintext but the credentials are obfuscated.
         assert!(raw.contains("192.168.100.2"));
         assert!(raw.contains(ConfigStore::EXPORT_PREFIX));
         assert!(!raw.contains("s3cr3t"));
+        assert!(!raw.contains("p4ss"));
 
-        // Importing into a fresh store recovers the plaintext password.
+        // Importing into a fresh store recovers the plaintext password and
+        // proxy from the fixed-key blobs.
         let mut b = temp_store();
         assert_eq!(b.import_from(&export_path).unwrap(), (1, 0));
         assert_eq!(b.cache.sessions.len(), 1);
         assert_eq!(b.cache.sessions[0].password.as_str(), "s3cr3t");
+        assert_eq!(b.cache.sessions[0].proxy.as_str(), "socks5://me:p4ss@proxy.corp:1080");
         assert_eq!(b.cache.sessions[0].host, "192.168.100.2");
 
         // Re-importing the same file skips the duplicate.
@@ -2883,6 +3840,74 @@ mod tests {
         let _ = std::fs::remove_file(&export_path);
         let _ = std::fs::remove_file(&a.path);
         let _ = std::fs::remove_file(&b.path);
+    }
+
+    #[test]
+    fn open_config_secrets_counts_fixed_key_recoveries() {
+        let key = [7u8; 32];
+        let mut cfg = ConfigFile::default();
+        cfg.sessions.push(Session {
+            name: "legacy".into(),
+            host: "192.168.100.3".into(),
+            user: "ops".into(),
+            password: Secret::new(enc_exp_v1_fixture("exported-secret")),
+            ..Session::new_empty()
+        });
+        cfg.webdav_password = Secret::new(ConfigStore::encrypt(&key, "dav-secret").unwrap());
+
+        let mut lost = 0usize;
+        let mut recovered = 0usize;
+        ConfigStore::open_config_secrets(&key, &mut cfg, &mut lost, &mut recovered);
+        // One fixed-key blob; the blob sealed with the local key is not.
+        assert_eq!(recovered, 1);
+        assert_eq!(lost, 0);
+        assert_eq!(cfg.sessions[0].password.as_str(), "exported-secret");
+        assert_eq!(cfg.webdav_password.as_str(), "dav-secret");
+
+        // A truncated fixed-key blob is unreadable, so it is cleared and
+        // counted as lost instead.
+        cfg.sessions.push(Session {
+            password: Secret::new(format!("{}truncated", ConfigStore::EXPORT_PREFIX)),
+            ..Session::new_empty()
+        });
+        lost = 0;
+        recovered = 0;
+        ConfigStore::open_config_secrets(&key, &mut cfg, &mut lost, &mut recovered);
+        assert_eq!(recovered, 0);
+        assert_eq!(lost, 1);
+    }
+
+    #[test]
+    fn bundle_roundtrip_and_wrong_passphrase() {
+        let mut a = temp_store();
+        a.cache.sessions.push(Session {
+            name: "pve".into(),
+            host: "10.0.0.9".into(),
+            port: 22,
+            user: "root".into(),
+            password: Secret::new("hunter2"),
+            ..Session::new_empty()
+        });
+
+        let pack = a.export_bundle("correct horse").unwrap();
+        // The bundle is opaque: no plaintext host or password leaks.
+        assert!(!pack.contains("hunter2"));
+        assert!(!pack.contains("10.0.0.9"));
+
+        // Right passphrase restores the session and its plaintext secret.
+        let mut b = temp_store();
+        let cfg = ConfigStore::decrypt_bundle("correct horse", &pack).unwrap();
+        assert_eq!(b.apply_bundle(cfg).unwrap(), 1);
+        assert_eq!(b.cache.sessions[0].password.as_str(), "hunter2");
+        assert_eq!(b.cache.sessions[0].host, "10.0.0.9");
+
+        // Wrong passphrase fails to authenticate (AEAD tag mismatch).
+        let c = temp_store();
+        assert!(ConfigStore::decrypt_bundle("wrong horse", &pack).is_err());
+
+        let _ = std::fs::remove_file(&a.path);
+        let _ = std::fs::remove_file(&b.path);
+        let _ = std::fs::remove_file(&c.path);
     }
 
     #[test]
@@ -2917,6 +3942,93 @@ mod tests {
     }
 
     #[test]
+    fn imports_mobaxterm_export() {
+        let mut store = temp_store();
+        let raw = "\
+[Bookmarks]\r\n\
+SubRep=\r\n\
+ImgNum=42\r\n\
+prod-server=#109#0%192.0.2.10%22%admin%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0#15%80%24#0# #-1\r\n\
+win-box=#91#4%192.0.2.20%3389%admin%0%0#15%80%24#0# #-1\r\n\
+[Bookmarks_1]\r\n\
+SubRep=Network\r\n\
+ImgNum=41\r\n\
+old-switch=#98#7%10.0.0.1%23%cisco%0%0#15%80%24#0# #-1\r\n";
+
+        assert_eq!(store.import_json(raw).unwrap(), (2, 0));
+        let ssh = &store.cache.sessions[0];
+        assert_eq!(ssh.name, "prod-server");
+        assert_eq!(ssh.host, "192.0.2.10");
+        assert_eq!(ssh.port, 22);
+        assert_eq!(ssh.user, "admin");
+        assert!(ssh.group.is_empty());
+        let telnet = &store.cache.sessions[1];
+        assert_eq!(telnet.name, "old-switch");
+        assert_eq!(telnet.host, "10.0.0.1");
+        assert_eq!(telnet.port, 23);
+        assert_eq!(telnet.user, "cisco");
+        assert_eq!(telnet.group, "Network");
+
+        let _ = std::fs::remove_file(&store.path);
+    }
+
+    #[test]
+    fn imports_mobaxterm_cp1252_file() {
+        let path = std::env::temp_dir().join(format!("ms-mxt-{}.mxtsessions", Uuid::new_v4()));
+        let mut data = b"[Bookmarks]\r\nSubRep=\r\n".to_vec();
+        data.extend_from_slice(b"caf\xe9=#109#0%192.0.2.60%22%root%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0%0#15%80%24#0# #-1\r\n");
+        std::fs::write(&path, &data).unwrap();
+
+        let mut store = temp_store();
+        assert_eq!(store.import_from(&path).unwrap(), (1, 0));
+        assert_eq!(store.cache.sessions[0].name, "caf\u{e9}");
+        assert_eq!(store.cache.sessions[0].host, "192.0.2.60");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&store.path);
+    }
+
+    #[test]
+    fn imports_mobaxterm_gbk_file() {
+        // A Simplified-Chinese Windows MobaXterm export is GBK (CP936):
+        // Chinese session names, folder names and a key path with a Chinese
+        // user directory must survive the import instead of turning into
+        // CP1252 mojibake.
+        let text = "\
+[Bookmarks]\r\n\
+SubRep=上海机房\r\n\
+生产服务器=#109#0%192.0.2.70%22%root%%1%1%%%%%%0%%_CurrentDrive_\\Users\\张三\\.ssh\\id.ppk%%1%1%%2%proxy.example.com%8080%me#MobaFont%10%0%0%1%15%236,236,236%30,30,30#0# 备注#-1\r\n";
+        let data = encoding_rs::GBK.encode(text).0;
+        let path = std::env::temp_dir().join(format!("ms-mxt-gbk-{}.mxtsessions", Uuid::new_v4()));
+        std::fs::write(&path, &data[..]).unwrap();
+
+        let mut store = temp_store();
+        assert_eq!(store.import_from(&path).unwrap(), (1, 0));
+        let session = &store.cache.sessions[0];
+        assert_eq!(session.name, "生产服务器");
+        assert_eq!(session.group, "上海机房");
+        assert_eq!(session.host, "192.0.2.70");
+        assert_eq!(session.user, "root");
+        assert_eq!(session.private_key_path, "C:\\Users\\张三\\.ssh\\id.ppk");
+        assert_eq!(session.note, "备注");
+        assert!(matches!(session.auth, AuthMethod::Key));
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&store.path);
+    }
+
+    #[test]
+    fn decode_gbk_rejects_western_and_accepts_chinese() {
+        // CP1252 "café" + separators never form two adjacent high bytes.
+        let western = b"caf\xe9=#109#0%h%22%root%0#15#0# #-1\r\n";
+        assert!(ConfigStore::decode_gbk(western).is_none());
+        // Real Chinese text: paired high bytes decoding cleanly as GBK.
+        let chinese = encoding_rs::GBK.encode("名称=生产").0;
+        assert_eq!(
+            ConfigStore::decode_gbk(&chinese).as_deref(),
+            Some("名称=生产")
+        );
+    }
     fn issue_500_sftp_places_are_per_session_pruned_and_persisted() {
         let mut store = temp_store();
         // Legacy configs have no places.
@@ -2940,8 +4052,7 @@ mod tests {
 
         // Deleting the session deletes its places.
         store.remove("a");
-        assert!(store.sftp_places("a").is_empty());
-    }
+        assert!(store.sftp_places("a").is_empty());    }
 
     #[test]
     fn issue_300_interface_defaults_and_ranges_are_safe() {
@@ -3029,6 +4140,220 @@ mod tests {
         assert!(!store.reorder_session("x", 1));
         assert!(!store.reorder_session("nope", 1));
     }
+
+    #[test]
+    fn quick_commands_import_merges_dedupes_and_filters() {
+        let mut store = temp_store();
+        store.set_quick_commands(vec![QuickCommand {
+            name: "ls".into(),
+            command: "ls -al".into(),
+            group: "misc".into(),
+            send_enter: true,
+        }]);
+        let file = r#"{
+            "meatshell_quick_commands": 1,
+            "commands": [
+                {"name":"ls","command":"ls -al","group":"misc","send_enter":true},
+                {"name":"df","command":"df -h","group":"tools"},
+                {"name":"  ","command":"echo hi"},
+                {"name":"no-cmd","command":"   "}
+            ],
+            "groups": ["tools", "empty-one"]
+        }"#;
+        // dup + blank name + blank command skipped; "df" added.
+        assert_eq!(store.quick_commands_import_json(file).unwrap(), (1, 3));
+        assert_eq!(store.quick_commands().len(), 2);
+        assert!(store.quick_groups().contains(&"tools".to_string()));
+        assert!(store.quick_groups().contains(&"empty-one".to_string()));
+        // Re-importing the same file is idempotent: nothing added.
+        assert_eq!(store.quick_commands_import_json(file).unwrap(), (0, 4));
+    }
+
+    #[test]
+    fn quick_commands_import_accepts_bare_array_and_rejects_garbage() {
+        let mut store = temp_store();
+        let arr = r#"[{"name":"top","command":"top"}]"#;
+        assert_eq!(store.quick_commands_import_json(arr).unwrap(), (1, 0));
+        // serde defaults: send_enter = true, group = "".
+        assert!(store.quick_commands()[0].send_enter);
+        assert!(store.quick_commands()[0].group.is_empty());
+        assert!(store.quick_commands_import_json("not json").is_err());
+        // A sessions-export object must not pass as a quick-commands file.
+        assert!(store
+            .quick_commands_import_json(r#"{"meatshell_export":1,"sessions":[]}"#)
+            .is_err());
+    }
+
+    #[test]
+    fn action_links_defaults_and_toggles() {
+        let mut store = fresh_store();
+        // The serde default keeps the feature ON; the per-kind toggles follow
+        // the master switch.
+        assert!(store.action_links_enabled());
+        assert!(store.action_links_ipv4());
+        assert!(store.action_links_host_port());
+        assert!(store.action_links_url());
+
+        store.set_action_links_url(false);
+        assert!(!store.action_links_url());
+        assert!(store.action_links_ipv4());
+        // Master off hides every kind.
+        store.set_action_links_enabled(false);
+        assert!(!store.action_links_url());
+        assert!(!store.action_links_ipv4());
+        assert!(!store.action_links_enabled());
+    }
+
+    #[test]
+    fn search_history_and_backpressure_defaults() {
+        let mut store = fresh_store();
+        assert!(!store.search_history_mode());
+        assert_eq!(store.search_history_limit(), 5000);
+        store.set_search_history_mode(true);
+        assert!(store.search_history_mode());
+        assert!(store.output_backpressure_enabled());
+        store.set_output_backpressure_enabled(false);
+        assert!(!store.output_backpressure_enabled());
+    }
+
+    #[test]
+    fn sftp_queue_config_defaults_and_clamps() {
+        let mut store = temp_store();
+        // 0 → default 2 concurrent workers; invalid dedup → "ask".
+        assert_eq!(store.sftp_queue_concurrency(), 2);
+        assert_eq!(store.sftp_queue_dedup(), "ask");
+        store.set_sftp_queue_concurrency(8);
+        store.set_sftp_queue_dedup("rename".into());
+        assert_eq!(store.sftp_queue_concurrency(), 4);
+        assert_eq!(store.sftp_queue_dedup(), "rename");
+        store.set_sftp_queue_dedup("bogus".into());
+        assert_eq!(store.sftp_queue_dedup(), "ask");
+        store.set_sftp_queue_rate_limit_kbps(2048);
+        assert_eq!(store.sftp_queue_rate_limit_kbps(), 2048);
+    }
+
+    #[test]
+    fn sftp_bookmarks_are_grouped_per_server_and_deduped() {
+        let mut store = temp_store();
+        store.add_sftp_bookmark("u@a".into(), "/var/log".into());
+        store.add_sftp_bookmark("u@b".into(), "/data/app".into());
+        // Re-adding on the same server moves it to the end; other servers
+        // keep their own lists untouched.
+        store.add_sftp_bookmark("u@a".into(), "/var/log".into());
+        assert_eq!(store.sftp_bookmarks("u@a").len(), 1);
+        assert_eq!(
+            store.sftp_bookmarks("u@a").last().map(String::as_str),
+            Some("/var/log")
+        );
+        assert_eq!(store.sftp_bookmarks("u@b").len(), 1);
+        assert!(store.sftp_bookmarks("u@c").is_empty());
+        store.add_sftp_bookmark("u@a".into(), "/etc".into());
+        store.remove_sftp_bookmark("u@a", "/var/log");
+        assert_eq!(store.sftp_bookmarks("u@a"), ["/etc".to_string()]);
+        // Removing the last path of a server drops the whole group.
+        store.remove_sftp_bookmark("u@a", "/etc");
+        assert!(store.sftp_bookmarks("u@a").is_empty());
+        store.remove_sftp_bookmark("u@b", "/data/app");
+        assert!(store.cache.sftp_bookmarks.is_empty());
+    }
+
+    #[test]
+    fn sftp_bookmarks_cap_drops_oldest_per_server() {
+        let mut store = temp_store();
+        for i in 0..70 {
+            store.add_sftp_bookmark("u@a".into(), format!("/p{i}"));
+        }
+        store.add_sftp_bookmark("u@b".into(), "/keep".into());
+        let bm = store.sftp_bookmarks("u@a");
+        assert_eq!(bm.len(), 64);
+        assert_eq!(bm.first().map(String::as_str), Some("/p6"));
+        assert_eq!(bm.last().map(String::as_str), Some("/p69"));
+        assert_eq!(store.sftp_bookmarks("u@b"), ["/keep".to_string()]);
+    }
+
+    #[test]
+    fn command_history_length_filters_apply() {
+        let mut store = temp_store();
+        // Defaults: no min/max → everything within cap is recorded.
+        store.set_command_history_min_len(3);
+        store.set_command_history_max_len(50);
+        store.push_command_history("ls".into()); // too short
+        store.push_command_history("kubectl logs app".into());
+        let long = "x".repeat(60);
+        store.push_command_history(long.clone()); // too long
+        assert_eq!(store.command_history().len(), 1);
+        assert_eq!(store.command_history()[0], "kubectl logs app");
+        // Clearing the min filter re-admits short commands.
+        store.set_command_history_min_len(0);
+        store.push_command_history("ls".into());
+        assert_eq!(store.command_history().len(), 2);
+    }
+
+    #[test]
+    fn highlight_export_import_roundtrip_merges_and_skips() {
+        let mut store = temp_store();
+        store.add_output_highlight_rule(OutputHighlightRule {
+            id: String::new(),
+            pattern: "connection refused".into(),
+            regex: false,
+            case_sensitive: false,
+            whole_line: false,
+            color: "red".into(),
+            enabled: true,
+        });
+        let exported = store.export_output_highlight_rules().unwrap();
+
+        // Re-importing the same export is idempotent: 0 imported, 1 updated.
+        let (imported, updated, skipped) = store
+            .import_output_highlight_rules(&exported)
+            .expect("re-import should succeed");
+        assert_eq!((imported, updated, skipped), (0, 1, 0));
+        assert_eq!(store.output_highlight_rules().len(), 1);
+
+        // A fresh rule (new id) is appended; a broken regex is skipped.
+        let batch = r#"{
+          "output_highlight_rules": [
+            {"id":"abc-1","pattern":"disk full","regex":false,"enabled":true,"color":"yellow"},
+            {"id":"abc-2","pattern":"(", "regex":true,"enabled":true,"color":"red"},
+            {"pattern":"  ","regex":false,"enabled":true,"color":"blue"}
+          ]
+        }"#;
+        let (imported, updated, skipped) = store
+            .import_output_highlight_rules(batch)
+            .expect("batch import should succeed");
+        assert_eq!(imported, 1); // "disk full"
+        assert_eq!(updated, 0);
+        assert_eq!(skipped, 2); // broken regex + blank pattern
+        assert_eq!(store.output_highlight_rules().len(), 2);
+        // "disk full" got its color normalized yellow→yellow, blank rejected.
+        assert_eq!(store.output_highlight_rules()[1].pattern, "disk full");
+
+        // First import of a legacy export (no id) is content-matched, second
+        // import updates via the id it gained.
+        let legacy = r#"[{"pattern":"OLD","regex":false,"enabled":true,"color":"gray"}]"#;
+        let (imported, _, _) = store.import_output_highlight_rules(legacy).unwrap();
+        assert_eq!(imported, 1);
+        let (imported, updated, _) = store.import_output_highlight_rules(legacy).unwrap();
+        assert_eq!(imported, 0);
+        assert_eq!(updated, 1);
+    }
+
+    #[test]
+    fn highlight_import_rejects_bad_shapes() {
+        let mut store = temp_store();
+        assert!(store.import_output_highlight_rules("not json").is_err());
+        assert!(store.import_output_highlight_rules(r#"{"foo":1}"#).is_err());
+        assert!(store
+            .import_output_highlight_rules(r#"{"output_highlight_rules":"nope"}"#)
+            .is_err());
+        // A type-invalid entry is skipped, not fatal for the batch.
+        assert_eq!(
+            store
+                .import_output_highlight_rules(r#"[{"pattern":123}]"#)
+                .unwrap(),
+            (0, 0, 1)
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3115,6 +4440,7 @@ mod profile_safety_tests {
             path: dir.join("sessions.json"), backup_dir: None,
             cache: ConfigFile::default(), key: [1; 32],
             disk_snapshot: std::cell::RefCell::new(None),
+            lost_secrets: 0, recovered_secrets: 0,
         };
         current.cache.sessions.push(Session::new_empty());
         current.save().unwrap();
@@ -3122,6 +4448,7 @@ mod profile_safety_tests {
             path: current.path.clone(), backup_dir: None,
             cache: current.cache.clone(), key: current.key,
             disk_snapshot: std::cell::RefCell::new(current.disk_snapshot.borrow().clone()),
+            lost_secrets: 0, recovered_secrets: 0,
         };
         current.cache.sessions.push(Session::new_empty());
         current.save().unwrap();
@@ -3142,6 +4469,26 @@ mod profile_safety_tests {
         fs::write(dir.join("secret.key"), b"broken").unwrap();
         assert!(ConfigStore::load_or_create_key(&dir).is_err());
         assert_eq!(fs::read(dir.join("secret.key")).unwrap(), b"broken");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pre_rekey_archive_copies_the_original_blobs_verbatim() {
+        let dir = std::env::temp_dir().join(format!("ms-rekey-archive-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sessions.json");
+        let original = r#"{"password":"enc:v1:fixture"}"#;
+        fs::write(&path, original).unwrap();
+        ConfigStore::archive_pre_rekey(&path, original);
+        assert_eq!(
+            fs::read_to_string(dir.join("sessions.json.pre-rekey")).unwrap(),
+            original,
+            "the archive must keep the original encrypted blobs"
+        );
+        // A failed backup (unwritable location) must not take the load down
+        // with it — it only logs.
+        let missing_parent = dir.join("no-such-dir").join("sessions.json");
+        ConfigStore::archive_pre_rekey(&missing_parent, original);
         let _ = fs::remove_dir_all(dir);
     }
 

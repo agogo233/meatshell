@@ -217,9 +217,8 @@ async fn upload_file(arguments: &Value, frontend: Frontend) -> Result<Value> {
             local: local_path,
             remote_dir: args.remote_directory.to_string(),
             cleanup_after: None,
-            // Headless automation has nobody to ask; overwriting is the
-            // documented behaviour of the upload tool.
-            conflict: crate::sftp::UploadConflict::Replace,
+            // The worker applies the session's queue policy to the target.
+            decision: crate::sftp::UploadDecision::Proceed,
         },
         true,
         args.target.timeout,
@@ -247,19 +246,18 @@ async fn download_file(arguments: &Value, frontend: Frontend) -> Result<Value> {
         .next()
         .filter(|name| !name.is_empty())
         .ok_or_else(|| anyhow!("remote_path must identify a file"))?;
-    if local_directory.join(file_name).exists() {
-        return Err(anyhow!(
-            "download destination already exists: {}",
-            local_directory.join(file_name).display()
-        ));
-    }
     let mut result = super::sftp::transfer(
         session,
         jump,
         crate::sftp::SftpCommand::Download {
             remote: remote_path.to_string(),
             local_dir: local_directory.to_string_lossy().into_owned(),
-            conflict: crate::sftp::DownloadConflict::Replace,
+            // Never overwrite: the download fails if the target exists, with no
+            // check-then-write race window in between.
+            conflict: crate::sftp::DownloadConflict::Fail,
+            // Unused for `Fail` (the atomic create decides it); kept consistent
+            // with the never-overwrite intent.
+            policy: crate::sftp::DedupPolicy::Skip,
         },
         false,
         args.target.timeout,
@@ -423,7 +421,7 @@ fn safe_session(session: &Session) -> Value {
             || !session.private_key_inline.is_empty(),
         "jump_session_id": session.jump_session_id,
         "jump_session_ids": session.jump_session_ids,
-        "has_proxy": !session.proxy.trim().is_empty(),
+        "has_proxy": !session.proxy.as_str().trim().is_empty(),
     })
 }
 
@@ -566,7 +564,10 @@ mod tests {
         };
         let mut hidden = Session::new_empty();
         hidden.mcp_access = false;
-        let shown = Session::new_empty();
+        // Opted in explicitly: a fresh session now defaults to unexposed
+        // (fail-closed), so "shown" must tick the box itself.
+        let mut shown = Session::new_empty();
+        shown.mcp_access = true;
         assert!(!exposed_to(&hidden, mcp));
         assert!(exposed_to(&shown, mcp));
         assert!(exposed_to(&hidden, Frontend::Cli));
@@ -578,17 +579,20 @@ mod tests {
     }
 
     #[test]
-    fn mcp_access_defaults_on_for_new_and_legacy_sessions() {
+    fn mcp_access_defaults_off_for_new_and_legacy_sessions() {
+        // Fail-closed: a fresh session, and a legacy config whose
+        // `mcp_access` field predates the flag, must both stay unexposed
+        // until the user explicitly opts in.
         let session = Session::new_empty();
-        assert!(session.mcp_access);
+        assert!(!session.mcp_access);
         let mut legacy = serde_json::to_value(&session).unwrap();
         legacy.as_object_mut().unwrap().remove("mcp_access");
         let restored: Session = serde_json::from_value(legacy).unwrap();
-        assert!(restored.mcp_access);
-        let mut opted_out = session;
-        opted_out.mcp_access = false;
-        let json = serde_json::to_value(&opted_out).unwrap();
-        assert!(!serde_json::from_value::<Session>(json).unwrap().mcp_access);
+        assert!(!restored.mcp_access);
+        let mut opted_in = session;
+        opted_in.mcp_access = true;
+        let json = serde_json::to_value(&opted_in).unwrap();
+        assert!(serde_json::from_value::<Session>(json).unwrap().mcp_access);
     }
 
     #[test]

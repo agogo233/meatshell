@@ -14,8 +14,12 @@ use crate::terminal::{RenderGates, TermBuffers};
 use crate::ui::{AppWindow, EditorWindow};
 
 /// Shared dependencies for starting or reconnecting a session tab.
+#[derive(Clone)]
 pub(crate) struct ConnectCtx {
     pub(crate) weak: slint::Weak<AppWindow>,
+    /// The main window's embedded editor pane: SFTP "open with editor" and
+    /// the editor-tab bookkeeping need it. Reconnecting sessions rebuild the
+    /// session but reuse the same window, so it stays across reconnects.
     pub(crate) editor: slint::Weak<EditorWindow>,
     /// Registry id of the window this session belongs to, so connect-time
     /// prompts (host key / credentials / MFA) open their dialog in the

@@ -238,7 +238,7 @@ pub(super) fn wire(
                     );
                     return;
                 }
-                super::session_callbacks::sync_sessions_for_window(
+                sync_sessions_for_window(
                     &weak,
                     &store.borrow(),
                     &sessions_model,

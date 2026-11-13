@@ -43,7 +43,7 @@ pub(super) fn launch_shell_model(store: &ConfigStore) -> ModelRc<LaunchItem> {
 
 /// SFTP privilege mode from the editor (#438): only "sudo" and "custom" are
 /// stored, and "custom" without a command falls back to the default.
-fn normalized_sftp_mode(mode: &str, command: &str) -> String {
+pub(super) fn normalized_sftp_mode(mode: &str, command: &str) -> String {
     match mode {
         "sudo" => "sudo".to_string(),
         "custom" if !command.trim().is_empty() => "custom".to_string(),
@@ -112,39 +112,36 @@ pub(super) fn session_groups_model(store: &ConfigStore) -> ModelRc<SharedString>
     )))
 }
 
-/// Serial ports
-/// de-duplicated and sorted alphabetically — feeds the new/edit dialog's serial port
-/// dropdown.
+/// Serial ports detected on this machine — feeds the new/edit dialog's serial
+/// port dropdown. Enumeration failure logs and yields an empty list; the dialog
+/// keeps accepting a manually typed device (COM3 / /dev/ttyUSB0).
 pub(super) fn session_serial_ports_model() -> ModelRc<SharedString> {
-    let mut named : Vec<String> = Vec::new();
-
-    let ports = serialport::available_ports()
-        .unwrap_or_else(|e| {
-            tracing::error!("No available serial ports found: {e}");
-            Vec::new()
-        });
-    for p in ports {
-        named.push(p.port_name);
-    }
+    let ports = serialport::available_ports().unwrap_or_else(|e| {
+        tracing::error!("No available serial ports found: {e}");
+        Vec::new()
+    });
 
     ModelRc::from(Rc::new(VecModel::from(
-        named
+        ports
             .into_iter()
-            .map(SharedString::from)
+            .map(|p| SharedString::from(p.port_name))
             .collect::<Vec<_>>(),
     )))
 }
 
 /// Build the jump-host picker's parallel label/id lists for the session dialog
-/// (#211). Index 0 is the unselected placeholder (empty id); the rest are
+/// (#211). Index 0 is always the "no jump host" entry (empty id); the rest are
 /// the saved SSH sessions except `exclude_id` (a session can't jump through
-/// itself). Each row resolves its own selection in these parallel lists.
+/// itself). Returns `(labels, ids, selected_index)` where `selected_index`
+/// points at `current_jump_id` (0 if unset / dangling).
 pub(super) fn jump_candidates(
     store: &ConfigStore,
     exclude_id: &str,
-) -> (ModelRc<SharedString>, ModelRc<SharedString>) {
-    let mut labels: Vec<SharedString> = vec![t("请选择跳板机", "Select a jump host").into()];
+    current_jump_id: &str,
+) -> (ModelRc<SharedString>, ModelRc<SharedString>, i32) {
+    let mut labels: Vec<SharedString> = vec![t("无（直接连接）", "None (direct)").into()];
     let mut ids: Vec<SharedString> = vec!["".into()];
+    let mut selected: i32 = 0;
     for s in store.sessions() {
         if s.kind != SessionKind::Ssh || s.id == exclude_id {
             continue;
@@ -156,14 +153,18 @@ pub(super) fn jump_candidates(
                 format!("{}@{}", s.user, s.host)
             }
         } else {
-            format!("{} ({}@{}:{})", s.name, s.user, s.host, s.port)
+            format!("{} ({}@{})", s.name, s.user, s.host)
         };
+        if s.id == current_jump_id {
+            selected = ids.len() as i32;
+        }
         labels.push(label.into());
         ids.push(s.id.clone().into());
     }
     (
         ModelRc::from(Rc::new(VecModel::from(labels))),
         ModelRc::from(Rc::new(VecModel::from(ids))),
+        selected,
     )
 }
 
@@ -447,12 +448,6 @@ pub(super) fn resolve_builtin_session(store: &ConfigStore, id: &str) -> Option<S
     if id.starts_with(super::agents::AGENT_ID_PREFIX) {
         return super::agents::agent_session(store, id);
     }
-    if id == crate::update::linux::AUR_SESSION_ID {
-        // The update tab for AUR installs: runs the user's AUR helper.
-        let mut session = builtin_local_session(id, t("更新 MeatShell", "Update MeatShell"), "shell");
-        session.local_command = crate::update::linux::aur_update_command();
-        return Some(session);
-    }
     system_shell_sessions(store)
         .into_iter()
         .find(|s| s.id == id)
@@ -558,8 +553,8 @@ mod wsl_probe_tests {
 // ---------------------------------------------------------------------------
 
 /// Build the effective session represented by the dialog. When editing, blank
-/// secret fields retain their saved values. Stored secrets only enter the UI
-/// after opting in and clicking the eye button (#10, #276).
+/// secret fields retain their saved values because real passwords and pasted
+/// private keys are deliberately never echoed back into the UI (#10, #276).
 pub(super) fn session_from_draft(
     draft: &SessionDraft,
     existing: Option<&Session>,
@@ -582,20 +577,17 @@ pub(super) fn session_from_draft(
     } else {
         Secret::default()
     };
-    // Store key paths with forward slashes uniformly; inline mode clears the path.
     let private_key_path = if draft.private_key_inline_mode {
         String::new()
     } else {
         draft.private_key_path.to_string().replace('\\', "/")
     };
     let kind = SessionKind::from_str(&draft.kind.to_string());
-    // Auto-name: serial uses the device; otherwise user@host or just host (#110).
     let auto_name = match kind {
         SessionKind::Serial => format!("{} @{}", draft.serial_port, draft.baud_rate),
         _ if draft.user.trim().is_empty() => draft.host.to_string(),
         _ => format!("{}@{}", draft.user, draft.host),
     };
-    // Telnet defaults to 23, RDP to 3389, SSH to 22; serial ignores the port.
     let default_port = match kind {
         SessionKind::Telnet => 23,
         SessionKind::Rdp => 3389,
@@ -624,7 +616,7 @@ pub(super) fn session_from_draft(
         password,
         private_key_path,
         private_key_inline,
-        proxy: draft.proxy.to_string(),
+        proxy: Secret::new(draft.proxy.to_string()),
         last_used: None,
         group: draft.group.to_string(),
         kind,
@@ -662,6 +654,7 @@ pub(super) fn session_from_draft(
         },
         note: draft.note.to_string(),
         jump_session_id: String::new(),
+        allow_secret_reveal: draft.allow_secret_reveal,
         jump_session_ids: if kind == SessionKind::Ssh {
             crate::config::draft_jump_ids(
                 draft.jumps.iter().map(|hop| (hop.id.to_string(), hop.placeholder)),
@@ -669,7 +662,6 @@ pub(super) fn session_from_draft(
         } else {
             Vec::new()
         },
-        allow_secret_reveal: draft.allow_secret_reveal,
         mcp_access: draft.allow_mcp_access,
         rdp_domain: draft.rdp_domain.to_string(),
         rdp_fullscreen,

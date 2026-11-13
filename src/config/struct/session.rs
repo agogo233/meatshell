@@ -190,8 +190,10 @@ pub struct Session {
     pub private_key_inline: Secret,
     /// Optional outbound proxy, e.g. "socks5://127.0.0.1:1080" or
     /// "http://user:pass@host:8080". Empty = use $ALL_PROXY, else direct.
+    /// `Secret` so a proxy password is encrypted on disk and redacted from
+    /// debug output like every other credential.
     #[serde(default)]
-    pub proxy: String,
+    pub proxy: Secret,
     /// Optional SSH jump host (bastion): the id of another saved SSH session to
     /// tunnel this connection through, like OpenSSH's ProxyJump. Empty = direct.
     /// The jump session may reference another jump. The full chain is validated
@@ -207,8 +209,10 @@ pub struct Session {
     pub allow_secret_reveal: bool,
     /// Expose this session to MCP clients (#432). When false, MCP tools treat
     /// it as nonexistent and refuse routes that use it as a jump host. The CLI
-    /// is unaffected. Absent in older configs → true, preserving behaviour.
-    #[serde(default = "default_true")]
+    /// is unaffected. Absent in older configs → false (fail-closed); MCP is an
+    /// opt-in surface, so a config written before this flag existed simply
+    /// stays unexposed until the user ticks it.
+    #[serde(default = "default_false")]
     pub mcp_access: bool,
     #[serde(default)]
     pub last_used: Option<String>,
@@ -405,6 +409,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_false() -> bool {
+    false
+}
+
 #[cfg(test)]
 mod session_log_mode_tests {
     use super::*;
@@ -496,11 +504,14 @@ impl Session {
             password: Secret::default(),
             private_key_path: String::new(),
             private_key_inline: Secret::default(),
-            proxy: String::new(),
+            proxy: Secret::default(),
             jump_session_id: String::new(),
             jump_session_ids: Vec::new(),
             allow_secret_reveal: false,
-            mcp_access: true,
+            // MCP exposure is opt-in (#432): new sessions stay hidden from MCP
+            // clients until the user ticks it, matching the fail-closed
+            // serde default above.
+            mcp_access: false,
             last_used: None,
             group: String::new(),
             kind: SessionKind::Ssh,

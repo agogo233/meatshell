@@ -3,6 +3,16 @@ use super::super::tests::temp_store;
 use super::super::{ConfigFile, SessionTrigger};
 use super::*;
 
+// The legacy `enc:exp:v1:` fixture helper needs the same crypto stack the
+// removed writer used. These are NOT reachable through `use super::*` here:
+// the glob only covers `import`'s own namespace (see import.rs imports).
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use chacha20poly1305::{
+    aead::{Aead, AeadCore, KeyInit},
+    ChaCha20Poly1305,
+};
+use rand::rngs::OsRng;
+
 fn session(id: &str) -> Session {
     Session {
         id: id.into(),
@@ -15,6 +25,32 @@ fn session(id: &str) -> Session {
 
 fn native(sessions: Vec<Session>) -> String {
     serde_json::json!({"sessions": sessions}).to_string()
+}
+
+/// Legacy portable-export fixture (`meatshell_export: 1`, plaintext fields).
+/// The fixed-key writer (`ConfigStore::export_json`) was removed — the UI
+/// exports Argon2id bundles now — but `import_json` still READS this format,
+/// so the round-trip tests build fixtures by hand.
+fn legacy_export(sessions: Vec<Session>) -> String {
+    serde_json::json!({"meatshell_export": 1, "sessions": sessions}).to_string()
+}
+
+/// One credential encrypted exactly like the removed legacy writer did:
+/// `enc:exp:v1:` = ChaCha20-Poly1305 under the built-in (fixed) export key.
+/// Pins the reader against that format — if the key or construction ever
+/// changes, the caller's test fails deliberately.
+fn enc_exp_v1(plain: &str) -> String {
+    let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
+    let mut blob = nonce.to_vec();
+    blob.extend_from_slice(
+        &ChaCha20Poly1305::new((&ConfigStore::EXPORT_KEY).into())
+            .encrypt(&nonce, plain.as_bytes())
+            .unwrap(),
+    );
+    format!(
+        "enc:exp:v1:{}",
+        URL_SAFE_NO_PAD.encode(&blob)
+    )
 }
 
 fn snapshot(store: &ConfigStore) -> serde_json::Value {
@@ -48,15 +84,7 @@ fn portable_roundtrip_remaps_both_jump_formats_and_preserves_all_other_fields() 
     target.note = "Synthetic note".into();
     target.allow_secret_reveal = true;
     source.cache.sessions = vec![target.clone(), inner, outer];
-    let (export, _) = source.export_json().unwrap();
-    assert!(export.contains("enc:exp:v1:"));
-    for secret in [
-        "synthetic-password",
-        "synthetic-inline-key",
-        "synthetic-trigger-response",
-    ] {
-        assert!(!export.contains(secret));
-    }
+    let export = legacy_export(source.cache.sessions.clone());
 
     let mut destination = temp_store();
     destination.key = [9; 32]; // Different local profile key, as on another machine.
@@ -366,7 +394,7 @@ fn rejects_unknown_export_versions_and_missing_session_array() {
 }
 
 #[test]
-fn file_import_is_bounded_and_requires_regular_utf8_json() {
+fn file_import_is_bounded_and_rejects_non_session_files() {
     let mut store = temp_store();
     let path = std::env::temp_dir().join(format!("ms-import-{}.json", Uuid::new_v4()));
     fs::write(&path, native(vec![session("from-file")])).unwrap();
@@ -383,6 +411,8 @@ fn file_import_is_bounded_and_requires_regular_utf8_json() {
     assert!(store
         .import_json(&" ".repeat(MAX_IMPORT_BYTES + 1))
         .is_err());
+    // ANSI bytes now decode (GBK/CP1252) instead of failing as "not UTF-8",
+    // but this pair carries no parseable session content in any decoder.
     fs::write(&path, [0xff, 0xfe]).unwrap();
     assert!(store.import_from(&path).is_err());
     fs::remove_file(&path).unwrap();
@@ -411,14 +441,17 @@ fn decoded_literal_ciphertext_prefixes_are_encrypted_on_import() {
     let literal = "enc:v1:synthetic-literal-password-not-ciphertext";
     let mut source = temp_store();
     let mut imported = session("literal-prefix");
-    imported.password = Secret::new(literal);
-    imported.private_key_inline = Secret::new(literal);
+    // The removed writer sealed every secret with the fixed export key; a
+    // fixture that keeps `enc:`-prefixed values plaintext would be rejected by
+    // `decode_import_secret` as an unopenable blob.
+    imported.password = Secret::new(enc_exp_v1(literal));
+    imported.private_key_inline = Secret::new(enc_exp_v1(literal));
     imported.triggers.push(SessionTrigger {
-        response: Secret::new(literal),
+        response: Secret::new(enc_exp_v1(literal)),
         ..SessionTrigger::default()
     });
     source.cache.sessions.push(imported);
-    let (export, _) = source.export_json().unwrap();
+    let export = legacy_export(source.cache.sessions.clone());
     let mut destination = temp_store();
     destination.key = [9; 32];
     assert_eq!(destination.import_json(&export).unwrap(), (1, 0));
@@ -440,20 +473,46 @@ fn decoded_literal_ciphertext_prefixes_are_encrypted_on_import() {
 }
 
 #[test]
+fn legacy_export_key_credentials_still_import_and_reseal_locally() {
+    // Reading the removed fixed-key format must keep working: an old portable
+    // export carries `enc:exp:v1:` credentials that only the built-in key
+    // opens. On the destination they are re-sealed with the LOCAL profile key.
+    let literal = "synthetic-legacy-export-password";
+    let mut source = temp_store();
+    let mut imported = session("legacy-export-key");
+    imported.password = Secret::new(enc_exp_v1(literal));
+    source.cache.sessions.push(imported);
+    let export = legacy_export(source.cache.sessions.clone());
+    let mut destination = temp_store();
+    destination.key = [9; 32]; // different machine / profile key
+    assert_eq!(destination.import_json(&export).unwrap(), (1, 0));
+    assert_eq!(destination.sessions()[0].password.as_str(), literal);
+    let disk: ConfigFile =
+        serde_json::from_str(&fs::read_to_string(&destination.path).unwrap()).unwrap();
+    assert_eq!(
+        ConfigStore::try_decrypt(&destination.key, disk.sessions[0].password.as_str()).as_deref(),
+        Some(literal)
+    );
+    remove_fixture(&destination);
+}
+
+#[test]
 fn literal_encryption_prefix_stays_protected_across_load_and_ordinary_saves() {
     let literal = "enc:v1:synthetic-literal-credential";
     let mut store = temp_store();
     store.cache.webdav_password = Secret::new(literal);
     let mut imported = session("repeated-save");
-    imported.password = Secret::new(literal);
-    imported.private_key_inline = Secret::new(literal);
+    // Same as the other literal fixture: the old writer sealed secrets with
+    // the fixed export key, so an `enc:`-prefixed plaintext would be rejected.
+    imported.password = Secret::new(enc_exp_v1(literal));
+    imported.private_key_inline = Secret::new(enc_exp_v1(literal));
     imported.triggers.push(SessionTrigger {
-        response: Secret::new(literal),
+        response: Secret::new(enc_exp_v1(literal)),
         ..SessionTrigger::default()
     });
     let mut source = temp_store();
     source.cache.sessions.push(imported);
-    let (export, _) = source.export_json().unwrap();
+    let export = legacy_export(source.cache.sessions.clone());
     store.import_json(&export).unwrap();
     for _ in 0..2 {
         let raw = fs::read_to_string(&store.path).unwrap();
@@ -462,7 +521,9 @@ fn literal_encryption_prefix_stays_protected_across_load_and_ordinary_saves() {
         // without ever resolving or writing the process-global user profile.
         let mut loaded: ConfigFile = serde_json::from_str(&raw).unwrap();
         assert!(loaded.sessions[0].password.is_local_ciphertext());
-        ConfigStore::decrypt_local_secrets(&store.key, &mut loaded);
+        let mut lost = 0;
+        let mut recovered = 0;
+        ConfigStore::open_config_secrets(&store.key, &mut loaded, &mut lost, &mut recovered);
         for secret in [
             &loaded.sessions[0].password,
             &loaded.sessions[0].private_key_inline,
@@ -484,8 +545,9 @@ fn saving_import_preserves_undecodable_existing_local_ciphertext() {
     let opaque = "enc:v1:synthetic-unknown-key-ciphertext";
     let mut store = temp_store();
     store.cache = serde_json::from_str(&native(vec![session("existing")])).unwrap();
+    // A blob the current key cannot open stays as-is in the profile; importing
+    // other sessions must never rewrite or drop it.
     store.cache.sessions[0].password = serde_json::from_value(serde_json::json!(opaque)).unwrap();
-    ConfigStore::decrypt_local_secrets(&store.key, &mut store.cache);
     assert!(store.cache.sessions[0].password.is_local_ciphertext());
     assert_eq!(
         store.import_json(&native(vec![session("new")])).unwrap(),
@@ -510,7 +572,7 @@ fn same_endpoint_profiles_preserve_names_auth_credentials_proxy_and_routes() {
             1 => alias.group = "Different group".into(),
             2 => alias.auth = super::super::AuthMethod::Key,
             3 => alias.password = Secret::new("different-synthetic-password"),
-            4 => alias.proxy = "socks5://127.0.0.1:1080".into(),
+            4 => alias.proxy = Secret::new("socks5://127.0.0.1:1080"),
             _ => alias.jump_session_ids = vec!["hop".into()],
         }
         aliases.push(alias);

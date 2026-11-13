@@ -15,14 +15,17 @@ pub(super) fn apply_session_event_to_window(
     let tabs_rc = win.get_tabs();
     let terminals_rc = win.get_terminals();
     // `ModelRc::as_any` lets us downcast to the concrete `VecModel<T>`.
-    let tabs = tabs_rc
-        .as_any()
-        .downcast_ref::<VecModel<TabInfo>>()
-        .expect("tabs model must be a VecModel");
-    let terminals = terminals_rc
-        .as_any()
-        .downcast_ref::<VecModel<TerminalState>>()
-        .expect("terminals model must be a VecModel");
+    // Never expected in practice (every set_tabs/set_terminals installs a
+    // VecModel), but a panic here aborts the whole process in release, so a
+    // dropped event beats a dead app.
+    let Some(tabs) = tabs_rc.as_any().downcast_ref::<VecModel<TabInfo>>() else {
+        tracing::warn!("tabs model is not a VecModel; dropping session event for {tab_id}");
+        return;
+    };
+    let Some(terminals) = terminals_rc.as_any().downcast_ref::<VecModel<TerminalState>>() else {
+        tracing::warn!("terminals model is not a VecModel; dropping session event for {tab_id}");
+        return;
+    };
 
     let update_terminal = |mutator: &dyn Fn(&mut TerminalState)| {
         for i in 0..terminals.row_count() {
@@ -33,6 +36,12 @@ pub(super) fn apply_session_event_to_window(
                     break;
                 }
             }
+        }
+        // The docked SFTP panel mirrors the ACTIVE tab's row; keep it fresh
+        // whenever that tab's SFTP state lands (#dock-stack). Content models
+        // are replaced wholesale, so the mirror must re-copy the reference.
+        if win.get_active_tab_id().as_str() == tab_id {
+            sync_active_sftp_to_root(win, terminals);
         }
     };
     let update_tab = |mutator: &dyn Fn(&mut TabInfo)| {
@@ -84,8 +93,9 @@ pub(super) fn apply_session_event_to_window(
         SessionEvent::Connected => {
             update_tab(&|t| t.connected = true);
             update_terminal(&|t| t.status = crate::i18n::t("已连接", "Connected").into());
-            if let Some(st) = statuses.lock().unwrap().get_mut(tab_id) {
+            if let Some(st) = lock_or_recover(&statuses).get_mut(tab_id) {
                 st.state = 1;
+                st.reconnect_attempts = 0;
             }
             if win.get_active_tab_id().as_str() == tab_id
                 && (sidebar_updates_visible(win) || win.get_system_info_window_open())
@@ -94,16 +104,21 @@ pub(super) fn apply_session_event_to_window(
             }
         }
         SessionEvent::Closed(reason) => {
-            // A disconnected tab remains open for Enter-to-reconnect, but it
-            // must not retain the old firehose scrollback while idle. Keep the
-            // tab, its status, and the currently visible screen; only release
-            // the raw replay stream and deep history, then append the
-            // reconnect hint below onto what was already on screen (#451).
+            // A disconnected tab remains open for Enter-to-reconnect with its
+            // full scrollback intact, so the user can review what happened
+            // before the drop; history is only released when the tab itself
+            // is closed (#f654b61). Append the reconnect hint below onto
+            // what was already on screen.
             if let Some(h) = crate::app::term_buf(bufs, tab_id) {
-                let mut b = h.lock().unwrap();
+                let mut b = lock_or_recover(&h);
                 if let Some(log) = b.session_log.as_mut() {
                     log.note(&format!("disconnected: {reason}"));
                 }
+                // A disconnected tab stays open for review, but its full
+                // 100k-line scrollback is not worth holding once the link is
+                // down; trim to the disconnected bound so many idle tabs don't
+                // stack up ~20 MB each. Active tabs keep MAX_HISTORY.
+                b.trim_history(crate::terminal::DISCONNECTED_MAX_HISTORY);
             }
             // Print the hint into the terminal itself (FinalShell-style), via a
             // synthetic Output event so it reuses the normal render path (#79).
@@ -129,7 +144,7 @@ pub(super) fn apply_session_event_to_window(
             update_terminal(&|t| {
                 t.status = format!("{} — {reason}", crate::i18n::t("已断开", "Disconnected")).into()
             });
-            if let Some(st) = statuses.lock().unwrap().get_mut(tab_id) {
+            if let Some(st) = lock_or_recover(&statuses).get_mut(tab_id) {
                 st.state = 2;
             }
             if win.get_active_tab_id().as_str() == tab_id
@@ -150,7 +165,7 @@ pub(super) fn apply_session_event_to_window(
             procs: _,
             sys,
         } => {
-            if let Some(st) = statuses.lock().unwrap().get_mut(tab_id) {
+            if let Some(st) = lock_or_recover(&statuses).get_mut(tab_id) {
                 st.cpu = cpu_percent;
                 st.mem_used_kib = mem_used_kib;
                 st.mem_total_kib = mem_total_kib;
@@ -179,7 +194,7 @@ pub(super) fn apply_session_event_to_window(
             current_user,
             procs,
         } => {
-            if let Some(st) = statuses.lock().unwrap().get_mut(tab_id) {
+            if let Some(st) = lock_or_recover(&statuses).get_mut(tab_id) {
                 if !current_user.is_empty() {
                     st.user = current_user;
                 }
@@ -250,10 +265,18 @@ pub(super) fn apply_session_event_to_window(
                     .into(),
                     permissions: crate::ssh::format_permissions(e.permissions_mode).into(),
                     permissions_mode: e.permissions_mode as i32,
-                    // Unresolved owner/group stay blank instead of flashing the
-                    // raw uid/gid numbers — names land on the follow-up paint.
-                    owner: e.owner.clone().unwrap_or_default().into(),
-                    group: e.group.clone().unwrap_or_default().into(),
+                    owner: e
+                        .owner
+                        .clone()
+                        .or_else(|| e.uid.map(|v| v.to_string()))
+                        .unwrap_or_else(|| "-".to_string())
+                        .into(),
+                    group: e
+                        .group
+                        .clone()
+                        .or_else(|| e.gid.map(|v| v.to_string()))
+                        .unwrap_or_else(|| "-".to_string())
+                        .into(),
                     selected: false,
                 })
                 .collect();
@@ -295,15 +318,60 @@ pub(super) fn apply_session_event_to_window(
             win.invoke_sftp_record_visit(tab_id.into(), path.clone().into());
         }
         SessionEvent::SftpStatus(msg) => {
-            update_terminal(&|t| t.sftp_status = msg.clone().into());
+            update_terminal(&|t| {
+                t.sftp_status = msg.clone().into();
+                t.sftp_status_kind = 0;
+            });
         }
         SessionEvent::SftpError(msg) => {
             // Show the reason and stop the spinner; leave the current listing in
             // place so a failed navigation doesn't blank the panel (#112).
             update_terminal(&|t| {
                 t.sftp_status = msg.clone().into();
+                t.sftp_status_kind = 2;
                 t.sftp_loading = false;
             });
+        }
+        SessionEvent::SftpSaveResult {
+            path,
+            ok,
+            message,
+        } => {
+            // Built-in editor save outcome (#70). The status bar is colour-coded
+            // via `sftp-status-kind` (1 saved / 2 failed), and the editor's own
+            // transient save pill (`editor-save-ack`) mirrors the result for the
+            // file that is still open, in whichever host it lives.
+            let kind = if ok { 1 } else { 2 };
+            update_terminal(&|t| {
+                t.sftp_status = message.clone().into();
+                t.sftp_status_kind = kind;
+            });
+            // Editor tabs (#494): tag the document row whose path matches, so the
+            // pane's pill shows beside the Save button. A failure also re-marks
+            // the row dirty (nothing was written), as the detached host does.
+            if let Some(docs) = win.get_editor_docs().as_any().downcast_ref::<VecModel<EditorDoc>>() {
+                for i in 0..docs.row_count() {
+                    if let Some(mut row) = docs.row_data(i) {
+                        if row.path.as_str() == path.as_str() {
+                            row.save_ack = kind;
+                            if !ok {
+                                row.dirty = true;
+                            }
+                            docs.set_row_data(i, row);
+                            break;
+                        }
+                    }
+                }
+            }
+            // Detached editor window: mirror the same result to its pill; a
+            // failure re-marks dirty so the close-confirm and unsaved dot stay
+            // honest (the optimistic clear was wrong).
+            if editor.get_editor_open() && editor.get_editor_path().as_str() == path.as_str() {
+                editor.set_editor_save_ack(kind);
+                if !ok {
+                    editor.set_editor_dirty(true);
+                }
+            }
         }
         SessionEvent::SftpFileText {
             path,
@@ -348,13 +416,54 @@ pub(super) fn apply_session_event_to_window(
                     local,
                     local_net_hist,
                 );
-                update_terminal(&|t| t.sftp_status = error.clone().into());
+                update_terminal(&|t| {
+                    t.sftp_status = error.clone().into();
+                    t.sftp_status_kind = 2;
+                });
             }
         }
         SessionEvent::SftpDownloadInstead { path } => {
             // Double-clicked file that isn't editable text (#493): run the
             // regular download, exactly as the Download menu entry would.
             win.invoke_sftp_download(tab_id.into(), path.into());
+        }
+        SessionEvent::SftpAskUploadConflict { name, responder } => {
+            // A target appeared after the listing was taken; the transfer is
+            // blocked until this answers. A dismissed dialog (backdrop click)
+            // skips the file — conservative, never overwrites.
+            let replace = t("替换", "Replace");
+            let keep_both = t("保留两份", "Keep both");
+            let skip = t("跳过", "Skip");
+            let result = DialogOwner::of_weak(&win.as_weak())
+                .message()
+                .set_title(t("远端文件已存在", "Remote file already exists"))
+                .set_description(format!(
+                    "{}\n{}",
+                    name,
+                    t(
+                        "上传时发现同名文件（可能在目录刷新后出现）。请选择替换、保留两份，或跳过该文件。",
+                        "A file with this name appeared remotely after the listing was taken. Choose to replace it, keep both, or skip it."
+                    )
+                ))
+                .set_level(rfd::MessageLevel::Warning)
+                .set_buttons(rfd::MessageButtons::YesNoCancelCustom(
+                    replace.to_string(),
+                    keep_both.to_string(),
+                    skip.to_string(),
+                ))
+                .show();
+            let reply = match result {
+                rfd::MessageDialogResult::Yes => crate::ssh::UploadConflictReply::Overwrite,
+                rfd::MessageDialogResult::No => crate::ssh::UploadConflictReply::KeepBoth,
+                rfd::MessageDialogResult::Custom(value) if value == replace => {
+                    crate::ssh::UploadConflictReply::Overwrite
+                }
+                rfd::MessageDialogResult::Custom(value) if value == keep_both => {
+                    crate::ssh::UploadConflictReply::KeepBoth
+                }
+                _ => crate::ssh::UploadConflictReply::Skip,
+            };
+            responder.respond(reply);
         }
         SessionEvent::LocalFilesChanged { path } => {
             // A download finished writing into a local folder. If the split
@@ -465,12 +574,13 @@ pub(super) fn apply_session_event_to_window(
                 // Drive the breathing indicator on the Transfers toolbar button:
                 // `true` while any row is active (0) or preparing (3); flips back
                 // to `false` the moment the last transfer finishes (#breathing-light).
-                let has_active = (0..model.row_count()).any(|i| {
-                    model
-                        .row_data(i)
-                        .map(|r| r.state == 0 || r.state == 3)
-                        .unwrap_or(false)
-                });
+                let has_active = (0..model.row_count())
+                    .any(|i| {
+                        model
+                            .row_data(i)
+                            .map(|r| r.state == 0 || r.state == 3)
+                            .unwrap_or(false)
+                    });
                 win.set_has_active_transfers(has_active);
             }
         }
@@ -534,6 +644,14 @@ pub(super) fn apply_session_event_to_window(
                     }
                     win.set_command_history(history_model(&store.borrow()));
                 }
+            });
+        }
+        SessionEvent::CommandMark(mark) => {
+            // Reflect the OSC 133 command-running state on the tab so the
+            // command-history dropdown can suppress itself while a program runs.
+            let running = matches!(mark, crate::ssh::CommandMark::CommandStart);
+            update_terminal(&|row: &mut TerminalState| {
+                row.command_running = running;
             });
         }
     }

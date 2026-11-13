@@ -16,6 +16,16 @@ fn default_wsl_home() -> String {
     "~".to_string()
 }
 
+/// Per-server group of saved SFTP panel path bookmarks. `server` is the
+/// connection label (e.g. "user@host") the paths were collected under; the
+/// panel only ever shows the group matching the tab it belongs to.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SftpBookmarkGroup {
+    pub server: String,
+    #[serde(default)]
+    pub paths: Vec<String>,
+}
+
 /// A user-defined agent launcher (#427), for agent CLIs meatshell does not
 /// detect by itself. `command` runs inside a local shell tab (PowerShell on
 /// Windows, the login shell elsewhere), optionally starting in `directory`.
@@ -43,10 +53,18 @@ pub struct CustomShell {
     pub directory: String,
 }
 
-// Testing-stage MCP defaults. Switch these serde defaults to false before the
-// feature is promoted from preview to a stable release.
-fn default_mcp_preview_enabled() -> bool {
+fn default_true() -> bool {
     true
+}
+
+// MCP / remote-control defaults. Fail-closed: the automation surface (tools
+// gated by these flags) must stay off until the user explicitly enables it,
+// both for new installs and for legacy configs missing the field (serde fills
+// the default). Previously these returned `true` as preview-stage conveniences;
+// the upstream-style note said to flip them before a stable release — that
+// release is this build.
+fn default_mcp_preview_enabled() -> bool {
+    false
 }
 
 /// Ships with the "幻想 3048" sci-fi wallpaper on by default (a dark theme). New
@@ -61,8 +79,12 @@ fn default_wallpaper() -> String {
     "builtin:tech".to_string()
 }
 
+fn default_search_history_limit() -> u32 {
+    5000
+}
+
 /// Bump when `migrate_defaults` gains a new one-time default-layout change.
-pub const DEFAULTS_REV: u32 = 3;
+pub const DEFAULTS_REV: u32 = 4;
 
 pub(crate) const PREVIOUS_DEFAULT_WALLPAPER_TRANSPARENCY: f32 = 0.38;
 pub(crate) const PREVIOUS_DEFAULT_WALLPAPER_OVERLAY: f32 =
@@ -101,7 +123,17 @@ pub(crate) fn default_quick_panel_height() -> f32 {
     220.0
 }
 
+pub(crate) fn default_ai_panel_width() -> f32 {
+    320.0
+}
+
+pub(crate) fn default_ai_panel_height() -> f32 {
+    420.0
+}
+
 /// On-disk layout. Keep additive to ease forward-compat.
+/// Do not construct new-user configs via `Default`; use `fresh_config()` or
+/// serde deserialization.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ConfigFile {
     #[serde(default)]
@@ -161,6 +193,71 @@ pub struct ConfigFile {
     /// by default while still allowing users to preserve byte-for-byte display.
     #[serde(default)]
     pub json_format_disabled: bool,
+    /// Stored inverted so the built-in SFTP editor's syntax highlighting is on
+    /// by default while remaining switchable under Settings → SFTP.
+    #[serde(default)]
+    pub editor_highlight_disabled: bool,
+    // ── Action links (terminal clickable patterns) ─────────────────────────
+    /// Enables terminal action links (IPv4 / host:port / http(s) URLs). One
+    /// global switch; individual matcher kinds can be toggled below. Defaults
+    /// to ON for new and existing configs (additive feature, links are drawn
+    /// only on hover and require a modifier + click to activate).
+    #[serde(default = "default_true")]
+    pub action_links_enabled: bool,
+    #[serde(default = "default_true")]
+    pub action_links_ipv4: bool,
+    #[serde(default = "default_true")]
+    pub action_links_host_port: bool,
+    #[serde(default = "default_true")]
+    pub action_links_url: bool,
+    // ── Terminal search ───────────────────────────────────────────────────
+    /// Search mode: false = live buffer only (legacy), true = full scrollback
+    /// history navigation. Persisted so the toggle sticks across sessions.
+    #[serde(default)]
+    pub search_history_mode: bool,
+    /// Cap for full-history search results (0 = the default of 5000).
+    #[serde(default = "default_search_history_limit")]
+    pub search_history_limit: u32,
+    // ── Large-output backpressure ─────────────────────────────────────────
+    /// Soft backpressure (throttled reads + render downshift + banner) for
+    /// large-output bursts. Defaults ON (additive; existing 33/8/100ms gating
+    /// stays untouched, this only adds the pressure signal + banner).
+    #[serde(default = "default_true")]
+    pub output_backpressure_enabled: bool,
+    // ── SFTP transfer queue ───────────────────────────────────────────────
+    /// Concurrent transfer workers (1..=4). 0 = default (2).
+    #[serde(default)]
+    pub sftp_queue_concurrency: u32,
+    /// Per-transfer rate limit in KiB/s (0 = unlimited).
+    #[serde(default)]
+    pub sftp_queue_rate_limit_kbps: u32,
+    /// Duplicate-target policy: "ask" | "overwrite" | "skip" | "rename" (#v0.7.2).
+    #[serde(default)]
+    pub sftp_queue_dedup: String,
+    /// Preserve the remote file's mtime after upload/download.
+    #[serde(default)]
+    pub sftp_queue_preserve_mtime: bool,
+    /// Saved SFTP panel path bookmarks grouped per server (`add_sftp_bookmark`
+    /// moves a re-added path to the end of that server's list).
+    #[serde(default)]
+    pub sftp_bookmarks: Vec<SftpBookmarkGroup>,
+    // ── Command-history filters (fuzzy suggestions) ───────────────────────
+    /// Minimum command length (chars) recorded in command history. 0 = no min.
+    #[serde(default)]
+    pub command_history_min_len: u32,
+    /// Maximum command length (chars) recorded in command history. 0 = no max.
+    #[serde(default)]
+    pub command_history_max_len: u32,
+    // ── Grace auto-reconnect (#P3-H) ──────────────────────────────────────
+    /// Automatically reconnect a dropped (non-local) tab in place. Opt-in.
+    #[serde(default)]
+    pub auto_reconnect_enabled: bool,
+    /// Max consecutive auto-reconnect attempts per tab before giving up. 0 = default (5).
+    #[serde(default)]
+    pub auto_reconnect_max_attempts: u32,
+    /// Seconds between auto-reconnect scans. 0 = default (5).
+    #[serde(default)]
+    pub auto_reconnect_interval_secs: u64,
     /// Record terminal output of new tabs to plain-text session logs (#265).
     /// Off by default; saved sessions can override it either way.
     #[serde(default)]
@@ -308,6 +405,19 @@ pub struct ConfigFile {
     pub window_width: f32,
     #[serde(default)]
     pub window_height: f32,
+    /// Last window position in logical px (0 = unset → use the default).
+    /// Lets users keep their preferred window position across restarts.
+    #[serde(default)]
+    pub window_x: f32,
+    #[serde(default)]
+    pub window_y: f32,
+    /// The monitor's pixel scale factor at the moment the position/size above
+    /// were saved (0 = unset → fall back to the current window scale). On a
+    /// mixed-DPI desktop the saved logical coordinates only restore to the
+    /// physical spot they had on the monitor they came from when converted
+    /// with that monitor's own scale, not today's.
+    #[serde(default)]
+    pub window_scale: f32,
     /// Collapse the bottom SFTP panel on startup (#78).
     #[serde(default)]
     pub collapse_sftp_default: bool,
@@ -378,20 +488,6 @@ pub struct ConfigFile {
     /// 0 = default (3).
     #[serde(default)]
     pub ssh_keepalive_max: u32,
-    /// Disable the startup "new version available" check (#184). Default false =
-    /// keep checking (preserves existing behaviour for upgrading users); turning
-    /// it on stops the GitHub releases query and the banner.
-    #[serde(default)]
-    pub update_check_disabled: bool,
-    /// Download mirror prefixes for one-click updates, raced against GitHub.
-    /// Used only with the Chinese UI in a mainland China time zone.
-    /// `None` = the built-in list (`update::mirror::DEFAULT_MIRRORS`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub update_mirrors: Option<Vec<String>>,
-    /// The download source the user picked (a mirror prefix, `""` = GitHub).
-    /// `None` = automatic: use the fastest source at download time.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub update_mirror_choice: Option<String>,
     /// Enable the local stdio MCP server (`meatshell mcp serve`).
     #[serde(default = "default_mcp_preview_enabled")]
     pub mcp_enabled: bool,
@@ -411,6 +507,27 @@ pub struct ConfigFile {
     /// resource panel / wallpaper overlay) to users still sitting on old defaults.
     #[serde(default)]
     pub defaults_rev: u32,
+    /// AI assistant chat settings. `ai_api_key` is encrypted at rest like the
+    /// WebDAV password. `ai_base_url` is an OpenAI-compatible base URL without
+    /// a trailing slash (e.g. `https://api.openai.com/v1`).
+    #[serde(default)]
+    pub ai_base_url: String,
+    #[serde(default)]
+    pub ai_model: String,
+    #[serde(default)]
+    pub ai_api_key: Secret,
+    /// AI-panel docking: extents (px) and docked edge (left|right|top|bottom),
+    /// persisted so the layout sticks.
+    #[serde(default)]
+    pub ai_panel_open: bool,
+    #[serde(default)]
+    pub ai_panel_collapsed: bool,
+    #[serde(default = "default_ai_panel_width")]
+    pub ai_panel_width: f32,
+    #[serde(default = "default_ai_panel_height")]
+    pub ai_panel_height: f32,
+    #[serde(default)]
+    pub ai_panel_dock: String,
     /// Per-edge stacks of simultaneously-expanded docked panels (#dock-stack),
     /// e.g. session list + Quick shared on the left edge, split vertically.
     /// Empty (or <2 slots on a valid edge) → the legacy single-panel-per-edge
@@ -419,16 +536,16 @@ pub struct ConfigFile {
     pub dock_stacks: Vec<DockEdgeSer>,
 }
 
-/// Portable export file (issue #46): sessions with everything in plaintext
-/// **except** the password, which is encrypted with a fixed key baked into the
-/// binary so the file opens on *any* machine running meatshell.
-///
-/// Security note: a built-in key in open-source code is **obfuscation, not real
-/// security** — anyone with the source can derive it. It only stops a casual
-/// over-the-shoulder read of the file, same level as FinalShell's export.
+/// Portable quick-commands export (#55 companion): names, commands and group
+/// names only — no secrets, so the JSON stays plaintext.
+/// `groups` preserves *empty* groups too (a command's own `group` field only
+/// covers non-empty ones).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ExportFile {
+pub(crate) struct QuickCommandsExportFile {
     /// Format marker / version so the schema can evolve later.
-    pub(crate) meatshell_export: u32,
-    pub(crate) sessions: Vec<Session>,
+    pub(crate) meatshell_quick_commands: u32,
+    #[serde(default)]
+    pub(crate) commands: Vec<QuickCommand>,
+    #[serde(default)]
+    pub(crate) groups: Vec<String>,
 }

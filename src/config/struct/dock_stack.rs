@@ -1,7 +1,7 @@
 //! Docked-panel edge stacks (#dock-stack).
 //!
-//! Window-level panels (sidebar / welcome / quick) can share the same
-//! window edge at the same time, stacked along that edge. A `DockEdgeSer`
+//! Window-level panels (sidebar / welcome / quick / ai / sftp) can share the
+//! same window edge at the same time, stacked along that edge. A `DockEdgeSer`
 //! records, per edge, the ordered list of simultaneously-expanded panels and
 //! how that edge's secondary axis is divided between them. Legacy configs have
 //! an empty list → the old single-panel-per-edge layout keeps working.
@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 /// One panel in an edge stack. `kind` is one of
-/// `"sidebar" | "welcome" | "quick"`; `ratio` divides the edge's
+/// `"sidebar" | "welcome" | "quick" | "ai"`; `ratio` divides the edge's
 /// secondary axis among the stacked panels (0..1 — the stack is renormalised
 /// when loaded, so stale ratios can never sum away from 1).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -35,7 +35,7 @@ pub(crate) fn valid_edge(edge: &str) -> bool {
 }
 
 pub(crate) fn valid_kind(kind: &str) -> bool {
-    matches!(kind, "sidebar" | "welcome" | "quick")
+    matches!(kind, "sidebar" | "welcome" | "quick" | "ai" | "sftp")
 }
 
 /// Normalise one edge stack so it is safe to apply:
@@ -118,7 +118,7 @@ mod tests {
 
     #[test]
     fn sanitize_keeps_valid_edge_and_renormalises() {
-        let out = sanitize_edge(edge("right", vec![slot("sidebar", 1.0), slot("quick", 1.0)]))
+        let out = sanitize_edge(edge("right", vec![slot("ai", 1.0), slot("quick", 1.0)]))
             .expect("valid two-panel stack survives");
         assert_eq!(out.edge, "right");
         assert_eq!(out.slots.len(), 2);
@@ -129,12 +129,12 @@ mod tests {
     fn sanitize_drops_unknown_kinds() {
         let out = sanitize_edge(edge(
             "bottom",
-            vec![slot("sidebar", 0.5), slot("bogus", 0.5), slot("quick", 0.5)],
+            vec![slot("sidebar", 0.5), slot("bogus", 0.5), slot("ai", 0.5)],
         ))
         .expect("survives after dropping the unknown kind");
-        // ["bogus"] filtered → sidebar + quick remain, renormalised.
+        // ["bogus"] filtered → sidebar + ai remain, renormalised.
         assert_eq!(out.slots.len(), 2);
-        assert!(out.slots.iter().all(|s| matches!(s.kind.as_str(), "sidebar" | "quick")));
+        assert!(out.slots.iter().all(|s| matches!(s.kind.as_str(), "sidebar" | "ai")));
     }
 
     #[test]
@@ -153,17 +153,17 @@ mod tests {
     #[test]
     fn sanitize_rejects_single_panel_or_bad_edge() {
         assert!(sanitize_edge(edge("left", vec![slot("sidebar", 1.0)])).is_none());
-        assert!(sanitize_edge(edge("middle", vec![slot("sidebar", 0.5), slot("quick", 0.5)])).is_none());
+        assert!(sanitize_edge(edge("middle", vec![slot("sidebar", 0.5), slot("ai", 0.5)])).is_none());
         assert!(sanitize_edge(edge("left", Vec::new())).is_none());
         // Zero/negative ratios leave fewer than 2 valid panels → rejected.
-        assert!(sanitize_edge(edge("left", vec![slot("sidebar", 0.0), slot("quick", 0.0)])).is_none());
+        assert!(sanitize_edge(edge("left", vec![slot("sidebar", 0.0), slot("ai", 0.0)])).is_none());
     }
 
     #[test]
     fn sanitize_clamps_ratios_within_range() {
         let out = sanitize_edge(edge(
             "top",
-            vec![slot("sidebar", 0.0001), slot("quick", 999.0)],
+            vec![slot("sidebar", 0.0001), slot("ai", 999.0)],
         ))
         .expect("stack survives");
         assert!(out.slots[0].ratio >= 0.05);

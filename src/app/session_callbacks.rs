@@ -1,80 +1,10 @@
-//! Saved-session list, session dialog and connection callbacks.
+//! Session list, session dialog and connection callbacks (the large
+//! wire_session_callbacks block). Split out of app.rs to match the
+//! upstream module boundary (session_callbacks).
 
 use super::*;
 
-/// Drops the second connect of a double-click (#511). Session rows connect on
-/// each click release, and users coming from Xshell / FinalShell double-click.
-#[derive(Default)]
-struct DoubleClickGuard {
-    last: Option<(String, std::time::Instant)>,
-}
-
-impl DoubleClickGuard {
-    /// The default double-click time on Windows and macOS.
-    const WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
-
-    /// False when `id` was connected less than [`Self::WINDOW`] ago.
-    fn allow(&mut self, id: &str, now: std::time::Instant) -> bool {
-        let repeat = matches!(&self.last, Some((last_id, at))
-            if last_id == id && now.saturating_duration_since(*at) < Self::WINDOW);
-        if !repeat {
-            self.last = Some((id.to_string(), now));
-        }
-        !repeat
-    }
-}
-
-#[cfg(test)]
-mod double_click_tests {
-    use super::DoubleClickGuard;
-    use std::time::{Duration, Instant};
-
-    #[test]
-    fn the_second_click_of_a_double_click_does_not_connect_again() {
-        let mut guard = DoubleClickGuard::default();
-        let t = Instant::now();
-        assert!(guard.allow("rdp", t));
-        assert!(!guard.allow("rdp", t + Duration::from_millis(180)));
-        // The ignored click does not extend the window: a deliberate third
-        // click after it connects again.
-        assert!(guard.allow("rdp", t + Duration::from_millis(600)));
-    }
-
-    #[test]
-    fn other_sessions_and_later_clicks_still_connect() {
-        let mut guard = DoubleClickGuard::default();
-        let t = Instant::now();
-        assert!(guard.allow("a", t));
-        assert!(guard.allow("b", t + Duration::from_millis(50)));
-        assert!(guard.allow("a", t + Duration::from_millis(100)));
-        assert!(guard.allow("a", t + Duration::from_secs(2)));
-    }
-}
-
-pub(super) fn sync_sessions_for_window(
-    window: &slint::Weak<AppWindow>,
-    store: &ConfigStore,
-    model: &VecModel<SessionInfo>,
-) {
-    let Some(window) = window.upgrade() else {
-        return;
-    };
-    let query = window.get_host_search_query().to_string();
-    // Prefer in-place row updates: they keep the list's scroll position and
-    // any running drag alive and skip the reallocation. A full set_vec
-    // rebuild — which destroys the dragging row's pointer grab — happens
-    // only when the row count changed, and the revision bump tells Welcome
-    // to clear its stale drag state in exactly that case.
-    if !refresh_session_rows_in_place(store, model, &query) {
-        window.set_sessions_revision(window.get_sessions_revision() + 1);
-    }
-}
-
-/// Parse the batch-import textarea (#150). Each non-empty, non-`#` line is
-/// `host|port|user|password|name`; trailing fields are optional (port → 22,
-/// user → root, password → none, name → user@host). A leading header row such as
-/// `host|port|username|password|name` is skipped. Dedup happens at the call site.
-pub(super) fn wire_session_callbacks(
+pub(crate) fn wire_session_callbacks(
     window: &AppWindow,
     // Registry id of `window`; connect-time prompts are tagged with it so
     // their dialogs open (and abort on close) in this window (#multi-window).
@@ -101,7 +31,10 @@ pub(super) fn wire_session_callbacks(
     sftp_follow_cd: Arc<std::sync::atomic::AtomicBool>,
     tab_routes: TabRoutes,
     tab_titles: Rc<RefCell<HashMap<String, String>>>,
-    editor_win: Rc<EditorWindow>,
+    bundle_mailbox: BundleMailbox,
+    // Detached editor window of this window (#494): connects pass it down to
+    // the session event pump through `ConnectCtx`.
+    editor: slint::Weak<EditorWindow>,
 ) {
     // Working set of port forwards (#56) for the session being created/edited.
     // The forward add/delete callbacks mutate it; saving reads it into
@@ -138,53 +71,13 @@ pub(super) fn wire_session_callbacks(
         });
     }
 
-    let editor_test = Rc::new(RefCell::new(crate::session_test::EditorTest::default()));
-    session_editor::register(&window, store.clone(), window_id, editor_test.clone());
-    {
-        let weak = window.as_weak();
-        let active_test = editor_test.clone();
-        window.on_session_dialog_closed(move || {
-            if let Some(w) = weak.upgrade() {
-                session_editor::stop_test(&w, window_id, &active_test);
-            }
-        });
-    }
-
-    {
-        let weak = window.as_weak();
-        let active_test = editor_test.clone();
-        window.on_session_dialog_stop_test(move || {
-            if let Some(w) = weak.upgrade() {
-                session_editor::stop_test(&w, window_id, &active_test);
-            }
-        });
-    }
-
-    {
-        let weak = window.as_weak();
-        let active_test = editor_test.clone();
-        window.on_session_dialog_changed(move || {
-            if let Some(w) = weak.upgrade() {
-                let snapshot = session_editor::connection_snapshot(&w);
-                let same_snapshot = active_test.borrow().matches_snapshot(snapshot);
-                if !same_snapshot && session_editor::stop_test(&w, window_id, &active_test) {
-                    w.set_dialog_test_status("".into());
-                }
-            }
-        });
-    }
-
     // New session -> open dialog with blank draft.
     let weak = window.as_weak();
     let ef_new = edit_forwards.clone();
     let et_new = edit_triggers.clone();
     let ets_new = edit_trigger_secrets.clone();
     let store_ng = store.clone();
-    let active_test = editor_test.clone();
     window.on_new_session_clicked(move || {
-        if let Some(w) = weak.upgrade() {
-            session_editor::stop_test(&w, window_id, &active_test);
-        }
         if let Some(w) = weak.upgrade() {
             *ef_new.borrow_mut() = vec![blank_forward_draft()];
             *et_new.borrow_mut() = vec![blank_trigger_draft()];
@@ -193,12 +86,11 @@ pub(super) fn wire_session_callbacks(
             w.set_dialog_forwards(forward_model(&ef_new.borrow()));
             w.set_dialog_triggers(trigger_model(&et_new.borrow()));
             let empty = Session::new_empty();
-            let (jump_labels, jump_ids) = jump_candidates(&store_ng.borrow(), &empty.id);
+            let (jump_labels, jump_ids, _jump_idx) =
+                jump_candidates(&store_ng.borrow(), &empty.id, "");
             w.set_jump_choices(jump_labels);
             w.set_jump_ids(jump_ids);
             w.set_dialog_jumps(ModelRc::default());
-            w.set_dialog_allow_secret_reveal(false);
-            w.set_dialog_allow_mcp_access(true);
             w.set_dialog_id(empty.id.into());
             w.set_dialog_name("".into());
             w.set_dialog_host("".into());
@@ -237,14 +129,20 @@ pub(super) fn wire_session_callbacks(
             w.set_dialog_rdp_gfx(false);
             w.set_dialog_rdp_extra_args("".into());
             w.set_dialog_rdp_show_advanced(false);
-            w.set_dialog_rdp_preview("".into());
             w.set_dialog_encoding("UTF-8".into());
-            w.set_dialog_vt100_drawing(true);
+            w.set_dialog_vt100_drawing(false);
             w.set_dialog_term_type(crate::config::DEFAULT_TERM_TYPE.into());
             w.set_dialog_session_log("default".into());
             w.set_dialog_disable_shell_integration(false);
+            // A new session starts from a clean slate: the submit now takes
+            // these from the draft, so leftover values from the session edited
+            // before must not ride along (#438).
             w.set_dialog_sftp_mode("".into());
             w.set_dialog_sftp_command("".into());
+            w.set_dialog_allow_secret_reveal(false);
+            // MCP exposure is opt-in (#432): new sessions stay hidden from MCP
+            // clients until the user ticks it, matching the stored default.
+            w.set_dialog_allow_mcp_access(false);
             w.set_dialog_note("".into());
             w.set_dialog_editing(false);
             w.set_dialog_open(true);
@@ -319,27 +217,57 @@ pub(super) fn wire_session_callbacks(
         });
     }
 
-    // Export all sessions to a portable JSON file (issue #46). Passwords are
-    // obfuscated with the built-in export key; host/user/port stay plaintext.
+    // Export the whole config as a passphrase-encrypted bundle (#P3-I). The old
+    // built-in-key JSON export let anyone derive the key from the source code.
     {
         let weak = window.as_weak();
         let store = store.clone();
         window.on_export_sessions(move || {
-            if let Some(path) = DialogOwner::of_weak(&weak)
-                .file()
-                .set_file_name("meatshell-connections.json")
-                .add_filter("JSON", &["json"])
-                .save_file()
-            {
-                let res = store.borrow().export_to(&path);
-                if let Some(w) = weak.upgrade() {
-                    let hint = match res {
-                        Ok(n) => format!("{} {}", t("已导出连接", "exported"), n),
-                        Err(e) => format!("{}: {}", t("导出失败", "export failed"), e),
-                    };
-                    w.set_ssh_import_hint(hint.into());
-                }
+            let Some(w) = weak.upgrade() else { return };
+            let pass = w.get_portable_passphrase().to_string();
+            if pass.is_empty() {
+                w.set_ssh_import_hint(
+                    t(
+                        "请先在 设置 → 界面 填写便携包口令",
+                        "enter a bundle passphrase in Settings → Interface first",
+                    )
+                    .into(),
+                );
+                return;
             }
+            let Some(path) = rfd::FileDialog::new()
+                .set_file_name("meatshell-connections.mpack")
+                .add_filter("MeatShell bundle", &["mpack"])
+                .save_file()
+            else {
+                return;
+            };
+            let payload = match store.borrow().bundle_payload() {
+                Ok(payload) => payload,
+                Err(e) => {
+                    w.set_ssh_import_hint(
+                        format!("{}: {}", t("导出失败", "export failed"), e).into(),
+                    );
+                    return;
+                }
+            };
+            let count = store.borrow().sessions().len();
+            let weak2 = weak.clone();
+            std::thread::spawn(move || {
+                let res = ConfigStore::seal_bundle(&pass, &payload).and_then(|pack| {
+                    std::fs::write(&path, pack)
+                        .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))
+                });
+                let hint = match res {
+                    Ok(()) => format!(
+                        "{} {}",
+                        t("已导出连接（口令加密）", "exported (encrypted)"),
+                        count
+                    ),
+                    Err(e) => format!("{}: {}", t("导出失败", "export failed"), e),
+                };
+                let _ = weak2.upgrade_in_event_loop(move |w| w.set_ssh_import_hint(hint.into()));
+            });
         });
     }
 
@@ -396,15 +324,15 @@ pub(super) fn wire_session_callbacks(
         let sessions_model = sessions_model.clone();
         let registry = registry.clone();
         window.on_import_sessions(move || {
-            if let Some(path) = DialogOwner::of_weak(&weak)
-                .file()
+            if let Some(path) = rfd::FileDialog::new()
                 .add_filter("JSON", &["json"])
+                .add_filter("MobaXterm", &["mxtsessions", "moba"])
                 .pick_file()
             {
                 let res = store.borrow_mut().import_from(&path);
                 if let Some(w) = weak.upgrade() {
                     let hint = match res {
-                        Ok((added, skipped)) => {
+                            Ok((added, skipped)) => {
                             sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
                             registry.broadcast_config_changed();
                             format!(
@@ -423,6 +351,181 @@ pub(super) fn wire_session_callbacks(
         });
     }
 
+    // ── Passphrase-encrypted portable bundle (#P3-I) ──────────────────────
+    // File export/import + WebDAV round-trip of the whole config, sealed with a
+    // key derived from the passphrase the user typed in the WebDAV settings page.
+    {
+        let weak = window.as_weak();
+        let store = store.clone();
+        window.on_export_portable_bundle(move || {
+            let Some(w) = weak.upgrade() else { return };
+            let pass = w.get_portable_passphrase().to_string();
+            if pass.is_empty() {
+                w.set_portable_status(
+                    t("请先填写便携包口令", "enter a bundle passphrase first").into(),
+                );
+                return;
+            }
+            let Some(path) = rfd::FileDialog::new()
+                .set_file_name("meatshell.mpack")
+                .add_filter("MeatShell bundle", &["mpack"])
+                .save_file()
+            else {
+                return;
+            };
+            let payload = match store.borrow().bundle_payload() {
+                Ok(payload) => payload,
+                Err(e) => {
+                    w.set_portable_status(
+                        format!("{}: {}", t("导出失败", "export failed"), e).into(),
+                    );
+                    return;
+                }
+            };
+            let count = store.borrow().sessions().len();
+            let weak2 = weak.clone();
+            w.set_portable_status(t("导出中...", "exporting...").into());
+            std::thread::spawn(move || {
+                let res = ConfigStore::seal_bundle(&pass, &payload).and_then(|pack| {
+                    std::fs::write(&path, pack)
+                        .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))
+                });
+                let msg = match res {
+                    Ok(()) => format!("{} {}", t("已导出便携包", "bundle exported"), count),
+                    Err(e) => format!("{}: {}", t("导出失败", "export failed"), e),
+                };
+                let _ = weak2.upgrade_in_event_loop(move |w| w.set_portable_status(msg.into()));
+            });
+        });
+    }
+    {
+        let weak = window.as_weak();
+        let mailbox = bundle_mailbox.clone();
+        window.on_import_portable_bundle(move || {
+            let Some(w) = weak.upgrade() else { return };
+            let pass = w.get_portable_passphrase().to_string();
+            if pass.is_empty() {
+                w.set_portable_status(
+                    t("请先填写便携包口令", "enter a bundle passphrase first").into(),
+                );
+                return;
+            }
+            let Some(path) = rfd::FileDialog::new()
+                .add_filter("MeatShell bundle", &["mpack"])
+                .pick_file()
+            else {
+                return;
+            };
+            // The Argon2 KDF is deliberately slow; run it (and the file read)
+            // off the UI thread and let the bundle timer apply the result.
+            let mailbox = mailbox.clone();
+            w.set_portable_status(t("解密中...", "decrypting...").into());
+            std::thread::spawn(move || {
+                let result = std::fs::read_to_string(&path)
+                    .map_err(|e| format!("{e}"))
+                    .and_then(|pack| {
+                        ConfigStore::decrypt_bundle(&pass, &pack).map_err(|e| format!("{e:#}"))
+                    });
+                lock_or_recover(&mailbox).push(BundleDelivery {
+                    result,
+                    download: false,
+                    webdav: false,
+                    fallback: None,
+                });
+            });
+        });
+    }
+    {
+        let weak = window.as_weak();
+        let store = store.clone();
+        window.on_upload_portable_bundle(move || {
+            let Some(w) = weak.upgrade() else { return };
+            let pass = w.get_portable_passphrase().to_string();
+            let url = w.get_webdav_url().to_string();
+            let username = w.get_webdav_username().to_string();
+            let password = w.get_webdav_password().to_string();
+            let remote_path = w.get_webdav_remote_path().to_string();
+            let accept_invalid_certs = w.get_webdav_accept_invalid_certs();
+            if pass.is_empty() {
+                w.set_portable_status(
+                    t("请先填写便携包口令", "enter a bundle passphrase first").into(),
+                );
+                return;
+            }
+            let bundle_path = bundle_remote_path(&remote_path);
+            let payload = match store.borrow().bundle_payload() {
+                Ok(payload) => payload,
+                Err(e) => {
+                    w.set_portable_status(
+                        format!("{}: {}", t("上传失败", "upload failed"), e).into(),
+                    );
+                    return;
+                }
+            };
+            let weak2 = weak.clone();
+            w.set_portable_status(t("上传中...", "uploading...").into());
+            std::thread::spawn(move || {
+                let res = ConfigStore::seal_bundle(&pass, &payload).and_then(|pack| {
+                    let envelope = format!("{{\"meatshell_bundle\":1,\"data\":\"{pack}\"}}");
+                    webdav_put_json(
+                        &url,
+                        &bundle_path,
+                        &username,
+                        &password,
+                        accept_invalid_certs,
+                        envelope,
+                    )
+                });
+                let msg = match res {
+                    Ok(()) => t("便携包已上传", "bundle uploaded").to_string(),
+                    Err(e) => format!("{}: {}", t("上传失败", "upload failed"), e),
+                };
+                let _ = weak2.upgrade_in_event_loop(move |w| w.set_portable_status(msg.into()));
+            });
+        });
+    }
+    {
+        let weak = window.as_weak();
+        let mailbox = bundle_mailbox.clone();
+        window.on_download_portable_bundle(move || {
+            let Some(w) = weak.upgrade() else { return };
+            let pass = w.get_portable_passphrase().to_string();
+            let url = w.get_webdav_url().to_string();
+            let username = w.get_webdav_username().to_string();
+            let password = w.get_webdav_password().to_string();
+            let remote_path = w.get_webdav_remote_path().to_string();
+            let accept_invalid_certs = w.get_webdav_accept_invalid_certs();
+            if pass.is_empty() {
+                w.set_portable_status(
+                    t("请先填写便携包口令", "enter a bundle passphrase first").into(),
+                );
+                return;
+            }
+            let bundle_path = bundle_remote_path(&remote_path);
+            // Fetch + KDF off the UI thread; the bundle timer applies the
+            // decrypted config where the store lives.
+            let mailbox = mailbox.clone();
+            w.set_portable_status(t("下载中...", "downloading...").into());
+            std::thread::spawn(move || {
+                let result =
+                    webdav_get_json(&url, &bundle_path, &username, &password, accept_invalid_certs)
+                        .map_err(|e| format!("{e:#}"))
+                        .and_then(|body| {
+                            extract_bundle_data(&body).map_err(|e| format!("{e}"))
+                        })
+                        .and_then(|pack| {
+                            ConfigStore::decrypt_bundle(&pass, &pack).map_err(|e| format!("{e:#}"))
+                        });
+                lock_or_recover(&mailbox).push(BundleDelivery {
+                    result,
+                    download: true,
+                    webdav: false,
+                    fallback: None,
+                });
+            });
+        });
+    }
+
     // Edit -> open dialog prefilled.
     {
         let weak = window.as_weak();
@@ -430,11 +533,7 @@ pub(super) fn wire_session_callbacks(
         let ef_edit = edit_forwards.clone();
         let et_edit = edit_triggers.clone();
         let ets_edit = edit_trigger_secrets.clone();
-        let active_test = editor_test.clone();
         window.on_edit_session(move |id: SharedString| {
-            if let Some(w) = weak.upgrade() {
-                session_editor::stop_test(&w, window_id, &active_test);
-            }
             let id = id.to_string();
             let store = store.borrow();
             let Some(session) = store.get(&id) else {
@@ -445,11 +544,7 @@ pub(super) fn wire_session_callbacks(
                 ef_edit.borrow_mut().push(blank_forward_draft());
             }
             *et_edit.borrow_mut() = trigger_drafts(&session.triggers);
-            *ets_edit.borrow_mut() = session
-                .triggers
-                .iter()
-                .map(|t| t.response.clone())
-                .collect();
+            *ets_edit.borrow_mut() = session.triggers.iter().map(|t| t.response.clone()).collect();
             if et_edit.borrow().is_empty() {
                 et_edit.borrow_mut().push(blank_trigger_draft());
                 ets_edit.borrow_mut().push(Secret::default());
@@ -464,34 +559,45 @@ pub(super) fn wire_session_callbacks(
                 w.set_dialog_port(session.port.to_string().into());
                 w.set_dialog_user(session.user.clone().into());
                 w.set_dialog_auth(session.auth.as_str().into());
-                // Start blank; the dialog only loads saved credentials after
-                // opt-in, initially masked. Blank on save still retains them (#10).
+                // The reveal opt-in goes first: `set_dialog_key_inline_mode`
+                // below makes the dialog ask for the stored credentials, and
+                // that request must already see this session's own value
+                // instead of whatever the previous one left behind.
+                w.set_dialog_allow_secret_reveal(session.allow_secret_reveal);
+                // Never echo the stored password back into the UI (issue #10) —
+                // leave it blank; a blank field on save keeps the existing one.
                 w.set_dialog_password("".into());
                 w.set_dialog_key_path(session.private_key_path.clone().into());
                 w.set_dialog_key_inline("".into());
                 w.set_dialog_key_inline_mode(!session.private_key_inline.is_empty());
                 w.set_dialog_test_status("".into());
-                let (proxy_type, proxy_hostport) = split_proxy(&session.proxy);
+                // Backfill the MCP-exposure opt-in from the saved session: the
+                // dialog starts unchecked (fail-closed), so without this the
+                // user's existing opt-in would silently flip off on save.
+                w.set_dialog_allow_mcp_access(session.mcp_access);
+                let (proxy_type, proxy_hostport) = split_proxy(session.proxy.as_str());
                 w.set_dialog_proxy_type(proxy_type.into());
                 w.set_dialog_proxy_hostport(proxy_hostport.into());
-                let (jump_labels, jump_ids) = jump_candidates(&store, &session.id);
+                let (jump_labels, jump_ids, _) =
+                    jump_candidates(&store, &session.id, &session.jump_session_id);
+                // Backfill the jump editor from the saved route. A resolvable
+                // chain shows one row per hop (immediate first); a broken
+                // route shows a test error and, when only the legacy single
+                // hop is set, forces an explicit repair instead of silently
+                // flattening it (#211).
                 let route = store.resolve_jump_chain(session);
                 let ids = match route {
                     Ok(hops) => hops.into_iter().rev().map(|hop| hop.id).collect(),
                     Err(err) => {
                         w.set_dialog_test_status(err.to_string().into());
                         if session.jump_session_ids.is_empty() {
-                            // Require an explicit repair: flattening only the immediate hop
-                            // would silently discard a broken inherited route.
                             vec![String::new(), session.jump_session_id.clone()]
                         } else {
                             session.jump_session_ids.clone()
                         }
                     }
                 };
-                w.set_dialog_jumps(session_editor::jump_rows(ids, &jump_ids));
-                w.set_dialog_allow_secret_reveal(session.allow_secret_reveal);
-                w.set_dialog_allow_mcp_access(session.mcp_access);
+                w.set_dialog_jumps(jump_rows(ids, &jump_ids));
                 w.set_jump_choices(jump_labels);
                 w.set_jump_ids(jump_ids);
                 w.set_dialog_group(session.group.clone().into());
@@ -524,17 +630,41 @@ pub(super) fn wire_session_callbacks(
                 w.set_dialog_rdp_gfx(session.rdp_gfx);
                 w.set_dialog_rdp_extra_args(session.rdp_extra_args.clone().into());
                 w.set_dialog_rdp_show_advanced(!session.rdp_extra_args.is_empty());
-                w.set_dialog_rdp_preview("".into());
                 w.set_dialog_encoding(session.encoding.clone().into());
                 w.set_dialog_vt100_drawing(session.vt100_drawing);
                 w.set_dialog_term_type(session.effective_term_type().into());
                 w.set_dialog_session_log(session.session_log.as_str().into());
-                w.set_dialog_disable_shell_integration(session.disable_shell_integration);
                 w.set_dialog_sftp_mode(session.sftp_mode.clone().into());
                 w.set_dialog_sftp_command(session.sftp_command.clone().into());
+                w.set_dialog_disable_shell_integration(session.disable_shell_integration);
                 w.set_dialog_note(session.note.clone().into());
                 w.set_dialog_editing(true);
                 w.set_dialog_open(true);
+            }
+        });
+    }
+
+    // Reveal a saved credential from the open editor (#reveal-secret). The
+    // dialog only asks after the user opted in with `allow_secret_reveal`, so
+    // an unauthorized caller gets nothing back.
+    {
+        let weak = window.as_weak();
+        let store = store.clone();
+        window.on_reveal_session_secret(move |private_key| {
+            let Some(w) = weak.upgrade() else {
+                return SharedString::new();
+            };
+            if !w.get_dialog_open() || !w.get_dialog_allow_secret_reveal() {
+                return SharedString::new();
+            }
+            let store = store.borrow();
+            let Some(session) = store.get(w.get_dialog_id().as_str()) else {
+                return SharedString::new();
+            };
+            if private_key {
+                session.private_key_inline.as_str().into()
+            } else {
+                session.password.as_str().into()
             }
         });
     }
@@ -575,7 +705,7 @@ pub(super) fn wire_session_callbacks(
                 if let Some(orig) = s.get(&id.to_string()).cloned() {
                     let mut copy = orig;
                     copy.id = uuid::Uuid::new_v4().to_string();
-                    copy.name = format!("{} (copy)", copy.name);
+                    copy.name = format!("{} {}", copy.name, t("副本", "(copy)"));
                     copy.last_used = None;
                     s.upsert(copy);
                     if let Err(err) = s.save() {
@@ -667,8 +797,7 @@ pub(super) fn wire_session_callbacks(
                     .upgrade()
                     .map(|w| w.get_host_search_query().to_string())
                     .unwrap_or_default();
-                let in_place =
-                    refresh_session_rows_in_place(&store.borrow(), &sessions_model, &query);
+                let in_place = refresh_session_rows_in_place(&store.borrow(), &sessions_model, &query);
                 if !in_place {
                     // The hop changed the row count (e.g. a cross-group hop
                     // emptied the ungrouped section): the set_vec rebuild
@@ -824,6 +953,70 @@ pub(super) fn wire_session_callbacks(
         });
     }
 
+    // Jump-chain editor rows in the session dialog (#211): add / update /
+    // delete / move. Rows hold the chosen id + dropdown choice; saving maps
+    // them back to `jump_session_ids` (see submit / `session_from_draft`).
+    {
+        let weak = window.as_weak();
+        window.on_add_jump(move || {
+            if let Some(w) = weak.upgrade() {
+                update_jump_rows(&w, |rows| {
+                    if rows.len() < MAX_JUMP_EDITOR_ROWS {
+                        rows.push(JumpHop {
+                            placeholder: true,
+                            ..JumpHop::default()
+                        });
+                    }
+                });
+            }
+        });
+        let weak = window.as_weak();
+        window.on_update_jump(move |index, choice| {
+            if let Some(w) = weak.upgrade() {
+                let Some(id) = w.get_jump_ids().row_data(choice.max(0) as usize) else {
+                    return;
+                };
+                // Mutate the row IN PLACE (set_row_data), not through
+                // `update_jump_rows`: that rebuilds the model, which recreates
+                // the row and destroys the one whose dropdown popup is still
+                // closing (#509). The helper also cleared the test status, so
+                // do that here.
+                let Ok(index) = usize::try_from(index) else {
+                    return;
+                };
+                let rows = w.get_dialog_jumps();
+                if let Some(row) = rows.row_data(index) {
+                    let placeholder = row.placeholder && id.trim().is_empty();
+                    rows.set_row_data(
+                        index,
+                        JumpHop {
+                            id,
+                            choice,
+                            placeholder,
+                        },
+                    );
+                    w.set_dialog_test_status("".into());
+                }
+            }
+        });
+        let weak = window.as_weak();
+        window.on_delete_jump(move |index| {
+            if let Some(w) = weak.upgrade() {
+                update_jump_rows(&w, |rows| {
+                    if index >= 0 && (index as usize) < rows.len() {
+                        rows.remove(index as usize);
+                    }
+                });
+            }
+        });
+        let weak = window.as_weak();
+        window.on_move_jump(move |from, to| {
+            if let Some(w) = weak.upgrade() {
+                update_jump_rows(&w, |rows| move_jump_row(rows, from, to));
+            }
+        });
+    }
+
     // Dialog submit -> persist + (optionally) connect.
     {
         let weak = window.as_weak();
@@ -833,11 +1026,7 @@ pub(super) fn wire_session_callbacks(
         let edit_triggers = edit_triggers.clone();
         let edit_trigger_secrets = edit_trigger_secrets.clone();
         let registry = registry.clone();
-        let active_test = editor_test.clone();
         window.on_session_dialog_submit(move |draft: SessionDraft| {
-            if let Some(w) = weak.upgrade() {
-                session_editor::stop_test(&w, window_id, &active_test);
-            }
             let id = draft.id.to_string();
             let forwards = match validated_port_forwards(&edit_forwards.borrow()) {
                 Ok(forwards) => forwards,
@@ -848,19 +1037,149 @@ pub(super) fn wire_session_callbacks(
                     return;
                 }
             };
-            let triggers =
-                match validated_triggers(&edit_triggers.borrow(), &edit_trigger_secrets.borrow()) {
-                    Ok(triggers) => triggers,
-                    Err(message) => {
-                        if let Some(w) = weak.upgrade() {
-                            w.set_dialog_test_status(message.into());
-                        }
-                        return;
-                    }
-                };
-            // Saving and testing use the same draft conversion, including blank-secret retention.
-            let existing = store.borrow().get(&id).cloned();
-            let new_session = session_from_draft(&draft, existing.as_ref(), forwards, triggers);
+            let triggers = match validated_triggers(&edit_triggers.borrow(), &edit_trigger_secrets.borrow()) {
+                Ok(triggers) => triggers,
+                Err(message) => {
+                    if let Some(w) = weak.upgrade() { w.set_dialog_test_status(message.into()); }
+                    return;
+                }
+            };
+            // The edit dialog never echoes the real password (issue #10): a blank
+            // field while editing means "keep the existing password" rather than
+            // "clear it".  Only overwrite when the user actually typed something.
+            let password = if draft.password.is_empty() {
+                store
+                    .borrow()
+                    .get(&id)
+                    .map(|s| s.password.clone())
+                    .unwrap_or_default()
+            } else {
+                Secret::new(draft.password.to_string())
+            };
+            let private_key_inline = if draft.private_key_inline_mode {
+                if draft.private_key_inline.is_empty() {
+                    store
+                        .borrow()
+                        .get(&id)
+                        .map(|s| s.private_key_inline.clone())
+                        .unwrap_or_default()
+                } else {
+                    Secret::new(draft.private_key_inline.to_string())
+                }
+            } else {
+                Secret::default()
+            };
+            let private_key_path = if draft.private_key_inline_mode {
+                String::new()
+            } else {
+                draft.private_key_path.to_string().replace('\\', "/")
+            };
+            let kind = crate::config::SessionKind::from_str(&draft.kind.to_string());
+            // Auto-name: serial → port label; otherwise user@host, or just the
+            // host when no username was given (#110).
+            let auto_name = match kind {
+                crate::config::SessionKind::Serial => {
+                    format!("{} @{}", draft.serial_port, draft.baud_rate)
+                }
+                _ if draft.user.trim().is_empty() => draft.host.to_string(),
+                _ => format!("{}@{}", draft.user, draft.host),
+            };
+            // Telnet defaults to port 23, RDP to 3389, SSH to 22; serial ignores
+            // the port entirely.
+            let default_port = match kind {
+                crate::config::SessionKind::Telnet => 23,
+                crate::config::SessionKind::Rdp => 3389,
+                _ => 22,
+            };
+            let (rdp_fullscreen, rdp_width, rdp_height) = rdp_display_settings(
+                &draft.rdp_resolution.to_string(),
+                draft.rdp_width,
+                draft.rdp_height,
+            );
+            // Immediate jump first; only SSH sessions carry a jump chain
+            // (#211). Fresh unselected editor rows stay out of the route.
+            let jump_session_ids = if kind == crate::config::SessionKind::Ssh {
+                crate::config::draft_jump_ids(
+                    draft.jumps.iter().map(|hop| (hop.id.to_string(), hop.placeholder)),
+                )
+            } else {
+                Vec::new()
+            };
+            let new_session = Session {
+                id,
+                name: if draft.name.is_empty() {
+                    auto_name
+                } else {
+                    draft.name.to_string()
+                },
+                host: draft.host.to_string(),
+                port: if draft.port <= 0 {
+                    default_port
+                } else {
+                    draft.port as u16
+                },
+                user: draft.user.to_string(),
+                auth: AuthMethod::from_str(&draft.auth.to_string()),
+                password,
+                // Store the key path with forward slashes uniformly.
+                private_key_path,
+                private_key_inline,
+                proxy: Secret::new(draft.proxy.to_string()),
+                last_used: None,
+                group: draft.group.to_string(),
+                kind,
+                local_distribution: String::new(),
+                local_working_dir: String::new(),
+                local_command: String::new(),
+                local_program: String::new(),
+                local_args: Vec::new(),
+                serial_port: draft.serial_port.to_string(),
+                baud_rate: if draft.baud_rate <= 0 {
+                    115_200
+                } else {
+                    draft.baud_rate as u32
+                },
+                data_bits: draft.data_bits as u8,
+                stop_bits: draft.stop_bits as u8,
+                parity: draft.parity.to_string(),
+                flow_control: draft.flow_control.to_string(),
+                encoding: draft.encoding.to_string(),
+                vt100_drawing: draft.vt100_drawing,
+                term_type: crate::config::normalize_term_type(&draft.term_type).to_string(),
+                session_log: SessionLogMode::from_str(draft.session_log.as_str()),
+                forwards,
+                triggers,
+                disable_shell_integration: draft.disable_shell_integration,
+                // Root / custom SFTP server command survive the save (#438).
+                sftp_mode: if kind == SessionKind::Ssh {
+                    normalized_sftp_mode(draft.sftp_mode.as_str(), draft.sftp_command.as_str())
+                } else {
+                    String::new()
+                },
+                sftp_command: if kind == SessionKind::Ssh {
+                    draft.sftp_command.trim().to_string()
+                } else {
+                    String::new()
+                },
+                note: draft.note.to_string(),
+                jump_session_id: String::new(),
+                allow_secret_reveal: draft.allow_secret_reveal,
+                jump_session_ids,
+                mcp_access: draft.allow_mcp_access,
+                rdp_domain: draft.rdp_domain.to_string(),
+                rdp_fullscreen,
+                rdp_width,
+                rdp_height,
+                rdp_legacy_tls: draft.rdp_legacy_tls,
+                rdp_admin: draft.rdp_admin,
+                rdp_smart_sizing: draft.rdp_smart_sizing,
+                rdp_cert_policy: draft.rdp_cert_policy.to_string(),
+                rdp_network: draft.rdp_network.to_string(),
+                rdp_sound: draft.rdp_sound,
+                rdp_clipboard: draft.rdp_clipboard,
+                rdp_gfx: draft.rdp_gfx,
+                rdp_extra_args: draft.rdp_extra_args.to_string(),
+            };
             if new_session.kind == crate::config::SessionKind::Rdp {
                 if let Err(message) = crate::rdp::validate_options(&new_session) {
                     if let Some(w) = weak.upgrade() {
@@ -869,21 +1188,20 @@ pub(super) fn wire_session_callbacks(
                     return;
                 }
             }
-            if let Err(err) = store.borrow().resolve_jump_chain(&new_session) {
-                if let Some(w) = weak.upgrade() {
-                    w.set_dialog_test_status(err.to_string().into());
-                }
-                return;
-            }
             {
-                let mut s = store.borrow_mut();
-                s.upsert(new_session);
-                if let Err(err) = s.save() {
-                    tracing::warn!("failed to save config: {err:#}");
+                // An invalid jump chain (dangling/empty hop) must fail the save
+                // with on-screen feedback instead of persisting a route that
+                // cannot connect (#211). Non-SSH drafts resolve to no hops.
+                if let Err(err) = store.borrow().resolve_jump_chain(&new_session) {
                     if let Some(w) = weak.upgrade() {
                         w.set_dialog_test_status(err.to_string().into());
                     }
                     return;
+                }
+                let mut s = store.borrow_mut();
+                s.upsert(new_session);
+                if let Err(err) = s.save() {
+                    tracing::warn!("failed to save config: {err:#}");
                 }
             }
             sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
@@ -894,14 +1212,29 @@ pub(super) fn wire_session_callbacks(
         });
     }
 
-    // Preview from unsaved draft; the saved password is never rendered.
-    window.on_session_dialog_preview_rdp(move |draft: SessionDraft| {
-        let session = session_from_draft(&draft, None, Vec::new(), Vec::new());
-        if session.kind != crate::config::SessionKind::Rdp {
-            return String::new().into();
-        }
-        crate::rdp::preview_args(&session).unwrap_or_else(|message| message).into()
-    });
+    // Active dialog connection test: a spawned runtime task (SSH handshake /
+    // TCP reachability / serial open) with its abort handle, so
+    // `stop-test` / `closed` / `changed` can cancel an in-flight test instead
+    // of leaving a fire-and-forget task whose late host-key / credential / MFA
+    // prompts would pop up against a closed or edited dialog (#276).
+    // Ownership for the in-flight connection test: a finished, replaced or
+    // closed test must never reopen auth UI or update a later draft (#276).
+    // Uses the upstream `EditorTest` ticket mechanism (snapshot + active flag
+    // + abort handle) instead of the older fire-and-forget join-handle slot.
+    let editor_test: Rc<RefCell<EditorTest>> = Rc::new(RefCell::new(EditorTest::default()));
+
+    // Preview the FreeRDP command line from the unsaved draft; the saved
+    // password is never rendered.
+    {
+        let weak = window.as_weak();
+        window.on_session_dialog_preview_rdp(move |draft: SessionDraft| {
+            let session = session_from_draft(&draft, None, Vec::new(), Vec::new());
+            if session.kind != crate::config::SessionKind::Rdp {
+                return String::new().into();
+            }
+            crate::rdp::preview_args(&session).unwrap_or_else(|message| message).into()
+        });
+    }
 
     // Test connection from the session dialog. SSH tests use the same handshake,
     // host-key verification, proxy/jump routing, and authentication as a real
@@ -913,13 +1246,26 @@ pub(super) fn wire_session_callbacks(
         let edit_forwards = edit_forwards.clone();
         let edit_triggers = edit_triggers.clone();
         let edit_trigger_secrets = edit_trigger_secrets.clone();
-        let active_test = editor_test.clone();
+        let editor_test = editor_test.clone();
+        // Replace any in-flight test with this one. The snapshot is a static
+        // counter below: the session dialog is modal, so the draft cannot be
+        // edited while a test runs — the ticket still guards against late
+        // host-key / credential / MFA prompts from a superseded test (#276).
+        // A plain fn, not a closure: `impl Trait` parameters are only allowed
+        // on functions/methods, not closure parameters.
+        fn begin_test(
+            runtime: &tokio::runtime::Runtime,
+            editor_test: &Rc<RefCell<EditorTest>>,
+            snapshot: &std::cell::Cell<u64>,
+            task: impl std::future::Future<Output = ()> + Send + 'static,
+        ) {
+            snapshot.set(snapshot.get() + 1);
+            editor_test.borrow_mut().begin(snapshot.get());
+            let handle = runtime.spawn(task);
+            editor_test.borrow_mut().attach(handle.abort_handle());
+        }
+        let test_snapshot = std::cell::Cell::new(0u64);
         window.on_session_dialog_test(move |draft: SessionDraft| {
-            if let Some(w) = weak.upgrade() {
-                session_editor::stop_test(&w, window_id, &active_test);
-            }
-            let snapshot = weak.upgrade().map(|w| session_editor::connection_snapshot(&w)).unwrap_or_default();
-            let ticket = active_test.borrow_mut().begin(snapshot);
             let kind = draft.kind.to_string();
             if kind == "serial" {
                 let port_name = draft.serial_port.to_string();
@@ -929,7 +1275,7 @@ pub(super) fn wire_session_callbacks(
                     draft.baud_rate as u32
                 };
                 let weak_done = weak.clone();
-                let task = runtime.spawn(async move {
+                begin_test(&runtime, &editor_test, &test_snapshot, async move {
                     let message = match tokio::task::spawn_blocking(move || {
                         serialport::new(&port_name, baud)
                             .timeout(std::time::Duration::from_millis(800))
@@ -941,9 +1287,12 @@ pub(super) fn wire_session_callbacks(
                         Ok(Err(e)) => format!("{}: {e}", t("连接失败", "Connection failed")),
                         Err(e) => format!("{}: {e}", t("连接失败", "Connection failed")),
                     };
-                    session_editor::finish_test(weak_done, window_id, ticket, message);
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(w) = weak_done.upgrade() {
+                            w.set_dialog_test_status(message.into());
+                        }
+                    });
                 });
-                active_test.borrow_mut().attach(task.abort_handle());
                 return;
             }
 
@@ -957,16 +1306,13 @@ pub(super) fn wire_session_callbacks(
                     return;
                 }
             };
-            let triggers =
-                match validated_triggers(&edit_triggers.borrow(), &edit_trigger_secrets.borrow()) {
-                    Ok(triggers) => triggers,
-                    Err(message) => {
-                        if let Some(w) = weak.upgrade() {
-                            w.set_dialog_test_status(message.into());
-                        }
-                        return;
-                    }
-                };
+            let triggers = match validated_triggers(&edit_triggers.borrow(), &edit_trigger_secrets.borrow()) {
+                Ok(triggers) => triggers,
+                Err(message) => {
+                    if let Some(w) = weak.upgrade() { w.set_dialog_test_status(message.into()); }
+                    return;
+                }
+            };
             let session = session_from_draft(&draft, existing.as_ref(), forwards, triggers);
             let weak_done = weak.clone();
 
@@ -981,29 +1327,13 @@ pub(super) fn wire_session_callbacks(
                     }
                 };
                 let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
-                let task = runtime.spawn(async move {
+                begin_test(&runtime, &editor_test, &test_snapshot, async move {
                     let mut test = Box::pin(test_session_auth(session, jump, events_tx));
-                    let mut events_open = true;
                     let result = loop {
                         tokio::select! {
                             result = &mut test => break result,
-                            event = events_rx.recv(), if events_open => {
-                                let Some(event) = event else { events_open = false; continue };
-                                if let SessionEvent::Status(ref status) = event {
-                                    let weak_status = weak_done.clone();
-                                    let status_ticket = ticket.clone();
-                                    let status = status.clone();
-                                    let _ = slint::invoke_from_event_loop(move || {
-                                        if !status_ticket.is_active() { return; }
-                                        if let Some(w) = weak_status.upgrade() {
-                                            if w.get_dialog_open()
-                                                && status_ticket.matches_snapshot(session_editor::connection_snapshot(&w))
-                                            {
-                                                w.set_dialog_test_status(status.into());
-                                            }
-                                        }
-                                    });
-                                }
+                            event = events_rx.recv() => {
+                                let Some(event) = event else { continue };
                                 if matches!(
                                     event,
                                     SessionEvent::HostKeyPrompt { .. }
@@ -1011,13 +1341,8 @@ pub(super) fn wire_session_callbacks(
                                         | SessionEvent::MfaPrompt { .. }
                                 ) {
                                     let weak_prompt = weak_done.clone();
-                                    let prompt_ticket = ticket.clone();
                                     let _ = slint::invoke_from_event_loop(move || {
-                                        if !prompt_ticket.is_active() { return; }
                                         let Some(w) = weak_prompt.upgrade() else { return };
-                                        if !w.get_dialog_open()
-                                            || !prompt_ticket.matches_snapshot(session_editor::connection_snapshot(&w))
-                                        { return; }
                                         match event {
                                             SessionEvent::HostKeyPrompt {
                                                 host,
@@ -1026,10 +1351,9 @@ pub(super) fn wire_session_callbacks(
                                                 fingerprint,
                                                 changed,
                                                 responder,
-                                            } => enqueue_hostkey_prompt_scoped(
+                                            } => enqueue_hostkey_prompt(
                                                 &w,
                                                 window_id,
-                                                Some(prompt_ticket.id),
                                                 host,
                                                 port,
                                                 key_type,
@@ -1044,10 +1368,9 @@ pub(super) fn wire_session_callbacks(
                                                 need_user,
                                                 need_password,
                                                 responder,
-                                            } => enqueue_cred_prompt_scoped(
+                                            } => enqueue_cred_prompt(
                                                 &w,
                                                 window_id,
-                                                Some(prompt_ticket.id),
                                                 session_id,
                                                 host,
                                                 user,
@@ -1061,10 +1384,9 @@ pub(super) fn wire_session_callbacks(
                                                 prompt,
                                                 echo,
                                                 responder,
-                                            } => enqueue_mfa_prompt_scoped(
+                                            } => enqueue_mfa_prompt(
                                                 &w,
                                                 window_id,
-                                                Some(prompt_ticket.id),
                                                 session_id,
                                                 host,
                                                 prompt,
@@ -1082,15 +1404,18 @@ pub(super) fn wire_session_callbacks(
                         Ok(()) => t("连接正常", "Connection OK").to_string(),
                         Err(e) => format!("{}: {e:#}", t("连接失败", "Connection failed")),
                     };
-                    session_editor::finish_test(weak_done, window_id, ticket, message);
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(w) = weak_done.upgrade() {
+                            w.set_dialog_test_status(message.into());
+                        }
+                    });
                 });
-                active_test.borrow_mut().attach(task.abort_handle());
                 return;
             }
 
             let host = session.host;
             let port = session.port;
-            let task = runtime.spawn(async move {
+            begin_test(&runtime, &editor_test, &test_snapshot, async move {
                 let target = format!("{host}:{port}");
                 let result = tokio::time::timeout(
                     std::time::Duration::from_secs(3),
@@ -1102,20 +1427,55 @@ pub(super) fn wire_session_callbacks(
                     Ok(Err(e)) => format!("{}: {e}", t("连接失败", "Connection failed")),
                     Err(_) => format!("{}: {target}", t("连接超时", "Connection timed out")),
                 };
-                session_editor::finish_test(weak_done, window_id, ticket, message);
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(w) = weak_done.upgrade() {
+                        w.set_dialog_test_status(message.into());
+                    }
+                });
             });
-            active_test.borrow_mut().attach(task.abort_handle());
+        });
+    }
+
+    // Dialog test lifecycle (#276): stop an in-flight connection test when the
+    // user presses "Stop test", closes the dialog, or edits the draft. Without
+    // these the spawned test task kept running fire-and-forget and its late
+    // host-key / credential / MFA prompts popped up against a closed dialog.
+    {
+        let weak = window.as_weak();
+        let editor_test = editor_test.clone();
+        window.on_session_dialog_stop_test(move || {
+            let in_flight = editor_test.borrow_mut().stop().is_some();
+            if in_flight {
+                if let Some(w) = weak.upgrade() {
+                    w.set_dialog_test_status(t("测试已取消", "Test cancelled").into());
+                }
+            }
+        });
+    }
+    {
+        let weak = window.as_weak();
+        let editor_test = editor_test.clone();
+        window.on_session_dialog_closed(move || {
+            editor_test.borrow_mut().stop();
+            if let Some(w) = weak.upgrade() {
+                w.set_dialog_test_status("".into());
+            }
+        });
+    }
+    {
+        // Editing the draft invalidates the running test (its values no longer
+        // match what is being tested). `stop` aborts the task and finishes the
+        // ticket so a late result can never update a newer test (#276).
+        let editor_test = editor_test.clone();
+        window.on_session_dialog_changed(move || {
+            editor_test.borrow_mut().stop();
         });
     }
 
     // Cancel dialog.
     {
         let weak = window.as_weak();
-        let active_test = editor_test.clone();
         window.on_session_dialog_cancel(move || {
-            if let Some(w) = weak.upgrade() {
-                session_editor::stop_test(&w, window_id, &active_test);
-            }
             if let Some(w) = weak.upgrade() {
                 w.set_dialog_open(false);
             }
@@ -1127,9 +1487,8 @@ pub(super) fn wire_session_callbacks(
     {
         let weak = window.as_weak();
         window.on_session_dialog_pick_key(move || {
-            let mut dialog = DialogOwner::of_weak(&weak)
-                .file()
-                .set_title(t("选择私钥文件", "Choose private key file"));
+            let mut dialog =
+                rfd::FileDialog::new().set_title(t("选择私钥文件", "Choose private key file"));
             // OpenSSH's standard key names (id_ed25519, id_rsa, …) usually
             // have no extension. Extension filters hide or disable those files
             // in native pickers, so show every file on every platform (#393).
@@ -1145,6 +1504,202 @@ pub(super) fn wire_session_callbacks(
                     w.set_dialog_key_path(path.into());
                 }
             }
+        });
+    }
+
+    // In-app SSH keypair generator. The (potentially slow) RSA/Ed25519
+    // generation runs off the UI thread; the pair is written to ~/.ssh with
+    // 0600 and the private key is pasted into the inline field so the session
+    // can use it immediately.
+    {
+        let weak = window.as_weak();
+        window.on_session_dialog_generate_key(move || {
+            let weak = weak.clone();
+            // The callback must be 'static; reach for the window through the
+            // Weak handle instead of capturing the &AppWindow reference.
+            let Some(w) = weak.upgrade() else { return };
+            let algo = match w.get_dialog_key_algo().to_string().as_str() {
+                "rsa" => crate::ssh::keygen::KeyAlgorithm::Rsa,
+                _ => crate::ssh::keygen::KeyAlgorithm::Ed25519,
+            };
+            std::thread::spawn(move || {
+                let outcome = (|| -> Result<(String, String), String> {
+                    let key = crate::ssh::keygen::generate_keypair(algo).map_err(|e| e.to_string())?;
+                    let fp = key.fingerprint.clone();
+                    let pem = key.private_key_pem.clone();
+                    let key = crate::ssh::keygen::write_key_files(key, algo).map_err(|e| e.to_string())?;
+                    let path = key.private_key_path.display().to_string();
+                    Ok((
+                        pem,
+                        format!("{} · {} · {}", t("已生成", "generated"), path, fp),
+                    ))
+                })()
+                .map_err(|e| format!("{}: {e}", t("生成失败", "generation failed")));
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(w) = weak.upgrade() else { return };
+                    // Only a successful generation fills the inline field and
+                    // arms the upload button; a failure leaves whatever the
+                    // user already typed untouched.
+                    match outcome {
+                        Ok((pem, status)) => {
+                            w.set_dialog_key_inline(pem.into());
+                            w.set_dialog_key_inline_mode(true);
+                            w.set_dialog_key_generated(true);
+                            w.set_dialog_key_status(status.into());
+                        }
+                        Err(status) => {
+                            w.set_dialog_key_status(status.into());
+                        }
+                    }
+                });
+            });
+        });
+    }
+
+    // Push the freshly generated public key to the server's authorized_keys so
+    // the matching private key can log in without a password. Connects with the
+    // session's current credentials (the same host-key / credential / MFA
+    // prompt plumbing as "Test connection"), then runs an idempotent append
+    // over an SSH exec channel.
+    {
+        let weak = window.as_weak();
+        let runtime = runtime.clone();
+        let store = store.clone();
+        let edit_forwards = edit_forwards.clone();
+        let edit_triggers = edit_triggers.clone();
+        let edit_trigger_secrets = edit_trigger_secrets.clone();
+        window.on_session_dialog_upload_key(move |draft: SessionDraft| {
+            if draft.kind.to_string() != "ssh" {
+                if let Some(w) = weak.upgrade() {
+                    w.set_dialog_key_status(
+                        t("只有 SSH 会话才能上传公钥", "only SSH sessions can receive a public key").into(),
+                    );
+                }
+                return;
+            }
+            let weak_done = weak.clone();
+            let existing = store.borrow().get(draft.id.as_str()).cloned();
+            let forwards = match validated_port_forwards(&edit_forwards.borrow()) {
+                Ok(forwards) => forwards,
+                Err(message) => {
+                    if let Some(w) = weak.upgrade() {
+                        w.set_dialog_key_status(message.into());
+                    }
+                    return;
+                }
+            };
+            let triggers = match validated_triggers(&edit_triggers.borrow(), &edit_trigger_secrets.borrow()) {
+                Ok(triggers) => triggers,
+                Err(message) => {
+                    if let Some(w) = weak.upgrade() {
+                        w.set_dialog_key_status(message.into());
+                    }
+                    return;
+                }
+            };
+            let session = session_from_draft(&draft, existing.as_ref(), forwards, triggers);
+            if session.host.is_empty() {
+                if let Some(w) = weak.upgrade() {
+                    w.set_dialog_key_status(t("请先填写主机地址", "enter a host address first").into());
+                }
+                return;
+            }
+            // The generated private key lives in the draft's inline field; turn it
+            // back into a public key line for the server.
+            let pem = draft.private_key_inline.as_str().trim().to_string();
+            let public_key_line = match (|| -> Result<String> {
+                let key = ssh_key::PrivateKey::from_openssh(&pem).context("parse generated private key")?;
+                Ok(key.public_key().to_openssh().context("serialise public key")?)
+            })() {
+                Ok(line) => line,
+                Err(e) => {
+                    if let Some(w) = weak.upgrade() {
+                        w.set_dialog_key_status(format!("{}: {e}", t("公钥无效", "invalid public key")).into());
+                    }
+                    return;
+                }
+            };
+            let jump = match resolve_jump(&store, &session) {
+                Ok(jump) => jump,
+                Err(error) => {
+                    if let Some(w) = weak_done.upgrade() {
+                        w.set_dialog_key_status(error.to_string().into());
+                    }
+                    return;
+                }
+            };
+            let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+            let session_for_task = session.clone();
+            let events_tx_for_task = events_tx.clone();
+            // Clone for the inner relay task: it is spawned as a 'static task,
+            // so it must own its Weak handle. The outer task keeps `weak_done`
+            // for the final status line.
+            let weak_inner = weak_done.clone();
+            // Clone the runtime handle for the inner relay task: the outer
+            // async block consumes `runtime`, so the nested spawn would move
+            // it twice.
+            let runtime_inner = runtime.clone();
+            runtime.spawn(async move {
+                // Relay host-key / credential / MFA prompts to the same UI the
+                // "Test connection" button uses, then push the public key.
+                runtime_inner.spawn(async move {
+                    while let Some(event) = events_rx.recv().await {
+                        if matches!(
+                            event,
+                            SessionEvent::HostKeyPrompt { .. }
+                                | SessionEvent::CredentialPrompt { .. }
+                                | SessionEvent::MfaPrompt { .. }
+                        ) {
+                            let weak_prompt = weak_inner.clone();
+                            let _ = slint::invoke_from_event_loop(move || {
+                                let Some(w) = weak_prompt.upgrade() else { return };
+                                match event {
+                                    SessionEvent::HostKeyPrompt {
+                                        host,
+                                        port,
+                                        key_type,
+                                        fingerprint,
+                                        changed,
+                                        responder,
+                                    } => enqueue_hostkey_prompt(
+                                        &w, window_id, host, port, key_type, fingerprint, changed, responder,
+                                    ),
+                                    SessionEvent::CredentialPrompt {
+                                        session_id,
+                                        host,
+                                        user,
+                                        need_user,
+                                        need_password,
+                                        responder,
+                                    } => enqueue_cred_prompt(
+                                        &w, window_id, session_id, host, user, need_user, need_password, responder,
+                                    ),
+                                    SessionEvent::MfaPrompt {
+                                        session_id,
+                                        host,
+                                        prompt,
+                                        echo,
+                                        responder,
+                                    } => enqueue_mfa_prompt(
+                                        &w, window_id, session_id, host, prompt, echo, responder,
+                                    ),
+                                    _ => {}
+                                }
+                            });
+                        }
+                    }
+                });
+                let result = push_authorized_keys(session_for_task, jump, public_key_line, events_tx_for_task).await;
+                let message = match result {
+                    Ok(()) => t("公钥已上传，现在可用密钥登录", "public key uploaded; key login now works").to_string(),
+                    Err(e) => format!("{}: {e:#}", t("上传失败", "upload failed")),
+                };
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(w) = weak_done.upgrade() {
+                        w.set_dialog_key_status(message.into());
+                    }
+                });
+            });
         });
     }
 
@@ -1210,9 +1765,7 @@ pub(super) fn wire_session_callbacks(
         window.on_update_trigger(move |index: i32, trigger: TriggerDraft| {
             let i = index as usize;
             let mut values = triggers.borrow_mut();
-            if i < values.len() {
-                values[i] = trigger;
-            }
+            if i < values.len() { values[i] = trigger; }
         });
     }
     {
@@ -1223,12 +1776,8 @@ pub(super) fn wire_session_callbacks(
             let i = index as usize;
             let mut values = triggers.borrow_mut();
             let mut saved = secrets.borrow_mut();
-            if i < values.len() {
-                values.remove(i);
-            }
-            if i < saved.len() {
-                saved.remove(i);
-            }
+            if i < values.len() { values.remove(i); }
+            if i < saved.len() { saved.remove(i); }
             if values.is_empty() {
                 values.push(blank_trigger_draft());
                 saved.push(Secret::default());
@@ -1259,35 +1808,17 @@ pub(super) fn wire_session_callbacks(
         let local_net_hist = local_net_hist.clone();
         let sftp_follow_cd = sftp_follow_cd.clone();
         let tab_routes = tab_routes.clone();
-        let repeat_guard = RefCell::new(DoubleClickGuard::default());
         window.on_connect_session(move |id: SharedString| {
             let id = id.to_string();
-            // A session row connects on every click release, so a double-click
-            // arrives here twice: two tabs, or two stacked RDP windows that
-            // kick each other off (#511). Only the first click connects.
-            if !repeat_guard
-                .borrow_mut()
-                .allow(&id, std::time::Instant::now())
+            let session = if id.starts_with("system:")
+                || id.starts_with(super::agents::AGENT_ID_PREFIX)
             {
-                return;
-            }
-            let builtin =
-                id.starts_with("system:") || id.starts_with(super::agents::AGENT_ID_PREFIX);
-            let session = if builtin {
-                match resolve_builtin_session(&store.borrow(), &id) {
+                // Built-in system shells (incl. the detected pwsh / Git Bash /
+                // Nushell and user-defined local shells, #533/#538) and custom
+                // agents share one resolver; a miss must not fail silently.
+                match session_models::resolve_builtin_session(&store.borrow(), &id) {
                     Some(s) => s,
-                    None => {
-                        // An agent uninstalled since meatshell detected it.
-                        if let (Some(name), Some(w)) = (
-                            super::agents::agent_name(&store.borrow(), &id),
-                            weak.upgrade(),
-                        ) {
-                            w.set_ssh_import_hint(
-                                format!("{} {name}", t("未找到", "Not found:")).into(),
-                            );
-                        }
-                        return;
-                    }
+                    None => return,
                 }
             } else {
                 match store.borrow().get(&id).cloned() {
@@ -1304,10 +1835,7 @@ pub(super) fn wire_session_callbacks(
                 let message = match crate::rdp::launch(&session) {
                     Ok(started) => format!(
                         "{} {}",
-                        t(
-                            "已用系统远程桌面打开",
-                            "Opened with the system remote desktop client"
-                        ),
+                        t("已用系统远程桌面打开", "Opened with the system remote desktop client"),
                         started
                     ),
                     Err(err) => format!("{}: {err}", t("RDP 启动失败", "Failed to start RDP")),
@@ -1340,7 +1868,7 @@ pub(super) fn wire_session_callbacks(
             // Seed the per-tab status so the sidebar shows "连接中 host" the
             // moment this tab becomes active (the `changed active-tab-id`
             // handler fires refresh-sidebar right after set_active_tab_id below).
-            tab_statuses.lock().unwrap().insert(
+            lock_or_recover(&tab_statuses).insert(
                 tab_id.clone(),
                 TabStatus {
                     host: conn_label.clone(),
@@ -1359,65 +1887,48 @@ pub(super) fn wire_session_callbacks(
                 title: tab_title.into(),
                 kind: "terminal".into(),
                 connected: false,
-                // Local shells offer "Add to session list" (#501).
                 local: session.kind == SessionKind::Local,
             });
             // Each session keeps its own SFTP collapse state + sizes, seeded from
             // the global defaults (the "collapse SFTP by default" pref and the
             // persisted panel sizes) so they no longer bleed across panes (#v0.5).
-            let (
-                sftp_collapsed_default,
-                sftp_h_default,
-                sftp_w_default,
-                split_default,
-                local_dir,
-                local_bookmarks,
-                local_recent,
-                local_show_hidden,
-                local_sort_key,
-                local_sort_dir,
-            ) = weak
+            let (sftp_collapsed_default, sftp_h_default, sftp_w_default) = weak
                 .upgrade()
                 .map(|w| {
                     (
                         w.get_collapse_sftp_default(),
                         w.get_sftp_panel_height(),
                         w.get_sftp_panel_width(),
-                        w.get_sftp_split_enabled(),
-                        w.get_sftp_last_local_dir().to_string(),
-                        w.get_local_bookmarks(),
-                        w.get_local_recent(),
+                    )
+                })
+                .unwrap_or((false, 220.0, 380.0));
+            // Local list options (#532 follow-up) seed the per-tab row from the
+            // window-wide settings (the same store the panel persists to).
+            let (sftp_local_show_hidden, sftp_local_sort_key, sftp_local_sort_dir) = weak
+                .upgrade()
+                .map(|w| {
+                    (
                         w.get_sftp_local_show_hidden(),
                         w.get_sftp_local_sort_key().to_string(),
                         w.get_sftp_local_sort_dir(),
                     )
                 })
-                .unwrap_or((
-                    false,
-                    220.0,
-                    380.0,
-                    false,
-                    String::new(),
-                    ModelRc::from(std::rc::Rc::new(VecModel::<SharedString>::default())),
-                    ModelRc::from(std::rc::Rc::new(VecModel::<SharedString>::default())),
-                    false,
-                    String::new(),
-                    0,
-                ));
+                .unwrap_or((false, String::new(), 0));
             terminals_model.push(TerminalState {
                 id: tab_id.clone().into(),
                 status: t("连接中...", "Connecting...").into(),
                 spans: ModelRc::from(std::rc::Rc::new(VecModel::<TermSpan>::default())),
                 cursor_row: 0,
                 cursor_col: 0,
+                cursor_visible: true,
                 rows_used: 0,
                 scroll_max: 0,
                 scroll_offset: 0,
                 is_alt_screen: false,
                 mouse_tracked: false,
                 find_matches: ModelRc::from(std::rc::Rc::new(VecModel::<TermMatch>::default())),
-                find_current: TermMatch::default(),
                 selection: ModelRc::from(std::rc::Rc::new(VecModel::<TermMatch>::default())),
+                has_selection: false,
                 sftp_path: "/".into(),
                 sftp_entries: ModelRc::from(std::rc::Rc::new(VecModel::<SftpEntry>::default())),
                 sftp_status: if has_sftp {
@@ -1429,6 +1940,7 @@ pub(super) fn wire_session_callbacks(
                     )
                     .into()
                 },
+                sftp_status_kind: 0,
                 sftp_loading: has_sftp,
                 sftp_tree_nodes: ModelRc::from(std::rc::Rc::new(
                     VecModel::<SftpTreeNode>::default(),
@@ -1436,70 +1948,89 @@ pub(super) fn wire_session_callbacks(
                 sftp_selected_count: 0,
                 sftp_sort_key: "".into(),
                 sftp_sort_dir: 0,
-                sftp_available: has_sftp,
                 sftp_bookmarks: {
-                    let places = store.borrow().sftp_places(&id);
-                    super::sftp_places::string_model(&places.bookmarks)
+                    let v: Vec<slint::SharedString> = store
+                        .borrow()
+                        .sftp_bookmarks(&conn_label)
+                        .iter()
+                        .map(|p| p.as_str().into())
+                        .collect();
+                    ModelRc::from(std::rc::Rc::new(VecModel::from(v)))
                 },
-                sftp_recent: {
-                    let places = store.borrow().sftp_places(&id);
-                    super::sftp_places::string_model(&places.recent)
-                },
-                sftp_bookmarked: false,
-                // The split view and the last local folder are remembered (#532);
-                // a folder that no longer exists falls back to the home folder
-                // when the pane first lists it.
-                sftp_dual: has_sftp && split_default,
-                sftp_local_path: if local_dir.is_empty() {
-                    home_display().into()
-                } else {
-                    local_dir.clone().into()
-                },
+                sftp_available: has_sftp,
+                // Split (dual-pane) view starts off; the local pane remembers
+                // the home folder until it is first opened (lazy listing).
+                sftp_dual: false,
+                sftp_local_path: home_display().into(),
                 sftp_local_entries: ModelRc::from(std::rc::Rc::new(
                     VecModel::<SftpEntry>::default(),
                 )),
                 sftp_local_status: "".into(),
                 sftp_local_loading: false,
                 sftp_local_selected_count: 0,
-                // 0 = an even local/remote split; set when the divider is dragged.
                 sftp_local_pane_width: 0.0,
-                sftp_local_quick_places: ModelRc::from(std::rc::Rc::new(
-                    VecModel::<SftpLocalPlace>::default(),
-                )),
-                sftp_local_drive_places: ModelRc::from(std::rc::Rc::new(
-                    VecModel::<SftpLocalPlace>::default(),
-                )),
-                // Machine-wide local places; refreshed again whenever they change.
-                sftp_local_bookmarks: local_bookmarks,
-                sftp_local_recent: local_recent,
-                sftp_local_bookmarked: false,
-                sftp_local_show_hidden: local_show_hidden,
-                sftp_local_sort_key: local_sort_key.into(),
-                sftp_local_sort_dir: local_sort_dir,
-                sftp_local_filter: "".into(),
-                sftp_local_all_entries: ModelRc::from(std::rc::Rc::new(
-                    VecModel::<SftpEntry>::default(),
-                )),
+                sftp_recent: {
+                    let v: Vec<slint::SharedString> = store
+                        .borrow()
+                        .sftp_places(&id)
+                        .recent
+                        .iter()
+                        .map(|p| p.as_str().into())
+                        .collect();
+                    ModelRc::from(std::rc::Rc::new(VecModel::from(v)))
+                },
+                // #500 per-session bookmarks live in their own field: the row's
+                // `sftp_bookmarks` belongs to the older per-server menu.
+                sftp_places_bookmarks: {
+                    let v: Vec<slint::SharedString> = store
+                        .borrow()
+                        .sftp_places(&id)
+                        .bookmarks
+                        .iter()
+                        .map(|p| p.as_str().into())
+                        .collect();
+                    ModelRc::from(std::rc::Rc::new(VecModel::from(v)))
+                },
+                sftp_bookmarked: {
+                    // Seed the star flag from the initial path ("/") so the
+                    // toolbar matches the places menu on the first draw; the
+                    // navigation callbacks own it afterwards.
+                    store
+                        .borrow()
+                        .sftp_places(&id)
+                        .bookmarks
+                        .iter()
+                        .any(|p| p.as_str() == "/")
+                },
                 font_size: 0,
                 tunnels: ModelRc::from(std::rc::Rc::new(VecModel::<TunnelInfo>::default())),
                 sftp_collapsed: !has_sftp || sftp_collapsed_default,
                 sftp_panel_height: sftp_h_default,
                 sftp_panel_width: sftp_w_default,
                 sftp_saved_height: sftp_h_default,
+                link_matches: ModelRc::from(std::rc::Rc::new(VecModel::<TermMatch>::default())),
+                find_active: -1,
+                find_total: 0,
+                command_running: false,
+                backpressure: false,
+                find_current: TermMatch::default(),
+                sftp_local_quick_places: ModelRc::from(std::rc::Rc::new(
+                    VecModel::<SftpLocalPlace>::default(),
+                )),
+                sftp_local_drive_places: ModelRc::from(std::rc::Rc::new(
+                    VecModel::<SftpLocalPlace>::default(),
+                )),
+                sftp_local_bookmarks: ModelRc::from(std::rc::Rc::new(VecModel::<SharedString>::default())),
+                sftp_local_recent: ModelRc::from(std::rc::Rc::new(VecModel::<SharedString>::default())),
+                sftp_local_bookmarked: false,
+                sftp_local_show_hidden,
+                sftp_local_sort_key: sftp_local_sort_key.into(),
+                sftp_local_sort_dir,
+                sftp_local_filter: "".into(),
+                sftp_local_all_entries: ModelRc::from(std::rc::Rc::new(
+                    VecModel::<SftpEntry>::default(),
+                )),
             });
-            // A restored split view lists its remembered folder right away —
-            // the pane would otherwise stay blank until it is toggled (#532).
-            if has_sftp && split_default {
-                if let Some(w) = weak.upgrade() {
-                    let start = if local_dir.is_empty() {
-                        home_dir()
-                    } else {
-                        std::path::PathBuf::from(&local_dir)
-                    };
-                    super::sftp_local::load_dir_or_fallback(&w, &tab_id, start, home_dir());
-                    super::sftp_local::refresh_places(&w, &tab_id);
-                }
-            }
             // Create vt100 parser for this tab (default 24×80; resized on first
             // terminal-resize callback). 5000-line scrollback is stored for
             // future scroll-navigation support.
@@ -1514,12 +2045,18 @@ pub(super) fn wire_session_callbacks(
                     compile_output_rules(settings.output_highlight_rules()),
                 )
             };
-            bufs.lock().unwrap().insert(
+            lock_or_recover(&bufs).insert(
                 tab_id.clone(),
                 Arc::new(Mutex::new(TermBuffer {
                     parser: crate::terminal::vt_parser(24, 80, 5000),
                     find_query: String::new(),
+                    find_positions: Vec::new(),
+                    find_active: -1,
+                    find_dirty: false,
                     find_cursor: None,
+                    search_history_mode: store.borrow().search_history_mode(),
+                    command_running: false,
+                    backpressure: false,
                     is_dark: is_dark_now,
                     output_highlight,
                     custom_highlight_rules,
@@ -1536,6 +2073,8 @@ pub(super) fn wire_session_callbacks(
                     view_offset: 0,
                     scroll_accum: 0.0,
                     displayed_text: Vec::new(),
+                    action_links: Vec::new(),
+                    action_link_flags: action_link_flags(&store.borrow()),
                     csi_state: CsiState::Normal,
                     csi_pending: Vec::new(),
                     raw: std::collections::VecDeque::new(),
@@ -1550,23 +2089,22 @@ pub(super) fn wire_session_callbacks(
                     let settings = store.borrow();
                     (settings.session_log_enabled(), settings.session_log_dir())
                 };
-                with_term_buf(&bufs, &tab_id, |b| {
-                    apply_session_log_to_buffer(b, enabled, &dir)
-                });
+                with_term_buf(&bufs, &tab_id, |b| apply_session_log_to_buffer(b, enabled, &dir));
             }
-            render_gates.lock().unwrap().insert(
+            lock_or_recover(&render_gates).insert(
                 tab_id.clone(),
                 Arc::new(TabRenderGate::new(RENDER_MIN_INTERVAL)),
             );
             // No followed-cwd yet: the first OSC 7 always triggers a follow.
-            sftp_last_cwd.lock().unwrap().remove(&tab_id);
+            lock_or_recover(&sftp_last_cwd).remove(&tab_id);
             // Add the new tab to the focused pane and re-flatten (this also sets
             // active-tab-id to the new tab via refresh_panes).
             layout.borrow_mut().add_tab(tab_id.clone());
             if let Some(w) = weak.upgrade() {
+                let lay = layout.borrow().clone();
                 refresh_panes(
                     &w,
-                    &layout.borrow(),
+                    &lay,
                     content_size.get(),
                     &tabs_model,
                     &panes_model,
@@ -1578,7 +2116,7 @@ pub(super) fn wire_session_callbacks(
             // Shared with in-place reconnect (#79) via start_session_in_tab.
             let ctx = ConnectCtx {
                 weak: weak.clone(),
-                editor: editor_win.as_weak(),
+                editor: editor.clone(),
                 window_id,
                 runtime: runtime.clone(),
                 handles: handles.clone(),
@@ -1720,199 +2258,6 @@ pub(super) fn wire_session_callbacks(
                         }
                     }
                 }
-            }
-        });
-    }
-}
-
-/// Re-sync this window when another window persists sessions, theme or language.
-pub(super) fn listen_for_config_changes(ctx: &WinCtx, sessions_model: &Rc<VecModel<SessionInfo>>) {
-    let WinCtx {
-        store,
-        registry,
-        bufs,
-        window,
-        editor_win,
-        ..
-    } = ctx;
-    let window_id = ctx.window_id;
-    // Cross-window propagation: when another window persists sessions / theme /
-    // language it broadcasts; re-sync what this window shows. The listener only
-    // READS the store and updates this window's models (never saves), so a
-    // broadcast can never re-enter the broadcast path.
-    {
-        let weak = window.as_weak();
-        let store = store.clone();
-        let sessions_model = sessions_model.clone();
-        let bufs = bufs.clone();
-        let editor_weak = editor_win.as_weak();
-        registry.add_config_listener(
-            window_id,
-            Rc::new(move || {
-                let Some(w) = weak.upgrade() else { return };
-                // Rebuild the list with the window's current search filter.
-                sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
-                // Custom agents (#427): launch menu and Settings list.
-                w.invoke_refresh_agent_launchers();
-                // Terminal colour schemes, then re-apply the theme to the
-                // chrome AND every open terminal buffer (re-renders them).
-                super::terminal_scheme::apply_terminal_schemes(&w, &store.borrow());
-                apply_dark_mode(&w, &bufs, theme_pref_is_dark(&store.borrow()));
-                // Colour theme preset + immersive switch (Wallpaper & theme).
-                super::color_theme::apply_color_theme(&w, &store.borrow());
-                // Language translations are process-global; refresh our flag only.
-                w.set_lang_en(crate::i18n::is_en());
-                // Command-bar visibility is a global preference.
-                w.set_cmd_bar_hidden(store.borrow().cmd_bar_hidden());
-                w.set_right_click_copy(store.borrow().right_click_copy());
-                // Persisted terminal font size (settings stepper) is global too.
-                w.set_term_font_size(store.borrow().font_size() as f32);
-                // SSH keepalive (#515) is a client-wide setting.
-                super::settings_callbacks::sync_ssh_keepalive(&w, &store.borrow());
-                // Docked vs detached editor (#494) is a global preference.
-                w.set_editor_embedded(store.borrow().editor_embedded());
-                if let Some(editor) = editor_weak.upgrade() {
-                    sync_editor_theme(&w, &editor);
-                    if editor.get_editor_open() {
-                        let content = editor.get_editor_content();
-                        editor_syntax::refresh(&editor, content.as_str());
-                    }
-                }
-            }),
-        );
-    }
-}
-
-/// WSL working-directory picker and generated WSL profiles.
-pub(super) fn wire_wsl_profiles(ctx: &WinCtx, sessions_model: &Rc<VecModel<SessionInfo>>) {
-    let WinCtx {
-        store,
-        registry,
-        window,
-        ..
-    } = ctx;
-    {
-        let weak = window.as_weak();
-        window.on_pick_wsl_directory(move || {
-            if let Some(folder) = DialogOwner::of_weak(&weak).file().pick_folder() {
-                if let Some(w) = weak.upgrade() {
-                    w.set_wsl_new_directory(folder.to_string_lossy().to_string().into());
-                }
-            }
-        });
-    }
-    {
-        let weak = window.as_weak();
-        let store = store.clone();
-        let sessions_model = sessions_model.clone();
-        let registry = registry.clone();
-        window.on_add_wsl_profile(move |name, distribution, directory| {
-            {
-                let mut s = store.borrow_mut();
-                s.add_wsl_profile(
-                    name.to_string(),
-                    distribution.to_string(),
-                    directory.to_string(),
-                );
-                let _ = s.save();
-                if let Some(w) = weak.upgrade() {
-                    w.set_wsl_profiles(wsl_profile_model(&s));
-                    w.set_launch_shells(launch_shell_model(&s));
-                    sync_sessions_for_window(&weak, &s, &sessions_model);
-                }
-            }
-            registry.broadcast_config_changed();
-        });
-    }
-    {
-        let weak = window.as_weak();
-        let store = store.clone();
-        let sessions_model = sessions_model.clone();
-        let registry = registry.clone();
-        window.on_remove_wsl_profile(move |id| {
-            {
-                let mut s = store.borrow_mut();
-                s.remove_wsl_profile(id.as_str());
-                let _ = s.save();
-                if let Some(w) = weak.upgrade() {
-                    w.set_wsl_profiles(wsl_profile_model(&s));
-                    w.set_launch_shells(launch_shell_model(&s));
-                    sync_sessions_for_window(&weak, &s, &sessions_model);
-                }
-            }
-            registry.broadcast_config_changed();
-        });
-    }
-}
-
-/// Host-key, credential and MFA prompt callbacks for this window.
-pub(super) fn wire_auth_prompts(ctx: &WinCtx) {
-    let WinCtx {
-        registry, window, ..
-    } = ctx;
-    let window_id = ctx.window_id;
-    // Host-key confirmation dialog (#109-5): the user trusts or rejects the
-    // presented server key; the decision fans back out to the blocked SSH/SFTP
-    // handler(s) and the next queued prompt for THIS window (if any) is shown.
-    {
-        let weak = window.as_weak();
-        window.on_hostkey_accept(move || {
-            if let Some(w) = weak.upgrade() {
-                resolve_front_hostkey(&w, window_id, true);
-            }
-        });
-    }
-    {
-        let weak = window.as_weak();
-        window.on_hostkey_reject(move || {
-            if let Some(w) = weak.upgrade() {
-                resolve_front_hostkey(&w, window_id, false);
-            }
-        });
-    }
-
-    // Connect-time credential prompt (#110): the user supplies the missing
-    // username/password (or cancels); the answer unblocks the SSH/SFTP auth.
-    {
-        let weak = window.as_weak();
-        let registry = registry.clone();
-        window.on_cred_accept(move || {
-            if let Some(w) = weak.upgrade() {
-                let remember = w.get_cred_remember();
-                resolve_front_cred(&w, window_id, true);
-                // "Remember" persisted new credentials onto the saved session
-                // (auth_dialogs::persist_credentials); the registry is not
-                // reachable there, so broadcast from this owning callback.
-                if remember {
-                    registry.broadcast_config_changed();
-                }
-            }
-        });
-    }
-    {
-        let weak = window.as_weak();
-        window.on_cred_reject(move || {
-            if let Some(w) = weak.upgrade() {
-                resolve_front_cred(&w, window_id, false);
-            }
-        });
-    }
-
-    // MFA / keyboard-interactive prompt (#86-MFA): the user enters the
-    // verification code (or cancels); the answer unblocks the SSH/SFTP auth.
-    {
-        let weak = window.as_weak();
-        window.on_mfa_submit(move || {
-            if let Some(w) = weak.upgrade() {
-                resolve_front_mfa(&w, window_id, true);
-            }
-        });
-    }
-    {
-        let weak = window.as_weak();
-        window.on_mfa_cancel(move || {
-            if let Some(w) = weak.upgrade() {
-                resolve_front_mfa(&w, window_id, false);
             }
         });
     }

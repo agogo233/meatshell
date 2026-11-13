@@ -18,9 +18,10 @@ pub(super) fn resolve_jump(store: &Rc<RefCell<ConfigStore>>, session: &Session) 
 }
 
 pub(super) fn should_start_sftp(session: &Session) -> bool {
-    // Shell-integration compatibility must not hide SFTP. Auto-login scripts
-    // can require the shell hooks to be disabled while still using SFTP.
-    session.kind == SessionKind::Ssh
+    // Compatibility mode must keep the connection to a single, plain PTY.
+    // Bastions such as JumpServer/Koko can terminate an active proxied shell
+    // when the client immediately opens a second SSH connection for SFTP.
+    session.kind == SessionKind::Ssh && !session.disable_shell_integration
 }
 
 /// Spawn the shell (+ SFTP) workers and their event-pump threads for an
@@ -28,7 +29,7 @@ pub(super) fn should_start_sftp(session: &Session) -> bool {
 /// reconnect (#79); the tab/terminal/parser must already exist.
 pub(super) fn start_session_in_tab(tab_id: &str, session: Session, ctx: &ConnectCtx) {
     let has_sftp = should_start_sftp(&session);
-    let (initial_cols, initial_rows) = *ctx.last_term_size.lock().unwrap();
+    let (initial_cols, initial_rows) = *lock_or_recover(&ctx.last_term_size);
     // Resolve every ancestor on the UI thread before starting any worker.
     // Invalid chains must never silently fall back to a direct connection.
     let jump = match resolve_jump(&ctx.store, &session) {
@@ -36,10 +37,16 @@ pub(super) fn start_session_in_tab(tab_id: &str, session: Session, ctx: &Connect
         Err(error) => {
             if let (Some(win), Some(editor)) = (ctx.weak.upgrade(), ctx.editor.upgrade()) {
                 apply_session_event_to_window(
-                    &win, &editor, ctx.window_id, tab_id,
+                    &win,
+                    &editor,
+                    ctx.window_id,
+                    tab_id,
                     SessionEvent::Closed(error.to_string()),
-                    &ctx.bufs, &ctx.render_gates, &ctx.tab_statuses,
-                    &ctx.local_snap, &ctx.local_net_hist,
+                    &ctx.bufs,
+                    &ctx.render_gates,
+                    &ctx.tab_statuses,
+                    &ctx.local_snap,
+                    &ctx.local_net_hist,
                 );
             }
             return;
@@ -123,6 +130,27 @@ pub(super) fn start_session_in_tab(tab_id: &str, session: Session, ctx: &Connect
         // points at the destination and the handle must land there.
         let sftp_route = route.clone();
         let sftp_tab_id = tab_id.to_string();
+        // Snapshot the transfer-queue settings now (UI thread) so the worker
+        // task doesn't need to reach back into the config store. Concurrency,
+        // rate limit and mtime therefore apply from the next connection, not
+        // to live transfers; the dedup policy is read live by the UI at click
+        // time, and this snapshot only drives the worker's last-moment
+        // re-check when a target appears after the click.
+        let queue_cfg = {
+            let cfg = ctx.store.borrow();
+            let dedup = match cfg.sftp_queue_dedup() {
+                "overwrite" => crate::sftp::DedupPolicy::Overwrite,
+                "skip" => crate::sftp::DedupPolicy::Skip,
+                "rename" => crate::sftp::DedupPolicy::Rename,
+                _ => crate::sftp::DedupPolicy::Ask,
+            };
+            crate::sftp::SftpQueueConfig {
+                concurrency: cfg.sftp_queue_concurrency(),
+                rate_limit_kbps: cfg.sftp_queue_rate_limit_kbps(),
+                dedup,
+                preserve_mtime: cfg.sftp_queue_preserve_mtime(),
+            }
+        };
         sftp_runtime.spawn(async move {
             // The interactive PTY may never report Connected (stalled
             // handshake); bound the wait so this bootstrap task cannot
@@ -134,8 +162,12 @@ pub(super) fn start_session_in_tab(tab_id: &str, session: Session, ctx: &Connect
                 return;
             }
             tokio::task::yield_now().await;
-            let sftp_handle = spawn_sftp(sftp_task_runtime.handle(), session, jump, sftp_tx);
-            let handles = sftp_route.lock().ok().map(|r| r.sftp_handles.clone());
+            let sftp_handle =
+                spawn_sftp(sftp_task_runtime.handle(), session, jump, sftp_tx, queue_cfg);
+            let handles = sftp_route
+                .lock()
+                .ok()
+                .map(|r| r.sftp_handles.clone());
             if let Some(handles) = handles {
                 if let Ok(mut handles) = handles.lock() {
                     handles.insert(sftp_tab_id, sftp_handle);
@@ -152,6 +184,9 @@ pub(super) fn start_session_in_tab(tab_id: &str, session: Session, ctx: &Connect
         let route_pump = route.clone();
         let rt_pump = ctx.runtime.clone();
         let tab_id_pump = tab_id.to_string();
+        // Snapshot the large-output-protection toggle on the UI thread; the pump
+        // thread has no store access.
+        let bp_enabled = ctx.store.borrow().output_backpressure_enabled();
         std::thread::spawn(move || {
             let mut shell_rx = rx;
             let mut sftp_ready_tx = sftp_ready_tx;
@@ -190,7 +225,9 @@ pub(super) fn start_session_in_tab(tab_id: &str, session: Session, ctx: &Connect
 
                 // A close marker can sit behind a large burst of Output events
                 // in the unbounded channel. Handle it before ingesting anything
-                // from this batch.
+                // from this batch; the tab's scrollback is kept for
+                // Enter-to-reconnect (#f654b61), so only the dead session's
+                // queued output is dropped.
                 if let Some(closed) = take_closed_event(&mut drained) {
                     let rt_evt = rt.clone();
                     let tid = tab_id_pump.clone();
@@ -243,7 +280,8 @@ pub(super) fn start_session_in_tab(tab_id: &str, session: Session, ctx: &Connect
                             // Swallow when follow-cd is off: forwarding it would set
                             // sftp_loading without any ListDir to clear it (the #59
                             // stuck-"loading" trap).
-                            if !changed || !rt.follow_cd.load(std::sync::atomic::Ordering::Relaxed)
+                            if !changed
+                                || !rt.follow_cd.load(std::sync::atomic::Ordering::Relaxed)
                             {
                                 continue;
                             }
@@ -280,6 +318,16 @@ pub(super) fn start_session_in_tab(tab_id: &str, session: Session, ctx: &Connect
                                 ui_batch.push(SessionEvent::Output(chunk));
                             }
                         }
+                        SessionEvent::CommandMark(mark) => {
+                            // Track "a command is running" on the buffer
+                            // off-thread; forward to the UI so the history
+                            // dropdown can suppress itself mid-program.
+                            if let Some(h) = crate::app::term_buf(&rt.bufs, &tab_id_pump) {
+                                lock_or_recover(&h).command_running =
+                                    matches!(mark, crate::ssh::CommandMark::CommandStart);
+                            }
+                            ui_batch.push(SessionEvent::CommandMark(mark));
+                        }
                         other => ui_batch.push(other),
                     }
                 }
@@ -305,8 +353,11 @@ pub(super) fn start_session_in_tab(tab_id: &str, session: Session, ctx: &Connect
                     match evt {
                         SessionEvent::Output(chunk) => {
                             let chunk_len = chunk.len();
-                            let reply =
-                                ingest_terminal_output(&rt.bufs, &tab_id_pump, chunk.as_bytes());
+                            let reply = ingest_terminal_output(
+                                &rt.bufs,
+                                &tab_id_pump,
+                                chunk.as_bytes(),
+                            );
                             if !reply.is_empty() {
                                 let _ = terminal_reply_tx.send(SessionCommand::RawInput(reply));
                             }
@@ -341,8 +392,49 @@ pub(super) fn start_session_in_tab(tab_id: &str, session: Session, ctx: &Connect
                 }
 
                 if dirty_since_request {
-                    let _ =
-                        request_tab_render(rt.window.clone(), &tab_id_pump, &rt.bufs, &rt.gates);
+                    let _ = request_tab_render(
+                        rt.window.clone(),
+                        &tab_id_pump,
+                        &rt.bufs,
+                        &rt.gates,
+                    );
+                }
+
+                // Large-output protection: when the producer has outrun the
+                // renderer, the unbounded channel grows. Surface that as a banner
+                // (with hysteresis so it doesn't flicker at the threshold). The
+                // pump's own `wait_for_ui_flush` pacing already applies the
+                // backpressure; this only informs the user.
+                if bp_enabled {
+                    const BP_HIGH: usize = 24;
+                    const BP_LOW: usize = 4;
+                    let pending = shell_rx.len();
+                    if let Some(h) = crate::app::term_buf(&rt.bufs, &tab_id_pump) {
+                        // Scope the guard so it is released before the render
+                        // request below re-locks the same buffer.
+                        let changed = {
+                            let mut buf = lock_or_recover(&h);
+                            let next = if buf.backpressure {
+                                pending > BP_LOW
+                            } else {
+                                pending >= BP_HIGH
+                            };
+                            if buf.backpressure != next {
+                                buf.backpressure = next;
+                                true
+                            } else {
+                                false
+                            }
+                        };
+                        if changed {
+                            let _ = request_tab_render(
+                                rt.window.clone(),
+                                &tab_id_pump,
+                                &rt.bufs,
+                                &rt.gates,
+                            );
+                        }
+                    }
                 }
 
                 if ui_only.is_empty() {
@@ -433,13 +525,13 @@ mod tests {
     use crate::config::{Session, SessionKind};
 
     #[test]
-    fn shell_compatibility_keeps_sftp_available() {
+    fn compatibility_mode_keeps_ssh_to_one_connection() {
         let mut session = Session::new_empty();
         session.kind = SessionKind::Ssh;
         assert!(should_start_sftp(&session));
 
         session.disable_shell_integration = true;
-        assert!(should_start_sftp(&session));
+        assert!(!should_start_sftp(&session));
     }
 
     #[test]
@@ -448,4 +540,51 @@ mod tests {
         session.kind = SessionKind::Telnet;
         assert!(!should_start_sftp(&session));
     }
+}
+/// Reconnect a disconnected tab in place (#79): drop the dead shell/SFTP
+/// handles, clear the screen, and respawn the session in the SAME tab. Returns
+/// true when a reconnect was started (the tab was in the disconnected state).
+/// Shared by the Enter-to-reconnect key handler and the auto-reconnect timer.
+pub(crate) fn reconnect_tab_in_place(tab_id: &str, ctx: &ConnectCtx) -> bool {
+    let session_id = {
+        let statuses = lock_or_recover(&ctx.tab_statuses);
+        statuses
+            .get(tab_id)
+            .filter(|st| st.state == 2)
+            .map(|st| st.session_id.clone())
+    };
+    let Some(session_id) = session_id else {
+        return false;
+    };
+    let Some(session) = ctx.store.borrow().get(&session_id).cloned() else {
+        return false;
+    };
+    // A credential prompt cancelled during an earlier attempt must not silence
+    // this one: the answer cache lives for the whole process run otherwise.
+    forget_cred_decision(&session_id);
+    // Drop the dead shell/SFTP handles for this tab.
+    ctx.handles.borrow_mut().remove(tab_id);
+    if let Some(h) = lock_or_recover(&ctx.sftp_handles).remove(tab_id) {
+        h.close();
+    }
+    // Fresh screen: new parser, cleared history/selection.
+    if let Some(h) = term_buf(&ctx.bufs, tab_id) {
+        let mut b = lock_or_recover(&h);
+        b.release_scrollback();
+        if let Some(log) = b.session_log.as_mut() {
+            log.note("reconnecting");
+        }
+    }
+    if let Some(st) = lock_or_recover(&ctx.tab_statuses).get_mut(tab_id) {
+        st.state = 0;
+    }
+    // Fresh session: the first OSC 7 after reconnect follows.
+    lock_or_recover(&ctx.sftp_last_cwd).remove(tab_id);
+    if let Some(w) = ctx.weak.upgrade() {
+        set_terminal_row(&w, tab_id, |t| {
+            t.status = crate::i18n::t("重连中...", "Reconnecting...").into();
+        });
+    }
+    start_session_in_tab(tab_id, session, ctx);
+    true
 }

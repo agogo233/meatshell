@@ -4,6 +4,8 @@ mod structs;
 mod config;
 #[path = "impls/finalshell.rs"]
 mod finalshell;
+#[path = "impls/mobaxterm.rs"]
+mod mobaxterm;
 mod jump_chain;
 pub(crate) use jump_chain::draft_jump_ids;
 

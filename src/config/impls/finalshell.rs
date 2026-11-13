@@ -42,8 +42,10 @@ struct FinalShellConnection {
     terminal_encoding: String,
     #[serde(default)]
     description: String,
+    // Parsed leniently per entry (see map_port_forwards): a single malformed
+    // forward must not fail the whole session's import.
     #[serde(default)]
-    port_forwarding_list: Vec<FinalShellPortForward>,
+    port_forwarding_list: Vec<serde_json::Value>,
 }
 
 /// One SSH tunnel in FinalShell's `port_forwarding_list`.
@@ -155,10 +157,19 @@ impl FinalShellConnection {
     }
 }
 
-fn map_port_forwards(entries: Vec<FinalShellPortForward>) -> Vec<PortForward> {
+fn map_port_forwards(entries: Vec<serde_json::Value>) -> Vec<PortForward> {
     entries
         .into_iter()
-        .filter_map(FinalShellPortForward::into_port_forward)
+        .filter_map(|value| match serde_json::from_value::<FinalShellPortForward>(value) {
+            Ok(forward) => forward.into_port_forward(),
+            // A forward FinalShell wrote in an unexpected shape (a string port,
+            // a non-numeric id, …) is skipped on its own; the rest of the
+            // session still imports.
+            Err(err) => {
+                tracing::warn!("skipping malformed FinalShell port forward entry: {err}");
+                None
+            }
+        })
         .collect()
 }
 
@@ -176,6 +187,19 @@ impl FinalShellPortForward {
                 return None;
             }
         };
+        // Local and dynamic forwards listen on the client machine. The GUI
+        // only allows a loopback bind for them (#port-forward validation), so a
+        // FinalShell export that records a wide bind (0.0.0.0, a LAN IP, …) is
+        // skipped rather than turned into an all-interfaces listener.
+        if (kind == "local" || kind == "dynamic") && !crate::tunnel::is_loopback_bind(&self.ip) {
+            tracing::warn!(
+                "skipping FinalShell port forward {:?}: {:?} bind address {} is not loopback",
+                self.name,
+                kind,
+                self.ip
+            );
+            return None;
+        }
         // SOCKS5/dynamic: MeatShell ignores host/host_port; FinalShell still
         // writes dst_address 127.0.0.1 and dst_port 0 in many exports.
         let (host, host_port) = if kind == "dynamic" {
@@ -522,5 +546,38 @@ mod tests {
         assert_eq!(session.forwards.len(), 1);
         assert_eq!(session.forwards[0].name, "MySQL");
         assert_eq!(session.forwards[0].kind, "local");
+    }
+
+    #[test]
+    fn skips_wide_local_bind_address() {
+        // A local forward recorded against 0.0.0.0 would open an
+        // all-interfaces listener; the GUI forbids that, so the import must
+        // drop the entry instead of keeping it.
+        let raw = ssh_connection_with_forwards(
+            r#"[
+                {"port": 3308, "ip": "0.0.0.0", "dst_address": "127.0.0.1", "name": "wide", "dst_port": 3306, "id": 1, "type": 100},
+                {"port": 3309, "ip": "127.0.0.1", "dst_address": "127.0.0.1", "name": "ok", "dst_port": 3306, "id": 2, "type": 100}
+            ]"#,
+        );
+        let session = &parse_export(&raw).unwrap()[0];
+        assert_eq!(session.forwards.len(), 1, "the wide bind must be skipped");
+        assert_eq!(session.forwards[0].name, "ok");
+    }
+
+    #[test]
+    fn malformed_forward_entry_does_not_fail_the_session() {
+        // A string port (and a stray object entry) breaks strict decoding of
+        // that one entry; the well-formed entry and the session itself survive.
+        let raw = ssh_connection_with_forwards(
+            r#"[
+                {"port": "not-a-number", "ip": "127.0.0.1", "dst_address": "127.0.0.1", "name": "bad", "dst_port": 3306, "id": 1, "type": 100},
+                {"port": 3308, "ip": "127.0.0.1", "dst_address": "127.0.0.1", "name": "good", "dst_port": 3306, "id": 2, "type": 100},
+                "not-an-object"
+            ]"#,
+        );
+        let session = &parse_export(&raw).unwrap()[0];
+        assert_eq!(session.host, "192.0.2.10");
+        assert_eq!(session.forwards.len(), 1);
+        assert_eq!(session.forwards[0].name, "good");
     }
 }
