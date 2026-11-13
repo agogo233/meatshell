@@ -22,7 +22,6 @@ All notable changes are documented here. 本文件记录所有重要变更。
 - **内部清理：删除无调用的 URL 解码残留（含非 ASCII 乱码隐患），文件行高收敛为单一常量定义。**
 - **Internal cleanup: removed an unused URL-decoding helper (with a latent non-ASCII mojibake bug) and unified the file-row height into a single constant.**
 
-
 - **修复无 busybox `stat` 的设备文件面板首屏目录为空、手动刷新才显示。** 打开面板的“探测 + 取 home + 列目录”合并命令只通过 `stat` 列举，而 OpenWrt/BusyBox 可能没有该工具，导致首屏静默空白（与真空目录无法区分）。现在 `stat` 输出为空时自动改用 `ls -lAn` 长格式重列一次（与手动刷新的回退行为一致），正常设备零额外开销。
 - **Fix the first file-panel paint being empty (needing a manual refresh) on hosts without busybox `stat`.** The merged probe+home+listing command lists through `stat` only, which OpenWrt/BusyBox may not ship, so the first paint was silently blank (indistinguishable from an empty home). A `stat`-free result now re-lists once via the `ls -lAn` long format — the same fallback manual refresh already used — with zero extra cost on normal hosts.
 
