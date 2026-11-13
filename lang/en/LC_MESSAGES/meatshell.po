@@ -399,6 +399,21 @@ msgstr "Local (-L)"
 msgid "Remote (-R)"
 msgstr "Remote (-R)"
 
+msgid "Remote (-R): the server side listens; traffic is forwarded to the target on this machine"
+msgstr "Remote (-R): the server side listens; traffic is forwarded to the target on this machine"
+
+msgid "Local target"
+msgstr "Local target"
+
+msgid "Target host / port"
+msgstr "Target host / port"
+
+msgid "Filter names"
+msgstr "Filter names"
+
+msgid "Open in file manager"
+msgstr "Open in file manager"
+
 msgid "Dynamic (-D)"
 msgstr "Dynamic (-D)"
 

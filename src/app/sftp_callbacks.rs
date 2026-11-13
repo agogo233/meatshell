@@ -572,6 +572,9 @@ fn wire_sftp_split_callbacks(window: &AppWindow, sftp_handles: &SftpHandles) {
             update_terminal_row(model, tab_id.as_str(), |row| {
                 row.sftp_local_pane_width = width;
             });
+            // Mirror into the window-level default so a tab switch re-seeds the
+            // panel width even when the new tab remembers the same value.
+            w.set_sftp_local_pane_width(width);
         });
     }
     {

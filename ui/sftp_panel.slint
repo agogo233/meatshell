@@ -1077,6 +1077,9 @@ export component SftpPanel inherits Rectangle {
     callback persist-local-pane-width(length);
     callback persist-local-split-ratio(float);
     init => { root.local-pane-width = root.local-pane-default; }
+    // Re-seed the dragged width whenever the remembered default changes: a tab
+    // switch updates the default in place while this panel instance is reused.
+    changed local-pane-default => { root.local-pane-width = root.local-pane-default; }
     property <bool> local-resizing: false;
     // Effective local extent: the dragged width, else the saved ratio, else
     // half the panel. The remote half always keeps ~200px so its Name column

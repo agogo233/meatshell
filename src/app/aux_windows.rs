@@ -153,12 +153,23 @@ pub(super) fn wire_monitor_windows(ctx: &WinCtx) {
     }
 }
 
-/// Editor window drag and resize callbacks. The close path is not taken from
-/// the upstream `close-requested` → `request-close` chain: this fork's
-/// `EditorWindow` has no `request-close` callback (the in-window close button
-/// goes through the unsaved-changes check in `editor_host::wire_editor_host`).
+/// Editor window drag and resize callbacks. The OS close button goes through
+/// the unsaved-changes check; the actual close (`close-editor`) is wired with
+/// the other editor logic in `editor_host::wire_editor_host`.
 pub(super) fn wire_editor_window_chrome(ctx: &WinCtx) {
     let WinCtx { editor_win, .. } = ctx;
+    {
+        // The OS close button goes through the unsaved-changes check; the
+        // actual close (`close-editor`) is wired with the other editor logic
+        // in `editor_host::wire_editor_host`.
+        let close_request = editor_win.as_weak();
+        editor_win.window().on_close_requested(move || {
+            if let Some(editor) = close_request.upgrade() {
+                editor.invoke_request_close();
+            }
+            slint::CloseRequestResponse::KeepWindowShown
+        });
+    }
     {
         let weak = editor_win.as_weak();
         editor_win.on_win_drag(move || {

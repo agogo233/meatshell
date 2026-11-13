@@ -399,6 +399,15 @@ msgstr "本地 -L"
 msgid "Remote (-R)"
 msgstr "远程 -R"
 
+msgid "Remote (-R): the server side listens; traffic is forwarded to the target on this machine"
+msgstr "远程（-R）：由服务器端监听，流量会转发到本机上的目标"
+
+msgid "Local target"
+msgstr "本地目标"
+
+msgid "Target host / port"
+msgstr "目标主机 / 端口"
+
 msgid "Dynamic (-D)"
 msgstr "动态 -D"
 
