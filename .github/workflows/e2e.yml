@@ -1,23 +1,23 @@
-name: Remote MCP checks and headless Linux
+name: End-to-end and headless checks
+
+# Headless Linux service build + python end-to-end regressions (remote MCP
+# HTTP/stdio with OAuth, config imports, SSH jump chains, loopback TLS via a
+# checksum-pinned Caddy). Restored after b3345e4 removed remote-mcp.yml:
+# without it the headless feature (`#[cfg(feature = "headless")]` in
+# main.rs / terminal/headless.rs / build.rs) had no compile coverage and the
+# python e2e suite never ran anywhere.
+#
+# Triggering is deliberately narrow: manual dispatch plus a weekly schedule —
+# a full e2e run on every push or PR would double the CI minutes for
+# rarely-affected changes, so it is kept off the PR gate.
 
 on:
-  push:
-    branches: ["feat/authenticated-remote-mcp"]
-    tags: ["v*-remote.*"]
-  pull_request:
-    paths:
-      - "src/mcp/**"
-      - "src/automation/**"
-      - "src/ssh/**"
-      - "src/sftp/**"
-      - "tests/remote_mcp_e2e.py"
-      - "tests/tls_proxy_fixture.py"
-      - "Cargo.*"
-      - ".github/workflows/remote-mcp.yml"
   workflow_dispatch:
+  schedule:
+    - cron: "0 18 * * 1" # Mondays 18:00 UTC
 
 concurrency:
-  group: remote-mcp-${{ github.ref }}
+  group: e2e-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -26,8 +26,7 @@ permissions:
 jobs:
   linux:
     runs-on: ubuntu-22.04
-    permissions:
-      contents: write
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Install build and synthetic test dependencies
@@ -86,12 +85,26 @@ jobs:
           path: |
             ${{ env.ASSET }}
             ${{ env.ASSET }}.sha256
+
+  attach-headless-release:
+    # Only this job needs to write to the release, so it stays out of the
+    # long-running linux job above; run it only for a v* tag push.
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: linux
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write # only used to attach the tested headless service to a v* tag release
+    steps:
+      - name: Download tested headless package
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-x86_64-headless
+          path: dist
       - name: Attach tested headless service to fork release
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           prerelease: true
           fail_on_unmatched_files: true
           files: |
-            ${{ env.ASSET }}
-            ${{ env.ASSET }}.sha256
+            dist/meatshell-*.tar.gz
+            dist/meatshell-*.sha256

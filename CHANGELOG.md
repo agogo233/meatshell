@@ -5,6 +5,26 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ## [Unreleased]
 
+- **修复无 busybox `stat` 的设备文件面板首屏目录为空、手动刷新才显示。** 打开面板的“探测 + 取 home + 列目录”合并命令只通过 `stat` 列举，而 OpenWrt/BusyBox 可能没有该工具，导致首屏静默空白（与真空目录无法区分）。现在 `stat` 输出为空时自动改用 `ls -lAn` 长格式重列一次（与手动刷新的回退行为一致），正常设备零额外开销。
+- **Fix the first file-panel paint being empty (needing a manual refresh) on hosts without busybox `stat`.** The merged probe+home+listing command lists through `stat` only, which OpenWrt/BusyBox may not ship, so the first paint was silently blank (indistinguishable from an empty home). A `stat`-free result now re-lists once via the `ls -lAn` long format — the same fallback manual refresh already used — with zero extra cost on normal hosts.
+
+- **无 SFTP 服务的服务器打开文件面板更快。** 此前每次连接都要先等“子系统探测”最长 15 秒超时才降级到备用方式；现在探测上限缩到 2 秒，且一旦确认服务器没有该服务就记住结论——本次运行期间再打开/重连面板会直接跳过注定失败的探测，只剩一条“探测+列目录”命令；若服务器之后装上了该服务，手动刷新目录即可在下一次连接时重新发现。
+- **Faster file-panel open on servers without SFTP.** The subsystem probe used to wait up to 15 s before falling back; it is now capped at 2 s, and once a server is confirmed to lack the service the verdict is remembered — further opens/reconnects in this run skip the doomed probe entirely and go straight to a single probe+listing command. A manual directory refresh re-probes on the next connect, so a server that later gains the service is found again.
+- **修复 SCP 模式上传始终超时失败：缺少通道 EOF。** 上传方向把文件字节全部送达并确认后，远端 `scp -t` 因读不到 stdin 的 EOF 而永不退出，`finish()` 等满 30 秒报“等待远端退出超时”，然后清理掉临时文件——每次上传都“成功不了”。现在最后一个确认之后发送通道 EOF，远端立即退出，上传秒级完成、正式文件名落盘、传输行正常变“已完成”（下载方向本就自会退出，不受影响）。
+- **Fix SCP uploads always timing out: a missing channel EOF.** After every file byte was delivered and acknowledged, the remote `scp -t` sink never saw EOF on its stdin and so never exited, so `finish()` waited the full 30 s and reported "timed out waiting for the remote to exit" before deleting the temp file — every upload failed to land. The upload direction now sends channel EOF right after the last ack, the sink exits at once, and the upload completes in seconds with the real file name and a row that turns "Done" (downloads already exit on their own and are unaffected).
+- **修复 SCP 模式远端 shell 命令无超时。** 列目录、改名、删除、mv 落盘等远端命令此前可能永久挂起（网络抖动 / 服务器不回关闭），让传输行永远卡在“进行中”、呼吸灯一直闪。现在按操作分档：普通命令 30 秒，打包、跨盘移动、全量目录列举、全量用户查询等长操作最长 10 分钟，超时报错而不是挂起（超时还会显式关掉信道）。
+- **Fix SCP-mode remote shell commands having no timeout.** Remote commands (listings, rename, delete, the promote `mv`) could hang forever on a flaky network or a server that never closes, leaving a transfer row stuck "in progress" with the breathing light pulsing. They now get a per-kind cap — 30 seconds for ordinary commands, up to 10 minutes for genuinely long work (tar packing, cross-filesystem `mv`, a full listing, a full user dump) — and time out with an explicit channel close instead of hanging.
+- **修复无 `getent` 的主机每次列目录都空转一次探测。** 每次列出含属主信息（uid/gid）的目录都会重跑一次注定失败的 `getent` 探测（OpenWrt/BusyBox 没有该工具）。现在首次探测返回“工具不存在”后负缓存，后续列目录直接跳过（SFTP 子系统模式同样受益）。手动刷新目录会清掉负缓存，主机中途装上 `getent` 或新增账号后无需重连即可重新显示属主名。
+- **Fix repeated doomed `getent` probes on hosts without it.** Every listing carrying owner/group IDs re-ran a `getent` probe that could only fail (OpenWrt/BusyBox has no such tool). The first "not found" answer is now negative-cached so later listings skip the probe (the SFTP-subsystem mode benefits too). A manual directory refresh clears the negative cache, so a host that gains `getent` or a new account mid-session starts showing names again without a reconnect.
+
+- **上传同名文件不再静默覆盖，且“点击后出现”的目标也会先询问。** 上传前按“当前目录里已有同名项”做判断：无冲突直接传，文件夹合并免策略（不打断批量上传），有冲突按配置策略处理；若用户点了“替换/保留两份/取消”，只对真正冲突的文件生效，不再误伤未冲突文件。若目标是在点击之后、传输开始前才出现的，worker 会重新检查并弹窗询问（替换 / 保留两份 / 跳过）；窗口已关或长时间无应答时保守地保留两份，绝不静默覆盖。
+- **Uploading onto an existing name never overwrites silently, and a target that appears after the click is asked about too.** Before an upload the batch is resolved per file against the known listing: files with no clash proceed straight in, folder uploads merge without asking (so they never break a batch), and only the files that really clash get the configured policy — a batch "Skip" no longer drops the non-conflicting ones. If a target appears after the click but before the transfer starts, the worker re-checks the live state and asks (replace / keep both / skip); with the window gone or no reply within the generous wait it conservatively keeps both copies, never overwriting unseen.
+
+- **SCP 模式文件面板加载与刷新明显变快。** 打开面板时“取当前目录 + 列目录 + 拉取根目录树”原来要串行往返多次，现在合并成一次往返并行拉取，高延迟链路上打开更快；手动刷新时已展开的目录树节点改为最多 4 路并发刷新（此前逐个串行），且目录树节点列举最长 30 秒（此前最长 10 分钟），一个卡住的节点不再拖住整个刷新。面板主目录列举仍保留最长 10 分钟宽松上限，大目录在慢速链路上不会误报失败。
+- **The SCP-mode file panel loads and refreshes noticeably faster.** Opening the panel used to round-trip serially for the home directory, its listing and the root tree; these now share one round-trip with the tree probe running concurrently, so high-latency links open faster. A manual refresh re-fetches every expanded tree node concurrently (up to 4 at a time, previously one after another), and each tree node is capped at 30 seconds (previously 10 minutes), so one stalled node no longer holds up the whole refresh. The panel's main listing keeps the generous 10-minute bound so large directories on slow links are not misreported as failures.
+
+- **修复拖选时反向滚动把选区往错误方向继续拉长。** 拖选文字时用滚轮翻页，此前滚轮向任何方向滚都会把选区两端分别向上下各自抻长，反向滚回时选区顶部也跟着向上延长、无法收回。现在改为“橡皮筋”模型：拖选起点（锚点）固定，只有活动端随滚动伸缩——正向滚动继续扩选，反向滚动把选区收回来，收到锚点后先收成空，余量在下一帧再从另一侧长出（一帧内不会整段跳过锚点），锚点字段全程不被改写、选区不会整体漂移；拖住不动（未拖出选区）时滚轮只翻页、不产生选区。
+- **Fix the wheel extending the wrong end when scrolling back during a drag-selection.** Wheeling to flip pages mid-drag used to stretch both ends of the selection in their own directions, so scrolling back kept growing the top end instead of pulling the selection in. The selection is now rubber-banded around the drag anchor: the anchor stays fixed and only the live end follows the scrolls — rolling fore keeps growing it, rolling back pulls it in, and once it reaches the anchor the band empties first, with the remainder growing out of the other side on the next frame instead of jumping across in one. The anchor field is never rewritten, so the selection can no longer drift as a whole; wheeling while holding the button without dragging only scrolls, it never invents a selection.
 - **本机“位置”下拉的小改进：最近项可单独移除、收藏可上下排序、可打开所在文件夹。** 最近列表悬停出现 ×，只删这一条（“清除最近访问”仍在）；收藏行悬停出现 ↑ / ↓ 调整顺序（顺序会保存，决定菜单里的先后）；菜单底部新增“打开所在文件夹”，用系统文件管理器打开左侧当前目录。
 - **Local places menu polish: remove one recent entry, reorder bookmarks, open the folder in the file manager.** Recent rows show a × on hover that drops just that entry (the bulk "Clear recent" stays); bookmark rows show ↑ / ↓ to reorder them (the order is saved and drives the menu); a new "Open in file manager" item at the bottom opens the folder the pane is showing.
 - **本机侧列表支持隐藏文件开关、点列头排序和按名称筛选。** 路径栏新增“眼睛”按钮切换隐藏/系统项（Windows 属性、Unix 点文件），默认隐藏，AppData、$RECYCLE.BIN 不再占满列表；名称、大小、修改时间列头可点击，按升序 → 降序 → 默认（文件夹在前、自然名称序）循环，当前排序列高亮并带箭头；面板够宽时路径栏下多一行筛选框，输入即按名称过滤（大小写不敏感），切换目录保留。隐藏开关与排序列随布局保存。
@@ -15,57 +35,68 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ## [0.8.2] - 2026-11-08
 
-- **标签页菜单可记录会话日志，查找显示数量并支持跳转（#535）。** SSH、Telnet、串口和本地终端标签页的右键菜单新增“开始记录会话日志...”：选择保存位置（默认为会话日志目录下的 `<名称>_<时间戳>.log`），先写入当前屏幕内容，记录期间该项变为“停止记录会话日志”。查找栏现在同时搜索回滚历史和当前屏幕，显示“当前/总数”（无匹配时显示“无结果”），可用 Enter / Shift+Enter 或上下按钮跳转，两端循环并自动滚动到匹配处，当前匹配项高亮更明显。
-- **Session log from the tab menu, and find shows a count and steps through matches (#535).** The tab context menu of SSH, Telnet, serial and local tabs gains "Start session log...": pick where to save (the session-log folder and `<name>_<timestamp>.log` are proposed), the current screen is written first, and while recording the item reads "Stop session log". The find bar now searches scrollback as well as the screen, shows "current/total" (or "No results"), and steps with Enter / Shift+Enter or the up/down buttons, wrapping at both ends and scrolling the match into view; the current match gets a stronger highlight.
+- **移除应用内更新功能。** 工具栏的更新按钮、设置里的更新页、启动时的版本检查、下载镜像与一键安装（AUR / 自更新 / MSI）全部移除；应用不再自行检查或下载新版。升级请直接从本仓库（agogo233/meatshell）的 Releases 页下载，旧配置里残留的更新相关项会被静默忽略，无需手动清理。关于面板的项目主页链接统一指向本仓库。
+- **The in-app update feature has been removed.** The toolbar update button, the Settings → Updates page, the startup version check, download mirrors and one-click installers (AUR / self-update / MSI) are all gone; the app no longer checks for or downloads new versions on its own. To upgrade, download from this repository's (agogo233/meatshell) Releases page. Update-related leftovers in old config files are silently ignored — no manual cleanup needed. The About panel's project link now points at this repository.
 
-- **RDP 会话支持更多 FreeRDP 选项（#530）。** 会话编辑窗口新增：FreeRDP 服务器兼容模式（Linux / macOS）、旧版 TLS、管理员会话（/admin）、智能缩放、证书策略（忽略 / 首次信任 / 拒绝不受信任）、网络类型、声音重定向、剪贴板共享、图形加速（GFX），以及每行一个的高级 FreeRDP 参数（支持中文别名，如 `网络=局域网`、`音频=开`）。感谢 @andnnl。
-- **More FreeRDP options for RDP sessions (#530).** The session editor gains FreeRDP server compatibility (Linux / macOS), legacy TLS, administrative session (/admin), smart sizing, a certificate policy (ignore / trust on first use / reject untrusted), a network profile, sound redirection, clipboard sharing, graphics acceleration (GFX), and advanced FreeRDP arguments, one per line, with Chinese aliases such as `网络=局域网` and `音频=开`. Thanks @andnnl.
+- **修复取消面板拖拽后残留虚线预览（#dock）。** 拖动面板时若焦点被弹窗或失焦夺走（指针取消事件），此前会当成一次完成的拖放提交移动/排序，预览框也会卡住。现在取消事件只清掉预览，不会提交任何移动或排序。
+- **Fix a stranded dock preview when a panel drag is cancelled (#dock).** When a drag lost its grab to a popup or window deactivation (a pointer-cancel event), it used to commit the move/reorder and leave the preview stuck. Cancel now just drops the preview without committing any move or reorder.
 
-- **默认启用 VT100 线条绘制（#543）。** nvtop、mc 等 ncurses 程序用 `ESC ( 0` 绘制的边框、坐标轴和进度条不再显示成 q x l k m 字母（温度 `35°C` 也不再显示成 `35fC`），与 xterm、Windows Terminal、PuTTY 一致。已有会话同样默认开启，如有需要可在会话设置中关闭。`reset` 命令现在也会恢复普通字符集，TUI 异常退出后终端不会一直显示成线条字符。
-- **VT100 line drawing is on by default (#543).** Borders, axes and bars that ncurses programs such as nvtop and mc draw with `ESC ( 0` no longer show up as the letters q x l k m (and `35°C` no longer as `35fC`), matching xterm, Windows Terminal and PuTTY. Existing sessions get it too; it can still be turned off in the session settings. `reset` now also restores the normal character set, so a TUI that crashes cannot leave the terminal drawing letters as lines.
+- **修复面板排序未即时保存。** 把侧栏、欢迎页、快速命令、AI 或 SFTP 面板拖回自身边缘重新排序后，新顺序只在下次显式保存窗口布局时才落盘。现在每次排序成功即写入配置。
+- **Fix panel reorders not being saved immediately.** Reordering a docked panel back onto its own edge only persisted the new order the next time the layout was saved explicitly. It is now written to config on every successful reorder.
 
-- **大量日志输出时渲染更流畅、内存占用更低。** 持续输出时以 60 Hz 渲染（原为 30 Hz），每帧原地更新而不再重建所有文字元素；回滚历史改用紧凑存储，10 万行彩色日志的内存从约 72 MB 降到约 40 MB，彩色日志的处理速度约提升一倍。
-- **Smoother rendering and lower memory under heavy log output.** Sustained output renders at 60 Hz (was 30 Hz) and updates text in place instead of rebuilding every text element each frame; scrollback uses a compact layout, so 100k coloured log lines take about 40 MB instead of 72 MB, and coloured log streams are processed about twice as fast.
 
-- **本机侧支持收藏和最近访问（#532 后续）。** 左侧路径栏新增 ☆（面板较窄时隐藏）：点一下收藏当前文件夹，已收藏时高亮；“位置”下拉里多出“收藏”和“最近”两段，收藏可悬停删除，最近可一键清空。打开的本地文件夹会按时间倒序记入最近（去重、最多 15 条），收藏最多 50 条；两者都对整台机器生效，换会话、重启后仍在。Windows 下同一目录的不同大小写/结尾斜杠按同一个处理。
-- **Local bookmarks and recent folders in the split view (follow-up to #532).** The left path bar gained a ☆ (hidden when the pane is too narrow): click it to bookmark the current folder, highlighted while bookmarked; the places menu now has Bookmarks and Recent sections, bookmarks can be removed on hover and Recent cleared in one click. Opened local folders are remembered newest-first (de-duplicated, 15 at most), bookmarks are capped at 50, both apply to the whole machine and survive restarts and session switches. On Windows the same folder is recognised regardless of case or a trailing separator.
+- **修复 SFTP 的 root / 自定义服务器命令保存后失效（#438）。** 新建或编辑会话时选择的「sudo 提权」或「自定义命令」此前总被丢弃，连接仍以登录用户身份运行。现在会随会话保存，并在编辑时正确回填。
+- **Fix root / custom SFTP server command being lost on save (#438).** Choosing sudo elevation or a custom SFTP server command always came back as the login user; the choice now survives the save and is shown again when the session is edited.
 
-- **双栏会记住上次的状态、本机目录和分隔比例，本机侧新增“位置”下拉（#532）。** 上次开着双栏，下次打开就还是双栏；左侧回到上次所在的文件夹（U 盘拔掉或网络盘不可用时自动回到主目录并提示），拖动过的分隔条比例也一并记住。左侧路径栏原来的“主目录”按钮换成“位置”下拉：主目录 / 桌面 / 下载 / 文档，以及本机的各个盘符（带卷标），点一下即可跳转。盘符枚举在后台线程完成，断线的网络驱动器不会卡住界面。
-- **The split view remembers its state, its local folder and the divider share, and the local side has a places menu (#532).** If the split view was open, it opens that way next time; the left pane returns to the folder it was showing (a removed USB stick or an unmounted network drive falls back to the home folder with a note), and the divider's share is remembered too. The local path bar's home button became a places menu: Home, Desktop, Downloads, Documents, and every drive on this machine (with its volume label), one click each. Drives are enumerated off the UI thread, so a dead network drive cannot stall the window.
+- **修复编辑会话时终端类型被重置（#498）。** 编辑已有会话时，终端类型没有从保存值回填，看到的永远是默认值，保存后即被改写。新建会话现在也会写入默认值。
+- **Fix the terminal type being reset when a session is edited (#498).** The editor never loaded the stored value, so the dropdown always showed the default and saving overwrote it. New sessions now get the default value written too.
 
-- **修复双栏本地面板可能冻结窗口、以及复制含环目录会无限递归的问题（#520 后续）。** 本地路径解析不再在界面线程访问文件系统：输入指向已断开的网络盘或休眠 NAS 的路径时窗口不再卡住，找不到/不是文件夹的错误改由后台列目录线程报告。从资源管理器拖入的文件夹复制现在会跳过已复制过的物理目录（符号链接或 Windows 联接点成环时不再无限递归），拒绝把文件夹复制到它自己的子目录里，并有 32 层深度上限兜底。
-- **Fix the local pane freezing the window and copying link loops forever (follow-up to #520).** Resolving a typed local path no longer touches the filesystem on the UI thread, so a mapped drive that has gone away or a sleeping NAS cannot hang the window; the background listing thread reports "no such folder / not a folder" instead. Folder copies from the file manager now skip physical folders they have already copied (a symlink or Windows junction loop can no longer recurse), refuse to copy a folder into its own subfolder, and stop at a 32-level depth cap as a backstop.
+- **修复串口会话的端口下拉列表为空。** 下拉列表此前没有任何数据，端口只能手动输入（COM3 / /dev/ttyUSB0）。现在会在每次打开新建或编辑对话框时列出本机已检测到的串口。
+- **Fix the empty serial port dropdown.** The list was never filled, so a device could only be typed by hand (COM3 / /dev/ttyUSB0). Detected ports are now listed each time the new or edit dialog opens.
 
-- **修复登录后终端只显示“Last login”、没有提示符也无法输入的问题（#524）。** Shell 集成初始化命令以前在 `Last login:` 提示后立即输入，若登录脚本启动了菜单、`read` 或堡垒机选择界面，命令会被当作它们的输入，终端看起来就卡死了。现在会等 shell 在提示符上安静下来后再输入，不会输入到 `Password:`、`Select [1-3]:` 之类的提问中；即使初始化没有完成，输出也会在 5 秒内正常显示。
-- **Fix the terminal showing only "Last login" with no prompt and no input (#524).** The shell-integration setup used to be typed right after the `Last login:` banner, so a menu, `read` or bastion picker started by the login scripts took it as input and the terminal looked frozen. It is now typed only once the shell sits quietly at a prompt, never into questions such as `Password:` or `Select [1-3]:`, and output is shown within 5 s even if the setup never completes.
+- **修复会话编辑器无法查看已保存的凭据。** 「查看已保存的密码 / 私钥」此前完全没有接线：编辑会话时授权开关永远是关，密码与内联密钥也无法取回。现在可放心愿取用：对话框需已打开且已明确授权，才会返回该会话保存的密码或内联私钥，其余情况一律返回空。
+- **Fix the session editor being unable to reveal saved credentials.** The reveal path was never wired: the opt-in switch never left "off" when editing a session, and the saved password or inline key could not be read back. It now works as intended — an open editor with an explicit opt-in returns that session's stored password or inline private key, and nothing otherwise.
 
-- **修复连接 macOS 主机后 “Last login” 之后没有任何输出的问题（#541）。** 0.8.1 加入的 zsh 按键绑定让初始化命令超过了 macOS 终端单行 1024 字节的限制，命令被截断而没有执行。现在 bash 和 zsh 只接收各自需要的部分，两者都保持在限制以内。
-- **Fix macOS hosts showing nothing after "Last login" (#541).** The zsh key bindings added in 0.8.1 pushed the setup line past macOS's 1024-byte terminal line limit, so it was cut off and never ran. Bash and zsh now each receive only their own part, both well under the limit.
+- **修复远程隧道（-R）运行时不生效，且目标地址无法填写。** 添加远程转发时会话面板会静默丢弃它；目标主机与端口两栏也只在「本地转发」下显示，导致远程转发的目标只能是默认值。现在远程转发可正常建立，目标栏在「本地」与「远程」下均可填写（动态转发仍不需要目标）。
+- **Fix runtime remote (-R) tunnels being dropped with no way to set the target.** The runtime panel silently discarded a remote forward, and the target host/port row only showed for local forwarding, leaving the target at its default. Remote forwards now establish, and the target row is editable for both local and remote (dynamic still needs no target).
 
-- **修复 Shift + 方向键、选区和登录脚本提问相关的问题（#542）。** Shift / Alt / Ctrl 与方向键、Home/End、PageUp/PageDown、Delete、F1–F12 组合时不再丢失修饰键，Shift + 左/右 可在 TUI 中选择文本；按 Esc 或在启用鼠标的程序中左键单击会清除终端选区；登录脚本询问 `(y/n)`、`[Y/n]`、`yes/no` 等问题时不再输入 Shell 集成命令，在提问处打字只会暂缓初始化，回车后在真正的提示符出现时继续。
-- **Fix Shift+arrow keys, selection clearing and login-script questions (#542).** Shift / Alt / Ctrl combined with the arrow keys, Home/End, PageUp/PageDown, Delete and F1–F12 keep their modifier, so Shift+Left/Right select text in TUIs; Esc, or a left click in a mouse-aware program, clears the terminal selection; and the shell-integration setup is no longer typed into login-script questions such as `(y/n)`, `[Y/n]` or `yes/no` — typing at such a question only delays the setup until Enter, after which it goes out at the real prompt.
+- **修复终端缺字形显示为空白（#461）。** 字形回退表此前从未安装，`➜`、`✔` 等终端字体缺失的符号显示为空白。现在会在启动时以及更换终端字体后按系统字体重建回退表，并重绘已打开的终端。
+- **Fix missing terminal glyphs rendering as blank (#461).** The glyph-fallback table was never installed, so symbols the terminal font lacks (`➜`, `✔`, …) came out blank. The table is now rebuilt from system fonts at startup and after a font change, and open terminals are redrawn.
 
-- **修复展开高级选项后会话窗口底部按钮被遮挡的问题（#525）。** “测试连接 / 取消 / 创建”现在固定在窗口底部，不再随内容一起被裁掉。
-- **Fix the session dialog's buttons disappearing with advanced options open (#525).** Test connection / Cancel / Create are now pinned to the bottom of the dialog instead of being clipped off with the content.
+- **修复 Windows 上调整远程桌面窗口大小导致 mstsc 重新连接（#511）。** 生成的 .rdp 文件此前没有设置动态分辨率，mstsc 使用默认值（开启）；服务器无法在会话中实时调整分辨率时，mstsc 会通过重新连接来实现，从而产生第二个连接，并在单会话的 Windows 上将第一个连接挤下线。现在窗口模式与全屏模式均写入动态分辨率关闭，调整大小时只缩放画面。（仅限 Windows 的 mstsc 路径；使用 FreeRDP 客户端的连接沿用原有参数。）
+- **Fix mstsc reconnecting when a remote desktop window is resized on Windows (#511).** The .rdp file never set dynamic resolution, so mstsc used its default (on); on servers that cannot resize a live session it resized by reconnecting, which opened a second connection that logged the first one off on single-session Windows. Dynamic resolution is now off for both windowed and full screen, so resizing only scales the picture. (mstsc on Windows only; connections through the FreeRDP client keep their existing arguments.)
 
-- **SFTP 删除会删除所有勾选项，支持 Del 键，并优先显示修改时间（#531）。** 右键已勾选的行会显示“删除选中项”并删除全部勾选项；文件列表中按 Del（macOS 上为 Cmd+Backspace）删除勾选项或高亮行，不再转发给终端；普通宽度的面板也能看到修改时间列。
-- **SFTP deletes every checked entry, supports the Del key and shows Modified sooner (#531).** Right-clicking a checked row offers "Delete checked items" and deletes the whole selection; Del (Cmd+Backspace on macOS) in the file list deletes the checked entries or the highlighted row instead of going to the terminal; and an ordinary-width panel now has room for the Modified column.
+- **新会话的 MCP 访问默认改为未勾选。** 新建会话对话框此前默认勾选「允许 MCP 访问」，与「MCP 暴露需用户显式开启（#432）」以及已有会话的实际存储值不一致，新建会话可能被无意开放给 MCP 客户端。现在默认不勾选，需要时手动开启。
+- **The MCP access box is now unchecked by default for new sessions.** The new-session dialog pre-ticked "allow MCP access", which contradicted the opt-in design (#432) and the value actually stored for existing sessions, so a new session could be exposed to MCP clients without the user asking for it. It now starts unchecked and can be ticked deliberately.
 
-- **修复串口按键卡顿、松开后仍继续响应的问题（#534）。** Windows 串口的写入不再等待读超时，按住方向键松开后光标会立即停下，回车也不再迟钝。
-- **Fix serial keystrokes lagging and replaying after release (#534).** Writes to Windows COM ports no longer wait behind the read timeout, so the cursor stops as soon as a held arrow key is released and Enter responds at once.
+- **本地标签页可把正在运行的 ssh 连接加入会话列表（#501）。** 在本地终端里用 ssh 连上服务器后，标签页右键菜单新增「加入会话列表」：主机、端口、用户名与跳板链路从 ssh 命令行解析，名称取自 ~/.ssh/config 中的别名；配置里匹配不到的跳板主机不会编造，会在保存后的提示里说明。
+- **A local tab can save its running ssh connection as a session (#501).** After connecting with ssh in a local shell, the tab context menu gains "Add to session list": host, port, user and the jump chain are read from the ssh command line, and the name comes from the alias in ~/.ssh/config. A jump host that does not match a saved session is reported in the note after saving rather than guessed.
 
-- **修复快捷命令中名为 “default” 的分组重复出现的问题（#534）。** 任何大小写的 “default” 现在都视为默认分组，列表中只显示一个，保存在其中的命令也能正常显示。
-- **Fix a quick-command group named "default" appearing twice (#534).** "default" in any case now means the built-in group, so the list shows it once and the commands saved under it are visible.
+- **Telnet 会话可保存凭据并自动登录（#507）。** 新建或编辑 Telnet 会话时可填写用户名与密码；连接时 MeatShell 自动应答设备首次出现的登录与密码提示，任一项留空则仍由你手动输入。
+- **Telnet sessions can save credentials and log in automatically (#507).** A Telnet session can store a user name and a password; on connect MeatShell answers the device's first login and password prompts with them, and leaving either blank keeps you typing it by hand.
 
-- **修复 WSL 损坏时 MeatShell 启动后长时间不显示窗口的问题（#537）。** 判断是否显示 WSL 时改为读取注册表，不再在启动时运行 `wsl.exe`。
-- **Fix MeatShell taking minutes to show its window when WSL is broken (#537).** Whether to list WSL is now read from the registry instead of running `wsl.exe` at startup.
+- **FinalShell 导入现在带端口转发（#514）。** 从 FinalShell 导出导入会话时，`port_forwarding_list` 一并迁入：type 100 → 本地、200 → 远程、300 → 动态（SOCKS5），默认自动启动；动态转发会清空无意义的主机与端口（FinalShell 常仍写入 127.0.0.1:0），无法识别的类型带警告跳过，不影响该会话其余内容。
+- **FinalShell import now carries port forwards (#514).** Importing a FinalShell export brings over `port_forwarding_list`: type 100 → local, 200 → remote, 300 → dynamic (SOCKS5), starting automatically by default; a dynamic forward has its meaningless host and port cleared (FinalShell often still writes 127.0.0.1:0), and an unrecognised type is skipped with a warning while the rest of the session imports as before.
 
-- **修复 macOS 上 SFTP 文件列表在文件名列上无法滚动的问题（#540）。** 触控板滚动只在指针确实位于终端输出上时才交给终端。
-- **Fix the SFTP file list not scrolling over the file names on macOS (#540).** Trackpad scrolling now goes to the terminal only while the pointer is actually over the terminal output.
+- **设置新增配色预设与「沉浸式配色」开关。** 「设置 → 壁纸与主题」新增配色预设：默认、纯白、雾灰、钛灰、钴蓝、鼠尾草绿、暖黄、樱粉，以及 VS Code / IDEA / Xcode / JetBrains / Cursor / Claude Code 六套编辑器风格，最后是按一个自定义颜色推导的「自定义」。每套预设含深色与浅色两套调色板，跟随明暗切换，并同步到已打开的进程、系统与编辑器窗口。打开「沉浸式配色」时壁纸的强调色与色调仍覆盖预设；关闭后壁纸只作背景，配色由预设决定。
+- **Settings › Wallpaper & theme gains colour theme presets and an "immersive colours" switch.** The page gains presets for Default, White, Mist Gray, Titanium Gray, Cobalt Blue, Sage Green, Warm Yellow, Sakura Pink, six editor looks (VS Code, IDEA, Xcode, JetBrains, Cursor, Claude Code) and a Custom derived from one accent colour; each carries a dark and a light palette that follows the light/dark switch and is mirrored to the process, system-information and editor windows. With "immersive colours" on the wallpaper's accent and tint still override the preset; with it off the wallpaper is only a backdrop and the preset decides the colours.
 
-- **修复 macOS 上“打开下载目录”和 SFTP “用外部程序打开”无反应的问题。** 现在使用 macOS 的 `open` 命令。感谢 @qingbinzeng。
-- **Fix "Open download folder" and SFTP "Open externally" doing nothing on macOS.** They now use macOS's `open` command. Thanks @qingbinzeng.
+- **MCP 与自动化接口接受 saved_session_id 别名。** Claude 桌面版的 remote-devices 桥接不会转发顶层 session_id 参数，导致每个会话类工具都报「缺少或无效的 session_id」，而 list_sessions / import_sessions 正常。现在 saved_session_id 与 sessionId 都作为别名接受，取值冲突直接拒绝；缺少参数时会列出实际收到的参数名。另将 upload_file / download_file 的默认超时对齐到声明的 120 秒，minLength:1 的字符串参数不再接受空值。
+- **MCP and automation accept the saved_session_id alias.** Claude desktop's remote-devices bridge does not forward a top-level session_id, so every session tool failed with "missing or invalid string argument: session_id" while list_sessions and import_sessions worked. saved_session_id and sessionId are now accepted as aliases, conflicting values are rejected, and a missing argument names the keys that actually arrived. upload_file / download_file also default to the advertised 120 s timeout, and minLength:1 strings no longer accept the empty value.
 
+- **内置编辑器恢复括号匹配高亮。** 此前合并上游时编辑器被换成基于 vendored Slint 的纯着色管道，括号配对方框随之消失（上游 v0.7.4 发布说明仍宣称支持）。现在光标停在 `()` `[]` `{}` 旁时，配对的两个字符以金色/棕金色标出，移开即消失；字符串、注释、Shell heredoc 体与 YAML 块标量内的括号不参与配对，光标停在括号旁时才会做一次扫描（普通移动零开销）。说明：当前渲染管道只支持前景色，无法画 v0.7.4 那样的方框，故以染色替代。
+- **The built-in editor restores bracket-pair highlighting.** When the upstream merge swapped the editor to the vendored-Slint colour-only pipeline, the bracket-pair box disappeared (upstream's v0.7.4 notes still advertised it). The matching pair of `()` `[]` `{}` is now marked in gold / light brown while the caret sits beside it, and clears on move; brackets inside strings, comments, Shell heredoc bodies and YAML block scalars never pair, and the scan only runs when the caret actually touches a bracket (plain moves are free). Note: the current renderer is colour-only, so a v0.7.4-style box outline is not possible and the pair is coloured instead.
+
+- **修复内置编辑器高亮颜色错位。** heredoc 体内的关键字此前被当作关键字上色（`cat <<EOF` 后的 `if/then` 变紫红）、YAML 块标量内的 `a: b` 被当作键上色、裸 URL 值 `http://example.com` 的 `http` 被误认成键。现在 heredoc 体与块标量整体作为字符串着色，键判定收窄到行首/列表符/流式集合前缀，裸 URL 不再误判。未闭合的三引号字符串仍延续到文档末尾（与上游一致，属既有的跨行字符串语义）。
+- **Fix mis-coloured highlighting in the built-in editor.** Keywords inside a heredoc body were coloured as keywords (`if`/`then` after `cat <<EOF` turned magenta), `a: b` inside a YAML block scalar was coloured as a key, and the scheme of a bare URL value `http://example.com` was mistaken for a key. Heredoc and block-scalar bodies now render as one string, the key test is narrowed to line starts, list markers and flow-collection prefixes, and a bare URL is no longer misread. An unterminated triple-quoted string still runs to the end of the document, matching upstream's existing cross-line string behaviour.
+
+- **修复编辑器字符串识别出错导致括号配对失效。** 词法规则误把字母 `r`、`n` 排除在字符串之外，凡是含这两个字母的字符串（如 `"error"`、`"name"`）都不被当作字符串，还可能从断点起跨行吞掉后续代码；其中的括号于是被当成结构括号，真实的括号便找不到配对、始终不亮。现在字符串按「引号、反斜杠、行尾」正确划界，含 r/n 的字符串恢复字符串着色，括号配对随之恢复正常。未闭合的引号不再跨行吞掉后续代码，该行内容按普通代码着色；相应地，合法跨行的引号字符串（Shell / JS 的多行引号）暂不作为字符串着色。
+- **Fix the editor's string detection breaking bracket pairing.** The lexer wrongly excluded the letters `r` and `n` from strings, so any string containing them (`"error"`, `"name"`) was not recognised as a string and could even swallow the following code across lines; the brackets inside were then taken for structural ones, so real brackets found no partner and never lit up. Strings are now delimited by quote, backslash and line end, strings containing r/n are coloured as strings again, and bracket pairing is restored. An unterminated quote no longer swallows the following code across lines — its line is coloured as ordinary code instead — and, correspondingly, a legitimately multi-line quoted string (Shell / JS) is not coloured as a string yet.
+
+### 已知差异 / Known divergences（本 fork 与上游）
+
+- **SFTP 拖出到访达 / 资源管理器（#504）本 fork 有意未实现。** 上游 0.7.9 与 0.8.0 的更新日志宣称支持将 SFTP 行拖出到访达或资源管理器；本 fork 决定暂不接线，因此这两条在本仓库不生效。完整实现（Windows OLE 虚拟文件拖拽、macOS 文件承诺）归档在 `src/attic/drag_out.rs` 与 `src/attic/drag_out_mac.rs`，`src/sftp` 的传输侧仍可用；取用需同时恢复 `on_sftp_drag_out`、`drag_out_items` 与界面的拖出手势，详见 `src/attic/README.md`。
+- **Dragging SFTP rows out to Finder / Explorer (#504) is intentionally not implemented in this fork.** Upstream 0.7.9 and 0.8.0 advertise dragging SFTP rows out to Finder or Explorer; this fork deliberately leaves it unwired, so those entries do not hold here. The full implementation (Windows OLE virtual-file drag, macOS file promises) is archived in `src/attic/drag_out.rs` and `src/attic/drag_out_mac.rs`, the `src/sftp` transfer side is intact, and reviving it needs `on_sftp_drag_out`, `drag_out_items` and the UI drag gesture restored together — see `src/attic/README.md`.
 ## [0.8.1] - 2026-10-30
 
 - **SSH 保活可在设置中调整（#515）。** 新增“设置 → 连接”页：可开关 SSH 保活，设置发送间隔（5–300 秒，默认 30 秒）和断开前允许的连续无响应次数（2–10 次，默认 3 次）。保活可防止空闲连接被 NAT、防火墙或校园网关静默回收；服务器连续无响应时会直接提示连接已关闭并可按 Enter 重连，不必等到按键才发现。设置同时作用于终端、SFTP、跳板机和 MCP 连接，对新建连接生效。
@@ -167,7 +198,11 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 - **Linux .deb 安装包按其他发布文件的格式命名。** 文件名改为 `meatshell-<版本>-linux-<架构>.deb`，包版本即发布版本（0.7.9，而不是 0.7.9-1）。
 - **Linux .deb packages are named like the other release files.** They are now `meatshell-<tag>-linux-<arch>.deb`, and the package version is the release version (0.7.9, not 0.7.9-1).
+- **修复内置编辑器中拖选文字时滚轮失效的问题（#388）。** 此前在编辑器里按住鼠标拖拽选择文字的过程中转动滚轮会毫无反应，查看长文档必须松开鼠标、滚动、再重新拖选。现在拖选过程中可以直接用滚轮翻页，内容随之滚动，选区继续跟随鼠标延伸；之前为绕开该问题加的临时兜底滚动逻辑保留不变。
+- **Fix wheel scrolling while dragging a selection in the editor (#388).** While holding the mouse down to select text in the built-in editor, the wheel did nothing, so reading long files required releasing the mouse, scrolling, and dragging again. The wheel now scrolls the editor mid-drag and the selection keeps following the pointer; the earlier fallback scroll workaround is left in place unchanged.
 
+- **停靠面板支持同边堆叠与拖动排序。** 侧栏、欢迎页、快捷指令、AI 对话、SFTP 面板可以停靠在同一条窗口边缘上上下堆叠，面板之间的分隔条可拖动调整各自占比；在堆叠内按住面板标题拖动，还能按松手位置直接交换顺序。堆叠的成员、顺序与比例按会话持久保存。
+- **Stacked dock panels sharing one window edge.** Sidebar, welcome, quick commands, AI panel and SFTP panel can dock to the same window edge and stack along it, with draggable dividers resizing each share; dragging a panel header within its stack reorders the stack by where it lands. Members, order and ratios persist per session.
 ## [0.7.8] - 2026-10-18
 
 - **应用内一键更新（#390、#497）。** 检测到新版本后，“设置”中的更新按钮可直接下载并安装：先下载并校验 SHA-256，再点击“安装并重启”，程序会关闭所有窗口、替换为新版本并自动重新打开。MSI 安装版交由 Windows Installer 升级（感谢 @yanmuq，#497）；Windows 便携版（.zip）、Linux AppImage 与 .tar.gz、macOS .app 会直接替换自身文件，替换失败时自动回滚。便携版的 `config/` 与 `log/` 数据目录不会被改动。通过 .deb、Flatpak 或 AUR 安装的版本会提示使用系统包管理器更新；安装在无写入权限位置（如 Program Files、`/usr/local/bin`）的版本仍打开发布页面。
@@ -306,6 +341,9 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ## [0.7.4] - 2026-09-21
 
+- **修复编辑器右键剪切/粘贴导致应用闪退的问题（#454）。** 剪切与粘贴会修改文本，触发重算行号与语法高亮模型的回调。此前这次模型替换发生在右键菜单自身的点击回调栈内，随后的行号槽与高亮覆盖层重建又落在同一次布局刷新里——弹窗事件尚未分发完毕，就要创建或销毁整批子元素（行号每一项都是一个只读文本输入框），在事件中途创建或销毁交互元素会重入 Slint 内部状态并 panic。复制与全选不触碰模型，所以此前只有剪切/粘贴闪退。现在菜单点击只记录请求并关闭菜单，真正的操作与随后的重新聚焦改在下一次界面事件循环执行；四项统一走这条延迟路径，键盘上的 Ctrl+X / Ctrl+V 未被本次改动触及（它们同样触发模型重建，只是发生在按键分发而非弹窗分发中，所以从未闪退）。
+- **Fix the crash when cutting or pasting from the editor's right-click menu (#454).** Cut and Paste modify the text, which fires the callbacks that rebuild the line-number gutter and syntax-highlight overlay models. That model swap used to happen inside the context menu's own click callback, and the resulting rebuild of the gutter and highlight repeaters landed in the same layout refresh — the popup's event dispatch had not finished, yet the whole batch of child elements (each gutter row is a read-only text input) had to be created or destroyed. Creating or destroying interactive elements mid-event re-enters Slint's internal state and panics. Copy and Select All leave the models alone, which is why only Cut/Paste used to crash. The menu click now only records the request and closes the popup; the actual action and the follow-up refocus run on the next UI event loop. All four items share this deferred path, and the keyboard Ctrl+X / Ctrl+V path is untouched by this change (it triggers the same model rebuild, but during key dispatch rather than popup dispatch, which is why it never crashed).
+
 - **修复会话断开（`exit` 或网络中断）后终端内容被清空的问题（#451）。** 断开连接时，释放缓存曾会新建一个空白的 vt100 解析器，导致"连接已断开，按 Enter 重新连接"提示打印在一块空屏幕上，而不是追加在断开前的原有内容后面。现在断开时只释放体积较大且无上限的原始重放缓冲区与历史滚动记录，当前可见屏幕内容保持不变；重新连接和手动"清空缓存"两个场景仍会像之前一样得到全新空白屏幕。
 - **Fix terminal content being wiped after a session disconnects (`exit` or network loss) (#451).** On disconnect, releasing the buffer used to create a brand-new, blank vt100 parser, so the "Disconnected — press Enter to reconnect" hint printed onto an empty screen instead of appending to whatever was on screen before the drop. Disconnect now only releases the large, unbounded raw replay buffer and scrollback history; the currently visible screen is left untouched. Reconnecting and the manual "Clear cache" action still get a fresh blank screen as before.
 
@@ -317,6 +355,63 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 - **修复窗口收窄时终端换行错位、全屏交互程序（如 menuconfig）显示错乱，以及 SFTP 面板工具栏按钮被裁剪的问题（#433）。** 终端列数计算预留一列安全边距，避免因取整误差把最后几列内容推出可视区域——这既修复了长行不能自动换行的问题，也修复了全屏字符界面程序（如 menuconfig）出现的乱码、错位和偶发卡顿。同时修正了显示目录树时 SFTP 面板判断"是否需要紧凑工具栏"的宽度阈值，使其正确扣除目录树占用的空间，工具栏按钮不再在收窄面板或拖动目录树分隔条时被裁剪或消失。
 - **Fix terminal line-wrap misalignment on narrow windows, display corruption in full-screen interactive programs (e.g. menuconfig), and clipped SFTP toolbar buttons (#433).** The terminal column count now reserves a one-column safety margin so rounding error can no longer push the last cell(s) past the visible grid — this fixes both long lines failing to wrap and full-screen TUI programs like menuconfig rendering garbled or occasionally freezing. Also corrected the SFTP panel's narrow-toolbar width threshold to account for the directory tree's width, so toolbar buttons no longer get clipped or disappear when the panel is narrow or the tree divider is dragged.
+
+- **编辑器语法高亮升级 + 括号匹配。** 角色分色对齐 VS Code（控制流/变量/类型独立配色）；Shell heredoc、TOML 多行字符串跨行着色；函数定义名、点号装饰器、TOML 点号键、YAML 块标量等新规则；新增 Dockerfile、Makefile 与 nginx.conf 语法；光标停在括号上时配对括号显示方框标记。
+- **Editor highlighting upgrade + bracket matching.** VS Code-style role colours (separate control-flow / variable / type hues), cross-line Shell heredocs and TOML multi-line strings, new rules for function-definition names, dotted decorators, TOML dotted keys and YAML block scalars, fresh Dockerfile / Makefile / nginx.conf grammars, and a box outline on the bracket pair matching the caret.
+
+- **内置编辑器语法高亮。** SFTP 查看/编辑远端文本文件时按语法为关键字、字符串、数字、注释与内置标识着色（先支持 Shell / JSON / YAML / TOML / INI / Python，按扩展名或 shebang 识别）。高亮文件改为不折行 + 横向滚动（VS Code 风格），行号与内容恒定行高对齐；中文输入法组合期间自动切换原生渲染。超过 2000 行或未知格式的文件保持原有折行纯文本视图；可在设置 → SFTP 开关。
+- **Built-in editor syntax highlighting.** Viewing or editing remote text files over SFTP now colours keywords, strings, numbers, comments and builtins (initially Shell / JSON / YAML / TOML / INI / Python, detected by extension or shebang). Highlighted files switch to no-wrap with horizontal scrolling (VS Code-style); the gutter and body align on a constant row height. IME composition temporarily restores native rendering. Files over 2000 lines or with unknown formats keep the original wrapped plain-text view; toggle it in Settings → SFTP.
+
+- **终端动作链接。** 识别输出中的 IPv4、`host:port` 与 http(s) URL：URL 支持 Ctrl+单击用系统浏览器打开，IPv4/`host:port` 一键填入命令栏；可在设置中按类型开关（macOS 暂不支持）。
+- **Terminal action links.** Recognize IPv4, `host:port` and http(s) URLs in output: Ctrl+click opens URLs in the system browser, while IPv4/`host:port` fill the command bar with one click; each type is toggleable in settings (not yet on macOS).
+
+- **自定义高亮规则支持 JSON 导入/导出。** 输出高亮规则可整体导出为 JSON 文件并在另一台机器导入，规则带稳定 id 便于合并。
+- **Import/export custom highlight rules as JSON.** Output-highlight rules can be exported to a JSON file and imported on another machine; each rule carries a stable id for clean merging.
+
+- **搜索增强：全历史双模式导航。** 查找可在「当前缓冲」与「完整回滚历史」间切换，支持上/下条跳转与命中计数，Enter / Shift+Enter 导航。
+- **Search upgrade: full-history dual-mode navigation.** Find can now toggle between the visible buffer and the whole scrollback, with next/previous jumps, a match counter, and Enter / Shift+Enter navigation.
+
+- **命令历史模糊建议与长度过滤。** 历史下拉改为模糊评分排序，并可按最短/最长长度过滤记录。
+- **Fuzzy command-history suggestions with length filters.** The history dropdown now ranks entries by a fuzzy score, and entries can be filtered by minimum/maximum length.
+
+- **被动解析 OSC 133 shell 集成命令边界。** 识别提示符/命令起止标记，命令运行期间抑制历史下拉，避免打断输入。
+- **Passive OSC 133 shell-integration parsing.** Prompt/command boundaries are recognized so the history dropdown is suppressed while a command is running.
+
+- **大输出保护横幅。** 当渲染队列积压时显示软背压横幅提示，避免误以为界面卡死。
+- **Large-output protection banner.** A soft-backpressure banner appears when the render queue backs up, so a busy terminal doesn't look frozen.
+
+- **SFTP 传输队列工程化。** 新增并发上限、限速（KiB/s）、下载 mtime 保留与重名处理策略（询问/覆盖/跳过/改名），并在设置中提供对应控件。
+- **SFTP transfer-queue engineering.** Adds a concurrency cap, per-transfer rate limiting (KiB/s), download mtime preservation, and a duplicate-file policy (ask/overwrite/skip/rename), all exposed in settings.
+
+- **断线自动重连（默认关闭）。** 可选的周期性扫描会在远程标签断开后原地重连，带最大尝试次数与重连间隔，成功连接后计数归零。
+- **Grace auto-reconnect (opt-in).** An optional periodic scan reconnects dropped remote tabs in place, with a max-attempt cap and retry interval; the counter resets on a successful connect.
+
+- **口令加密便携包与 WebDAV 同步。** 用口令（Argon2id + ChaCha20-Poly1305）把全部连接与设置封装为单个便携文件，支持文件导入/导出及经 WebDAV 上传/下载。
+- **Passphrase-encrypted portable bundle with WebDAV sync.** Seal all sessions and settings into one file encrypted with a passphrase (Argon2id + ChaCha20-Poly1305), with file export/import plus WebDAV upload/download.
+
+- **支持导入 MobaXterm 会话（`.mxtsessions` / `.moba`）。** 并入「导入连接」，自动识别 MobaXterm 导出的会话文件，支持文件夹分组、SSH 与 Telnet 会话、私钥路径与代理映射；会话密码由 MobaXterm 加密，无法还原，连接时按现有流程提示输入。
+- **Support importing MobaXterm sessions (`.mxtsessions` / `.moba`).** Folded into "Import connections", the format is auto-detected: folder groups, SSH and Telnet sessions, private-key path and proxy mapping are carried over; passwords are encrypted by MobaXterm and cannot be recovered, so the connect-time prompt asks for them.
+
+- **停止构建 Intel Mac 安装包。** 发布矩阵和独立测试流水线不再构建 `macos-x86_64`，后续 macOS 版本仅提供 Apple Silicon 包，以减少发布耗时和维护成本。
+- **Stop building Intel Mac packages.** Remove `macos-x86_64` from both the release matrix and the dedicated test workflow; future macOS releases provide Apple Silicon packages only, reducing CI time and maintenance cost.
+
+- **安全加固：WebDAV 同步改走口令加密包。** 上传不再使用固定内置密钥的 JSON 导出（拿到文件即可还原全部密码），改为 Argon2id 加密便携包并在上传后尽力删除旧明文文件；下载优先读加密包，仅对旧服务器回退明文格式。SSH 本地/动态转发对存量非回环绑定告警放行、对新增请求明确拒绝并回显；AI 流式生成新增 10 分钟总时长上限。
+- **Security: WebDAV sync now travels in the encrypted bundle.** Uploads no longer ship the fixed-key JSON export (which let anyone with the file recover every password); they send the Argon2id bundle and best-effort delete the legacy plaintext copy. Downloads read the bundle first, falling back to the legacy file only for servers that still have it. Stored non-loopback forwards keep working but announce their exposure, new runtime requests for them are refused with a visible message, and AI generations gain a 10-minute wall-clock cap.
+
+- **传输队列修复：重名竞态、上传策略、限速与并发。** 下载的重名判定移到写入前的最后一刻（点击后新出现的文件不再被静默覆盖），上传同样遵循重名策略（询问/覆盖/跳过/改名，命名与下载一致）；打包下载与编辑器回传纳入并发上限；限速不再把单次等待截断为 1 秒，低速设置真正生效；跳过/取消不再弹出空传输面板。
+- **Transfer-queue fixes: conflict race, upload policy, pacing and caps.** The duplicate-target decision is re-checked at write time so a file appearing after the click is no longer silently overwritten; uploads now honour the same policy (ask/overwrite/skip/rename with download-style numbering); archive downloads and edited-file re-uploads respect the concurrency cap; the rate limiter no longer truncates its sleep to 1 s, so low rates hold; skipped or cancelled transfers no longer pop an empty panel.
+
+- **配置与重连修复。** 导入便携包前自动备份原配置（`sessions.json.pre-bundle`）；高亮规则按 id 导入改为整条更新而非仅同步开关；便携包的加密/网络操作移出 UI 线程，不再冻结窗口；SSH TCP 连接阶段加 30 秒超时（半开网络不再把标签页永久卡在「连接中」）；重连期间取消过的凭据弹窗不再永久静默；重连间隔改设置即时生效。
+- **Config and reconnect fixes.** Importing a bundle backs up the current config first (`sessions.json.pre-bundle`); re-importing a highlight rule by id now updates the whole rule instead of only its enabled flag; bundle encryption and WebDAV traffic moved off the UI thread no longer freeze the window; the SSH TCP phase is capped at 30 s so a half-open network can't strand a tab in "connecting" forever; a credential prompt cancelled during reconnect no longer silences every later attempt; the reconnect interval applies live.
+
+- **终端与杂项修复。** 历史搜索在新输出/缩放后惰性重扫，不再跳到过期行号；OSC 133 序列跨数据块不再丢失或渲染成乱码；动作链接不再把 URL 内部的主机/地址单独加链、拒绝前导零八位组；WebDAV 远端路径按百分号编码，401/403 与「文件夹不存在」区分报错；`secret.key` 以 0600 创建；密钥重建后无法解密的已存密码被清空并一次性提示，而不是当作字面密码保存；快捷命令导入加 128 条上限；命令历史统一按去空格后的文本存储。
+- **Terminal and assorted fixes.** History search re-scans lazily after new output or a resize instead of jumping to stale rows; OSC 133 sequences split across reads survive instead of rendering as garbage; action links no longer linkify a host inside a URL and reject leading-zero octets; WebDAV remote paths are percent-encoded and 401/403 is reported as an auth problem rather than a missing folder; `secret.key` is created 0600; after a key regeneration undecryptable saved passwords are cleared with a one-time warning instead of being kept as literal passwords; quick-command imports are capped at 128 entries; command history stores the trimmed text it filters on.
+
+- **CI 新增单元测试流水线。** 新增 `test.yml`，每次 push/PR 在 Linux 上运行 `cargo test`，此前单元测试从未在 CI 中执行。
+- **CI runs the unit tests.** A new `test.yml` job runs `cargo test` on every push/PR; previously the unit tests were never exercised in CI.
+
+- **窗口从最小化恢复不再闪烁。** 恢复瞬间 1~2px 的尺寸取整噪声与瞬态极小值不再触发四边面板整体重排，面板改为逐行就地更新，消除「背景先出、面板后弹」的滞后；终端恢复遮罩（#183）揭开时改为 160ms 渐隐而非瞬时弹回。
+- **Restoring a minimized window no longer flickers.** 1-2px DPI-rounding noise and transient tiny sizes from the restore resize now skip dock relayout, and panels refresh row-by-row in place instead of being destroyed and re-created a frame later; the terminal restore cover (#183) fades out over 160ms rather than popping the terminal back in.
 
 - **内置编辑器支持实时基础语法染色并优化大文本显示。** 按扩展名识别 Rust、Python、Shell、JSON、YAML、TOML、JavaScript/TypeScript 和 C/C++，区分关键字、字符串、注释、数字和配置键，并适配深浅主题。行号复用原生排版，仅绘制可见行号；滚动和光标闪烁复用排版缓存。超过 10,000 行的文本停止读取并提示文本过大，保留现有字节大小限制。
 - **Add live lexical highlighting and improve large-text display in the built-in editor.** Detect Rust, Python, Shell, JSON, YAML, TOML, JavaScript/TypeScript, and C/C++ by extension, with theme-aware colors for keywords, strings, comments, numbers, and configuration keys. Draw only visible gutter numbers using native text layout, and reuse layouts when scrolling or blinking the cursor. Stop reading files over 10,000 lines with a text-too-large message, retaining the existing byte limit.
@@ -346,9 +441,6 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 - **修复命令输入框全选与多行滚动（#416，输入框部分）。** `Ctrl+A` / `Cmd+A` 现在全选文本，支持滚动查看多行内容，并在选择时跟随光标。该更新不包含 `top` 无法通过 `Ctrl+C` 退出问题的修复。
 - **Fix command-input select-all and multiline scrolling (input-field portion of #416).** `Ctrl+A` / `Cmd+A` now selects all text. Multiline content can scroll, and selection keeps the cursor visible. This update does not resolve the reported inability to exit `top` with `Ctrl+C`.
-
-- **保留 Intel Mac 安装包。** 正式发布同时提供 Intel (`macos-x86_64`) 和 Apple Silicon (`macos-aarch64`) 安装包。
-- **Keep Intel Mac packages.** Releases provide packages for both Intel (`macos-x86_64`) and Apple Silicon (`macos-aarch64`).
 
 ## [0.7.2] - 2026-09-04
 

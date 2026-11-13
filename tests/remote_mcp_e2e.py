@@ -57,7 +57,8 @@ def main():
         config = dict(defaults_rev=3, mcp_enabled=True, mcp_use_saved_credentials=True,
                       mcp_allow_commands=False, mcp_allow_file_transfers=False,
                       sessions=[dict(id='fixture', name='Fixture', host='127.0.0.1', port=1,
-                                     user='fixture', auth='password', password='synthetic-not-a-real-secret', kind='ssh')])
+                                     user='fixture', auth='password', password='synthetic-not-a-real-secret', kind='ssh',
+                                     mcp_access=True)])
         saved.write_text(json.dumps(config))
         jwks = root / 'public-jwks.json'
         jwks.write_text(json.dumps({'keys': [dict(kty='RSA', kid='fixture', alg='RS256', use='sig',

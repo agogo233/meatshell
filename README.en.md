@@ -28,7 +28,7 @@ Every `v*` tag triggers a GitHub Actions build that produces native binaries for
 
 ### Windows
 
-Download `meatshell-*-windows-x86_64.zip`, unzip, and run `meatshell.exe`.
+Download `meatshell-windows-x86_64-portable.zip`, unzip, and run `meatshell.exe`.
 
 ### Linux
 
@@ -108,6 +108,7 @@ open /Applications/meatshell.app
   - On Linux / macOS, each RDP session can select certificate policy, network profile, sound, clipboard, GFX, and legacy TLS compatibility. Advanced arguments accept one native FreeRDP argument per line (for example `/bpp:24` or `/drive:share,/tmp/path`) or supported aliases such as `network=lan`, `sound=on`, `网络=局域网`, and `音频=开`. Preview shows the final argument list without the saved password. Host, identity, certificate, and display switches cannot be overridden there; passwords stay on stdin. These FreeRDP options do not apply to Windows `mstsc`.
 - [x] Outbound proxy (SOCKS5 / HTTP)
 - [x] Import `~/.ssh/config`
+- [x] Import MobaXterm sessions (`.mxtsessions` / `.moba`, SSH/Telnet/groups/private-key path)
 - [x] Session passwords encrypted at rest (ChaCha20-Poly1305)
 - [x] Known-hosts (`known_hosts`) verification + first-connect confirmation
 - [x] Split panes for tabbed terminals
@@ -209,13 +210,16 @@ jump-host references are remapped to the new IDs, including forward references a
 references to skipped duplicates. `--dry-run` validates and reports counts without
 changing saved sessions; normal profile initialization may create the directory/key.
 
-The limit is 16 MiB. MeatShell portable exports (`meatshell_export: 1`, including
-`enc:exp:v1:` credentials), FinalShell exports, and native JSON profiles are supported.
+The limit is 16 MiB. MeatShell portable bundles (Argon2id passphrase +
+ChaCha20-Poly1305, `.mpack`), legacy `meatshell_export: 1` JSON exports
+(including their `enc:exp:v1:` fixed-key credentials — still read for
+compatibility, no longer written), FinalShell exports, and native JSON profiles
+are supported.
 Native profiles import sessions only. Machine-local `enc:v1:` credentials require the
 matching profile key; undecryptable secrets and invalid jump chains reject the entire
 import. A key-file path is preserved but its file is not copied: make that key available
-on the destination separately. Portable export encryption is reversible with a built-in
-key, so treat an export as a credential-bearing file and keep it private.
+on the destination separately. Treat any export as a credential-bearing file and keep it
+private.
 
 MCP exposes `import_sessions` with `local_path` and optional `dry_run` (default `true`).
 It returns only `added`, `skipped`, and `dry_run`. The existing MCP enable/file-transfer

@@ -26,7 +26,7 @@ JVM 压到几十 MB 原生级别。
 
 ### Windows
 
-下载 `meatshell-*-windows-x86_64.zip`，解压后双击 `meatshell.exe`。
+下载 `meatshell-windows-x86_64-portable.zip`，解压后双击 `meatshell.exe`。
 
 ### Linux
 
@@ -94,6 +94,7 @@ open /Applications/meatshell.app
     / `~/Library/Application Support/meatshell/sessions.json`（macOS）
 - [x] SSH（`russh`，纯 Rust）：密码 / 私钥 / 加密私钥（密码短语）
 - [x] SFTP 文件浏览 + 上传 / 下载（拖拽）+ 双栏（本地 / 远程）互传（可拖拽）+ 终端内 ZMODEM（`sz` 下载 / `rz` 多文件上传）
+- [x] 内置编辑器语法高亮：Shell / JSON / YAML / TOML / INI / Python（按扩展名或 shebang 识别），可在设置开关；高亮文件不折行、横向滚动，超 2000 行自动退回纯文本
 - [x] SSH 端口转发 / 隧道：本地 -L / 远程 -R / 动态 -D（SOCKS5）
   - 连接后的 Tunnel 面板可新建、停止、重新启动和删除转发；可保存到当前 SSH 会话，并选择下次连接时是否自动启用。
 - [x] 系统托盘：关闭主窗口后会话继续运行；从托盘恢复或新建窗口，选择“退出”才结束程序。
@@ -103,10 +104,18 @@ open /Applications/meatshell.app
   - Linux / macOS 的 RDP 会话可单独设置证书策略、网络类型、声音、剪贴板、GFX 和旧版 TLS 兼容选项。高级参数每行填写一个 FreeRDP 参数，例如 `/bpp:24` 或 `/drive:资料,/tmp/中文路径`；也支持 `网络=局域网`、`音频=开` 等中文别名以及 `network=lan`、`sound=on` 等英文别名。点击“预览 FreeRDP 参数”可查看最终参数列表（不包含保存的密码）。主机、账号、密码、证书及分辨率等冲突参数不能在高级参数中覆盖；密码始终通过标准输入传递。Windows 的 `mstsc` 不使用这些 FreeRDP 专属参数。
 - [x] 出站代理（SOCKS5 / HTTP）
 - [x] 导入 `~/.ssh/config`
+- [x] 导入 MobaXterm 会话（`.mxtsessions` / `.moba`，SSH/Telnet/分组/私钥路径）
 - [x] 会话密码加密存储（ChaCha20-Poly1305）
 - [x] 已知主机（`known_hosts`）校验 + 首次连接确认
 - [x] 多标签页终端分屏
 - [x] 多窗口：Ctrl+Shift+N（macOS ⌘⇧N）或系统入口“新建窗口”（Windows 任务栏 / Linux 桌面右键），Chrome 式单进程管理
+- [x] 终端动作链接：识别 IPv4 / `host:port` / http(s) URL，URL 可 Ctrl+单击打开浏览器，地址一键填入命令栏
+- [x] 终端搜索增强：当前缓冲 / 完整回滚历史双模式，上下一条跳转与命中计数
+- [x] 命令历史模糊建议 + 长度过滤；自定义输出高亮规则支持 JSON 导入 / 导出
+- [x] 被动解析 OSC 133 shell 集成命令边界；大输出软背压保护横幅
+- [x] SFTP 传输队列：并发上限 / 限速 / 下载 mtime 保留 / 重名处理策略
+- [x] 断线自动重连（可选，带最大尝试次数与重连间隔）
+- [x] 口令加密便携包（Argon2id + ChaCha20-Poly1305）：连接与设置整体导出 / 导入，并可经 WebDAV 同步
 
 彩色 emoji 图形来自 [Twemoji](https://github.com/jdecked/twemoji)，按
 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) 使用；完整署名见
@@ -195,11 +204,12 @@ meatshell --data-dir /absolute/path/to/profile cli import ./meatshell-connection
 跳板引用会映射到新的会话 ID，支持前向引用和指向已存在重复会话的引用。
 `--dry-run` 只校验并返回计数，不改变已保存会话；常规初始化可能创建配置目录和加密密钥。
 
-文件上限为 16 MiB。兼容 MeatShell 便携导出（`meatshell_export: 1`，包括
-`enc:exp:v1:` 凭据）、FinalShell 导出和原生 JSON 配置。原生配置只导入会话，
+文件上限为 16 MiB。兼容 MeatShell 口令加密便携包（Argon2id + ChaCha20-Poly1305，
+`.mpack`）、旧版 `meatshell_export: 1` JSON 导出（含 `enc:exp:v1:` 固定密钥凭据——
+仍可读取、但新版本不再产出）、FinalShell 导出和原生 JSON 配置。原生配置只导入会话，
 其中机器本地 `enc:v1:` 凭据需要匹配的配置密钥；无法解密的凭据或无效跳板链路会中止整个导入。
 私钥文件路径原样保留，不复制私钥文件，需要另外在目标机器准备对应文件。
-便携导出的加密使用内置密钥可还原，因此应按含有凭据的敏感文件保管。
+任何导出都应按含有凭据的敏感文件保管。
 
 MCP 新增 `import_sessions`，参数为 `local_path` 和可选的 `dry_run`（默认 `true`），
 只返回 `added`、`skipped`、`dry_run`。沿用 MCP 启用和文件传输权限；实际写入还需
