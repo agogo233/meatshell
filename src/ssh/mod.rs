@@ -4,7 +4,7 @@ mod structs;
 mod connection;
 #[path = "impls/cwd.rs"]
 mod cwd;
-pub(crate) use connection::{with_automation_cancellation, inherit_automation_cancellation, disconnect_ssh, network_stage, HandshakeHandler, HostKeyWait};
+pub(crate) use connection::{with_automation_cancellation, inherit_automation_cancellation, disconnect_ssh, network_stage, network_stage_bounded, SSH_NETWORK_TIMEOUT, HandshakeHandler, HostKeyWait};
 #[path = "impls/known_hosts.rs"]
 pub(crate) mod known_hosts;
 #[path = "impls/ppk.rs"]
@@ -13,6 +13,8 @@ pub(crate) mod ppk;
 pub(crate) mod proxy;
 #[path = "impls/ssh.rs"]
 mod ssh;
+#[path = "impls/keygen.rs"]
+pub(crate) mod keygen;
 #[path = "impls/ssh_config.rs"]
 pub(crate) mod ssh_config;
 #[path = "impls/ssh_cli.rs"]

@@ -57,7 +57,23 @@ where
     E: Into<anyhow::Error>,
     F: Future<Output = std::result::Result<T, E>>,
 {
-    tokio::time::timeout(SSH_NETWORK_TIMEOUT, future)
+    network_stage_bounded(label, future, SSH_NETWORK_TIMEOUT).await
+}
+
+/// [`network_stage`] with a caller-chosen budget. Used where a healthy server
+/// answers in milliseconds and a stall is a hard failure rather than a slow
+/// link — e.g. the SFTP subsystem probe, whose refusal must surface quickly so
+/// the panel can fall back to SCP instead of parking the user on a long wait.
+pub(crate) async fn network_stage_bounded<T, E, F>(
+    label: &str,
+    future: F,
+    budget: Duration,
+) -> Result<T>
+where
+    E: Into<anyhow::Error>,
+    F: Future<Output = std::result::Result<T, E>>,
+{
+    tokio::time::timeout(budget, future)
         .await
         .map_err(|_| stage_timeout(label))?
         .map_err(Into::into)
@@ -72,6 +88,18 @@ pub(crate) async fn disconnect_ssh<H: Handler>(handle: &Handle<H>, reason: &str)
         handle.disconnect(russh::Disconnect::ByApplication, reason, ""),
     )
     .await;
+}
+
+/// Disconnect a jump-host chain — the hops from the target back out — shared
+/// by the test-connection, command-runner and public-key-upload paths. Callers
+/// drop the target handle first and this chain second.
+pub(crate) async fn disconnect_jump_chain<H: Handler + Send + 'static>(
+    chain: &[Handle<H>],
+    reason: &str,
+) {
+    for handle in chain.iter().rev() {
+        disconnect_ssh(handle, reason).await;
+    }
 }
 
 fn stage_timeout(label: &str) -> anyhow::Error {

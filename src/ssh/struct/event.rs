@@ -5,8 +5,21 @@ use crate::config::PortForward;
 
 use super::{
     CredentialResponder, HostKeyResponder, MfaResponder, ProcInfo, ProcessKillResult, RemoteEntry,
-    RemoteTreeNode, RuntimeTunnelInfo, SessionCommand, SystemDetails,
+    RemoteTreeNode, RuntimeTunnelInfo, SessionCommand, SystemDetails, UploadConflictResponder,
 };
+
+/// A shell-integration command boundary from OSC 133.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandMark {
+    /// Prompt output begins (`133;A`).
+    PromptStart,
+    /// Prompt output ends, command input starts (`133;B`).
+    PromptEnd,
+    /// A command began executing (`133;C`).
+    CommandStart,
+    /// The command finished (`133;D[;exit]`).
+    CommandEnd,
+}
 
 /// Events emitted back to the UI thread.
 #[derive(Debug, Clone)]
@@ -90,6 +103,11 @@ pub enum SessionEvent {
     /// (OSC 697) so it can join the command-box history (#113).
     CommandRan(String),
 
+    /// A shell-integration command boundary reported via OSC 133 (passively parsed
+    /// when the remote shell emits it; we never inject it by default). Drives the
+    /// "is a command running" flag used to suppress history suggestions.
+    CommandMark(CommandMark),
+
     /// Runtime tunnel state changed (#206).
     TunnelUpdate(Vec<RuntimeTunnelInfo>),
 
@@ -130,6 +148,14 @@ pub enum SessionEvent {
         edit: bool,
         error: String,
     },
+    /// Result of saving the built-in editor's text back to the remote file
+    /// (#70). `message` is the localised status-bar text colour-coded via
+    /// `sftp-status-kind` (1 saved / 2 failed).
+    SftpSaveResult {
+        path: String,
+        ok: bool,
+        message: String,
+    },
     /// A double-clicked file could not be opened as text (#493): download it
     /// the usual way instead (download folder, conflict prompt and all).
     SftpDownloadInstead { path: String },
@@ -137,6 +163,24 @@ pub enum SessionEvent {
     /// dual-pane view refreshes its local browser when it shows that folder,
     /// so freshly downloaded files appear without a manual refresh.
     LocalFilesChanged { path: String },
+    /// An upload that was queued without a known conflict hit an existing
+    /// remote file (it appeared after the listing was taken). The UI must show
+    /// a conflict dialog and answer via `responder`; the transfer is blocked
+    /// meanwhile.
+    ///
+    /// The two no-answer paths are deliberately different:
+    /// - UI present but the dialog is dismissed (the "Skip" button, window
+    ///   close, backdrop click) replies `Skip` — the user was asked and walked
+    ///   away, so nothing is uploaded;
+    /// - UI absent (window gone, responder dropped) or no reply within the
+    ///   worker's generous wait replies `KeepBoth` — the user never saw the
+    ///   question, so the transfer lands under a fresh name rather than
+    ///   dropping a file they explicitly queued.
+    /// Neither ever overwrites without an explicit answer.
+    SftpAskUploadConflict {
+        name: String,
+        responder: UploadConflictResponder,
+    },
 }
 
 /// Handle retained by the UI layer to talk to a running session.

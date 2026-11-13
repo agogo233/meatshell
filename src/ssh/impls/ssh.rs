@@ -21,7 +21,8 @@ use crate::config::{AuthMethod, PortForward, Secret, Session, SessionTrigger};
 use crate::i18n::t;
 
 use super::connection::{
-    connect_ssh_stream, disconnect_ssh, network_stage, HandshakeHandler, HostKeyWait,
+    connect_ssh_stream, disconnect_jump_chain, disconnect_ssh, network_stage, HandshakeHandler,
+    HostKeyWait,
 };
 use super::cwd::CwdTracker;
 use super::structs::*;
@@ -325,6 +326,12 @@ impl AuxiliaryStartup {
 }
 
 const AUXILIARY_CHANNEL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Bound the TCP phase of a connection (direct and via proxy). A half-open
+/// network black-holes the SYN, and the OS default connect timeout (~2 min)
+/// would strand the tab in "connecting" — invisible to the auto-reconnect
+/// scan, which only picks up closed tabs.
+const SSH_TCP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 async fn auxiliary_timeout<F, T>(
     timeout: std::time::Duration,
@@ -752,6 +759,130 @@ pub fn extract_osc_command(text: &str) -> Option<(String, std::ops::Range<usize>
     None
 }
 
+/// Find a shell-integration OSC 133 boundary (`ESC ] 133 ; A|B|C|D[;exit] BEL|ST`)
+/// passively emitted by the remote shell. Returns the mark and the byte range of
+/// the whole sequence so the caller can strip it before rendering. An incomplete
+/// sequence yields `None` (the next chunk completes it). We never inject these;
+/// shells that already emit them (some zsh/powerline setups) drive the
+/// "command running" flag.
+pub fn extract_osc133(text: &str) -> Option<(CommandMark, std::ops::Range<usize>)> {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] != 0x1b || bytes[i + 1] != b']' {
+            i += 1;
+            continue;
+        }
+        let seq_start = i;
+        let osc_start = i + 2;
+        i += 2;
+        let mut end = i;
+        let mut term_len = 0;
+        while end < bytes.len() {
+            if bytes[end] == 0x07 {
+                term_len = 1;
+                break;
+            } else if bytes[end] == 0x1b && end + 1 < bytes.len() && bytes[end + 1] == b'\\' {
+                term_len = 2;
+                break;
+            }
+            end += 1;
+        }
+        if end >= bytes.len() {
+            break; // incomplete — leave it for the next chunk
+        }
+        if let Ok(content) = std::str::from_utf8(&bytes[osc_start..end]) {
+            if let Some(rest) = content.strip_prefix("133;") {
+                let mark = match rest.chars().next() {
+                    Some('A') => CommandMark::PromptStart,
+                    Some('B') => CommandMark::PromptEnd,
+                    Some('C') => CommandMark::CommandStart,
+                    Some('D') => CommandMark::CommandEnd,
+                    _ => {
+                        i = end + term_len;
+                        continue;
+                    }
+                };
+                return Some((mark, seq_start..end + term_len));
+            }
+        }
+        i = end + term_len;
+    }
+    None
+}
+
+/// Byte length of a trailing, still-unterminated OSC 133 sequence in `text`
+/// (a chunk boundary split it), or 0 when nothing must be held back. Only
+/// short `133;`-prefixed tails qualify; anything else renders normally.
+fn osc133_partial_tail(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    // Last OSC introducer (ESC ]) in the text. Complete OSC 133 sequences were
+    // already stripped by `extract_osc133`, so an unterminated one can only be
+    // a tail. The introducer may be followed by a lone trailing ESC (the ST's
+    // first byte, whose `\` is in the next chunk), so scan for the pair rather
+    // than inspecting the final ESC alone.
+    let mut start = None;
+    for i in 1..bytes.len() {
+        if bytes[i - 1] == 0x1b && bytes[i] == b']' {
+            start = Some(i - 1);
+        }
+    }
+    let start = match start {
+        Some(s) => s,
+        None => return 0,
+    };
+    let body = &bytes[start + 2..];
+    if body.len() > 64 {
+        return 0; // OSC 133 is short; a long tail is some other sequence
+    }
+    if body.contains(&0x07) || body.windows(2).any(|w| w == [0x1b, b'\\']) {
+        return 0; // already terminated — extract_osc133 handled it
+    }
+    // Hold back only while the body still matches the `133;` prefix (including
+    // a partial one like `13`), so unrelated OSCs are never stalled.
+    const WANT: &[u8] = b"133;";
+    if body.len() >= WANT.len() {
+        if &body[..WANT.len()] == WANT {
+            return bytes.len() - start;
+        }
+    } else if WANT.starts_with(body) {
+        return bytes.len() - start;
+    }
+    0
+}
+
+/// Percent-decode a URL path segment (e.g. `%20` → space).
+fn url_decode(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            let h1 = chars.next();
+            let h2 = chars.next();
+            match (h1, h2) {
+                (Some(a), Some(b)) => {
+                    let hex = format!("{a}{b}");
+                    if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                        result.push(byte as char);
+                    } else {
+                        result.push('%');
+                        result.push(a);
+                        result.push(b);
+                    }
+                }
+                (Some(a), None) => {
+                    result.push('%');
+                    result.push(a);
+                }
+                _ => result.push('%'),
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
 async fn kill_remote_process(
     handle: Arc<tokio::sync::Mutex<Handle<ClientHandler>>>,
     pid: u32,
@@ -1058,6 +1189,13 @@ struct RuntimeForward {
     forward: PortForward,
 }
 
+/// Lock a mutex, recovering the guard from a poisoned lock instead of panicking
+/// (same contract as `app::lock_or_recover`): a panic on the session worker
+/// must not take the whole session down with it.
+fn lock_or_recover<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 type RemoteForwardMap = Arc<std::sync::Mutex<std::collections::HashMap<u32, (String, u16)>>>;
 
 fn normalized_bind_addr(f: &PortForward) -> String {
@@ -1110,6 +1248,27 @@ fn start_runtime_forward(
     forward: PortForward,
     events: &UnboundedSender<SessionEvent>,
 ) -> RuntimeForward {
+    // Saved configs written before the loopback rule may still bind 0.0.0.0 or a
+    // LAN address. Keep the tunnel up so an upgrade doesn't break a working
+    // setup, but surface the exposure instead of binding silently.
+    if forward.kind.as_str() != "remote" && !crate::tunnel::is_loopback_bind(&forward.bind_addr) {
+        crate::tunnel::notice(
+            events,
+            format!(
+                "{} {}{}",
+                t(
+                    "警告：转发正在监听非回环地址，局域网内其他设备也可访问；建议在会话设置里改成 127.0.0.1",
+                    "warning: this forward listens on a non-loopback address and is reachable from the whole LAN; set it to 127.0.0.1 in the session settings"
+                ),
+                if forward.name.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!("[{}] ", forward.name)
+                },
+                format!("{}:{}", forward.bind_addr.trim(), forward.bind_port)
+            ),
+        );
+    }
     let info = tunnel_info(id, &forward, true, t("运行中", "running"));
     let task = match forward.kind.as_str() {
         "local" => Some(crate::tunnel::spawn_local(
@@ -1145,7 +1304,7 @@ async fn start_remote_forward(
     let mut info = tunnel_info(id, &forward, false, t("启动失败", "failed"));
     let port = forward.bind_port as u32;
     let bind = info.bind_addr.clone();
-    let duplicate = targets.lock().unwrap().contains_key(&port);
+    let duplicate = lock_or_recover(targets).contains_key(&port);
     if duplicate {
         let _ = events.send(SessionEvent::Output(format!(
             "\r\n[meatshell] -R {bind}:{port} {}\r\n",
@@ -1171,7 +1330,7 @@ async fn start_remote_forward(
                 )));
             }
             Err(error) => {
-                targets.lock().unwrap().remove(&port);
+                lock_or_recover(targets).remove(&port);
                 let _ = events.send(SessionEvent::Output(format!(
                     "\r\n[meatshell] -R {bind}:{port} 请求失败 / request failed: {error}\r\n"
                 )));
@@ -1208,7 +1367,7 @@ async fn stop_runtime_forward(
             )));
             return false;
         }
-        targets.lock().unwrap().remove(&port);
+        lock_or_recover(targets).remove(&port);
     }
     if let Some(task) = entry.task.take() {
         task.abort();
@@ -1279,7 +1438,7 @@ where
     H::Error: std::error::Error + Send + Sync + 'static,
 {
     let addr = format!("{}:{}", session.host, session.port);
-    let stream = match crate::ssh::proxy::resolve(&session.proxy) {
+    let stream = match crate::ssh::proxy::resolve(&session.proxy.as_str()) {
         Some(p) => {
             let _ = events.send(SessionEvent::Status(format!(
                 "{} {} → {}",
@@ -1287,17 +1446,45 @@ where
                 crate::ssh::proxy::describe(&p),
                 addr
             )));
-            network_stage(
-                &format!("proxy connect to {addr}"),
+            // Bound the TCP/proxy phase: a black-holed route would otherwise
+            // hang on the OS default (~2 min) and strand the tab in
+            // "connecting", invisible to the auto-reconnect scan. Auth is
+            // deliberately NOT timed — it waits on user prompts.
+            let stream = tokio::time::timeout(
+                SSH_TCP_CONNECT_TIMEOUT,
                 crate::ssh::proxy::connect(&p, &session.host, session.port),
             )
-            .await?
+            .await
+            .map_err(|_| anyhow!(t("代理连接超时", "proxy connection timed out")))?
+            .with_context(|| format!("proxy connect to {} failed", addr))?;
+            stream
         }
-        None => network_stage(
-            &format!("TCP connect to {addr}"),
-            tokio::net::TcpStream::connect((session.host.as_str(), session.port)),
-        )
-        .await?,
+        None => {
+            // russh's `connect` does an untimed TCP connect; bound that phase
+            // ourselves and hand the established stream to `connect_stream`.
+            // The (host, port) tuple keeps bare IPv6 literals working the way
+            // the proxy path does — a joined "host:port" string would not.
+            // Bracketed literals (`[::1]`) only parse in the string form, so
+            // strip the brackets before the tuple; trims also cover any
+            // padding whitespace around/inside the brackets.
+            let host = session
+                .host
+                .trim()
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .trim();
+            let stream = tokio::time::timeout(
+                SSH_TCP_CONNECT_TIMEOUT,
+                tokio::net::TcpStream::connect((host, session.port)),
+            )
+            .await
+            .map_err(|_| anyhow!(t("连接超时", "connection timed out")))?
+            .with_context(|| format!("connect {} failed", addr))?;
+            // Best-effort: a shell values latency over throughput (same as the
+            // telnet path; russh's Config has no nodelay knob).
+            let _ = stream.set_nodelay(true);
+            stream
+        }
     };
     let stage = format!("SSH handshake to {addr}");
     let _ = events.send(SessionEvent::Status(stage.clone()));
@@ -1455,10 +1642,18 @@ where
         jump.host, jump.port
     );
     let _ = events.send(SessionEvent::Status(stage.clone()));
+    // A bracketed IPv6 literal (`[::1]`) is only valid in the joined string
+    // form; the direct-tcpip channel address must be bare, like the direct
+    // path strips it before the `(host, port)` tuple.
+    let bare_target = target_host
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim();
     let channel = network_stage(
         &stage,
         jhandle.channel_open_direct_tcpip(
-            target_host.to_string(),
+            bare_target.to_string(),
             target_port as u32,
             "127.0.0.1".to_string(),
             0,
@@ -1625,16 +1820,15 @@ pub async fn test_session_auth(
 
     // Bound cleanup for the entire route, not once per hop. The outcome is
     // already known; a stalled transport must not keep Test Connection busy.
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        let _ = handle
-            .disconnect(Disconnect::ByApplication, "connection test complete", "")
-            .await;
-        for jump_handle in jump_handle.into_iter().rev() {
-            let _ = jump_handle
-                .disconnect(Disconnect::ByApplication, "connection test complete", "")
-                .await;
-        }
-    })
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        disconnect_ssh(&handle, "connection test complete"),
+    )
+    .await;
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        disconnect_jump_chain(&jump_handle, "connection test complete"),
+    )
     .await;
     result
 }
@@ -1755,12 +1949,109 @@ async fn execute_command_inner(
     let _ = handle
         .disconnect(Disconnect::ByApplication, "command complete", "")
         .await;
-    for jump_handle in jump_handle.into_iter().rev() {
-        let _ = jump_handle
-            .disconnect(Disconnect::ByApplication, "command complete", "")
-            .await;
-    }
+    disconnect_jump_chain(&jump_handle, "command complete").await;
     Ok(result)
+}
+
+/// Push a freshly generated public key line onto the remote server's
+/// `~/.ssh/authorized_keys` so the matching private key can log in without a
+/// password. Connects with the session's *current* credentials (password or
+/// keyboard-interactive), so the user only confirms the existing login once.
+/// Idempotent: a second run does not append a duplicate line.
+///
+/// The caller relays `events` to the UI exactly as `test_session_auth` does,
+/// so host-key, credential and MFA prompts keep working from this path too.
+pub(crate) async fn push_authorized_keys(
+    session: Session,
+    jump: Vec<Session>,
+    public_key_line: String,
+    events: UnboundedSender<SessionEvent>,
+) -> Result<()> {
+    let config = ssh_client_config();
+    let (mut handle, mut jump_handle, mut remote_forwards) =
+        connect_ssh(&session, &jump, config.clone(), &events).await?;
+
+    match authenticate_session(
+        &mut handle,
+        &mut jump_handle,
+        &mut remote_forwards,
+        &session,
+        &jump,
+        config,
+        &events,
+    )
+    .await?
+    {
+        AuthResult::Success => {}
+        // A cancelled or rejected login leaves the transport half-open (the
+        // session tab stays "connecting"); drop both handles before returning
+        // so the peer gets a clean disconnect instead of a leaked socket.
+        AuthResult::Cancelled => {
+            disconnect_ssh(&handle, "push cancelled").await;
+            disconnect_jump_chain(&jump_handle, "push cancelled").await;
+            return Err(anyhow!("login cancelled"));
+        }
+        AuthResult::Failed => {
+            disconnect_ssh(&handle, "push failed").await;
+            disconnect_jump_chain(&jump_handle, "push failed").await;
+            return Err(anyhow!("authentication failed"));
+        }
+    }
+
+    // Append the public key idempotently. The line travels as `$0` of the
+    // `sh -c` script — a single argv element because it is wrapped in single
+    // quotes (with any literal `'` in the comment escaped) — so no shell
+    // quoting of the base64 body is needed. `grep -qF` skips the append on a
+    // repeat; a hand-edited `authorized_keys` may lack a trailing newline,
+    // in which case the first `printf` repairs it so the new key lands on
+    // its own line instead of gluing onto the previous one; `chmod 600`
+    // keeps the file owner-only even when it pre-existed.
+    let escaped = public_key_line.replace('\'', "'\\''");
+    let command = format!(
+        "sh -c 'mkdir -p ~/.ssh && chmod 700 ~/.ssh && grep -qF \"$0\" ~/.ssh/authorized_keys 2>/dev/null || {{ [ -f ~/.ssh/authorized_keys ] && [ -n \"$(tail -c1 ~/.ssh/authorized_keys)\" ] && printf \"\\n\" >> ~/.ssh/authorized_keys; printf \"%s\\n\" \"$0\" >> ~/.ssh/authorized_keys; }} && chmod 600 ~/.ssh/authorized_keys' '{}'",
+        escaped
+    );
+
+    let mut channel = handle
+        .channel_open_session()
+        .await
+        .context("open command channel")?;
+    channel
+        .exec(true, command.as_bytes())
+        .await
+        .context("execute remote command")?;
+
+    let collect = async {
+        let mut exit_code = None;
+        while let Some(message) = channel.wait().await {
+            match message {
+                ChannelMsg::ExitStatus { exit_status } => exit_code = Some(exit_status),
+                ChannelMsg::Close => break,
+                _ => {}
+            }
+        }
+        exit_code
+    };
+
+    let exit_code = tokio::time::timeout(std::time::Duration::from_secs(30), collect)
+        .await
+        .map_err(|_| anyhow!("{}", t("推送超时", "push timed out")))?
+        // No ExitStatus before Close means the server never reported a result;
+        // treat it as a failure rather than a success.
+        .unwrap_or(1);
+
+    disconnect_ssh(&handle, "push complete").await;
+    disconnect_jump_chain(&jump_handle, "push complete").await;
+
+    if exit_code != 0 {
+        return Err(anyhow!(
+            "{} (exit {})",
+            t("推送公钥失败", "failed to push public key"),
+            exit_code
+        ));
+    }
+
+    Ok(())
 }
 
 fn append_bounded(target: &mut Vec<u8>, data: &[u8], limit: usize, truncated: &mut bool) {
@@ -1908,6 +2199,9 @@ async fn run_session(
     // session makes recalling an accidentally saved setup command clear normal
     // terminal rows (#289).
     let mut late_prompt_echo_pending = false;
+    // A trailing OSC 133 sequence that a chunk boundary split (its terminator
+    // arrives with the next read); held here and re-fed with that chunk.
+    let mut osc133_pending = String::new();
     // When to stop waiting for the setup's completion marker and show the
     // buffered output anyway (#524). `Some` only while `suppress_echo`.
     let mut suppress_deadline: Option<tokio::time::Instant> = None;
@@ -2220,13 +2514,29 @@ async fn run_session(
                         }
                     }
                     Some(SessionCommand::AddTunnel { id, forward }) => {
-                        let entry = if forward.kind == "remote" {
-                            start_remote_forward(&handle, &remote_forwards, id.clone(), forward, &events).await
+                        if (forward.kind == "local" || forward.kind == "dynamic")
+                            && !crate::tunnel::is_loopback_bind(&forward.bind_addr)
+                        {
+                            // Saved configs keep working (see
+                            // `start_runtime_forward`); a fresh request
+                            // gets a visible refusal instead of vanishing.
+                            crate::tunnel::notice(
+                                &events,
+                                t(
+                                    "本地/动态转发的监听地址仅允许回环地址（127.0.0.1 / localhost / ::1），本次未添加",
+                                    "a local or dynamic forward may only bind a loopback address (127.0.0.1 / localhost / ::1); this one was not added"
+                                )
+                                .to_string(),
+                            );
                         } else {
-                            start_runtime_forward(handle.clone(), id.clone(), forward, &events)
-                        };
-                        runtime_forwards.insert(id, entry);
-                        emit_tunnel_update(&runtime_forwards, &events);
+                            let entry = if forward.kind == "remote" {
+                                start_remote_forward(&handle, &remote_forwards, id.clone(), forward, &events).await
+                            } else {
+                                start_runtime_forward(handle.clone(), id.clone(), forward, &events)
+                            };
+                            runtime_forwards.insert(id, entry);
+                            emit_tunnel_update(&runtime_forwards, &events);
+                        }
                     }
                     Some(SessionCommand::StopTunnel(id)) => {
                         if let Some(f) = runtime_forwards.get_mut(&id) {
@@ -2421,6 +2731,11 @@ async fn run_session(
                             }
                             clean
                         };
+                        // Re-feed a partial OSC 133 held back from the last
+                        // chunk before anything else looks at this text.
+                        if !osc133_pending.is_empty() {
+                            text.insert_str(0, &std::mem::take(&mut osc133_pending));
+                        }
 
                         // OSC 7 remains authoritative. Some Bash configurations
                         // also report root's absolute directory in OSC 0/2 titles
@@ -2440,6 +2755,30 @@ async fn run_session(
                             if !cmd.is_empty() && !cmd.contains("__ms7") {
                                 let _ = events.send(SessionEvent::CommandRan(cmd.to_string()));
                             }
+                        }
+
+                        // Passively consume OSC 133 shell-integration boundaries
+                        // (never injected by us). Stripped so they don't render;
+                        // drives the "command running" flag for suggestion gating.
+                        // Scan forward from the last removal point: rescanning
+                        // the whole text per match was O(n²) on dense prompts.
+                        let mut osc_pos = 0usize;
+                        while let Some((mark, range)) = extract_osc133(&text[osc_pos..]) {
+                            let range = range.start + osc_pos..range.end + osc_pos;
+                            let start = range.start;
+                            text.replace_range(range, "");
+                            let _ = events.send(SessionEvent::CommandMark(mark));
+                            osc_pos = start;
+                        }
+                        // A sequence split by a chunk boundary (the ST's ESC and
+                        // `\` landing in different reads) must be held back and
+                        // re-fed with the next chunk, or it renders as garbage
+                        // and the command boundary is lost.
+                        let hold = osc133_partial_tail(&text);
+                        if hold > 0 {
+                            osc133_pending = text.split_off(text.len() - hold);
+                        } else {
+                            osc133_pending.clear();
                         }
 
                         for (response, append_enter) in trigger_engine.feed(&text) {
@@ -3747,6 +4086,7 @@ mod prompt_setup_echo_tests {
         assert_eq!(recalled, echoed);
     }
 
+    #[cfg(not(feature = "headless"))]
     #[test]
     fn hidden_setup_echo_resynchronizes_the_prompt_cursor() {
         let prompt = "root@host:~# ";
@@ -3860,6 +4200,59 @@ mod osc_command_tests {
         // No terminator yet → wait for more.
         assert!(extract_osc_command("\u{1b}]697;ls").is_none());
         assert!(extract_osc_command("plain text").is_none());
+    }
+}
+
+#[cfg(test)]
+mod osc133_tests {
+    use super::{osc133_partial_tail, CommandMark, extract_osc133};
+
+    #[test]
+    fn holds_back_a_split_sequence() {
+        // The ST's ESC arrived but `\` is in the next chunk.
+        assert_eq!(osc133_partial_tail("prompt\u{1b}]133;C\u{1b}"), 8);
+        // Terminator missing entirely.
+        assert_eq!(osc133_partial_tail("x\u{1b}]133;"), 6);
+        // Partial prefix of the `133;` introducer.
+        assert_eq!(osc133_partial_tail("x\u{1b}]13"), 4);
+        assert_eq!(osc133_partial_tail("x\u{1b}]"), 2);
+        // Complete sequences need no hold-back.
+        assert_eq!(osc133_partial_tail("x\u{1b}]133;C\u{07}"), 0);
+        assert_eq!(osc133_partial_tail("x\u{1b}]133;A\u{1b}\\y"), 0);
+        assert_eq!(osc133_partial_tail("plain prompt"), 0);
+        // Other OSCs are not stalled.
+        assert_eq!(osc133_partial_tail("x\u{1b}]7;file:///home"), 0);
+    }
+
+    #[test]
+    fn extracts_command_start_and_end() {
+        let (mark, range) = extract_osc133("x\u{1b}]133;C\u{07}y").expect("found");
+        assert_eq!(mark, CommandMark::CommandStart);
+        let mut s = "x\u{1b}]133;C\u{07}y".to_string();
+        s.replace_range(range, "");
+        assert_eq!(s, "xy");
+
+        let (mark, _) = extract_osc133("\u{1b}]133;D;0\u{07}").expect("found");
+        assert_eq!(mark, CommandMark::CommandEnd);
+    }
+
+    #[test]
+    fn extracts_prompt_marks_and_st() {
+        assert_eq!(
+            extract_osc133("\u{1b}]133;A\u{1b}\\").map(|(m, _)| m),
+            Some(CommandMark::PromptStart)
+        );
+        assert_eq!(
+            extract_osc133("\u{1b}]133;B\u{07}").map(|(m, _)| m),
+            Some(CommandMark::PromptEnd)
+        );
+    }
+
+    #[test]
+    fn ignores_other_osc_and_incomplete() {
+        assert!(extract_osc133("\u{1b}]7;file:///home\u{07}").is_none());
+        assert!(extract_osc133("\u{1b}]133;C").is_none()); // no terminator
+        assert!(extract_osc133("\u{1b}]133;Z\u{07}").is_none()); // unknown sub
     }
 }
 

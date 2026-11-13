@@ -88,3 +88,44 @@ impl std::fmt::Debug for MfaResponder {
         f.write_str("MfaResponder")
     }
 }
+
+/// The user's answer when an upload unexpectedly hits an existing remote file
+/// (it appeared after the listing was taken). `KeepBoth` is the worker's
+/// fallback when no reply arrives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UploadConflictReply {
+    /// Overwrite the existing remote file.
+    Overwrite,
+    /// Upload under a free name instead (`name (1).ext`).
+    KeepBoth,
+    /// Skip this upload.
+    Skip,
+}
+
+/// Carries the upload-conflict answer back to the blocked transfer task.
+/// `Arc<Mutex<Option<…>>>` so the enclosing [`SessionEvent`] stays `Clone`.
+#[derive(Clone)]
+pub struct UploadConflictResponder(
+    Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<UploadConflictReply>>>>,
+);
+
+impl UploadConflictResponder {
+    pub fn new(tx: tokio::sync::oneshot::Sender<UploadConflictReply>) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(Some(tx))))
+    }
+
+    /// Deliver the user's decision. Idempotent.
+    pub fn respond(&self, reply: UploadConflictReply) {
+        if let Ok(mut guard) = self.0.lock() {
+            if let Some(tx) = guard.take() {
+                let _ = tx.send(reply);
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for UploadConflictResponder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("UploadConflictResponder")
+    }
+}

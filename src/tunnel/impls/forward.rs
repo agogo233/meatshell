@@ -19,8 +19,18 @@ use tokio::task::JoinHandle;
 use crate::ssh::{ClientHandler, SessionEvent};
 
 /// Emit a one-line notice into the terminal output stream.
-fn notice(events: &UnboundedSender<SessionEvent>, msg: String) {
+pub fn notice(events: &UnboundedSender<SessionEvent>, msg: String) {
     let _ = events.send(SessionEvent::Output(format!("\r\n[meatshell] {msg}\r\n")));
+}
+
+/// Client-side listeners may only bind a loopback address; anything wider
+/// exposes the tunnel to the whole LAN. Shared by the save-time validator, the
+/// runtime tunnel panel and the forward spawner.
+pub fn is_loopback_bind(addr: &str) -> bool {
+    match addr.trim() {
+        "" | "127.0.0.1" | "localhost" | "::1" => true,
+        _ => false,
+    }
 }
 
 fn bind_target(bind_addr: &str, bind_port: u16) -> String {
