@@ -1,8 +1,14 @@
 //! Process, system-info and editor auxiliary window callbacks.
+//!
+//! The process / system-info monitor callbacks are wired inline in `app.rs`
+//! (single-file equivalents), so only the editor chrome and the always-on-top
+//! propagation are called from here.
 
 use super::*;
 
-/// Process / system-info monitor window callbacks and the main window resize grip.
+/// Process / system-info monitor window callbacks and the main window resize
+/// grip. Kept for reference: `app.rs` registers its own equivalents inline.
+#[allow(dead_code)]
 pub(super) fn wire_monitor_windows(ctx: &WinCtx) {
     let WinCtx {
         window,
@@ -147,21 +153,12 @@ pub(super) fn wire_monitor_windows(ctx: &WinCtx) {
     }
 }
 
-/// Editor window close, drag and resize callbacks.
+/// Editor window drag and resize callbacks. The close path is not taken from
+/// the upstream `close-requested` → `request-close` chain: this fork's
+/// `EditorWindow` has no `request-close` callback (the in-window close button
+/// goes through the unsaved-changes check in `editor_host::wire_editor_host`).
 pub(super) fn wire_editor_window_chrome(ctx: &WinCtx) {
     let WinCtx { editor_win, .. } = ctx;
-    {
-        // The OS close button goes through the unsaved-changes check; the
-        // actual close (`close-editor`) is wired with the other editor logic
-        // in `editor_host::wire_editor_host`.
-        let close_request = editor_win.as_weak();
-        editor_win.window().on_close_requested(move || {
-            if let Some(editor) = close_request.upgrade() {
-                editor.invoke_request_close();
-            }
-            slint::CloseRequestResponse::KeepWindowShown
-        });
-    }
     {
         let weak = editor_win.as_weak();
         editor_win.on_win_drag(move || {

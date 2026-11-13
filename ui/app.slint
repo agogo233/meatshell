@@ -22,20 +22,18 @@ import { SessionDialog, SessionDraft, PortFwd, TriggerDraft, JumpHop } from "ses
 import { ConfirmDialog } from "confirm_dialog.slint";
 import { ModalLayer, ModalKind } from "modal.slint";
 import { LabeledInput, PrimaryButton, GhostButton, DockExpandButton, IconButton, ToolStrip } from "widgets.slint";
-import { TerminalView, TermSpan, TermMatch, FindStatus, QuickCmd, QuickDockPanel } from "terminal_view.slint";
-import { SftpEntry, SftpTreeNode, TunnelInfo } from "sftp_panel.slint";
-import { TerminalView, TermSpan, TermMatch, QuickCmd, QuickDockPanel } from "terminal_view.slint";
-import { SftpEntry, SftpTreeNode, SftpLocalPlace, TunnelInfo } from "sftp_panel.slint";
+import { TerminalView, TermSpan, TermMatch, FindStatus, QuickCmd, QuickDockPanel, AIPanel, AiMessage } from "terminal_view.slint";
+import { SftpEntry, SftpTreeNode, SftpLocalPlace, TunnelInfo, SftpPanel } from "sftp_panel.slint";
 import { ProcWindow, ProcRow } from "proc_window.slint";
 import { SystemInfoWindow, SysInfoRow, SysMetricRow, SysNetRow } from "system_info_window.slint";
 import { EditorWindow } from "editor_window.slint";
 import { EditorPane, EditorFindResult, EditorDoc } from "editor_pane.slint";
-import { InterfacePanel, OutputRuleItem, WslProfileInfo, CustomAgentInfo, CustomShellInfo, UpdateMirrorRow, ColorThemeItem, TermSchemeItem } from "interface_panel.slint";
+import { InterfacePanel, OutputRuleItem, WslProfileInfo, CustomAgentInfo, CustomShellInfo, ColorThemeItem, TermSchemeItem } from "interface_panel.slint";
 // Re-export so `slint::include_modules!` generates the detached Rust window types.
 export { ProcWindow, SystemInfoWindow, EditorWindow }
 import { ComboBox, SpinBox, LineEdit, Button, ScrollView, CheckBox, Palette } from "std-widgets.slint";
 
-export { SessionInfo, LaunchItem, SessionDraft, JumpHop, TabInfo, SftpEntry, SftpTreeNode, TunnelInfo, QuickCmd, PortFwd, WslProfileInfo, CustomAgentInfo, CustomShellInfo, UpdateMirrorRow, ThemePalette, ColorThemeItem, TermColors, TermSchemeItem }
+export { SessionInfo, LaunchItem, SessionDraft, JumpHop, TabInfo, SftpEntry, SftpTreeNode, TunnelInfo, QuickCmd, PortFwd, WslProfileInfo, CustomAgentInfo, CustomShellInfo, ThemePalette, ColorThemeItem, TermColors, TermSchemeItem }
 
 // --- TerminalState ---------------------------------------------------------
 // Per-terminal view-model exposed to Rust. A TabInfo has the metadata; the
@@ -70,26 +68,35 @@ export struct TerminalState {
     spans: [TermSpan],     // coloured runs of the visible terminal screen
     cursor-row: int,       // cursor cell on the grid
     cursor-col: int,
+    cursor-visible: bool,  // false while the app hides the caret (DECTCEM, btop/htop)
     rows-used: int,        // content rows, for viewport sizing
     scroll-max: int,       // scrollback depth (max offset) — terminal scrollbar (#103)
     scroll-offset: int,    // current scrollback offset (0 = live bottom)
     is-alt-screen: bool,
     mouse-tracked: bool,     // remote app wants mouse events (btop/htop/mc)
     find-matches: [TermMatch], // search-highlight rectangles
+    link-matches: [TermMatch], // action-link underline rectangles (IPv4/host:port/URL)
+    find-active: int,          // history-mode: current match index (-1 = none)
+    find-total: int,           // history-mode: total match count
+    command-running: bool,     // OSC 133: a command is executing (suppress suggestions)
+    backpressure: bool,        // large-output protection active (pump pacing on UI)
     find-current: TermMatch,   // the current find match on screen; len 0 = none (#535)
     selection: [TermMatch],    // drag-selection highlight rectangles
+    has-selection: bool,       // live selection with extent → ctx-menu "Add as quick command"
 
     // SFTP panel state
     sftp-path: string,
     sftp-entries: [SftpEntry],
     sftp-status: string,
+    sftp-status-kind: int,      // 0 neutral / 1 saved / 2 failed (colour-coded status bar)
     sftp-loading: bool,
     sftp-tree-nodes: [SftpTreeNode],
     sftp-selected-count: int,   // checked entries in the SFTP panel (#100)
     sftp-sort-key: string,      // ""|"name"|"size"|"modified" (#248)
     sftp-sort-dir: int,         // 0 default / 1 asc / -1 desc (#248)
+    sftp-bookmarks: [string],   // saved paths for this tab's server (bookmark menu)
     sftp-available: bool,       // false for local/serial/telnet sessions
-    sftp-bookmarks: [string],   // this session's bookmarked folders (#500)
+    sftp-places-bookmarks: [string], // this session's bookmarked folders (#500)
     sftp-recent: [string],      // recently visited folders, newest first (#500)
     sftp-bookmarked: bool,      // current sftp-path is bookmarked (#500)
     // Split view (dual pane): the left half browses this machine's filesystem,
@@ -136,6 +143,27 @@ export struct PaneInfo {
     tabs: [TabInfo],
 }
 
+
+// One coloured run of the editor's syntax-highlight overlay, plus its logical
+// line. `source` mirrors the raw line text so Rust's incremental sync can diff
+// the model without extra state; it is never rendered.
+export struct HlSeg {
+    text: string,
+    color: color,
+    // Bracket-match box: Rust re-renders the touched rows with the matched
+    // characters split into their own segment when this is set.
+    boxed: bool,
+}
+
+export struct HlLine {
+    source: string,
+    // Rust-side diff token: cross-line scanner state ("" = none, "py3dq" =
+    // open Python triple-quote …, "hd:EOF" = inside a shell heredoc).
+    // Never rendered.
+    carry: string,
+    segments: [HlSeg],
+}
+
 // A draggable splitter between two regions of the split layout (v0.5).
 export struct SplitterInfo {
     split-id: int,
@@ -161,7 +189,10 @@ export struct PanelGeomInfo {
 // A draggable divider between two stacked docked panels (#dock-stack).
 // `edge` + `index` identify the boundary so Rust can update the ratio;
 // `edge` is the dock edge ("left|right|top|bottom") and `index` is the slot
-// *before* the boundary.
+// *before* the boundary. `axis-start`/`axis-len` are the stack's split window
+// along its secondary axis — top/bottom stacks start where the side stacks
+// end, so the drag position must be mapped through that window, not the
+// whole dock area (#dock-cross-edge).
 export struct DividerGeomInfo {
     edge: string,
     index: int,
@@ -170,6 +201,8 @@ export struct DividerGeomInfo {
     w: length,
     h: length,
     vertical: bool,   // true = vertical handle (drag up/down)
+    axis-start: length,
+    axis-len: length,
 }
 
 // A 26×26 top-bar icon button with a hover tooltip (right-aligned so it never
@@ -221,9 +254,6 @@ component IconBtn inherits Rectangle {
     //   independent layers below, with animation only on the breathe layer
     //   and only while `breathe=true` (#breathing-light).
     in property <bool> breathe: false;
-    // `badge=true` draws a small red dot on the top-right corner (the Updates
-    // button uses it to flag a newer release instead of a popup banner).
-    in property <bool> badge: false;
     callback clicked();
     width: 26px;
     height: 26px;
@@ -289,17 +319,6 @@ component IconBtn inherits Rectangle {
         font-size: Theme.fs-md;
         horizontal-alignment: center;
         vertical-alignment: center;
-    }
-    // Ringed in the toolbar background so it reads as a cut-out over the icon.
-    if root.badge : Rectangle {
-        x: parent.width - 10px;
-        y: 2px;
-        width: 8px;
-        height: 8px;
-        border-radius: 4px;
-        background: #e5484d;
-        border-width: 1.5px;
-        border-color: Theme.bg-panel;
     }
     if ta.has-hover && root.tooltip != "" : Rectangle {
         y: parent.height + 5px;
@@ -659,9 +678,9 @@ export component AppWindow inherits Window {
     in-out property <length> quick-panel-width: 260px;
     in-out property <length> quick-panel-height: 220px;
     in-out property <string> quick-panel-dock: "right";
-    property <string> quick-external-command;
-    property <bool> quick-external-send-enter;
-    property <int> quick-external-sequence;
+    in-out property <string> quick-external-command;
+    in-out property <bool> quick-external-send-enter;
+    in-out property <int> quick-external-sequence;
     in property <[string]> command-history;          // oldest first (newest last, #113)
     in property <[string]> history-view;             // filtered dropdown, oldest first (newest last, #101)
     in property <[string]> history-preview;          // history-view flattened to one line each (#419)
@@ -670,6 +689,14 @@ export component AppWindow inherits Window {
     callback delete-history(int /* index */);   // remove a history entry (#96)
     callback delete-history-cmd(string /* cmd */);   // remove a history entry by command (#101)
     callback search-history(string /* query */);     // filter the history dropdown (#101)
+    // A modifier-click on a terminal action link resolves to an action in Rust;
+    // the callback returns true when a link was hit so the terminal skips its
+    // own drag-selection. The master enable flag is `action-links-enabled`.
+    callback action-link-click(string /* tab-id */, int /* row */, int /* col */) -> bool;
+    // History-mode search: next/prev navigation and the mode toggle.
+    callback find-navigate(string /* tab-id */, bool /* reverse */);
+    in-out property <bool> search-history-mode: false;
+    callback set-search-history-mode(bool);
     in-out property <bool> quick-cmd-manage-open: false;  // manage dialog
     in-out property <length> qcm-dialog-width: 560px;
     in-out property <length> qcm-dialog-height: 560px;
@@ -683,6 +710,7 @@ export component AppWindow inherits Window {
     in-out property <string> qcm-group;               // manage form: group field (#55)
     in-out property <bool> qcm-send-enter: true;      // click sends+executes (B站)
     in-out property <int> qcm-edit-index: -1;         // -1 = add, >=0 = edit that entry (#55)
+    in-out property <string> qcm-io-hint;             // import/export result line (dialog-inline)
     callback add-quick-command(string /* name */, string /* command */, string /* group */, bool /* send-enter */);
     callback save-quick-command(int /* index */, string /* name */, string /* command */, string /* group */, bool /* send-enter */);
     callback delete-quick-command(int /* index */);
@@ -697,6 +725,9 @@ export component AppWindow inherits Window {
     property <string> qcg-orig;                       // group dialog: "" = new, else rename target
     callback submit-quick-group(string /* orig */, string /* name */);
     callback delete-quick-group(string /* name */);
+    // Import/export the whole quick-command list via portable JSON files.
+    callback export-quick-commands();
+    callback import-quick-commands();
     in property <[TransferInfo]> transfers; // download/upload records (newest first)
     in property <[string]> about-libs;      // open-source libraries used
     in-out property <bool> lang-en: false;  // current UI language (false = 中文)
@@ -723,6 +754,15 @@ export component AppWindow inherits Window {
     in-out property <string> output-highlight-preset: "log";
     in property <[OutputRuleItem]> output-highlight-rules;
     in-out property <string> output-highlight-rule-status;
+    // Terminal action links (IPv4 / host:port / http(s) URL) settings.
+    in-out property <bool> action-links-enabled: true;
+    in-out property <bool> action-links-ipv4: true;
+    in-out property <bool> action-links-host-port: true;
+    in-out property <bool> action-links-url: true;
+    callback set-action-links(bool, bool, bool, bool); // master, ipv4, host:port, url
+    in-out property <int> command-history-min-len: 0;
+    in-out property <int> command-history-max-len: 0;
+    callback set-command-history-length-filter(int, int); // min, max chars
     in-out property <float> ui-scale <=> Theme.ui-scale;   // global UI zoom (#100)
     in-out property <float> panel-font <=> Theme.panel-font;  // settings-panel font scale
     callback set-panel-font(int);                          // apply + persist (percent)
@@ -821,6 +861,8 @@ export component AppWindow inherits Window {
     callback add-output-highlight-rule(string, bool, bool, bool, string) -> bool;
     callback remove-output-highlight-rule(int);
     callback set-output-highlight-rule-enabled(int, bool);
+    callback export-output-highlight-rules();      // save custom rules to JSON
+    callback import-output-highlight-rules();      // merge custom rules from JSON
     callback set-ui-scale(int);                    // apply + persist UI scale (percent) (#100)
     // Immersive wallpaper (set by Rust). The active id + custom file basename
     // feed the Interface → Wallpaper picker.
@@ -833,6 +875,22 @@ export component AppWindow inherits Window {
     // SFTP follows the terminal's cd; opt out in Interface settings.
     in-out property <bool> sftp-follow-cd: true;
     callback set-sftp-follow-cd(bool);             // apply + persist
+    // SFTP transfer-queue tuning (concurrency / rate limit / dedup / mtime).
+    in-out property <int> sftp-queue-concurrency: 2;
+    callback set-sftp-queue-concurrency(int);
+    in-out property <int> sftp-queue-rate-limit: 0;
+    callback set-sftp-queue-rate-limit(int);
+    in-out property <string> sftp-queue-dedup: "ask";
+    callback set-sftp-queue-dedup(string);
+    in-out property <bool> sftp-preserve-mtime: false;
+    callback set-sftp-preserve-mtime(bool);
+    // Grace auto-reconnect (#P3-H).
+    in-out property <bool> auto-reconnect-enabled: false;
+    callback set-auto-reconnect-enabled(bool);
+    in-out property <int> auto-reconnect-max-attempts: 5;
+    callback set-auto-reconnect-max-attempts(int);
+    in-out property <int> auto-reconnect-interval: 5;
+    callback set-auto-reconnect-interval(int);
     // Hide the quick-command bar under the terminal; toolbar toggle persists it.
     in-out property <bool> cmd-bar-hidden: false;
     callback set-cmd-bar-hidden(bool);             // apply + persist
@@ -892,8 +950,6 @@ export component AppWindow inherits Window {
     // Render the welcome/session list as a left sidebar instead of a tab (v0.5).
     in-out property <bool> welcome-as-sidebar: false;
     callback set-welcome-as-sidebar(bool);         // apply + persist
-    in-out property <bool> update-check-enabled: true;   // startup new-version check (#184)
-    callback set-update-check-enabled(bool);       // apply + persist
     in-out property <bool> mcp-enabled: true;
     in-out property <bool> mcp-use-saved-credentials: true;
     in-out property <bool> mcp-allow-commands: true;
@@ -935,6 +991,48 @@ export component AppWindow inherits Window {
     callback set-pane-sftp-height(string /* tab-id */, length);
     callback set-pane-sftp-width(string /* tab-id */, length);
     callback set-pane-sftp-saved-height(string /* tab-id */, length);
+    // --- Docked SFTP panel — active-tab mirror (#dock-stack) --------------
+    // The docked SftpPanel renders globally (once, on the dock edge) from the
+    // ACTIVE tab's SFTP state; Rust mirrors that TerminalState row onto these
+    // properties via `sync_active_sftp_to_root` so the panel follows tab
+    // switches without living inside every TerminalView. Models are shared by
+    // reference, so remote listing updates land on the panel automatically.
+    in-out property <bool> sftp-available: false;
+    in-out property <string> sftp-path: "/";
+    in-out property <[SftpEntry]> sftp-entries;
+    in-out property <string> sftp-status;
+    in-out property <int> sftp-status-kind: 0;
+    in-out property <bool> sftp-loading: false;
+    in-out property <[SftpTreeNode]> sftp-tree-nodes;
+    in-out property <int> sftp-selected-count: 0;
+    in-out property <string> sftp-sort-key: "";
+    in-out property <int> sftp-sort-dir: 0;
+    in-out property <[string]> sftp-bookmarks;
+    // Per-session SFTP places (#500): bookmarks + recently visited folders
+    // mirrored from the active tab's row, like the per-server bookmarks above.
+    in-out property <[string]> sftp-places-bookmarks;
+    in-out property <[string]> sftp-recent;
+    in-out property <bool> sftp-bookmarked: false;
+    in-out property <[TunnelInfo]> sftp-tunnels;
+    // Split (dual-pane) view state, mirrored from the active tab like the
+    // remote-side state above (#515/#520 backport).
+    in-out property <bool> sftp-dual: false;
+    in-out property <string> sftp-local-path: "";
+    in-out property <[SftpEntry]> sftp-local-entries;
+    in-out property <string> sftp-local-status: "";
+    in-out property <bool> sftp-local-loading: false;
+    in-out property <int> sftp-local-selected-count: 0;
+    in-out property <length> sftp-local-pane-width: 0px;
+    // Local-pane places (#532): quick/drive folders, bookmarks + recently
+    // visited local folders — machine-wide, mirrored from the active tab's
+    // row into these root properties like the remote-side state above, so the
+    // docked panel keeps them without living inside every TerminalView.
+    in-out property <[SftpLocalPlace]> sftp-local-quick-places;
+    in-out property <[SftpLocalPlace]> sftp-local-drive-places;
+    in-out property <[string]> sftp-local-bookmarks;
+    in-out property <[string]> sftp-local-recent;
+    in-out property <bool> sftp-local-bookmarked: false;
+    in-out property <string> sftp-current-tab-id: "";
     // Confirm-before-close when there are live session tabs (#88): a stray
     // double-click on the title-bar icon / X shouldn't drop active sessions.
     in-out property <bool> confirm-close-open: false;
@@ -1005,6 +1103,38 @@ export component AppWindow inherits Window {
     callback save-webdav-settings(bool, string, string, string, string, bool);
     callback webdav-upload();
     callback webdav-download();
+    // Passphrase-encrypted portable bundle (#P3-I): file + WebDAV round-trips.
+    in-out property <string> portable-passphrase;
+    in-out property <string> portable-status;
+    callback export-portable-bundle();
+    callback import-portable-bundle();
+    callback upload-portable-bundle();
+    callback download-portable-bundle();
+    // --- AI assistant chat panel (OpenAI-compatible) -----------------------
+    in-out property <bool> ai-panel-open: false;
+    in-out property <length> ai-panel-width: 320px;
+    in-out property <length> ai-panel-height: 420px;
+    in-out property <string> ai-panel-dock: "left";
+    in-out property <bool> ai-panel-collapsed: false;
+    in property <[AiMessage]> ai-messages;
+    in-out property <bool> ai-busy: false;
+    in-out property <string> ai-draft;
+    in property <int> ai-draft-revision: 0;    // bumped when terminal text lands in the draft
+    in property <string> ai-discover-state: "";  // "" | "busy" | "ok" | "error"
+    in property <string> ai-discover-error;
+    in property <[string]> ai-discovered-models;
+    in-out property <string> ai-base-url;
+    in-out property <string> ai-api-key;
+    in-out property <string> ai-model;
+    in-out property <bool> ai-panel-enabled: false;
+    callback send-ai-message(string);
+    callback stop-ai-message();
+    callback clear-ai-messages();
+    callback send-selection-to-ai(string /* tab-id */);
+    callback save-ai-settings(string /* base-url */, string /* api-key */, string /* model */);
+    callback discover-ai-models(string /* base-url */, string /* api-key */);
+    callback set-ai-panel-open(bool);
+    callback set-ai-panel-dock(string);
     in-out property <length> sftp-panel-height: 220px; // shared; lets Rust locate the drop zone
     in-out property <length> sftp-panel-width: 380px;  // SFTP extent when docked left/right
     in-out property <string> sftp-dock: "bottom";      // SFTP dock edge, shared across tabs
@@ -1025,41 +1155,6 @@ export component AppWindow inherits Window {
     callback cancel-transfer(string);        // cancel an in-progress transfer by id (#100)
     callback set-language(string);           // switch UI language ("zh" / "en")
 
-    // --- Updates ----------------------------------------------------------
-    in property <bool> update-available: false;   // red dot on the toolbar Updates button
-    in property <string> update-version;
-    in property <bool> update-busy;
-    in property <bool> update-ready;
-    in property <bool> update-error;
-    in property <bool> update-install-supported;
-    // AUR installs: the update runs in a terminal tab, then MeatShell restarts.
-    in property <bool> update-via-terminal;
-    in property <string> update-status;
-    property <string> update-action-label: root.update-via-terminal
-        ? (root.update-ready
-            ? (root.lang-en ? "Restart" : "重启")
-            : (root.lang-en ? "Update in terminal" : "在终端中更新"))
-        : root.update-ready
-        ? (root.lang-en ? "Install and restart" : "安装并重启")
-        : root.update-install-supported
-            ? (root.lang-en ? "Download update" : "下载更新")
-            : (root.lang-en ? "Release page" : "发布页面");
-    callback check-for-updates();
-    callback update-action();
-    callback open-update-url();
-    // Download mirrors (Chinese UI only; used in a mainland China time zone).
-    in property <[UpdateMirrorRow]> update-mirrors;
-    in property <bool> update-mirrors-testing;
-    in property <bool> update-china-tz;
-    in property <string> update-mirror-error;
-    callback add-update-mirror(string);
-    callback remove-update-mirror(string);
-    callback reset-update-mirrors();
-    callback test-update-mirrors();
-    in property <bool> update-mirror-auto: true;
-    callback select-update-mirror(string);
-    callback set-update-mirror-auto(bool);
-
     // --- Editor tabs (#70, #494) ------------------------------------------
     // Settings → SFTP: open text files as tabs in this window (true) or in the
     // detached EditorWindow (false). Each open file is a row here and a tab of
@@ -1072,7 +1167,9 @@ export component AppWindow inherits Window {
                              string /* content */, bool /* readonly */);
     callback editor-doc-edited(string /* id */, string /* content */);
     callback editor-doc-highlight(string /* id */, string /* content */);
+    callback editor-doc-bracket-check(string /* id */, int /* caret byte offset */);
     callback editor-doc-save(string /* id */);
+    callback editor-doc-save-ack-dismiss(string /* id */);   // pill timer ran out
     callback editor-doc-replace-all(string /* id */, string /* query */, string /* replacement */);
     callback refresh-editor-syntax();         // theme changed: recolour every doc
     // Closing a tab with unsaved edits asks first (#287).
@@ -1081,6 +1178,7 @@ export component AppWindow inherits Window {
     callback editor-discard-confirmed(string /* id */);
     callback editor-count-matches(string /* content */, string /* query */) -> int;
     callback editor-find-step(string /* content */, string /* query */, int /* current */, bool /* reverse */) -> EditorFindResult;
+    callback editor-scroll-select(string /* content */, int /* anchor */, int /* focus */, length /* delta-y */, length /* line-height */) -> EditorFindResult;
 
     // --- Session list ------------------------------------------------------
     in property <[SessionInfo]> sessions;
@@ -1138,7 +1236,17 @@ export component AppWindow inherits Window {
     property <length> dock-right-gap: root.width - root.dock-central-x - root.dock-central-w;
     property <length> dock-top-gap: root.dock-central-y;
     property <length> dock-bottom-gap: root.height - root.dock-central-y - root.dock-central-h;
-    callback stack-split-drag(string /* edge */, int /* index */, float /* pos */);
+    callback stack-split-drag(string /* edge */, int /* index */, float /* pos */,
+                              float /* axis-start */, float /* axis-len */);
+    callback stack-split-done();
+    // OS file drag-in target highlight (Windows): Rust reports the hovered
+    // drop target in dock-area coordinates while a file drag is in flight,
+    // and clears it when the drop lands or the drag leaves the window.
+    in property <bool> file-drop-hl: false;
+    in property <length> file-drop-hl-x: 0px;
+    in property <length> file-drop-hl-y: 0px;
+    in property <length> file-drop-hl-w: 0px;
+    in property <length> file-drop-hl-h: 0px;
     // Reports the real dock-area size (window minus title bar): the Rust dock
     // engine must measure in THIS frame, not the window frame, or every panel
     // sits ~43px too low at the bottom edge (#dock-stack).
@@ -1150,6 +1258,13 @@ export component AppWindow inherits Window {
     // the index into dock-panels; `pos` is the cursor's distance from the
     // panel's outer edge along the dock normal (the new extent, px).
     callback panel-extent-drag(int /* panel index */, float /* pos */);
+    // Drop a panel back into its own stack: reorder it within the edge by the
+    // pointer's position along the stacking axis (#dock-reorder). `nx`/`ny`
+    // are the pointer's fraction of the dock area (0..1), dock-area relative;
+    // Rust ignores whichever axis the edge does not stack along and rejects the
+    // drop when the pointer has left the stack's thickness band.
+    callback stack-reorder(string /* edge */, string /* kind */,
+                           float /* nx */, float /* ny */);
     in-out property <string> active-tab-id: "welcome";
     in property <[TerminalState]> terminals;
 
@@ -1166,6 +1281,12 @@ export component AppWindow inherits Window {
     in-out property <string> dialog-key-path;
     in-out property <string> dialog-key-inline;
     in-out property <bool> dialog-key-inline-mode: false;
+    // Mirrors of the SessionDialog's `draft-key-*` generator state (#222),
+    // bound below so Rust can drive them from AppWindow without touching the
+    // dialog instance directly.
+    in-out property <string> dialog-key-algo: "ed25519";  // "ed25519" | "rsa"
+    in-out property <string> dialog-key-status;
+    in-out property <bool> dialog-key-generated: false;
     in-out property <string> dialog-proxy-type: "none";  // "none" | "socks5" | "http"
     in-out property <string> dialog-proxy-hostport;
     in-out property <string> dialog-group;
@@ -1176,7 +1297,7 @@ export component AppWindow inherits Window {
     in property <[string]> jump-ids;
     in-out property <[JumpHop]> dialog-jumps;
     in-out property <bool> dialog-allow-secret-reveal: false;
-    in-out property <bool> dialog-allow-mcp-access: true;
+    in-out property <bool> dialog-allow-mcp-access: false;
     callback reveal-session-secret(bool) -> string;
     callback add-jump();
     callback update-jump(int, int);
@@ -1290,6 +1411,8 @@ export component AppWindow inherits Window {
     callback session-dialog-stop-test();
     callback session-dialog-changed();
     callback session-dialog-pick-key();
+    callback session-dialog-generate-key();
+    callback session-dialog-upload-key(SessionDraft);
     // Port forwards for the session being edited (#56).
     in-out property <[PortFwd]> dialog-forwards;
     in-out property <[TriggerDraft]> dialog-triggers;
@@ -1410,6 +1533,7 @@ export component AppWindow inherits Window {
     callback sftp-delete(string /* tab-id */, string /* path */);
     callback sftp-toggle-select(string /* tab-id */, int /* row */);   // (#100)
     callback sftp-select-range(string /* tab-id */, int /* from */, int /* to */); // Shift+click
+    callback sftp-select-single(string /* tab-id */, int /* row */);  // row click selects only this entry
     // SFTP path bookmarks + recent folders (#500), stored per session.
     callback sftp-record-visit(string /* tab-id */, string /* path */);
     callback sftp-toggle-bookmark(string /* tab-id */, string /* path */);
@@ -1427,6 +1551,13 @@ export component AppWindow inherits Window {
     callback sftp-edit-external(string /* tab-id */, string /* path */);
     callback sftp-sort-request(string /* tab-id */, string /* key */);
     callback sftp-clear-sort(string /* tab-id */);
+    // Keyboard type-ahead in the SFTP file list (#sftp-typeahead): Rust matches
+    // the prefix against the tab's entry names, case-insensitively.
+    callback sftp-type-ahead(string /* tab-id */, string /* prefix */) -> int;
+    // Per-server path bookmarks: add current dir, jump to, or drop a saved path.
+    // Jump reuses sftp-navigate; only add/remove need Rust wiring.
+    callback sftp-bookmark-add(string /* tab-id */);
+    callback sftp-bookmark-remove(string /* tab-id */, string /* path */);
     callback tunnel-add(string /* tab-id */, string /* name */, string /* kind */, string /* bind */, string /* bind-port */, string /* host */, string /* host-port */, bool /* save */, bool /* auto-start */);
     callback tunnel-stop(string /* tab-id */, string /* tunnel-id */);
     callback tunnel-start(string /* tab-id */, string /* tunnel-id */);
@@ -1452,6 +1583,7 @@ export component AppWindow inherits Window {
     callback sftp-local-open(string /* tab-id */, string /* local-path */);  // OS default app
     callback sftp-local-toggle-select(string /* tab-id */, int /* row */);
     callback sftp-local-select-range(string /* tab-id */, int /* from */, int /* to */);
+    callback sftp-local-select-single(string /* tab-id */, int /* row */);
     callback sftp-local-copy-path(string /* local-path */);
     callback sftp-local-upload(string /* tab-id */, string /* local-path */);
     callback sftp-local-upload-selected(string /* tab-id */);
@@ -1495,11 +1627,11 @@ export component AppWindow inherits Window {
     callback right-click-copy-selection(string /* tab-id */) -> bool;
     // Clear a session's terminal buffer (its visible screen + scrollback).
     callback clear-terminal(string /* tab-id */);
+    // Context menu on a live selection: open the quick-command dialog with the
+    // selected text pre-filled as the command.
+    callback add-selection-to-quick(string /* tab-id */);
     // Recompute search highlights for a session's visible screen.
     callback find-query-changed(string /* tab-id */, string /* query */);
-    // Pointer over a tab's terminal output, from Slint's own hit testing; gates
-    // the macOS wheel fallback (#540).
-    callback terminal-output-hover(string /* tab-id */, bool /* hovered */);
     // Step through find matches across scrollback (#535); dir 0/1/-1.
     callback find-step(string /* tab-id */, string /* query */, int /* dir */) -> FindStatus;
     // Scroll a session's scrollback history by N lines (+ = up/older).
@@ -1717,39 +1849,207 @@ export component AppWindow inherits Window {
                 root.quick-panel-dock == "top" ? dock-area.quick-outer-strip : 0px;
             property <length> quick-bottom:
                 root.quick-panel-dock == "bottom" ? dock-area.quick-outer-strip : 0px;
+            // A collapsed AI panel joins the collapsed strip on its edge, highest
+            // priority to the one that wins the outermost slot (welcome > sidebar
+            // > quick). Only when nothing on that edge is collapsed does it reserve
+            // its own outermost 36px slot.
+            property <bool> ai-merge-welcome:
+                root.ai-panel-open && root.ai-panel-collapsed
+                && root.welcome-as-sidebar && root.welcome-collapsed
+                && root.ai-panel-dock == root.welcome-sidebar-dock;
+            property <bool> ai-merge-sidebar:
+                root.ai-panel-open && root.ai-panel-collapsed
+                && !dock-area.ai-merge-welcome && root.sidebar-collapsed
+                && root.ai-panel-dock == root.sidebar-dock;
+            property <bool> ai-merge-quick:
+                root.ai-panel-open && root.ai-panel-collapsed
+                && !dock-area.ai-merge-welcome && !dock-area.ai-merge-sidebar
+                && root.quick-panel-open && root.quick-panel-collapsed
+                && root.ai-panel-dock == root.quick-panel-dock;
+            property <length> ai-outer-strip:
+                !root.zen-mode && root.ai-panel-open && root.ai-panel-collapsed
+                    && !dock-area.ai-merge-welcome && !dock-area.ai-merge-sidebar
+                    && !dock-area.ai-merge-quick
+                    ? 36px : 0px;
+            property <bool> ai-outer-horizontal:
+                root.ai-panel-dock == "left" || root.ai-panel-dock == "right";
+            property <length> ai-left:
+                root.ai-panel-dock == "left" ? dock-area.ai-outer-strip : 0px;
+            property <length> ai-right:
+                root.ai-panel-dock == "right" ? dock-area.ai-outer-strip : 0px;
+            property <length> ai-top:
+                root.ai-panel-dock == "top" ? dock-area.ai-outer-strip : 0px;
+            property <length> ai-bottom:
+                root.ai-panel-dock == "bottom" ? dock-area.ai-outer-strip : 0px;
+            // A collapsed SFTP panel joins the icon-strip chain at the LOWEST
+            // priority (welcome > sidebar > quick > ai > sftp): it merges into
+            // whatever strip already owns its edge, or takes the outermost
+            // 36px slot by itself when nothing else is collapsed there
+            // (#dock-stack).
+            property <bool> sftp-merge-welcome:
+                root.sftp-available && root.sftp-collapsed
+                && root.welcome-as-sidebar && root.welcome-collapsed
+                && root.sftp-dock == root.welcome-sidebar-dock;
+            property <bool> sftp-merge-sidebar:
+                root.sftp-available && root.sftp-collapsed
+                && !dock-area.sftp-merge-welcome && root.sidebar-collapsed
+                && root.sftp-dock == root.sidebar-dock;
+            property <bool> sftp-merge-quick:
+                root.sftp-available && root.sftp-collapsed
+                && !dock-area.sftp-merge-welcome && !dock-area.sftp-merge-sidebar
+                && root.quick-panel-open && root.quick-panel-collapsed
+                && root.sftp-dock == root.quick-panel-dock;
+            property <bool> sftp-merge-ai:
+                root.sftp-available && root.sftp-collapsed
+                && !dock-area.sftp-merge-welcome && !dock-area.sftp-merge-sidebar
+                && !dock-area.sftp-merge-quick
+                && root.ai-panel-open && root.ai-panel-collapsed
+                && root.sftp-dock == root.ai-panel-dock;
+            property <length> sftp-outer-strip:
+                !root.zen-mode && root.sftp-available && root.sftp-collapsed
+                    && !dock-area.sftp-merge-welcome && !dock-area.sftp-merge-sidebar
+                    && !dock-area.sftp-merge-quick && !dock-area.sftp-merge-ai
+                    ? 36px : 0px;
+            property <bool> sftp-outer-horizontal:
+                root.sftp-dock == "left" || root.sftp-dock == "right";
+            property <length> sftp-left:
+                root.sftp-dock == "left" ? dock-area.sftp-outer-strip : 0px;
+            property <length> sftp-right:
+                root.sftp-dock == "right" ? dock-area.sftp-outer-strip : 0px;
+            property <length> sftp-top:
+                root.sftp-dock == "top" ? dock-area.sftp-outer-strip : 0px;
+            property <length> sftp-bottom:
+                root.sftp-dock == "bottom" ? dock-area.sftp-outer-strip : 0px;
+
+            // Top/bottom docks lay out inside the x range the side stacks leave
+            // behind (Rust reserves it in compute_geom, #dock-cross-edge), so
+            // their collapsed strips must match — a full-width strip here would
+            // sit on top of the side panel again.
+            property <length> h-dock-x: root.dock-central-x;
+            property <length> h-dock-w: root.dock-central-w;
+
+            // Standalone collapsed SFTP panel — nothing else is collapsed on
+            // its edge, so it takes the outermost 36px slot alone.
+            if dock-area.sftp-outer-strip > 0px : ToolStrip {
+                x: parent.sftp-outer-horizontal
+                    ? (root.sftp-dock == "right" ? parent.width - parent.sftp-outer-strip : 0px)
+                    : parent.h-dock-x;
+                y: root.sftp-dock == "bottom" ? parent.height - parent.sftp-outer-strip : 0px;
+                width: parent.sftp-outer-horizontal ? parent.sftp-outer-strip : parent.h-dock-w;
+                height: parent.sftp-outer-horizontal ? parent.height : parent.sftp-outer-strip;
+                dock-edge: root.sftp-dock;
+                glyph: "\u{E2C7}";   // folder — SFTP
+                tooltip: @tr("SFTP");
+                expand => {
+                    root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
+                }
+            }
 
             if dock-area.quick-outer-strip > 0px : ToolStrip {
-                x: root.quick-panel-dock == "right" ? parent.width - parent.quick-outer-strip : 0px;
+                x: parent.quick-outer-horizontal
+                    ? (root.quick-panel-dock == "right"
+                        ? parent.width - parent.quick-outer-strip : 0px)
+                    : parent.h-dock-x;
                 y: root.quick-panel-dock == "bottom" ? parent.height - parent.quick-outer-strip : 0px;
-                width: parent.quick-outer-horizontal ? parent.quick-outer-strip : parent.width;
+                width: parent.quick-outer-horizontal ? parent.quick-outer-strip : parent.h-dock-w;
                 height: parent.quick-outer-horizontal ? parent.height : parent.quick-outer-strip;
                 dock-edge: root.quick-panel-dock;
                 glyph: "\u{E3E7}";
                 tooltip: @tr("Quick commands");
+                show-second: parent.ai-merge-quick || parent.sftp-merge-quick;
+                second-glyph: parent.ai-merge-quick ? "\u{E8BD}" : "\u{E2C7}";
+                show-third: parent.ai-merge-quick && parent.sftp-merge-quick;
+                third-glyph: "\u{E2C7}";
                 expand => {
                     root.quick-panel-collapsed = false;
+                    root.dock-layout-changed();
+                }
+                expand-second => {
+                    if (parent.ai-merge-quick) {
+                        root.ai-panel-collapsed = false;
+                    } else {
+                        root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
+                    }
+                    root.dock-layout-changed();
+                }
+                expand-third => {
+                    root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
+                    root.dock-layout-changed();
+                }
+            }
+
+            // Standalone collapsed AI panel — nothing else is collapsed on its
+            // edge, so it takes the outermost 36px slot.
+            if dock-area.ai-outer-strip > 0px : ToolStrip {
+                x: parent.ai-outer-horizontal
+                    ? (root.ai-panel-dock == "right" ? parent.width - parent.ai-outer-strip : 0px)
+                    : parent.h-dock-x;
+                y: root.ai-panel-dock == "bottom" ? parent.height - parent.ai-outer-strip : 0px;
+                width: parent.ai-outer-horizontal ? parent.ai-outer-strip : parent.h-dock-w;
+                height: parent.ai-outer-horizontal ? parent.height : parent.ai-outer-strip;
+                dock-edge: root.ai-panel-dock;
+                glyph: "\u{E8BD}";
+                tooltip: @tr("AI assistant");
+                show-second: parent.sftp-merge-ai;
+                second-glyph: "\u{E2C7}";
+                expand => {
+                    root.ai-panel-collapsed = false;
+                    root.dock-layout-changed();
+                }
+                expand-second => {
+                    root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
                     root.dock-layout-changed();
                 }
             }
 
             // Collapsed welcome → a thin left icon strip (click the icon to re-open).
             if root.welcome-as-sidebar && root.welcome-collapsed : ToolStrip {
-                x: root.welcome-sidebar-dock == "right"
-                    ? parent.width - parent.quick-right - parent.welcome-strip
-                    : root.welcome-sidebar-dock == "left" ? parent.quick-left : parent.quick-left;
+                x: parent.welcome-horizontal
+                    ? (root.welcome-sidebar-dock == "right"
+                        ? parent.width - parent.quick-right - parent.welcome-strip
+                        : parent.quick-left)
+                    : parent.h-dock-x;
                 y: root.welcome-sidebar-dock == "bottom"
                     ? parent.height - parent.quick-bottom - parent.welcome-strip
                     : root.welcome-sidebar-dock == "top" ? parent.quick-top : parent.quick-top;
-                width: parent.welcome-horizontal ? parent.welcome-strip
-                    : parent.width - parent.quick-left - parent.quick-right;
+                width: parent.welcome-horizontal ? parent.welcome-strip : parent.h-dock-w;
                 height: parent.welcome-horizontal
                     ? parent.height - parent.quick-top - parent.quick-bottom : parent.welcome-strip;
                 dock-edge: root.welcome-sidebar-dock;
                 glyph: "\u{E88A}";   // session list / welcome
-                show-second: parent.combine-collapsed-tools || parent.quick-merge-welcome;
-                second-glyph: parent.combine-collapsed-tools ? "\u{E871}" : "\u{E3E7}";
-                show-third: parent.combine-collapsed-tools && parent.quick-merge-welcome;
-                third-glyph: "\u{E3E7}";
+                // Icon priority fills slots left-to-right: welcome, then the
+                // resource panel (when both collapsed into one strip), then
+                // quick commands, then the AI panel, then SFTP (last).
+                show-second: parent.combine-collapsed-tools || parent.quick-merge-welcome
+                    || parent.ai-merge-welcome || parent.sftp-merge-welcome;
+                second-glyph: parent.combine-collapsed-tools ? "\u{E871}"
+                    : parent.quick-merge-welcome ? "\u{E3E7}"
+                    : parent.ai-merge-welcome ? "\u{E8BD}" : "\u{E2C7}";
+                show-third: (parent.combine-collapsed-tools
+                            && (parent.quick-merge-welcome || parent.ai-merge-welcome || parent.sftp-merge-welcome))
+                    || (parent.quick-merge-welcome && (parent.ai-merge-welcome || parent.sftp-merge-welcome))
+                    || (parent.ai-merge-welcome && parent.sftp-merge-welcome);
+                third-glyph: (parent.combine-collapsed-tools && parent.quick-merge-welcome)
+                    ? "\u{E3E7}"
+                    : (parent.combine-collapsed-tools && parent.ai-merge-welcome) ? "\u{E8BD}"
+                    : (parent.combine-collapsed-tools && parent.sftp-merge-welcome) ? "\u{E2C7}"
+                    : (parent.quick-merge-welcome && parent.ai-merge-welcome) ? "\u{E8BD}"
+                    : (parent.quick-merge-welcome && parent.sftp-merge-welcome) ? "\u{E2C7}"
+                    : "\u{E2C7}";
+                show-fourth: (parent.combine-collapsed-tools && parent.quick-merge-welcome
+                            && (parent.ai-merge-welcome || parent.sftp-merge-welcome))
+                    || (parent.combine-collapsed-tools && parent.ai-merge-welcome
+                            && parent.sftp-merge-welcome)
+                    || (parent.quick-merge-welcome && parent.ai-merge-welcome
+                            && parent.sftp-merge-welcome);
+                fourth-glyph: (parent.combine-collapsed-tools && parent.quick-merge-welcome && parent.ai-merge-welcome)
+                    ? "\u{E8BD}"
+                    : (parent.combine-collapsed-tools && parent.quick-merge-welcome && parent.sftp-merge-welcome) ? "\u{E2C7}"
+                    : (parent.combine-collapsed-tools && parent.ai-merge-welcome && parent.sftp-merge-welcome) ? "\u{E2C7}"
+                    : "\u{E2C7}";
+                show-fifth: parent.combine-collapsed-tools && parent.quick-merge-welcome
+                    && parent.ai-merge-welcome && parent.sftp-merge-welcome;
+                fifth-glyph: "\u{E2C7}";
                 expand => {
                     root.welcome-collapsed = false;
                     root.set-welcome-collapsed(false);
@@ -1761,13 +2061,43 @@ export component AppWindow inherits Window {
                         root.set-sidebar-collapsed(false);
                     } else if (parent.quick-merge-welcome) {
                         root.quick-panel-collapsed = false;
+                    } else if (parent.ai-merge-welcome) {
+                        root.ai-panel-collapsed = false;
+                    } else {
+                        root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
                     }
                     root.dock-layout-changed();
                 }
                 expand-third => {
                     if (parent.combine-collapsed-tools && parent.quick-merge-welcome) {
                         root.quick-panel-collapsed = false;
+                    } else if (parent.combine-collapsed-tools && parent.ai-merge-welcome) {
+                        root.ai-panel-collapsed = false;
+                    } else if (parent.combine-collapsed-tools && parent.sftp-merge-welcome) {
+                        root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
+                    } else if (parent.quick-merge-welcome && parent.ai-merge-welcome) {
+                        root.ai-panel-collapsed = false;
+                    } else if (parent.quick-merge-welcome && parent.sftp-merge-welcome) {
+                        root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
+                    } else {
+                        root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
                     }
+                    root.dock-layout-changed();
+                }
+                expand-fourth => {
+                    if (parent.combine-collapsed-tools && parent.quick-merge-welcome && parent.ai-merge-welcome) {
+                        root.ai-panel-collapsed = false;
+                    } else if (parent.combine-collapsed-tools && parent.quick-merge-welcome && parent.sftp-merge-welcome) {
+                        root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
+                    } else if (parent.combine-collapsed-tools && parent.ai-merge-welcome && parent.sftp-merge-welcome) {
+                        root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
+                    } else {
+                        root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
+                    }
+                    root.dock-layout-changed();
+                }
+                expand-fifth => {
+                    root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
                     root.dock-layout-changed();
                 }
             }
@@ -1776,21 +2106,35 @@ export component AppWindow inherits Window {
             // edge (M5), anchored to the OUTER edge of dock-area so it lines up
             // with the 36px band the Rust dock engine reserves for it (#dock-stack).
             if !root.hide-panels && root.sidebar-collapsed && !dock-area.combine-collapsed-tools && !dock-area.sidebar-strip-outside : ToolStrip {
-                x: root.sidebar-dock == "right"
-                    ? parent.width - 36px - parent.quick-right
-                    : parent.quick-left;
+                x: root.sidebar-horizontal
+                    ? (root.sidebar-dock == "right"
+                        ? parent.width - 36px - (parent.quick-right + parent.ai-right)
+                        : parent.quick-left + parent.ai-left)
+                    : parent.h-dock-x;
                 y: root.sidebar-dock == "bottom"
-                    ? parent.height - 36px - parent.quick-bottom
-                    : parent.quick-top;
-                width: root.sidebar-horizontal
-                    ? 36px : parent.width - parent.quick-left - parent.quick-right;
+                    ? parent.height - 36px - (parent.quick-bottom + parent.ai-bottom)
+                    : parent.quick-top + parent.ai-top;
+                width: root.sidebar-horizontal ? 36px : parent.h-dock-w;
                 height: root.sidebar-horizontal
-                    ? parent.height - parent.quick-top - parent.quick-bottom
+                    ? parent.height - (parent.quick-top + parent.ai-top)
+                        - (parent.quick-bottom + parent.ai-bottom)
                     : 36px;
                 dock-edge: root.sidebar-dock;
                 glyph: "\u{E871}";   // dashboard — resource panel
-                show-second: dock-area.quick-merge-sidebar;
-                second-glyph: "\u{E3E7}";
+                show-second: dock-area.quick-merge-sidebar || dock-area.ai-merge-sidebar
+                    || dock-area.sftp-merge-sidebar;
+                second-glyph: dock-area.quick-merge-sidebar ? "\u{E3E7}"
+                    : dock-area.ai-merge-sidebar ? "\u{E8BD}" : "\u{E2C7}";
+                show-third: (dock-area.quick-merge-sidebar
+                            && (dock-area.ai-merge-sidebar || dock-area.sftp-merge-sidebar))
+                    || (dock-area.ai-merge-sidebar && dock-area.sftp-merge-sidebar);
+                third-glyph: (dock-area.quick-merge-sidebar && dock-area.ai-merge-sidebar)
+                    ? "\u{E8BD}"
+                    : (dock-area.quick-merge-sidebar && dock-area.sftp-merge-sidebar) ? "\u{E2C7}"
+                    : "\u{E2C7}";
+                show-fourth: dock-area.quick-merge-sidebar && dock-area.ai-merge-sidebar
+                    && dock-area.sftp-merge-sidebar;
+                fourth-glyph: "\u{E2C7}";
                 expand => {
                     root.sidebar-collapsed = false;
                     root.set-sidebar-collapsed(false);
@@ -1799,26 +2143,53 @@ export component AppWindow inherits Window {
                 expand-second => {
                     if (dock-area.quick-merge-sidebar) {
                         root.quick-panel-collapsed = false;
+                    } else if (dock-area.ai-merge-sidebar) {
+                        root.ai-panel-collapsed = false;
+                    } else {
+                        root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
                     }
+                    root.dock-layout-changed();
+                }
+                expand-third => {
+                    if (dock-area.quick-merge-sidebar && dock-area.ai-merge-sidebar) {
+                        root.ai-panel-collapsed = false;
+                    } else {
+                        root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
+                    }
+                    root.dock-layout-changed();
+                }
+                expand-fourth => {
+                    root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
                     root.dock-layout-changed();
                 }
             }
 
             if dock-area.sidebar-strip-outside : ToolStrip {
-                x: root.welcome-sidebar-dock == "right"
-                    ? parent.width - parent.quick-right - parent.sidebar-outside-strip
-                    : root.welcome-sidebar-dock == "left" ? parent.quick-left : parent.quick-left;
+                x: parent.welcome-horizontal
+                    ? (root.welcome-sidebar-dock == "right"
+                        ? parent.width - parent.quick-right - parent.sidebar-outside-strip
+                        : parent.quick-left)
+                    : parent.h-dock-x;
                 y: root.welcome-sidebar-dock == "bottom"
                     ? parent.height - parent.quick-bottom - parent.sidebar-outside-strip
                     : root.welcome-sidebar-dock == "top" ? parent.quick-top : parent.quick-top;
-                width: parent.welcome-horizontal ? parent.sidebar-outside-strip
-                    : parent.width - parent.quick-left - parent.quick-right;
+                width: parent.welcome-horizontal ? parent.sidebar-outside-strip : parent.h-dock-w;
                 height: parent.welcome-horizontal
                     ? parent.height - parent.quick-top - parent.quick-bottom : parent.sidebar-outside-strip;
                 dock-edge: root.welcome-sidebar-dock;
                 glyph: "\u{E871}";
-                show-second: parent.quick-merge-sidebar;
-                second-glyph: "\u{E3E7}";
+                show-second: parent.quick-merge-sidebar || parent.ai-merge-sidebar
+                    || parent.sftp-merge-sidebar;
+                second-glyph: parent.quick-merge-sidebar ? "\u{E3E7}"
+                    : parent.ai-merge-sidebar ? "\u{E8BD}" : "\u{E2C7}";
+                show-third: (parent.quick-merge-sidebar
+                            && (parent.ai-merge-sidebar || parent.sftp-merge-sidebar))
+                    || (parent.ai-merge-sidebar && parent.sftp-merge-sidebar);
+                third-glyph: (parent.quick-merge-sidebar && parent.ai-merge-sidebar)
+                    ? "\u{E8BD}" : "\u{E2C7}";
+                show-fourth: parent.quick-merge-sidebar && parent.ai-merge-sidebar
+                    && parent.sftp-merge-sidebar;
+                fourth-glyph: "\u{E2C7}";
                 expand => {
                     root.sidebar-collapsed = false;
                     root.set-sidebar-collapsed(false);
@@ -1827,7 +2198,23 @@ export component AppWindow inherits Window {
                 expand-second => {
                     if (parent.quick-merge-sidebar) {
                         root.quick-panel-collapsed = false;
+                    } else if (parent.ai-merge-sidebar) {
+                        root.ai-panel-collapsed = false;
+                    } else {
+                        root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
                     }
+                    root.dock-layout-changed();
+                }
+                expand-third => {
+                    if (parent.quick-merge-sidebar && parent.ai-merge-sidebar) {
+                        root.ai-panel-collapsed = false;
+                    } else {
+                        root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
+                    }
+                    root.dock-layout-changed();
+                }
+                expand-fourth => {
+                    root.set-pane-sftp-collapsed(root.sftp-current-tab-id, false);
                     root.dock-layout-changed();
                 }
             }
@@ -1836,19 +2223,20 @@ export component AppWindow inherits Window {
             // collapsed — its icon stays in the strip; clicking it re-opens.
             if false : Rectangle {
                 x: root.welcome-sidebar-dock == "right"
-                    ? parent.width - parent.quick-right - parent.sidebar-outside-strip - parent.welcome-size
+                    ? parent.width - parent.ai-right - parent.quick-right - parent.sidebar-outside-strip - parent.welcome-size
                   : root.welcome-sidebar-dock == "left"
-                    ? parent.quick-left + parent.sidebar-outside-strip
-                  : parent.quick-left;
+                    ? parent.ai-left + parent.quick-left + parent.sidebar-outside-strip
+                  : parent.ai-left + parent.quick-left;
                 y: root.welcome-sidebar-dock == "bottom"
-                    ? parent.height - parent.quick-bottom - parent.sidebar-outside-strip - parent.welcome-size
+                    ? parent.height - parent.ai-bottom - parent.quick-bottom - parent.sidebar-outside-strip - parent.welcome-size
                   : root.welcome-sidebar-dock == "top"
-                    ? parent.quick-top + parent.sidebar-outside-strip
-                  : parent.quick-top;
+                    ? parent.ai-top + parent.quick-top + parent.sidebar-outside-strip
+                  : parent.ai-top + parent.quick-top;
                 width: parent.welcome-horizontal ? parent.welcome-size
-                    : parent.width - parent.quick-left - parent.quick-right;
+                    : parent.width - parent.ai-left - parent.ai-right - parent.quick-left - parent.quick-right;
                 height: parent.welcome-horizontal
-                    ? parent.height - parent.quick-top - parent.quick-bottom : parent.welcome-size;
+                    ? parent.height - parent.ai-top - parent.ai-bottom - parent.quick-top - parent.quick-bottom
+                    : parent.welcome-size;
                 background: Theme.bg-panel;
                 clip: true;
                 Welcome {
@@ -1880,10 +2268,15 @@ export component AppWindow inherits Window {
                             if (root.quick-panel-open && root.quick-panel-dock == root.dock-target) {
                                 root.quick-panel-collapsed = true;
                             }
+                            if (root.ai-panel-open && root.ai-panel-dock == root.dock-target) {
+                                root.ai-panel-collapsed = true;
+                            }
                             root.persist-welcome-sidebar-dock(root.welcome-sidebar-dock);
                         }
                         root.panel-dragging = false;
                     }
+                    // Grab cancelled: drop the preview without committing.
+                    dock-drag-cancelled() => { root.panel-dragging = false; }
                     new-session => { root.new-session-clicked(); }
                     import-ssh-config => { root.import-ssh-config(); }
                     connect-session(id) => { root.connect-session(id); }
@@ -1919,16 +2312,16 @@ export component AppWindow inherits Window {
 
             // Drag the welcome sidebar's right edge to resize it (v0.5 M3b).
             if false : Rectangle {
-                x: root.welcome-sidebar-dock == "left" ? parent.quick-left + parent.sidebar-outside-strip + parent.welcome-size - 2px
-                  : root.welcome-sidebar-dock == "right" ? parent.width - parent.quick-right - parent.sidebar-outside-strip - parent.welcome-size - 2px
-                  : parent.quick-left;
-                y: root.welcome-sidebar-dock == "top" ? parent.quick-top + parent.sidebar-outside-strip + parent.welcome-size - 2px
-                  : root.welcome-sidebar-dock == "bottom" ? parent.height - parent.quick-bottom - parent.sidebar-outside-strip - parent.welcome-size - 2px
-                  : parent.quick-top;
+                x: root.welcome-sidebar-dock == "left" ? parent.ai-left + parent.quick-left + parent.sidebar-outside-strip + parent.welcome-size - 2px
+                  : root.welcome-sidebar-dock == "right" ? parent.width - parent.ai-right - parent.quick-right - parent.sidebar-outside-strip - parent.welcome-size - 2px
+                  : parent.ai-left + parent.quick-left;
+                y: root.welcome-sidebar-dock == "top" ? parent.ai-top + parent.quick-top + parent.sidebar-outside-strip + parent.welcome-size - 2px
+                  : root.welcome-sidebar-dock == "bottom" ? parent.height - parent.ai-bottom - parent.quick-bottom - parent.sidebar-outside-strip - parent.welcome-size - 2px
+                  : parent.ai-top + parent.quick-top;
                 width: parent.welcome-horizontal ? 4px
-                    : parent.width - parent.quick-left - parent.quick-right;
+                    : parent.width - parent.ai-left - parent.ai-right - parent.quick-left - parent.quick-right;
                 height: parent.welcome-horizontal
-                    ? parent.height - parent.quick-top - parent.quick-bottom : 4px;
+                    ? parent.height - parent.ai-top - parent.ai-bottom - parent.quick-top - parent.quick-bottom : 4px;
                 background: ws-split-ta.has-hover || dock-area.welcome-sidebar-dragging
                     ? Theme.accent : transparent;
                 ws-split-ta := TouchArea {
@@ -2047,10 +2440,15 @@ export component AppWindow inherits Window {
                         if (root.quick-panel-open && root.quick-panel-dock == root.dock-target) {
                             root.quick-panel-collapsed = true;
                         }
+                        if (root.ai-panel-open && root.ai-panel-dock == root.dock-target) {
+                            root.ai-panel-collapsed = true;
+                        }
                         root.persist-sidebar-dock(root.sidebar-dock);
                     }
                     root.panel-dragging = false;
                 }
+                // Grab cancelled: drop the preview without committing.
+                dock-drag-cancelled() => { root.panel-dragging = false; }
                 toggle-collapse() => {
                     root.sidebar-collapsed = !root.sidebar-collapsed;
                     root.set-sidebar-collapsed(root.sidebar-collapsed);
@@ -2129,16 +2527,26 @@ export component AppWindow inherits Window {
                 property <length> quick-w: 0px;
                 property <length> quick-h: 0px;
                 property <length> quick-sp: 0px;
+                // AI chat panel geometry (mirrors the quick panel, dock "left" default).
+                property <bool> ai-horizontal:
+                    root.ai-panel-dock == "left" || root.ai-panel-dock == "right";
+                property <length> ai-w: 0px;
+                property <length> ai-h: 0px;
+                property <length> ai-sp: 0px;
 
                 central := Rectangle {
-                x: root.quick-panel-open && !root.quick-panel-collapsed && root.quick-panel-dock == "left"
-                    ? parent.quick-w + parent.quick-sp : 0px;
-                y: root.quick-panel-open && !root.quick-panel-collapsed && root.quick-panel-dock == "top"
-                    ? parent.quick-h + parent.quick-sp : 0px;
-                width: root.quick-panel-open && !root.quick-panel-collapsed && parent.quick-horizontal
-                    ? parent.width - parent.quick-w - parent.quick-sp : parent.width;
-                height: root.quick-panel-open && !root.quick-panel-collapsed && !parent.quick-horizontal
-                    ? parent.height - parent.quick-h - parent.quick-sp : parent.height;
+                // Each docked panel shrinks only its own axis: quick-w/ai-w
+                // (and -h/-sp) are already 0px while closed or in zen mode.
+                x: (root.quick-panel-dock == "left" ? parent.quick-w + parent.quick-sp : 0px)
+                    + (root.ai-panel-dock == "left" ? parent.ai-w + parent.ai-sp : 0px);
+                y: (root.quick-panel-dock == "top" ? parent.quick-h + parent.quick-sp : 0px)
+                    + (root.ai-panel-dock == "top" ? parent.ai-h + parent.ai-sp : 0px);
+                width: parent.width
+                    - (parent.quick-horizontal ? parent.quick-w + parent.quick-sp : 0px)
+                    - (parent.ai-horizontal ? parent.ai-w + parent.ai-sp : 0px);
+                height: parent.height
+                    - (!parent.quick-horizontal ? parent.quick-h + parent.quick-sp : 0px)
+                    - (!parent.ai-horizontal ? parent.ai-h + parent.ai-sp : 0px);
                 clip: true;
                 // Split-pane area (v0.5): panes tile this rect; each pane has its own
                 // tab strip + active terminal / welcome. Rust flattens the split tree
@@ -2302,6 +2710,7 @@ export component AppWindow inherits Window {
                         spans: term.spans;
                         cursor-row: term.cursor-row;
                         cursor-col: term.cursor-col;
+                        cursor-visible: term.cursor-visible;
                         cursor-style: root.term-cursor-style;
                         cursor-color: root.term-cursor-color;
                         terminal-line-spacing: root.terminal-line-spacing;
@@ -2313,13 +2722,22 @@ export component AppWindow inherits Window {
                         is-alt-screen: term.is-alt-screen;
                         mouse-tracked: term.mouse-tracked;
                         find-matches: term.find-matches;
+                        link-matches: term.link-matches;
+                        find-match-index: term.find-active;
+                        find-total: term.find-total;
+                        command-running: term.command-running;
+                        backpressure: term.backpressure;
+                        search-history-mode: root.search-history-mode;
+                        action-links-enabled: root.action-links-enabled;
+                        link-clicked(row, col) => { return root.action-link-click(term.id, row, col); }
+                        find-navigate(reverse) => { root.find-navigate(term.id, reverse); }
+                        set-search-history-mode(v) => { root.set-search-history-mode(v); }
                         find-current: term.find-current;
                         selection: term.selection;
                         sftp-panel-height: term.sftp-panel-height;
                         set-sftp-panel-height(v) => { root.set-pane-sftp-height(term.id, v); }
                         sftp-panel-width: term.sftp-panel-width;
                         set-sftp-panel-width(v) => { root.set-pane-sftp-width(term.id, v); }
-                        sftp-dock <=> root.sftp-dock;
                         sftp-collapsed: term.sftp-collapsed;
                         set-sftp-collapsed(v) => { root.set-pane-sftp-collapsed(term.id, v); }
                         sftp-saved-height: term.sftp-saved-height;
@@ -2394,6 +2812,7 @@ export component AppWindow inherits Window {
                         persist-sftp-local-split(v) => { root.persist-sftp-local-split(v); }
                         sftp-local-places-refresh() => { root.sftp-local-places-refresh(term.id); }
                         tunnels: term.tunnels;
+                        has-selection: term.has-selection;
                         quick-commands: root.quick-commands;
                         quick-sidebar-enabled: root.quick-commands-as-sidebar;
                         quick-panel-docked: root.quick-panel-open;
@@ -2415,6 +2834,7 @@ export component AppWindow inherits Window {
                             root.qcm-command = "";
                             root.qcm-group = "";
                             root.qcm-edit-index = -1;
+                            root.qcm-io-hint = "";
                             root.quick-cmd-manage-open = true;
                         }
                         quick-dock-drag-move(ax, ay) => {
@@ -2431,6 +2851,8 @@ export component AppWindow inherits Window {
                             }
                             root.panel-dragging = false;
                         }
+                        // Grab cancelled: drop the preview without committing.
+                        quick-dock-drag-cancelled() => { root.panel-dragging = false; }
                         toggle-quick-group(g) => { root.toggle-quick-group(g); }
                         edit-quick-command(i) => { root.edit-quick-command(i); }
                         duplicate-quick-command(i) => { root.duplicate-quick-command(i); }
@@ -2544,8 +2966,9 @@ export component AppWindow inherits Window {
                         copy-terminal-text() => { root.copy-terminal-text(term.id); }
                         right-click-copy-selection() => { root.right-click-copy-selection(term.id) }
                         clear-terminal() => { root.clear-terminal(term.id); }
+                        add-selection-to-quick() => { root.add-selection-to-quick(term.id); }
+                        send-selection-to-ai() => { root.send-selection-to-ai(term.id); }
                         find-query-changed(q) => { root.find-query-changed(term.id, q); }
-                        output-hover(h) => { root.terminal-output-hover(term.id, h); }
                         find-step(q, d) => { return root.find-step(term.id, q, d); }
                         terminal-scroll(d) => { root.terminal-scroll(term.id, d); }
                         terminal-wheel(d, c, r) => { root.terminal-wheel(term.id, d, c, r); }
@@ -2584,10 +3007,16 @@ export component AppWindow inherits Window {
                         editor-syntax-spans: doc.syntax-spans;
                         content-changed => { root.editor-doc-edited(doc.id, self.editor-content); }
                         save-file => { root.editor-doc-save(doc.id); }
+                        editor-save-ack: doc.save-ack;
+                        save-ack-dismiss => { root.editor-doc-save-ack-dismiss(doc.id); }
                         editor-highlight(text) => { root.editor-doc-highlight(doc.id, text); }
+                        editor-bracket-check(caret) => { root.editor-doc-bracket-check(doc.id, caret); }
                         editor-count-matches(content, query) => { return root.editor-count-matches(content, query); }
                         editor-find-step(content, query, current, reverse) => {
                             return root.editor-find-step(content, query, current, reverse);
+                        }
+                        editor-scroll-select(content, anchor, focus, delta-y, line-height) => {
+                            return root.editor-scroll-select(content, anchor, focus, delta-y, line-height);
                         }
                         editor-replace-all(query, replacement) => {
                             root.editor-doc-replace-all(doc.id, query, replacement);
@@ -2595,13 +3024,18 @@ export component AppWindow inherits Window {
                     }
 
                     // Windows may show the terminal model being reconstructed when
-                    // restoring from minimize (#183). Briefly cover the terminal area
-                    // until the restore repaint settles; the underlying PTY/buffer is
-                    // untouched.
-                    if root.terminal-restore-cover && pane.active-id != "welcome" && pane.tabs.length > 0 : Rectangle {
+                    // restoring from minimize (#183). Cover the terminal area until
+                    // the restore repaint settles; the underlying PTY/buffer is
+                    // untouched. The element stays in the tree and is driven by
+                    // opacity so removing the cover fades instead of popping the
+                    // terminal back in: snapping on (0ms) still masks the first
+                    // frame, while the release eases out over 160ms.
+                    Rectangle {
                         width: parent.width;
                         height: parent.height;
                         background: Theme.term-bg;
+                        opacity: root.terminal-restore-cover && pane.active-id != "welcome" && pane.tabs.length > 0 ? 1.0 : 0.0;
+                        animate opacity { duration: root.terminal-restore-cover ? 0ms : 160ms; easing: ease-out; }
                     }
                 }
                 }
@@ -2668,6 +3102,7 @@ export component AppWindow inherits Window {
                     root.qcm-command = "";
                     root.qcm-group = "";
                     root.qcm-edit-index = -1;
+                    root.qcm-io-hint = "";
                     root.quick-cmd-manage-open = true;
                 }
                 close => { root.quick-panel-collapsed = true; }
@@ -2688,9 +3123,14 @@ export component AppWindow inherits Window {
                             root.welcome-collapsed = true;
                             root.set-welcome-collapsed(true);
                         }
+                        if (root.ai-panel-open && root.ai-panel-dock == root.dock-target) {
+                            root.ai-panel-collapsed = true;
+                        }
                     }
                     root.panel-dragging = false;
                 }
+                // Grab cancelled: drop the preview without committing.
+                dock-drag-cancelled => { root.panel-dragging = false; }
             }
 
             Rectangle {
@@ -2734,8 +3174,93 @@ export component AppWindow inherits Window {
                 }
             }
 
-
+            if false : AIPanel {
+                // Collapsed → shrink to the edge strip below; keep the element
+                // alive so the draft/scroll state survives the round trip.
+                visible: !root.ai-panel-collapsed;
+                x: root.ai-panel-dock == "right" ? parent.width - parent.ai-w : 0px;
+                y: root.ai-panel-dock == "bottom" ? parent.height - parent.ai-h : 0px;
+                width: parent.ai-horizontal ? parent.ai-w : parent.width;
+                height: parent.ai-horizontal ? parent.height : parent.ai-h;
+                messages: root.ai-messages;
+                busy: root.ai-busy;
+                dock-edge: root.ai-panel-dock;
+                draft <=> root.ai-draft;
+                draft-revision: root.ai-draft-revision;
+                send => { root.send-ai-message(root.ai-draft); }
+                stop => { root.stop-ai-message(); }
+                clear => { root.clear-ai-messages(); }
+                collapse => { root.ai-panel-collapsed = true; }
+                dock-drag-move(ax, ay) => {
+                    root.panel-dragging = true;
+                    root.drag-nx = (ax - dock-area.absolute-position.x) / dock-area.width;
+                    root.drag-ny = (ay - dock-area.absolute-position.y) / dock-area.height;
+                }
+                dock-drag-end => {
+                    if (root.dock-target != "") {
+                        root.ai-panel-dock = root.dock-target;
+                        root.set-ai-panel-dock(root.dock-target);
+                        // Same-edge squeeze: only one docked panel per edge.
+                        if (root.sidebar-dock == root.dock-target) {
+                            root.sidebar-collapsed = true;
+                            root.set-sidebar-collapsed(true);
                         }
+                        if (root.welcome-as-sidebar
+                                && root.welcome-sidebar-dock == root.dock-target) {
+                            root.welcome-collapsed = true;
+                            root.set-welcome-collapsed(true);
+                        }
+                        if (root.quick-panel-open && root.quick-panel-dock == root.dock-target) {
+                            root.quick-panel-collapsed = true;
+                        }
+                    }
+                    root.panel-dragging = false;
+                }
+                // Grab cancelled: drop the preview without committing.
+                dock-drag-cancelled => { root.panel-dragging = false; }
+            }
+
+            Rectangle {
+                visible: false;
+                x: root.ai-panel-dock == "left" ? parent.ai-w
+                 : root.ai-panel-dock == "right" ? parent.width - parent.ai-w - 4px
+                 : 0px;
+                y: root.ai-panel-dock == "top" ? parent.ai-h
+                 : root.ai-panel-dock == "bottom" ? parent.height - parent.ai-h - 4px
+                 : 0px;
+                width: parent.ai-horizontal ? 4px : parent.width;
+                height: parent.ai-horizontal ? parent.height : 4px;
+                background: ai-split-ta.has-hover ? Theme.accent : Theme.border-subtle;
+                ai-split-ta := TouchArea {
+                    x: quick-area.ai-horizontal ? -4px : 0px;
+                    y: quick-area.ai-horizontal ? 0px : -4px;
+                    width: quick-area.ai-horizontal ? 12px : parent.width;
+                    height: quick-area.ai-horizontal ? parent.height : 12px;
+                    mouse-cursor: quick-area.ai-horizontal ? ew-resize : ns-resize;
+                    moved => {
+                        if (self.pressed) {
+                            if (quick-area.ai-horizontal) {
+                                root.ai-panel-width = clamp(
+                                    root.ai-panel-dock == "right"
+                                        ? quick-area.width - ((self.absolute-position.x + self.mouse-x)
+                                            - quick-area.absolute-position.x)
+                                        : (self.absolute-position.x + self.mouse-x)
+                                            - quick-area.absolute-position.x,
+                                    240px, max(260px, quick-area.width - 240px));
+                            } else {
+                                root.ai-panel-height = clamp(
+                                    root.ai-panel-dock == "bottom"
+                                        ? quick-area.height - ((self.absolute-position.y + self.mouse-y)
+                                            - quick-area.absolute-position.y)
+                                        : (self.absolute-position.y + self.mouse-y)
+                                            - quick-area.absolute-position.y,
+                                    160px, max(180px, quick-area.height - 160px));
+                            }
+                        }
+                    }
+                }
+            }
+            }
             }
 
             // Stacked docked panels (#dock-stack): every expanded panel is
@@ -2788,13 +3313,26 @@ export component AppWindow inherits Window {
                         root.drag-ny = (ay - dock-area.absolute-position.y) / dock-area.height;
                     }
                     dock-drag-end() => {
-                        if (root.dock-target != "") {
+                        if (root.dock-target != "" && root.dock-target != root.sidebar-dock) {
                             root.sidebar-dock = root.dock-target;
                             root.persist-sidebar-dock(root.sidebar-dock);
                             root.dock-layout-changed();
+                        } else if (root.panel-dragging) {
+                            // A real drag that landed back on its own edge (or
+                            // mid-window): drop the panel where it landed. A
+                            // plain header click must never reorder — drag-nx /
+                            // drag-ny still hold the previous drag's pointer.
+                            // Clear the grab first so the reorder's refresh
+                            // isn't deferred by panel-dragging.
+                            root.panel-dragging = false;
+                            root.stack-reorder(root.sidebar-dock, "sidebar",
+                                               root.drag-nx, root.drag-ny);
                         }
                         root.panel-dragging = false;
                     }
+                    // Grab cancelled: drop the preview without committing a
+                    // move or reorder the user never finished.
+                    dock-drag-cancelled() => { root.panel-dragging = false; }
                     toggle-collapse() => {
                         root.sidebar-collapsed = !root.sidebar-collapsed;
                         root.set-sidebar-collapsed(root.sidebar-collapsed);
@@ -2822,13 +3360,24 @@ export component AppWindow inherits Window {
                         root.drag-ny = (ay - dock-area.absolute-position.y) / dock-area.height;
                     }
                     dock-drag-end() => {
-                        if (root.dock-target != "") {
+                        if (root.dock-target != "" && root.dock-target != root.welcome-sidebar-dock) {
                             root.welcome-sidebar-dock = root.dock-target;
                             root.persist-welcome-sidebar-dock(root.welcome-sidebar-dock);
                             root.dock-layout-changed();
+                        } else if (root.panel-dragging) {
+                            // A real drag that landed back on its own edge (or
+                            // mid-window): drop the panel where it landed. A
+                            // plain header click must never reorder — drag-nx /
+                            // drag-ny still hold the previous drag's pointer.
+                            root.panel-dragging = false;
+                            root.stack-reorder(root.welcome-sidebar-dock, "welcome",
+                                               root.drag-nx, root.drag-ny);
                         }
                         root.panel-dragging = false;
                     }
+                    // Grab cancelled: drop the preview without committing a
+                    // move or reorder the user never finished.
+                    dock-drag-cancelled() => { root.panel-dragging = false; }
                     new-session => { root.new-session-clicked(); }
                     import-ssh-config => { root.import-ssh-config(); }
                     connect-session(id) => { root.connect-session(id); }
@@ -2870,6 +3419,7 @@ export component AppWindow inherits Window {
                         root.qcm-command = "";
                         root.qcm-group = "";
                         root.qcm-edit-index = -1;
+                        root.qcm-io-hint = "";
                         root.quick-cmd-manage-open = true;
                     }
                     close => { root.quick-panel-collapsed = true; root.dock-layout-changed(); }
@@ -2879,13 +3429,256 @@ export component AppWindow inherits Window {
                         root.drag-ny = (ay - dock-area.absolute-position.y) / dock-area.height;
                     }
                     dock-drag-end => {
-                        if (root.dock-target != "") {
+                        if (root.dock-target != "" && root.dock-target != root.quick-panel-dock) {
                             root.quick-panel-dock = root.dock-target;
                             root.dock-layout-changed();
+                        } else if (root.panel-dragging) {
+                            // A real drag that landed back on its own edge (or
+                            // mid-window): drop the panel where it landed. A
+                            // plain header click must never reorder — drag-nx /
+                            // drag-ny still hold the previous drag's pointer.
+                            root.panel-dragging = false;
+                            root.stack-reorder(root.quick-panel-dock, "quick",
+                                               root.drag-nx, root.drag-ny);
                         }
                         root.panel-dragging = false;
                     }
+                    // Grab cancelled: drop the preview without committing a
+                    // move or reorder the user never finished.
+                    dock-drag-cancelled => { root.panel-dragging = false; }
                 }
+                if gp.kind == "ai" : AIPanel {
+                    width: parent.width;
+                    height: parent.height;
+                    messages: root.ai-messages;
+                    busy: root.ai-busy;
+                    dock-edge: gp.edge;
+                    draft <=> root.ai-draft;
+                    draft-revision: root.ai-draft-revision;
+                    send => { root.send-ai-message(root.ai-draft); }
+                    stop => { root.stop-ai-message(); }
+                    clear => { root.clear-ai-messages(); }
+                    collapse => { root.ai-panel-collapsed = true; root.dock-layout-changed(); }
+                    dock-drag-move(ax, ay) => {
+                        root.panel-dragging = true;
+                        root.drag-nx = (ax - dock-area.absolute-position.x) / dock-area.width;
+                        root.drag-ny = (ay - dock-area.absolute-position.y) / dock-area.height;
+                    }
+                    dock-drag-end => {
+                        if (root.dock-target != "" && root.dock-target != root.ai-panel-dock) {
+                            root.ai-panel-dock = root.dock-target;
+                            root.set-ai-panel-dock(root.ai-panel-dock);
+                            root.dock-layout-changed();
+                        } else if (root.panel-dragging) {
+                            // A real drag that landed back on its own edge (or
+                            // mid-window): drop the panel where it landed. A
+                            // plain header click must never reorder — drag-nx /
+                            // drag-ny still hold the previous drag's pointer.
+                            root.panel-dragging = false;
+                            root.stack-reorder(root.ai-panel-dock, "ai",
+                                               root.drag-nx, root.drag-ny);
+                        }
+                        root.panel-dragging = false;
+                    }
+                    // Grab cancelled: drop the preview without committing a
+                    // move or reorder the user never finished.
+                    dock-drag-cancelled => { root.panel-dragging = false; }
+                }
+                // The docked SFTP panel renders globally from the ACTIVE tab's
+                // mirrored state (#dock-stack); models are shared by reference
+                // so remote listings stay live. The panel is only ever rendered
+                // expanded — collapsing swaps it for the tool strip below.
+                if gp.kind == "sftp" : SftpPanel {
+                    width: parent.width;
+                    height: parent.height;
+                    current-tab-id: root.sftp-current-tab-id;
+                    current-path: root.sftp-path;
+                    entries: root.sftp-entries;
+                    status: root.sftp-status;
+                    status-kind: root.sftp-status-kind;
+                    loading: root.sftp-loading;
+                    tree-nodes: root.sftp-tree-nodes;
+                    transfer-targets: root.tabs;
+                    selected-count: root.sftp-selected-count;
+                    sort-key: root.sftp-sort-key;
+                    sort-dir: root.sftp-sort-dir;
+                    show-type: root.sftp-show-type;
+                    show-size: root.sftp-show-size;
+                    show-modified: root.sftp-show-modified;
+                    show-permissions: root.sftp-show-permissions;
+                    show-owner: root.sftp-show-owner;
+                    show-group: root.sftp-show-group;
+                    toggle-column(key) => { root.toggle-sftp-column(key); }
+                    tree-width: root.sftp-tree-width;
+                    persist-tree-width(v) => { root.persist-sftp-tree-width(v); }
+                    bookmarks: root.sftp-bookmarks;
+                    places-bookmarks: root.sftp-places-bookmarks;
+                    places-recent: root.sftp-recent;
+                    places-bookmarked: root.sftp-bookmarked;
+                    tunnels: root.sftp-tunnels;
+                    // Split (dual-pane) view: state mirrored from the active tab.
+                    dual: root.sftp-dual;
+                    local-path: root.sftp-local-path;
+                    local-entries: root.sftp-local-entries;
+                    local-status: root.sftp-local-status;
+                    local-loading: root.sftp-local-loading;
+                    local-selected-count: root.sftp-local-selected-count;
+                    local-pane-default: root.sftp-local-pane-width;
+                    // Local-pane places (#532) + split ratio, mirroring the
+                    // active tab's state like the rest of the dual-pane data.
+                    local-quick-places: root.sftp-local-quick-places;
+                    local-drive-places: root.sftp-local-drive-places;
+                    local-bookmarks: root.sftp-local-bookmarks;
+                    local-recent: root.sftp-local-recent;
+                    local-bookmarked: root.sftp-local-bookmarked;
+                    local-split-ratio: root.sftp-local-split;
+                    persist-local-pane-width(v) => {
+                        root.persist-sftp-local-pane-width(root.sftp-current-tab-id, v);
+                    }
+                    persist-local-split-ratio(v) => { root.persist-sftp-local-split(v); }
+                    local-places-refresh() => { root.sftp-local-places-refresh(root.sftp-current-tab-id); }
+                    local-toggle-bookmark() => { root.sftp-local-toggle-bookmark(root.sftp-current-tab-id); }
+                    local-remove-bookmark(path) => { root.sftp-local-remove-bookmark(root.sftp-current-tab-id, path); }
+                    local-clear-recent() => { root.sftp-local-clear-recent(root.sftp-current-tab-id); }
+                    // Local list options (#532 follow-up): the docked pane is the
+                    // only SFTP render path, so the upstream TerminalView bindings
+                    // are unwired — route them to the AppWindow state instead.
+                    local-show-hidden: root.sftp-local-show-hidden;
+                    local-sort-key: root.sftp-local-sort-key;
+                    local-sort-dir: root.sftp-local-sort-dir;
+                    local-toggle-hidden() => { root.sftp-local-toggle-hidden(root.sftp-current-tab-id); }
+                    local-sort(column)       => { root.sftp-local-sort(root.sftp-current-tab-id, column); }
+                    local-set-filter(text)   => { root.sftp-local-set-filter(root.sftp-current-tab-id, text); }
+                    local-remove-recent(path) => { root.sftp-local-remove-recent(root.sftp-current-tab-id, path); }
+                    local-move-bookmark(path, delta) => { root.sftp-local-move-bookmark(root.sftp-current-tab-id, path, delta); }
+                    local-reveal()           => { root.sftp-local-reveal(root.sftp-current-tab-id); }
+                    toggle-dual()          => { root.sftp-toggle-dual(root.sftp-current-tab-id); }
+                    local-navigate(path)   => { root.sftp-local-navigate(root.sftp-current-tab-id, path); }
+                    local-up()             => { root.sftp-local-up(root.sftp-current-tab-id); }
+                    local-home()           => { root.sftp-local-home(root.sftp-current-tab-id); }
+                    local-refresh()        => { root.sftp-local-refresh(root.sftp-current-tab-id); }
+                    local-open(path)       => { root.sftp-local-open(root.sftp-current-tab-id, path); }
+                    local-toggle-select(i) => { root.sftp-local-toggle-select(root.sftp-current-tab-id, i); }
+                    local-select-range(a, b) => { root.sftp-local-select-range(root.sftp-current-tab-id, a, b); }
+                    local-select-single(i) => { root.sftp-local-select-single(root.sftp-current-tab-id, i); }
+                    local-copy-path(path)  => { root.sftp-local-copy-path(path); }
+                    local-upload(path)     => { root.sftp-local-upload(root.sftp-current-tab-id, path); }
+                    local-upload-selected() => { root.sftp-local-upload-selected(root.sftp-current-tab-id); }
+                    download-to-local(path) => { root.sftp-download-to-local(root.sftp-current-tab-id, path); }
+                    download-selected-to-local() => { root.sftp-download-selected-to-local(root.sftp-current-tab-id); }
+                    collapsed: false;
+                    compact: false;
+                    // Side-docked (left/right): hide the tree like the old
+                    // per-terminal horizontal layout did.
+                    show-tree: !(gp.edge == "left" || gp.edge == "right");
+                    toggle-collapsed() => {
+                        // Minimise → dock strip. Goes through the per-tab
+                        // callback so the ACTIVE tab's collapse flag (the very
+                        // state that (un)docks the panel) is what flips.
+                        root.set-pane-sftp-collapsed(root.sftp-current-tab-id, true);
+                    }
+                    dock-drag-move(ax, ay) => {
+                        root.panel-dragging = true;
+                        root.drag-nx = (ax - dock-area.absolute-position.x) / dock-area.width;
+                        root.drag-ny = (ay - dock-area.absolute-position.y) / dock-area.height;
+                    }
+                    dock-drag-end => {
+                        if (root.dock-target != "" && root.dock-target != root.sftp-dock) {
+                            root.sftp-dock = root.dock-target;
+                            root.dock-layout-changed();
+                        } else if (root.panel-dragging) {
+                            // A real drag that landed back on its own edge (or
+                            // mid-window): drop the panel where it landed. A
+                            // plain header click must never reorder — drag-nx /
+                            // drag-ny still hold the previous drag's pointer.
+                            root.panel-dragging = false;
+                            root.stack-reorder(root.sftp-dock, "sftp",
+                                               root.drag-nx, root.drag-ny);
+                        }
+                        root.panel-dragging = false;
+                    }
+                    // Grab cancelled: drop the preview without committing a
+                    // move or reorder the user never finished.
+                    dock-drag-cancelled => { root.panel-dragging = false; }
+                    navigate(path) => { root.sftp-navigate(root.sftp-current-tab-id, path); }
+                    bookmark-add() => { root.sftp-bookmark-add(root.sftp-current-tab-id); }
+                    bookmark-jump(path) => { root.sftp-navigate(root.sftp-current-tab-id, path); }
+                    bookmark-remove(path) => { root.sftp-bookmark-remove(root.sftp-current-tab-id, path); }
+                    // Per-session places (#500): the star toggles / drops
+                    // bookmarks, navigation reuses the same sftp-navigate path.
+                    places-toggle-bookmark(path) => { root.sftp-toggle-bookmark(root.sftp-current-tab-id, path); }
+                    places-remove-bookmark(path) => { root.sftp-remove-bookmark(root.sftp-current-tab-id, path); }
+                    places-clear-recent() => { root.sftp-clear-recent(root.sftp-current-tab-id); }
+                    places-refresh() => { root.sftp-places-refresh(root.sftp-current-tab-id); }
+                    download(path) => { root.sftp-download(root.sftp-current-tab-id, path); }
+                    open-file(path) => { root.sftp-open-file(root.sftp-current-tab-id, path); }
+                    upload-clicked(dir, folder) => { root.sftp-upload-clicked(root.sftp-current-tab-id, dir, folder); }
+                    refresh(path) => { root.sftp-refresh(root.sftp-current-tab-id, path); }
+                    tree-expand(path) => { root.sftp-tree-expand(root.sftp-current-tab-id, path); }
+                    toggle-select(i) => { root.sftp-toggle-select(root.sftp-current-tab-id, i); }
+                    select-range(a, b) => { root.sftp-select-range(root.sftp-current-tab-id, a, b); }
+                    select-single(i) => { root.sftp-select-single(root.sftp-current-tab-id, i); }
+                    paste-upload(dir) => { root.sftp-paste-upload(root.sftp-current-tab-id, dir); }
+                    match-shortcut(text, control, meta, alt, shift) => {
+                        root.match-shortcut(text, control, meta, alt, shift, false);
+                    }
+                    forward-key(text, ctrl, alt, shift) => {
+                        root.send-key(root.sftp-current-tab-id, text, ctrl, alt, shift);
+                    }
+                    download-selected() => { root.sftp-download-selected(root.sftp-current-tab-id); }
+                    copy-to-target(path, target) => { root.sftp-copy-to-target(root.sftp-current-tab-id, path, target); }
+                    copy-selected-to-target(target) => { root.sftp-copy-selected-to-target(root.sftp-current-tab-id, target); }
+                    delete-selected() => {
+                        root.confirm-delete-tab = root.sftp-current-tab-id;
+                        root.confirm-delete-batch = true;
+                        root.confirm-delete-path = root.lang-en ? "the selected items" : "选中的项目";
+                        root.confirm-delete-open = true;
+                    }
+                    delete(path) => {
+                        root.confirm-delete-tab = root.sftp-current-tab-id;
+                        root.confirm-delete-path = path;
+                        root.confirm-delete-open = true;
+                    }
+                    view(path) => { root.sftp-view(root.sftp-current-tab-id, path); }
+                    edit(path) => { root.sftp-edit(root.sftp-current-tab-id, path); }
+                    open-external(path) => { root.sftp-open-external(root.sftp-current-tab-id, path); }
+                    edit-external(path) => { root.sftp-edit-external(root.sftp-current-tab-id, path); }
+                    sort-request(key) => { root.sftp-sort-request(root.sftp-current-tab-id, key); }
+                    clear-sort() => { root.sftp-clear-sort(root.sftp-current-tab-id); }
+                    type-ahead(prefix) => { return root.sftp-type-ahead(root.sftp-current-tab-id, prefix); }
+                    tunnel-add(name, kind, bind, bind-port, host, host-port, save, auto-start) => {
+                        root.tunnel-add(root.sftp-current-tab-id, name, kind, bind, bind-port, host, host-port, save, auto-start);
+                    }
+                    tunnel-stop(id) => { root.tunnel-stop(root.sftp-current-tab-id, id); }
+                    tunnel-start(id) => { root.tunnel-start(root.sftp-current-tab-id, id); }
+                    tunnel-delete(id) => { root.tunnel-delete(root.sftp-current-tab-id, id); }
+                    rename-request(path, name) => {
+                        root.sftp-prompt-kind = "rename";
+                        root.sftp-prompt-tab = root.sftp-current-tab-id;
+                        root.sftp-prompt-target = path;
+                        root.sftp-prompt-value = name;
+                        root.sftp-prompt-open = true;
+                    }
+                    chmod-request(path, name, mode) => {
+                        root.sftp-chmod-open(root.sftp-current-tab-id, path, name, mode);
+                    }
+                    copy-path(path) => { root.sftp-copy-path(path); }
+                    new-folder(dir) => {
+                        root.sftp-prompt-kind = "mkdir";
+                        root.sftp-prompt-tab = root.sftp-current-tab-id;
+                        root.sftp-prompt-target = dir;
+                        root.sftp-prompt-value = "";
+                        root.sftp-prompt-open = true;
+                    }
+                    new-file(dir) => {
+                        root.sftp-prompt-kind = "touch";
+                        root.sftp-prompt-tab = root.sftp-current-tab-id;
+                        root.sftp-prompt-target = dir;
+                        root.sftp-prompt-value = "";
+                        root.sftp-prompt-open = true;
+                    }
+                }
+
                 // Drag the panel's in-edge (central-facing) edge to resize its
                 // extent along the dock normal (width on left/right, height on
                 // top/bottom) — the stacked renderer's replacement for the old
@@ -2960,6 +3753,8 @@ export component AppWindow inherits Window {
             }
 
             // Dividers between stacked panels on the same edge (#dock-stack).
+            // The painted bar is 4px wide; the TouchArea overhangs ±5px along
+            // the drag axis so the handle is easy to grab with the finger.
             for dd[di] in root.dock-dividers : Rectangle {
                 x: dd.x;
                 y: dd.y;
@@ -2968,6 +3763,10 @@ export component AppWindow inherits Window {
                 background: dd-ta.pressed ? Theme.accent : Theme.border-strong;
                 animate background { duration: 100ms; }
                 dd-ta := TouchArea {
+                    x: dd.vertical ? 0px : -5px;
+                    y: dd.vertical ? -5px : 0px;
+                    width: dd.vertical ? parent.width : parent.width + 10px;
+                    height: dd.vertical ? parent.height + 10px : parent.height;
                     mouse-cursor: dd.vertical ? ns-resize : ew-resize;
                     moved => {
                         if (self.pressed) {
@@ -2976,10 +3775,24 @@ export component AppWindow inherits Window {
                                     ? ((self.absolute-position.y + self.mouse-y)
                                         - dock-area.absolute-position.y) / 1px
                                     : ((self.absolute-position.x + self.mouse-x)
-                                        - dock-area.absolute-position.x) / 1px);
+                                        - dock-area.absolute-position.x) / 1px,
+                                dd.axis-start / 1px, dd.axis-len / 1px);
                         }
                     }
                 }
+            }
+
+            // File drag-in target highlight (Windows): outlines the drop target
+            // — the terminal pane or the docked SFTP panel — while a file is
+            // held over it. Purely visual; Rust clears it on drop/leave.
+            if root.file-drop-hl : Rectangle {
+                x: root.file-drop-hl-x;
+                y: root.file-drop-hl-y;
+                width: root.file-drop-hl-w;
+                height: root.file-drop-hl-h;
+                border-width: 2px;
+                border-color: Theme.accent;
+                background: Theme.accent.with-alpha(0.12);
             }
 
             // Drag-to-dock snap overlay — four edge zones; the one under the cursor
@@ -3097,23 +3910,6 @@ export component AppWindow inherits Window {
             ? (root.pinned ? "Unpin window (stop keeping on top)" : "Pin window (keep on top)")
             : (root.pinned ? "取消置顶" : "窗口置顶");
         clicked => { root.pinned = !root.pinned; root.pinned-changed(root.pinned); }
-    }
-    // Updates: a quiet red dot instead of a popup banner when a newer release
-    // is found; clicking opens Settings → Updates, which holds every action.
-    IconBtn {
-        x: root.width - 214px - root.toolbar-x-off; y: root.toolbar-y;
-        visible: !root.term-fullscreen;
-        icon: "\u{E2C0}";   // Material "cloud_download"
-        badge: root.update-available;
-        tooltip: root.update-available
-            ? (root.lang-en ? "Update available: " : "有新版本：") + root.update-version
-            : (root.lang-en ? "Updates" : "软件更新");
-        clicked => {
-            root.settings-open = false;
-            root.download-open = false;
-            root.interface-start-page = "update";
-            root.interface-open = true;
-        }
     }
 
     // Frameless resize edges (#119): thin hit-zones that start an OS-level
@@ -3548,7 +4344,7 @@ export component AppWindow inherits Window {
                     Text { text: "\u{E5D8}"; font-family: "Material Icons"; // ↑ export
                            color: Theme.text-secondary; font-size: Theme.fs-sm;
                            vertical-alignment: center; }
-                    Text { text: root.lang-en ? "Export connections" : "导出连接";
+                    Text { text: root.lang-en ? "Export connections (encrypted)" : "导出连接（口令加密）";
                            color: Theme.text-primary; font-size: Theme.fs-md;
                            vertical-alignment: center; horizontal-stretch: 1; }
                 }
@@ -3988,9 +4784,28 @@ export component AppWindow inherits Window {
                     checked <=> root.qcm-send-enter;
                 }
 
-                // New (empty) group.
+                // Import / export + new (empty) group. The hint shows the last
+                // import/export result, cleared whenever the dialog reopens.
                 HorizontalLayout {
-                    Rectangle { horizontal-stretch: 1; }
+                    spacing: 8px;
+                    Text {
+                        text: root.qcm-io-hint;
+                        visible: root.qcm-io-hint != "";
+                        overflow: elide;
+                        color: Theme.text-muted;
+                        font-size: Theme.fs-xs;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                    }
+                    Rectangle { horizontal-stretch: root.qcm-io-hint == "" ? 1 : 0; }
+                    Button {
+                        text: root.lang-en ? "Export" : "导出";
+                        clicked => { root.export-quick-commands(); }
+                    }
+                    Button {
+                        text: root.lang-en ? "Import" : "导入";
+                        clicked => { root.import-quick-commands(); }
+                    }
                     Button {
                         text: root.lang-en ? "+ New group" : "+ 新建分组";
                         clicked => { root.qcg-orig = ""; root.qcg-name = ""; root.qcg-open = true; }
@@ -4839,7 +5654,7 @@ export component AppWindow inherits Window {
                             HorizontalLayout {
                                 padding-left: 4px; padding-right: 4px;
                                 Text {
-                                    text: "github.com/yituorou/meatshell";
+                                    text: "github.com/agogo233/meatshell";
                                     color: Theme.accent;
                                     font-size: Theme.fs-sm;
                                     vertical-alignment: center;
@@ -4880,6 +5695,9 @@ export component AppWindow inherits Window {
         draft-key-path <=> root.dialog-key-path;
         draft-key-inline <=> root.dialog-key-inline;
         draft-key-inline-mode <=> root.dialog-key-inline-mode;
+        draft-key-algo <=> root.dialog-key-algo;
+        draft-key-status <=> root.dialog-key-status;
+        draft-key-generated <=> root.dialog-key-generated;
         draft-proxy-type <=> root.dialog-proxy-type;
         draft-proxy-hostport <=> root.dialog-proxy-hostport;
         draft-group <=> root.dialog-group;
@@ -4935,6 +5753,8 @@ export component AppWindow inherits Window {
         stop-test => { root.session-dialog-stop-test(); }
         connection-draft-changed => { root.session-dialog-changed(); }
         pick-key-file => { root.session-dialog-pick-key(); }
+        generate-key => { root.session-dialog-generate-key(); }
+        upload-key(draft) => { root.session-dialog-upload-key(draft); }
         add-forward => { root.add-forward(); }
         update-forward(i, f) => { root.update-forward(i, f); }
         delete-forward(i) => { root.delete-forward(i); }
@@ -5380,8 +6200,21 @@ export component AppWindow inherits Window {
                     output-highlight-preset <=> root.output-highlight-preset;
                     output-highlight-rules: root.output-highlight-rules;
                     output-highlight-rule-status <=> root.output-highlight-rule-status;
+                    action-links-enabled <=> root.action-links-enabled;
+                    action-links-ipv4 <=> root.action-links-ipv4;
+                    action-links-host-port <=> root.action-links-host-port;
+                    action-links-url <=> root.action-links-url;
+                    command-history-min-len <=> root.command-history-min-len;
+                    command-history-max-len <=> root.command-history-max-len;
                     ui-scale: root.ui-scale;
                     sftp-follow-cd <=> root.sftp-follow-cd;
+                    sftp-queue-concurrency <=> root.sftp-queue-concurrency;
+                    sftp-queue-rate-limit <=> root.sftp-queue-rate-limit;
+                    sftp-queue-dedup <=> root.sftp-queue-dedup;
+                    sftp-preserve-mtime <=> root.sftp-preserve-mtime;
+                    auto-reconnect-enabled <=> root.auto-reconnect-enabled;
+                    auto-reconnect-max-attempts <=> root.auto-reconnect-max-attempts;
+                    auto-reconnect-interval <=> root.auto-reconnect-interval;
                     editor-embedded <=> root.editor-embedded;
                     collapse-sidebar-default <=> root.collapse-sidebar-default;
                     collapse-sftp-default <=> root.collapse-sftp-default;
@@ -5393,6 +6226,15 @@ export component AppWindow inherits Window {
                     webdav-remote-path <=> root.webdav-remote-path;
                     webdav-accept-invalid-certs <=> root.webdav-accept-invalid-certs;
                     webdav-status <=> root.webdav-status;
+                    portable-passphrase <=> root.portable-passphrase;
+                    portable-status <=> root.portable-status;
+                    ai-base-url <=> root.ai-base-url;
+                    ai-api-key <=> root.ai-api-key;
+                    ai-model <=> root.ai-model;
+                    ai-panel-enabled <=> root.ai-panel-enabled;
+                    ai-discovered-models: root.ai-discovered-models;
+                    ai-discover-state: root.ai-discover-state;
+                    ai-discover-error: root.ai-discover-error;
                     download-always-ask <=> root.download-always-ask;
                     session-log-enabled <=> root.session-log-enabled;
                     session-log-dir: root.session-log-dir;
@@ -5406,28 +6248,6 @@ export component AppWindow inherits Window {
                     zen-mode <=> root.zen-mode;
                     welcome-as-sidebar <=> root.welcome-as-sidebar;
                     quick-commands-as-sidebar <=> root.quick-commands-as-sidebar;
-                    update-check-enabled <=> root.update-check-enabled;
-                    update-version: root.update-version;
-                    update-busy: root.update-busy;
-                    update-error: root.update-error;
-                    update-install-supported: root.update-install-supported;
-                    update-via-terminal: root.update-via-terminal;
-                    update-status: root.update-status;
-                    update-action-label: root.update-action-label;
-                    check-for-updates => { root.check-for-updates(); }
-                    update-action => { root.update-action(); }
-                    open-update-url => { root.open-update-url(); }
-                    update-mirrors: root.update-mirrors;
-                    update-mirrors-testing: root.update-mirrors-testing;
-                    update-china-tz: root.update-china-tz;
-                    update-mirror-error: root.update-mirror-error;
-                    add-update-mirror(url) => { root.add-update-mirror(url); }
-                    remove-update-mirror(url) => { root.remove-update-mirror(url); }
-                    reset-update-mirrors => { root.reset-update-mirrors(); }
-                    test-update-mirrors => { root.test-update-mirrors(); }
-                    update-mirror-auto: root.update-mirror-auto;
-                    select-update-mirror(key) => { root.select-update-mirror(key); }
-                    set-update-mirror-auto(v) => { root.set-update-mirror-auto(v); }
                     mcp-enabled <=> root.mcp-enabled;
                     mcp-use-saved-credentials <=> root.mcp-use-saved-credentials;
                     mcp-allow-commands <=> root.mcp-allow-commands;
@@ -5482,6 +6302,12 @@ export component AppWindow inherits Window {
                         root.set-output-highlight(enabled, preset);
                     }
                     set-json-format-output(enabled) => { root.set-json-format-output(enabled); }
+                    set-action-links(enabled, ipv4, host-port, url) => {
+                        root.set-action-links(enabled, ipv4, host-port, url);
+                    }
+                    set-command-history-length-filter(min, max) => {
+                        root.set-command-history-length-filter(min, max);
+                    }
                     add-output-highlight-rule(pattern, regex, case-sensitive, whole-line, color) => {
                         root.add-output-highlight-rule(
                             pattern, regex, case-sensitive, whole-line, color)
@@ -5492,10 +6318,19 @@ export component AppWindow inherits Window {
                     set-output-highlight-rule-enabled(index, enabled) => {
                         root.set-output-highlight-rule-enabled(index, enabled);
                     }
+                    export-output-highlight-rules() => { root.export-output-highlight-rules(); }
+                    import-output-highlight-rules() => { root.import-output-highlight-rules(); }
                     set-ui-scale(v) => { root.set-ui-scale(v); }
                     set-panel-font(v) => { root.set-panel-font(v); }
                     set-renderer-mode(v) => { root.set-renderer-mode(v); }
                     set-sftp-follow-cd(v) => { root.set-sftp-follow-cd(v); }
+                    set-sftp-queue-concurrency(v) => { root.set-sftp-queue-concurrency(v); }
+                    set-sftp-queue-rate-limit(v) => { root.set-sftp-queue-rate-limit(v); }
+                    set-sftp-queue-dedup(v) => { root.set-sftp-queue-dedup(v); }
+                    set-sftp-preserve-mtime(v) => { root.set-sftp-preserve-mtime(v); }
+                    set-auto-reconnect-enabled(v) => { root.set-auto-reconnect-enabled(v); }
+                    set-auto-reconnect-max-attempts(v) => { root.set-auto-reconnect-max-attempts(v); }
+                    set-auto-reconnect-interval(v) => { root.set-auto-reconnect-interval(v); }
                     set-editor-embedded(v) => { root.set-editor-embedded(v); }
                     set-collapse-sidebar-default(v) => { root.set-collapse-sidebar-default(v); }
                     set-collapse-sftp-default(v) => { root.set-collapse-sftp-default(v); }
@@ -5505,6 +6340,25 @@ export component AppWindow inherits Window {
                     }
                     webdav-upload => { root.webdav-upload(); }
                     webdav-download => { root.webdav-download(); }
+                    export-portable-bundle => { root.export-portable-bundle(); }
+                    import-portable-bundle => { root.import-portable-bundle(); }
+                    upload-portable-bundle => { root.upload-portable-bundle(); }
+                    download-portable-bundle => { root.download-portable-bundle(); }
+                    save-ai-settings(base-url, api-key, model) => {
+                        root.save-ai-settings(base-url, api-key, model);
+                    }
+                    discover-ai-models(base-url, api-key) => {
+                        root.discover-ai-models(base-url, api-key);
+                    }
+                    set-ai-panel-enabled(v) => {
+                        // The settings toggle doubles as the panel's open/close:
+                        // persist + open it expanded (no same-edge squeeze — panels
+                        // now stack on the same edge, #dock-stack).
+                        root.ai-panel-open = v;
+                        root.set-ai-panel-open(v);
+                        root.ai-panel-collapsed = false;
+                        root.dock-layout-changed();
+                    }
                     set-download-always-ask(v) => { root.set-download-always-ask(v); }
                     set-session-log-enabled(v) => { root.set-session-log-enabled(v); }
                     pick-session-log-dir => { root.pick-session-log-dir(); }
@@ -5524,7 +6378,6 @@ export component AppWindow inherits Window {
                         }
                         root.set-quick-commands-as-sidebar(v);
                     }
-                    set-update-check-enabled(v) => { root.set-update-check-enabled(v); }
                     set-mcp-permissions(enabled, credentials, commands, files) => {
                         root.set-mcp-permissions(enabled, credentials, commands, files);
                     }

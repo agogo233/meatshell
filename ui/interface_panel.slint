@@ -19,20 +19,6 @@ export struct OutputRuleItem {
     enabled: bool,
 }
 
-// One download source on Settings → Updates (GitHub first, then mirrors).
-// `key` is the normalised prefix ("" = GitHub). `selected` is the source a
-// one-click update will use first (the user's pick, or the fastest in auto).
-// `level`: 0 untested/testing, 1 fast, 2 medium, 3 slow, 4 failed.
-export struct UpdateMirrorRow {
-    url: string,
-    key: string,
-    ping: string,
-    level: int,
-    fastest: bool,
-    selected: bool,
-    removable: bool,
-}
-
 export struct WslProfileInfo {
     id: string,
     name: string,
@@ -313,6 +299,8 @@ component SettingRow inherits Rectangle {
     in property <string> label;
     in property <string> desc;
     in property <bool> show-divider: true;
+    in property <bool> enabled: true;
+    opacity: root.enabled ? 1.0 : 0.45;
     VerticalLayout {
         HorizontalLayout {
             spacing: 14px;
@@ -741,9 +729,23 @@ export component InterfacePanel inherits Rectangle {
     in-out property <string> output-highlight-preset;
     in property <[OutputRuleItem]> output-highlight-rules;
     in-out property <string> output-highlight-rule-status;
+    in-out property <bool> action-links-enabled: true;
+    in-out property <bool> action-links-ipv4: true;
+    in-out property <bool> action-links-host-port: true;
+    in-out property <bool> action-links-url: true;
+    in-out property <int> command-history-min-len: 0;
+    in-out property <int> command-history-max-len: 0;
     in property <float> ui-scale;
     in-out property <bool> sftp-follow-cd;
     in-out property <bool> editor-embedded;
+    in-out property <int> sftp-queue-concurrency: 2;
+    in-out property <int> sftp-queue-rate-limit: 0;   // KiB/s, 0 = unlimited
+    in-out property <string> sftp-queue-dedup: "ask"; // ask/overwrite/skip/rename
+    in-out property <bool> sftp-preserve-mtime;
+    // Grace auto-reconnect (#P3-H).
+    in-out property <bool> auto-reconnect-enabled;
+    in-out property <int> auto-reconnect-max-attempts: 5;
+    in-out property <int> auto-reconnect-interval: 5;
     in-out property <bool> collapse-sidebar-default;
     in-out property <bool> collapse-sftp-default;
     in-out property <bool> sync-upload-enabled;
@@ -754,6 +756,18 @@ export component InterfacePanel inherits Rectangle {
     in-out property <string> webdav-remote-path;
     in-out property <bool> webdav-accept-invalid-certs;
     in-out property <string> webdav-status;
+    // Passphrase-encrypted portable bundle (#P3-I).
+    in-out property <string> portable-passphrase;
+    in-out property <string> portable-status;
+    // AI assistant chat (OpenAI-compatible). The key is stored encrypted at
+    // rest by Rust; the panel visibility toggle persists the panel itself.
+    in-out property <string> ai-base-url;
+    in-out property <string> ai-api-key;
+    in-out property <string> ai-model;
+    in-out property <bool> ai-panel-enabled: false;
+    in property <[string]> ai-discovered-models;
+    in property <string> ai-discover-state;   // "" | "busy" | "ok" | "error"
+    in property <string> ai-discover-error;
     in-out property <bool> download-always-ask;
     in-out property <bool> session-log-enabled;
     in property <string> session-log-dir;
@@ -768,33 +782,13 @@ export component InterfacePanel inherits Rectangle {
     in-out property <bool> zen-mode: false;
     in-out property <bool> welcome-as-sidebar;
     in-out property <bool> quick-commands-as-sidebar;
-    in-out property <bool> update-check-enabled;
-    in property <string> update-version;
-    in property <bool> update-busy;
-    in property <bool> update-error;
-    in property <bool> update-install-supported;
-    in property <bool> update-via-terminal;
-    in property <string> update-status;
-    in property <string> update-action-label;
-    callback check-for-updates();
-    callback update-action();
-    callback open-update-url();
-    in property <[UpdateMirrorRow]> update-mirrors;
-    in property <bool> update-mirrors-testing;
-    in property <bool> update-china-tz;
-    in property <string> update-mirror-error;
-    callback add-update-mirror(string);
-    callback remove-update-mirror(string);
-    callback reset-update-mirrors();
-    callback test-update-mirrors();
-    in property <bool> update-mirror-auto: true;
-    callback select-update-mirror(string /* key */);
-    callback set-update-mirror-auto(bool);
-    property <string> new-mirror;
-    in-out property <bool> mcp-enabled: true;
-    in-out property <bool> mcp-use-saved-credentials: true;
-    in-out property <bool> mcp-allow-commands: true;
-    in-out property <bool> mcp-allow-file-transfers: true;
+    // MCP / remote control: fail-closed defaults (see config_file.rs
+    // default_mcp_preview_enabled). The values are pushed from the store
+    // after load; these initial values only matter before the first push.
+    in-out property <bool> mcp-enabled: false;
+    in-out property <bool> mcp-use-saved-credentials: false;
+    in-out property <bool> mcp-allow-commands: false;
+    in-out property <bool> mcp-allow-file-transfers: false;
     // Ready-to-paste MCP client entry with this executable's path (Rust).
     in property <string> mcp-config-json;
     callback copy-text(string);
@@ -867,10 +861,21 @@ export component InterfacePanel inherits Rectangle {
     callback add-output-highlight-rule(string, bool, bool, bool, string) -> bool;
     callback remove-output-highlight-rule(int);
     callback set-output-highlight-rule-enabled(int, bool);
+    callback set-action-links(bool, bool, bool, bool); // master, ipv4, host:port, url
+    callback set-command-history-length-filter(int, int); // min, max chars
+    callback export-output-highlight-rules();
+    callback import-output-highlight-rules();
     callback set-ui-scale(int);
     callback set-panel-font(int);   // settings-panel font scale, percent
     callback set-renderer-mode(string);
     callback set-sftp-follow-cd(bool);
+    callback set-sftp-queue-concurrency(int);
+    callback set-sftp-queue-rate-limit(int);
+    callback set-sftp-queue-dedup(string);
+    callback set-sftp-preserve-mtime(bool);
+    callback set-auto-reconnect-enabled(bool);
+    callback set-auto-reconnect-max-attempts(int);
+    callback set-auto-reconnect-interval(int);
     callback set-editor-embedded(bool);
     callback set-collapse-sidebar-default(bool);
     callback set-collapse-sftp-default(bool);
@@ -878,6 +883,13 @@ export component InterfacePanel inherits Rectangle {
     callback save-webdav-settings(bool, string, string, string, string, bool);
     callback webdav-upload();
     callback webdav-download();
+    callback export-portable-bundle();
+    callback import-portable-bundle();
+    callback upload-portable-bundle();
+    callback download-portable-bundle();
+    callback save-ai-settings(string /* base-url */, string /* api-key */, string /* model */);
+    callback discover-ai-models(string /* base-url */, string /* api-key */);
+    callback set-ai-panel-enabled(bool);
     callback set-download-always-ask(bool);
     callback set-session-log-enabled(bool);
     callback pick-session-log-dir();
@@ -890,7 +902,6 @@ export component InterfacePanel inherits Rectangle {
     callback set-zen-mode(bool);
     callback set-welcome-as-sidebar(bool);
     callback set-quick-commands-as-sidebar(bool);
-    callback set-update-check-enabled(bool);   // startup new-version check (#184)
     callback set-mcp-permissions(bool, bool, bool, bool);
     callback persist-wallpaper-overlay(float);   // save the overlay opacity
     callback set-wallpaper(string);    // none / builtin selection
@@ -998,6 +1009,11 @@ export component InterfacePanel inherits Rectangle {
                     clicked => { root.ifd-page = "webdav"; }
                 }
                 NavItem {
+                    icon: "\u{E8BD}"; label: "AI";
+                    active: root.ifd-page == "ai";
+                    clicked => { root.ifd-page = "ai"; }
+                }
+                NavItem {
                     icon: "\u{E2C4}"; label: root.lang-en ? "Download" : "下载";
                     active: root.ifd-page == "download";
                     clicked => { root.ifd-page = "download"; }
@@ -1011,11 +1027,6 @@ export component InterfacePanel inherits Rectangle {
                     icon: "\u{E335}"; label: "MCP";
                     active: root.ifd-page == "mcp";
                     clicked => { root.ifd-page = "mcp"; }
-                }
-                NavItem {
-                    icon: "\u{E923}"; label: root.lang-en ? "Updates" : "软件更新";
-                    active: root.ifd-page == "update";
-                    clicked => { root.ifd-page = "update"; }
                 }
                 }
             }
@@ -1196,10 +1207,34 @@ export component InterfacePanel inherits Rectangle {
                     label: root.lang-en ? "Additional paste shortcuts" : "额外粘贴快捷键";
                     desc: root.lang-en ? "Enable Ctrl+Alt+V, Shift+Insert, and middle-click paste."
                                        : "启用 Ctrl+Alt+V、Shift+Insert 和鼠标中键粘贴。";
-                    show-divider: false;
                     Switch {
                         on: root.extra-paste-shortcuts-enabled;
                         toggled(v) => { root.extra-paste-shortcuts-enabled = v; root.set-extra-paste-shortcuts-enabled(v); }
+                    }
+                }
+                SettingRow {
+                    label: root.lang-en ? "History min length" : "历史最短长度";
+                    desc: root.lang-en ? "Commands shorter than this are not recorded (0 = off)."
+                                       : "短于此长度的命令不记录（0 表示不限制）。";
+                    Stepper {
+                        value: root.command-history-min-len; minimum: 0; maximum: 50; step: 1;
+                        changed(v) => {
+                            root.command-history-min-len = v;
+                            root.set-command-history-length-filter(v, root.command-history-max-len);
+                        }
+                    }
+                }
+                SettingRow {
+                    label: root.lang-en ? "History max length" : "历史最长长度";
+                    desc: root.lang-en ? "Commands longer than this are not recorded (0 = off)."
+                                       : "长于此长度的命令不记录（0 表示不限制）。";
+                    show-divider: false;
+                    Stepper {
+                        value: root.command-history-max-len; minimum: 0; maximum: 2000; step: 10;
+                        changed(v) => {
+                            root.command-history-max-len = v;
+                            root.set-command-history-length-filter(root.command-history-min-len, v);
+                        }
                     }
                 }
             }
@@ -1439,6 +1474,76 @@ export component InterfacePanel inherits Rectangle {
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
                             }
+                        }
+                    }
+                }
+
+                Rectangle { height: 8px; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    GhostButton {
+                        text: root.lang-en ? "Export rules" : "导出规则";
+                        clicked => { root.export-output-highlight-rules(); }
+                    }
+                    GhostButton {
+                        text: root.lang-en ? "Import rules" : "导入规则";
+                        clicked => { root.import-output-highlight-rules(); }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+
+                SectionHeader { text: root.lang-en ? "ACTION LINKS" : "动作链接"; height: 24px; }
+                SettingRow {
+                    label: root.lang-en ? "Clickable terminal links" : "终端可点击链接";
+                    desc: root.lang-en
+                        ? "Underline IPv4, host:port and http(s) URLs. Ctrl+click opens a URL or fills a diagnostic command."
+                        : "为 IPv4、host:port 和 http(s) 链接加下划线。Ctrl+单击打开链接或填入诊断命令。";
+                    Switch {
+                        on: root.action-links-enabled;
+                        toggled(v) => {
+                            root.action-links-enabled = v;
+                            root.set-action-links(v, root.action-links-ipv4,
+                                root.action-links-host-port, root.action-links-url);
+                        }
+                    }
+                }
+                SettingRow {
+                    label: root.lang-en ? "IPv4 addresses" : "IPv4 地址";
+                    enabled: root.action-links-enabled;
+                    Switch {
+                        on: root.action-links-ipv4;
+                        toggled(v) => {
+                            root.action-links-ipv4 = v;
+                            root.set-action-links(root.action-links-enabled, v,
+                                root.action-links-host-port, root.action-links-url);
+                        }
+                    }
+                }
+                SettingRow {
+                    label: root.lang-en ? "host:port endpoints" : "host:port 端点";
+                    enabled: root.action-links-enabled;
+                    Switch {
+                        on: root.action-links-host-port;
+                        toggled(v) => {
+                            root.action-links-host-port = v;
+                            root.set-action-links(root.action-links-enabled, root.action-links-ipv4,
+                                v, root.action-links-url);
+                        }
+                    }
+                }
+                SettingRow {
+                    label: root.lang-en ? "http(s) URLs" : "http(s) 链接";
+                    desc: root.lang-en
+                        ? "Only http and https are opened; other schemes are ignored."
+                        : "仅打开 http 与 https，其它协议一律忽略。";
+                    show-divider: false;
+                    enabled: root.action-links-enabled;
+                    Switch {
+                        on: root.action-links-url;
+                        toggled(v) => {
+                            root.action-links-url = v;
+                            root.set-action-links(root.action-links-enabled, root.action-links-ipv4,
+                                root.action-links-host-port, v);
                         }
                     }
                 }
@@ -1992,6 +2097,63 @@ export component InterfacePanel inherits Rectangle {
                         toggled(v) => { root.editor-embedded = v; root.set-editor-embedded(v); }
                     }
                 }
+                SectionHeader { text: root.lang-en ? "TRANSFER QUEUE" : "传输队列"; height: 24px; }
+                SettingRow {
+                    label: root.lang-en ? "Concurrent transfers" : "并发传输数";
+                    desc: root.lang-en
+                        ? "How many files upload/download at the same time (1-4)."
+                        : "同时上传/下载的文件数量（1-4）。";
+                    Stepper {
+                        value: root.sftp-queue-concurrency; minimum: 1; maximum: 4; step: 1;
+                        changed(v) => { root.sftp-queue-concurrency = v; root.set-sftp-queue-concurrency(v); }
+                    }
+                }
+                SettingRow {
+                    label: root.lang-en ? "Rate limit" : "限速";
+                    desc: root.lang-en
+                        ? "Per-transfer cap in KiB/s. 0 means unlimited."
+                        : "单个传输上限（KiB/s）。0 表示不限速。";
+                    Stepper {
+                        value: root.sftp-queue-rate-limit; minimum: 0; maximum: 100000; step: 100; unit: "KiB/s";
+                        changed(v) => { root.sftp-queue-rate-limit = v; root.set-sftp-queue-rate-limit(v); }
+                    }
+                }
+                SettingRow {
+                    label: root.lang-en ? "Duplicate files" : "重名文件";
+                    desc: root.lang-en
+                        ? "What to do when the target file already exists."
+                        : "目标文件已存在时的处理方式。";
+                    ComboBox {
+                        width: 180px;
+                        model: [
+                            root.lang-en ? "Ask" : "每次询问",
+                            root.lang-en ? "Overwrite" : "直接覆盖",
+                            root.lang-en ? "Skip" : "跳过",
+                            root.lang-en ? "Keep both" : "自动改名",
+                        ];
+                        current-value: root.sftp-queue-dedup == "overwrite" ? (root.lang-en ? "Overwrite" : "直接覆盖")
+                            : root.sftp-queue-dedup == "skip" ? (root.lang-en ? "Skip" : "跳过")
+                            : root.sftp-queue-dedup == "rename" ? (root.lang-en ? "Keep both" : "自动改名")
+                            : (root.lang-en ? "Ask" : "每次询问");
+                        selected(v) => {
+                            root.sftp-queue-dedup = (v == "Overwrite" || v == "直接覆盖") ? "overwrite"
+                                : (v == "Skip" || v == "跳过") ? "skip"
+                                : (v == "Keep both" || v == "自动改名") ? "rename" : "ask";
+                            root.set-sftp-queue-dedup(root.sftp-queue-dedup);
+                        }
+                    }
+                }
+                SettingRow {
+                    label: root.lang-en ? "Preserve modification time" : "保留修改时间";
+                    desc: root.lang-en
+                        ? "Set the downloaded file's mtime to match the remote file."
+                        : "下载后把本地文件的修改时间设为与远端一致。";
+                    show-divider: false;
+                    Switch {
+                        on: root.sftp-preserve-mtime;
+                        toggled(v) => { root.sftp-preserve-mtime = v; root.set-sftp-preserve-mtime(v); }
+                    }
+                }
             }
 
             // --- Local shells page (#533, #538) ------------------------
@@ -2355,6 +2517,38 @@ export component InterfacePanel inherits Rectangle {
                         : "会话同步本身从右上角的同步图标开关。";
                     color: Theme.text-muted; font-size: 11px * Theme.panel-font; wrap: word-wrap;
                 }
+                SectionHeader { text: root.lang-en ? "GRACE RECONNECT" : "智能重连"; height: 24px; }
+                SettingRow {
+                    label: root.lang-en ? "Auto-reconnect dropped tabs" : "断线自动重连";
+                    desc: root.lang-en
+                        ? "Reconnect a dropped remote tab in place, up to the attempt limit."
+                        : "远程标签断开后自动原地重连，最多到尝试上限。";
+                    Switch {
+                        on: root.auto-reconnect-enabled;
+                        toggled(v) => { root.auto-reconnect-enabled = v; root.set-auto-reconnect-enabled(v); }
+                    }
+                }
+                SettingRow {
+                    label: root.lang-en ? "Max attempts" : "最大尝试次数";
+                    desc: root.lang-en
+                        ? "Give up after this many consecutive failed reconnects."
+                        : "连续重连失败达到此次数后放弃。";
+                    Stepper {
+                        value: root.auto-reconnect-max-attempts; minimum: 1; maximum: 50; step: 1;
+                        changed(v) => { root.auto-reconnect-max-attempts = v; root.set-auto-reconnect-max-attempts(v); }
+                    }
+                }
+                SettingRow {
+                    label: root.lang-en ? "Retry interval" : "重连间隔";
+                    desc: root.lang-en
+                        ? "Seconds between reconnect scans."
+                        : "两次重连扫描之间的秒数。";
+                    show-divider: false;
+                    Stepper {
+                        value: root.auto-reconnect-interval; minimum: 2; maximum: 3600; step: 1; unit: "s";
+                        changed(v) => { root.auto-reconnect-interval = v; root.set-auto-reconnect-interval(v); }
+                    }
+                }
             }
 
             // --- WebDAV page (#185) ------------------------------------
@@ -2408,6 +2602,14 @@ export component InterfacePanel inherits Rectangle {
                         toggled(v) => { root.webdav-accept-invalid-certs = v; }
                     }
                 }
+                if root.webdav-accept-invalid-certs : Text {
+                    text: root.lang-en
+                        ? "Certificate verification is off: saved session passwords can be read by a man in the middle. Only trusted self-signed servers, HTTPS only."
+                        : "证书校验已关闭：已保存的会话密码可能被中间人读取，仅限可信自签服务器，且仅支持 HTTPS。";
+                    color: Theme.danger;
+                    font-size: 11px * Theme.panel-font;
+                    wrap: word-wrap;
+                }
                 HorizontalLayout {
                     spacing: 8px;
                     alignment: end;
@@ -2431,6 +2633,132 @@ export component InterfacePanel inherits Rectangle {
                 }
                 Text {
                     text: root.webdav-status;
+                    color: Theme.text-muted;
+                    font-size: 11px * Theme.panel-font;
+                    wrap: word-wrap;
+                }
+                SectionHeader { text: root.lang-en ? "PORTABLE BUNDLE" : "便携包"; height: 24px; }
+                Text {
+                    text: root.lang-en
+                        ? "Seal all sessions + settings into one file encrypted with a passphrase (Argon2id + ChaCha20-Poly1305). Import replaces the current config."
+                        : "用口令把全部连接与设置封装为单个文件（Argon2id + ChaCha20-Poly1305 加密）。导入会替换当前配置。";
+                    color: Theme.text-muted;
+                    font-size: 11px * Theme.panel-font;
+                    wrap: word-wrap;
+                }
+                LabeledInput {
+                    label: root.lang-en ? "Bundle passphrase" : "便携包口令";
+                    placeholder: root.lang-en ? "Required to export / import" : "导出与导入均需填写";
+                    password: true;
+                    value <=> root.portable-passphrase;
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+                    GhostButton {
+                        text: root.lang-en ? "Import file" : "导入文件";
+                        clicked => { root.import-portable-bundle(); }
+                    }
+                    GhostButton {
+                        text: root.lang-en ? "Export file" : "导出文件";
+                        clicked => { root.export-portable-bundle(); }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+                    GhostButton {
+                        text: root.lang-en ? "Download from WebDAV" : "从 WebDAV 下载";
+                        clicked => { root.download-portable-bundle(); }
+                    }
+                    PrimaryButton {
+                        text: root.lang-en ? "Upload to WebDAV" : "上传到 WebDAV";
+                        clicked => { root.upload-portable-bundle(); }
+                    }
+                }
+                Text {
+                    text: root.portable-status;
+                    color: Theme.text-muted;
+                    font-size: 11px * Theme.panel-font;
+                    wrap: word-wrap;
+                }
+            }
+
+            // --- AI page -----------------------------------------------
+            if root.ifd-page == "ai" : VerticalLayout {
+                padding-left: 20px;
+                padding-right: 20px;
+                padding-top: 14px;
+                spacing: 10px;
+                alignment: start;
+                SectionHeader { text: "AI"; height: 24px; }
+                SettingRow {
+                    label: root.lang-en ? "Show AI panel" : "显示 AI 对话面板";
+                    desc: root.lang-en
+                        ? "A dockable chat panel (left by default); terminal right-click → Send to AI fills its input."
+                        : "可停靠的对话面板（默认停靠左侧）；终端右键「发送到 AI」会填入其输入框。";
+                    show-divider: false;
+                    Switch {
+                        on: root.ai-panel-enabled;
+                        toggled(v) => { root.set-ai-panel-enabled(v); }
+                    }
+                }
+                LabeledInput {
+                    label: root.lang-en ? "API base URL" : "API 地址";
+                    placeholder: "https://api.openai.com/v1";
+                    value <=> root.ai-base-url;
+                }
+                LabeledInput {
+                    label: root.lang-en ? "API key" : "API Key";
+                    placeholder: root.lang-en ? "Optional (e.g. local Ollama)" : "可选（如本地 Ollama）";
+                    password: true;
+                    value <=> root.ai-api-key;
+                }
+                SettingRow {
+                    label: root.lang-en ? "Model" : "模型";
+                    desc: root.lang-en
+                        ? "Type a model name, or discover one from the endpoint."
+                        : "可手动填写模型名，也可点击「发现模型」自动获取。";
+                    HorizontalLayout {
+                        spacing: 6px;
+                        alignment: end;
+                        GhostButton {
+                            text: root.ai-discover-state == "busy"
+                                ? (root.lang-en ? "Discovering…" : "发现中…")
+                                : (root.lang-en ? "Discover models" : "发现模型");
+                            clicked => { root.discover-ai-models(root.ai-base-url, root.ai-api-key); }
+                        }
+                    }
+                }
+                if root.ai-discover-state == "ok" && root.ai-discovered-models.length > 0 : SettingRow {
+                    label: root.lang-en ? "Discovered models" : "发现的模型";
+                    ComboBox {
+                        width: 260px;
+                        model: root.ai-discovered-models;
+                        current-value: root.ai-model;
+                        selected(v) => { root.ai-model = v; }
+                    }
+                }
+                if root.ai-discover-state == "error" : Text {
+                    text: root.ai-discover-error;
+                    color: Theme.danger;
+                    font-size: 11px * Theme.panel-font;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+                    GhostButton {
+                        text: root.lang-en ? "Save" : "保存";
+                        clicked => {
+                            root.save-ai-settings(root.ai-base-url, root.ai-api-key, root.ai-model);
+                        }
+                    }
+                }
+                Text {
+                    text: root.lang-en
+                        ? "Any OpenAI-compatible /chat/completions endpoint works (OpenAI, DeepSeek, Ollama, …). The key is stored encrypted; conversations are never written to disk."
+                        : "支持任意 OpenAI 兼容 /chat/completions 接口（OpenAI、DeepSeek、Ollama 等）。Key 加密存储，对话不会写入磁盘。";
                     color: Theme.text-muted;
                     font-size: 11px * Theme.panel-font;
                     wrap: word-wrap;
@@ -2639,223 +2967,6 @@ export component InterfacePanel inherits Rectangle {
                         interval: 1500ms;
                         running: root.mcp-json-copied;
                         triggered => { root.mcp-json-copied = false; }
-                    }
-                }
-            }
-
-            // --- Updates -----------------------------------------------
-            if root.ifd-page == "update" : VerticalLayout {
-                padding-left: 20px;
-                padding-right: 20px;
-                padding-top: 14px;
-                // Room below the mirror buttons so they scroll fully into view
-                // above the card's bottom edge / resize grip.
-                padding-bottom: 28px;
-                spacing: 0;
-                alignment: start;
-                SectionHeader { text: root.lang-en ? "UPDATES" : "软件更新"; height: 24px; }
-                SettingRow {
-                    label: root.lang-en ? "Check for new versions on startup" : "启动时检查新版本";
-                    desc: root.lang-en
-                        ? "Check automatically on startup. You can also check manually below."
-                        : "启动时自动查询新版本，也可随时在下方手动检查。";
-                    show-divider: false;
-                    Switch {
-                        on: root.update-check-enabled;
-                        toggled(v) => { root.update-check-enabled = v; root.set-update-check-enabled(v); }
-                    }
-                }
-                Rectangle { height: 16px; }
-                if root.update-version != "" : Text {
-                    text: (root.lang-en ? "Available version: " : "可用版本：") + root.update-version;
-                    color: Theme.text-primary;
-                    font-size: Theme.fs-md;
-                }
-                Text {
-                    text: root.update-status;
-                    color: root.update-error ? #e57373 : Theme.text-muted;
-                    font-size: Theme.fs-sm;
-                    wrap: word-wrap;
-                }
-                Rectangle { height: 12px; }
-                HorizontalLayout {
-                    spacing: 10px;
-                    alignment: start;
-                    PrimaryButton {
-                        text: root.lang-en ? "Check for updates" : "检查更新";
-                        disabled: root.update-busy;
-                        clicked => { root.check-for-updates(); }
-                    }
-                    if root.update-version != "" && root.update-install-supported : PrimaryButton {
-                        text: root.update-action-label;
-                        disabled: root.update-busy;
-                        clicked => { root.update-action(); }
-                    }
-                }
-                Rectangle { height: 8px; }
-                HorizontalLayout {
-                    alignment: start;
-                    GhostButton {
-                        text: root.lang-en ? "Release page" : "发布页面";
-                        clicked => { root.open-update-url(); }
-                    }
-                }
-                Rectangle { height: 12px; }
-                Text {
-                    text: root.update-via-terminal
-                        ? (root.lang-en
-                            ? "Updates are built from the AUR: MeatShell opens a terminal tab running paru, yay or makepkg. When it finishes, restart MeatShell."
-                            : "更新从 AUR 构建：MeatShell 会打开终端标签页运行 paru、yay 或 makepkg，完成后重启 MeatShell 即可。")
-                        : root.update-install-supported
-                        ? (root.lang-en
-                            ? "Downloads are verified before installation. Installing closes all windows and connections, then reopens MeatShell. Temporary packages are removed afterwards."
-                            : "安装前会校验下载文件。安装时关闭所有窗口和连接，完成后重新打开 MeatShell，并清理临时安装包。")
-                        : (root.lang-en
-                            ? "This installation can't be updated from inside MeatShell; use the release page or your package manager."
-                            : "此安装方式不支持在软件内更新，请通过发布页面或系统包管理器更新。");
-                    color: Theme.text-muted;
-                    font-size: Theme.fs-sm;
-                    wrap: word-wrap;
-                }
-
-                // Download mirrors — Chinese UI only. Rust uses them only in a
-                // mainland China time zone, racing them against GitHub.
-                if !root.lang-en : VerticalLayout {
-                    spacing: 6px;
-                    // Speed-test every source each time the section appears.
-                    init => { root.test-update-mirrors(); }
-                    Rectangle { height: 14px; }
-                    HorizontalLayout {
-                        SectionHeader { text: "下载镜像"; height: 24px; horizontal-stretch: 1; }
-                        GhostButton {
-                            text: root.update-mirrors-testing ? "测速中…" : "重新测速";
-                            clicked => { if (!root.update-mirrors-testing) { root.test-update-mirrors(); } }
-                        }
-                    }
-                    Text {
-                        text: root.update-china-tz
-                            ? "一键更新优先使用选中的下载源，失败时依次换用其他源。所有下载均按 GitHub 发布的 SHA-256 校验。"
-                            : "当前系统时区不在中国大陆，镜像不会启用，更新将直接从 GitHub 下载。";
-                        color: Theme.text-muted;
-                        font-size: Theme.fs-sm;
-                        wrap: word-wrap;
-                    }
-                    SettingRow {
-                        label: "自动选择最快的下载源";
-                        desc: root.update-mirror-auto
-                            ? "每次更新前重新测速并使用最快的源。点击下方任一行可改为固定使用该源。"
-                            : "已固定使用选中的源，失败时再依次换用其他源。打开此开关恢复自动选择。";
-                        show-divider: false;
-                        Switch {
-                            on: root.update-mirror-auto;
-                            toggled(v) => { root.set-update-mirror-auto(v); }
-                        }
-                    }
-                    for mirror in root.update-mirrors : Rectangle {
-                        height: 30px;
-                        border-radius: Theme.radius-sm;
-                        background: mirror-row-ta.has-hover && !mirror.selected
-                            ? Theme.bg-hover.brighter(0.15) : Theme.bg-hover;
-                        border-width: mirror.selected ? 1px : 0px;
-                        border-color: Theme.accent;
-                        // Whole row selects; the ✕ button below sits on top of it.
-                        mirror-row-ta := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.select-update-mirror(mirror.key); }
-                        }
-                        HorizontalLayout {
-                            padding-left: 10px; padding-right: 4px; spacing: 8px;
-                            // Radio dot.
-                            Rectangle {
-                                width: 14px; height: 14px;
-                                y: (parent.height - self.height) / 2;
-                                border-radius: 7px;
-                                border-width: 1.5px;
-                                border-color: mirror.selected ? Theme.accent : Theme.text-muted;
-                                Rectangle {
-                                    width: 6px; height: 6px;
-                                    border-radius: 3px;
-                                    background: Theme.accent;
-                                    visible: mirror.selected;
-                                }
-                            }
-                            Text {
-                                text: mirror.removable ? mirror.url : mirror.url + "（官方源）";
-                                color: mirror.removable ? Theme.text-primary : Theme.text-secondary;
-                                font-size: Theme.fs-sm;
-                                vertical-alignment: center;
-                                horizontal-stretch: 1;
-                                overflow: elide;
-                            }
-                            if mirror.fastest : Text {
-                                text: "最快";
-                                color: #4caf50;
-                                font-size: Theme.fs-xs;
-                                vertical-alignment: center;
-                            }
-                            Text {
-                                min-width: 64px;
-                                text: mirror.ping;
-                                color: mirror.level == 1 ? #4caf50
-                                     : mirror.level == 2 ? #e0a040
-                                     : mirror.level >= 3 ? #e57373
-                                     : Theme.text-muted;
-                                font-size: Theme.fs-sm;
-                                horizontal-alignment: right;
-                                vertical-alignment: center;
-                            }
-                            // Keeps the ping column aligned on the GitHub row.
-                            if !mirror.removable : Rectangle { width: 22px; }
-                            if mirror.removable : Rectangle {
-                                width: 22px; height: 22px;
-                                y: (parent.height - self.height) / 2;
-                                border-radius: Theme.radius-sm;
-                                background: mirror-del-ta.has-hover ? Theme.bg-root : transparent;
-                                mirror-del-ta := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.remove-update-mirror(mirror.url); }
-                                }
-                                Text {
-                                    text: "\u{E5CD}";   // close
-                                    font-family: "Material Icons";
-                                    color: mirror-del-ta.has-hover ? #e57373 : Theme.text-muted;
-                                    font-size: Theme.fs-sm;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-                            }
-                        }
-                    }
-                    LabeledInput {
-                        label: "添加镜像（加在 GitHub 下载地址前的前缀）";
-                        placeholder: "https://v4.gh-proxy.org/";
-                        value <=> root.new-mirror;
-                        accepted => {
-                            root.add-update-mirror(root.new-mirror);
-                            if (root.update-mirror-error == "") { root.new-mirror = ""; }
-                        }
-                    }
-                    if root.update-mirror-error != "" : Text {
-                        text: root.update-mirror-error;
-                        color: #e57373;
-                        font-size: Theme.fs-sm;
-                        wrap: word-wrap;
-                    }
-                    HorizontalLayout {
-                        spacing: 10px;
-                        alignment: start;
-                        PrimaryButton {
-                            text: "添加";
-                            disabled: root.new-mirror == "";
-                            clicked => {
-                                root.add-update-mirror(root.new-mirror);
-                                if (root.update-mirror-error == "") { root.new-mirror = ""; }
-                            }
-                        }
-                        GhostButton {
-                            text: "恢复默认";
-                            clicked => { root.reset-update-mirrors(); }
-                        }
                     }
                 }
             }

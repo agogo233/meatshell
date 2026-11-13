@@ -229,6 +229,59 @@ pub(super) fn is_wayland_window(_window: &slint::Window) -> bool {
     false
 }
 
+/// Physical-pixel `(x, y, w, h)` rects of every connected monitor.
+pub(super) fn monitor_rects(window: &slint::Window) -> Vec<(f64, f64, f64, f64)> {
+    window
+        .with_winit_window(|ww| {
+            ww.available_monitors()
+                .map(|m| {
+                    let p = m.position();
+                    let s = m.size();
+                    (p.x as f64, p.y as f64, s.width as f64, s.height as f64)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// True if `window` (physical px) overlaps at least 40 physical px in both
+/// dimensions on any monitor — i.e. a placement a human could actually find.
+/// A position saved while a second monitor was attached (or the -32000,-32000
+/// sentinel Windows reports for a minimized HWND) fails this check, and the
+/// caller should fall back to centering instead of restoring it.
+pub(super) fn window_rect_visible_on_any_monitor(
+    window: (f64, f64, f64, f64),
+    monitors: &[(f64, f64, f64, f64)],
+) -> bool {
+    const MIN_VISIBLE_OVERLAP: f64 = 40.0;
+    let (wx, wy, ww, wh) = window;
+    if ww <= 0.0 || wh <= 0.0 {
+        return false;
+    }
+    monitors.iter().any(|&(mx, my, mw, mh)| {
+        let iw = (wx + ww).min(mx + mw) - wx.max(mx);
+        let ih = (wy + wh).min(my + mh) - wy.max(my);
+        iw >= MIN_VISIBLE_OVERLAP && ih >= MIN_VISIBLE_OVERLAP
+    })
+}
+
+/// True if a persisted logical window position is a real coordinate rather than
+/// a degenerate value — the (-32000,-32000) sentinel Windows reports for a
+/// minimized HWND, or an absurd magnitude. Used to decide whether to trust a
+/// saved position when no monitor geometry is available yet (the first timer
+/// tick can run before the winit window is attached to a display).
+pub(super) fn saved_position_plausible(x: f32, y: f32) -> bool {
+    const MINIMIZED_SENTINEL: f32 = -32000.0;
+    const ABS_LIMIT: f32 = 100_000.0;
+    // A real saved position is finite, well inside the sentinel/abs bounds.
+    x.is_finite()
+        && y.is_finite()
+        && x.abs() < ABS_LIMIT
+        && y.abs() < ABS_LIMIT
+        && (x - MINIMIZED_SENTINEL).abs() > 1000.0
+        && (y - MINIMIZED_SENTINEL).abs() > 1000.0
+}
+
 /// Detect the Windows mixed-DPI failure where the native maximized flag stays
 /// set but the HWND keeps a much smaller geometry from the previous monitor.
 /// Normal maximized work areas may be a little smaller because of the taskbar;
@@ -424,45 +477,6 @@ pub(super) fn setup_macos_platform(renderer_mode: &str) {
         }
     }
 }
-
-/// Center the window on the primary monitor's work area (Windows).
-#[cfg(windows)]
-pub(super) fn center_window(win: &AppWindow) {
-    #[repr(C)]
-    struct Rect {
-        left: i32,
-        top: i32,
-        right: i32,
-        bottom: i32,
-    }
-    #[link(name = "user32")]
-    extern "system" {
-        fn SystemParametersInfoW(action: u32, uiparam: u32, pvparam: *mut Rect, winini: u32)
-            -> i32;
-    }
-    const SPI_GETWORKAREA: u32 = 0x0030;
-
-    let size = win.window().size(); // physical pixels
-    let mut wa = Rect {
-        left: 0,
-        top: 0,
-        right: 0,
-        bottom: 0,
-    };
-    let ok = unsafe { SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut wa, 0) };
-    if ok == 0 {
-        return;
-    }
-    let area_w = (wa.right - wa.left).max(0) as u32;
-    let area_h = (wa.bottom - wa.top).max(0) as u32;
-    let x = wa.left + ((area_w.saturating_sub(size.width)) / 2) as i32;
-    let y = wa.top + ((area_h.saturating_sub(size.height)) / 2) as i32;
-    win.window()
-        .set_position(slint::PhysicalPosition::new(x, y));
-}
-
-#[cfg(not(windows))]
-pub(super) fn center_window(_win: &AppWindow) {}
 
 /// Bring a window to the front and give it keyboard focus: un-minimize it
 /// and ask the OS for focus. Used when an OS entry point (taskbar jump list,

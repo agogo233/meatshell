@@ -1,20 +1,9 @@
-//! UI and terminal font discovery.
+//! UI and terminal font resolution: system CJK/monospace enumeration,
+//! glyph-fallback coverage. Split out of app.rs to match the upstream
+//! module boundary (fonts).
 
 use super::*;
 
-/// Enumerate installed monospace font families for the Interface font picker.
-/// Terminals want fixed-width fonts, so non-monospace families are filtered out.
-/// Choose a UI font family that fontdb can actually resolve, falling back to the
-/// embedded "Meatshell Mono" when the system font database is empty/unreadable.
-///
-/// macOS 26 (Tahoe) shipped a system where fontdb couldn't register the named
-/// CJK font ("PingFang SC"), so hard-coding that name made the whole UI render
-/// blank (#129). This probes the loaded faces and picks the first CJK-capable
-/// family that exists; if none do, it returns the embedded font so the window is
-/// still visible (Latin text shows; CJK may tofu — far better than a blank UI).
-///
-/// Emits a one-line WARN summary (faces loaded + chosen font) so the choice lands
-/// in `error.log` for diagnostics without needing RUST_LOG.
 pub(super) fn resolve_ui_font_family() -> slint::SharedString {
     use fontdb::{Database, Family, Query, Stretch, Style, Weight};
 
@@ -197,7 +186,6 @@ fn build_glyph_fallback(term_family: &str) -> Option<crate::terminal::GlyphFallb
 /// thread), then redraw this window's terminals so already-printed prompts pick
 /// up the fallback. Repeated calls for the same family are no-ops (#461).
 pub(super) fn refresh_glyph_fallback(term_family: &str, window: &AppWindow, bufs: &TermBuffers) {
-    use std::sync::Mutex;
     static CURRENT: Mutex<Option<String>> = Mutex::new(None);
 
     let family = if term_family.trim().is_empty() {
@@ -226,7 +214,7 @@ pub(super) fn refresh_glyph_fallback(term_family: &str, window: &AppWindow, bufs
             }
             crate::terminal::install_glyph_fallback(fallback);
             let _ = weak.upgrade_in_event_loop(move |window| {
-                let tab_ids: Vec<String> = bufs.lock().unwrap().keys().cloned().collect();
+                let tab_ids: Vec<String> = lock_or_recover(&bufs).keys().cloned().collect();
                 for tab_id in tab_ids {
                     rebuild_tab_display(&window, &bufs, &tab_id);
                 }
@@ -236,3 +224,4 @@ pub(super) fn refresh_glyph_fallback(term_family: &str, window: &AppWindow, bufs
         tracing::warn!(%error, "failed to start glyph-fallback thread");
     }
 }
+

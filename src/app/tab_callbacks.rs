@@ -32,9 +32,10 @@ pub(super) fn wire_tab_callbacks(
                 return;
             };
             if let Some(w) = weak.upgrade() {
+                let lay = layout.borrow().clone();
                 refresh_panes(
                     &w,
-                    &layout.borrow(),
+                    &lay,
                     content_size.get(),
                     &tabs_model,
                     &panes_model,
@@ -67,9 +68,10 @@ pub(super) fn wire_tab_callbacks(
                 }
             }
             if let Some(w) = weak.upgrade() {
+                let lay = layout.borrow().clone();
                 refresh_panes(
                     &w,
-                    &layout.borrow(),
+                    &lay,
                     content_size.get(),
                     &tabs_model,
                     &panes_model,
@@ -102,9 +104,10 @@ pub(super) fn wire_tab_callbacks(
                 .move_tab_within(pane_id as u64, from as usize, to as usize);
             if let Some(w) = weak.upgrade() {
                 w.set_drag_active(false);
+                let lay = layout.borrow().clone();
                 refresh_panes(
                     &w,
-                    &layout.borrow(),
+                    &lay,
                     content_size.get(),
                     &tabs_model,
                     &panes_model,
@@ -147,21 +150,21 @@ pub(super) fn wire_tab_callbacks(
             }
 
             if let Some(h) = crate::app::term_buf(&bufs, id.as_str()) {
-                h.lock().unwrap().release_history_keep_screen();
+                super::lock_or_recover(&h).release_history_keep_screen();
             }
 
             tab_titles.borrow_mut().remove(&id);
             if let Some(handle) = handles.borrow_mut().remove(&id) {
                 handle.close();
             }
-            if let Some(sftp) = sftp_handles.lock().unwrap().remove(&id) {
+            if let Some(sftp) = lock_or_recover(&sftp_handles).remove(&id) {
                 sftp.close();
             }
-            sftp_last_cwd.lock().unwrap().remove(&id);
-            if let Some(gate) = render_gates.lock().unwrap().remove(&id) {
+            lock_or_recover(&sftp_last_cwd).remove(&id);
+            if let Some(gate) = lock_or_recover(&render_gates).remove(&id) {
                 gate.close();
             }
-            bufs.lock().unwrap().remove(&id);
+            lock_or_recover(&bufs).remove(&id);
             if let Ok(mut routes) = tab_routes.lock() {
                 routes.remove(&id);
             }
@@ -201,9 +204,10 @@ pub(super) fn wire_tab_callbacks(
                 // Drop a closed editor tab's document, or orphan the editor
                 // tabs whose SFTP channel was this terminal's (#494).
                 forget_tab(&w, &id);
+                let lay = layout.borrow().clone();
                 refresh_panes(
                     &w,
-                    &layout.borrow(),
+                    &lay,
                     content_size.get(),
                     &tabs_model,
                     &panes_model,
@@ -245,9 +249,10 @@ pub(super) fn wire_tab_callbacks(
                 }
             }
             if let Some(w) = weak.upgrade() {
+                let lay = layout.borrow().clone();
                 refresh_panes(
                     &w,
-                    &layout.borrow(),
+                    &lay,
                     content_size.get(),
                     &tabs_model,
                     &panes_model,
@@ -275,9 +280,10 @@ pub(super) fn wire_tab_callbacks(
                 }
             }
             if let Some(w) = weak.upgrade() {
+                let lay = layout.borrow().clone();
                 refresh_panes(
                     &w,
-                    &layout.borrow(),
+                    &lay,
                     content_size.get(),
                     &tabs_model,
                     &panes_model,
@@ -313,9 +319,10 @@ pub(super) fn wire_tab_callbacks(
                 }
             }
             if let Some(w) = weak.upgrade() {
+                let lay = layout.borrow().clone();
                 refresh_panes(
                     &w,
-                    &layout.borrow(),
+                    &lay,
                     content_size.get(),
                     &tabs_model,
                     &panes_model,
@@ -356,9 +363,10 @@ pub(super) fn wire_tab_callbacks(
                     lay.split(pane_id as u64, d, &tab_id, before);
                 }
                 if let Some(w) = weak.upgrade() {
+                    let lay = layout.borrow().clone();
                     refresh_panes(
                         &w,
-                        &layout.borrow(),
+                        &lay,
                         content_size.get(),
                         &tabs_model,
                         &panes_model,
@@ -384,9 +392,10 @@ pub(super) fn wire_tab_callbacks(
                 lay.merge_leaf_into_other(pane_id as u64);
             }
             if let Some(w) = weak.upgrade() {
+                let lay = layout.borrow().clone();
                 refresh_panes(
                     &w,
-                    &layout.borrow(),
+                    &lay,
                     content_size.get(),
                     &tabs_model,
                     &panes_model,
@@ -438,7 +447,10 @@ pub(super) fn wire_tab_callbacks(
                         w.set_drag_active(false);
                         return;
                     }
-                    match drag_target(&layout.borrow(), content_size.get(), x, y) {
+                    // Snapshot first: the match arms write Slint properties and
+                    // the temporary `layout.borrow()` would otherwise span them.
+                    let lay = layout.borrow().clone();
+                    match drag_target(&lay, content_size.get(), x, y) {
                         Some((_, _, (hx, hy, hw, hh))) => {
                             w.set_drag_active(true);
                             w.set_drag_hl_x(hx);
@@ -524,9 +536,10 @@ pub(super) fn wire_tab_callbacks(
             }
             if let Some(w) = weak.upgrade() {
                 w.set_drag_active(false);
+                let lay = layout.borrow().clone();
                 refresh_panes(
                     &w,
-                    &layout.borrow(),
+                    &lay,
                     content_size.get(),
                     &tabs_model,
                     &panes_model,

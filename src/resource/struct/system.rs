@@ -29,7 +29,35 @@ pub struct SystemSampler {
     pub(super) disks: Disks,
     pub(super) last_rx_total: u64,
     pub(super) last_tx_total: u64,
+    /// Whether the previous sample fell back to counting *all* adapters (no
+    /// physical one matched). A flip between the two counting scopes re-baselines
+    /// so the delta doesn't jump to the whole since-boot counter.
+    pub(super) last_fallback: bool,
     pub(super) last_instant: std::time::Instant,
+}
+
+/// One-time hardware inventory of the local machine (OS/kernel/CPU), shown in
+/// the system-information window of local shell tabs.
+#[derive(Clone, Default)]
+pub(crate) struct LocalHardwareInfo {
+    pub(crate) os: String,
+    pub(crate) kernel: String,
+    pub(crate) kernel_version: String,
+    pub(crate) arch: String,
+    pub(crate) hostname: String,
+    pub(crate) cpu_name: String,
+    pub(crate) cpu_vendor: String,
+    pub(crate) cpu_cores: String,
+    pub(crate) cpu_frequency: String,
+    pub(crate) gpus: Vec<LocalGpuInfo>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct LocalGpuInfo {
+    pub(crate) name: String,
+    pub(crate) vendor: String,
+    pub(crate) driver: String,
+    pub(crate) memory: String,
 }
 
 #[derive(Clone, Default)]
@@ -38,6 +66,9 @@ pub(crate) struct TabStatus {
     pub(crate) user: String,
     pub(crate) session_id: String,
     pub(crate) state: u8,
+    /// Consecutive auto-reconnect attempts for this tab (#P3-H). Reset to 0 on
+    /// a successful connect; capped by `auto_reconnect_max_attempts`.
+    pub(crate) reconnect_attempts: u32,
     /// True for built-in local shell tabs (system:*). Those should show the
     /// local machine's resource panel, not the (empty) remote stats fields.
     pub(crate) is_local: bool,

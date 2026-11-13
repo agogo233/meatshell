@@ -1,9 +1,12 @@
-//! Keyboard input routing from the terminal view to the PTY.
+//! Keyboard input wiring: translate Slint key events into the byte
+//! sequence sent to the remote PTY, with log redaction and macOS
+//! bare-Control marker handling. Split out of app.rs to match the
+//! upstream module boundary (key_input).
 
 use crate::terminal::ScreenDims as _;
 use super::*;
 
-pub(super) fn wire_key_input(
+pub(crate) fn wire_key_input(
     window: &AppWindow,
     handles: Rc<RefCell<HashMap<String, SessionHandle>>>,
     bufs: TermBuffers,
@@ -11,12 +14,87 @@ pub(super) fn wire_key_input(
     store: Rc<RefCell<ConfigStore>>,
     ctx: ConnectCtx,
 ) {
-    wire_tunnel_callbacks(
-        window,
-        handles.clone(),
-        store.clone(),
-        ctx.tab_statuses.clone(),
-    );
+    // Runtime SSH tunnel panel (#206). These tunnels live only for the active
+    // connection; saved session configuration remains unchanged.
+    {
+        let handles_rc = handles.clone();
+        window.on_tunnel_add(
+            move |tab_id: SharedString,
+                  name: SharedString,
+                  kind: SharedString,
+                  bind: SharedString,
+                  bind_port: SharedString,
+                  host: SharedString,
+                  host_port: SharedString,
+                  save: bool,
+                  auto_start: bool| {
+                let kind = kind.to_string();
+                if !matches!(kind.as_str(), "local" | "remote" | "dynamic") {
+                    return;
+                }
+                // The loopback bind check runs in the session worker, so a
+                // rejected tunnel reports itself in the terminal instead of
+                // vanishing silently (#port-forward-bind).
+                let Ok(bind_port) = bind_port.trim().parse::<u16>() else {
+                    return;
+                };
+                let host_port = if kind == "dynamic" {
+                    0
+                } else {
+                    match host_port.trim().parse::<u16>() {
+                        Ok(p) => p,
+                        Err(_) => return,
+                    }
+                };
+                let id = uuid::Uuid::new_v4().to_string();
+                let forward = crate::config::PortForward {
+                    // `save` persists the forward into the session. The fork's
+                    // runtime add keeps the simplified path: an explicit
+                    // session-id save is handled on the tunnel panel side.
+                    id: if save { id.clone() } else { String::new() },
+                    kind,
+                    name: name.trim().to_string(),
+                    bind_addr: bind.trim().to_string(),
+                    bind_port,
+                    host: host.trim().to_string(),
+                    host_port,
+                    auto_start,
+                };
+                let tunnel_id = if save {
+                    format!("saved-{id}")
+                } else {
+                    format!("runtime-{}", uuid::Uuid::new_v4())
+                };
+                if let Some(handle) = handles_rc.borrow().get(tab_id.as_str()) {
+                    handle.add_tunnel(tunnel_id, forward);
+                }
+            },
+        );
+    }
+    {
+        let handles_rc = handles.clone();
+        window.on_tunnel_stop(move |tab_id: SharedString, tunnel_id: SharedString| {
+            if let Some(handle) = handles_rc.borrow().get(tab_id.as_str()) {
+                handle.stop_tunnel(tunnel_id.to_string());
+            }
+        });
+    }
+    {
+        let handles_rc = handles.clone();
+        window.on_tunnel_start(move |tab_id: SharedString, tunnel_id: SharedString| {
+            if let Some(handle) = handles_rc.borrow().get(tab_id.as_str()) {
+                handle.start_tunnel(tunnel_id.to_string());
+            }
+        });
+    }
+    {
+        let handles_rc = handles.clone();
+        window.on_tunnel_delete(move |tab_id: SharedString, tunnel_id: SharedString| {
+            if let Some(handle) = handles_rc.borrow().get(tab_id.as_str()) {
+                handle.delete_tunnel(tunnel_id.to_string());
+            }
+        });
+    }
 
     // --- Command bar (#55): run command + quick-command management ---------
     {
@@ -206,6 +284,7 @@ pub(super) fn wire_key_input(
                 w.set_qcm_group(c.group.into());
                 w.set_qcm_send_enter(c.send_enter);
                 w.set_qcm_edit_index(index);
+                w.set_qcm_io_hint("".into());
                 w.set_quick_cmd_manage_open(true);
             }
         });
@@ -283,7 +362,12 @@ pub(super) fn wire_key_input(
         let weak = window.as_weak();
         let collapsed = collapsed_quick_groups.clone();
         window.on_move_quick_command(move |index: i32, group: SharedString| {
-            let target = crate::config::QuickCommand::normalize_group(&group);
+            let target = group.to_string();
+            let target = if target == "default" {
+                String::new()
+            } else {
+                target
+            };
             {
                 let mut s = store_rc.borrow_mut();
                 let mut v = s.quick_commands().to_vec();
@@ -364,6 +448,68 @@ pub(super) fn wire_key_input(
             }
         });
     }
+    // Quick-command export: whole list → portable plaintext JSON (no secrets
+    // involved, unlike the sessions export). Result shows in the dialog hint.
+    {
+        let store_rc = store.clone();
+        let weak = window.as_weak();
+        window.on_export_quick_commands(move || {
+            let Some(path) = rfd::FileDialog::new()
+                .set_file_name("meatshell-quick-commands.json")
+                .add_filter("JSON", &["json"])
+                .save_file()
+            else {
+                return;
+            };
+            let res = store_rc.borrow().quick_commands_export_to(&path);
+            if let Some(w) = weak.upgrade() {
+                let hint = match res {
+                    Ok(n) => format!("{} {}", t("已导出快捷命令", "exported"), n),
+                    Err(e) => format!("{}: {}", t("导出失败", "export failed"), e),
+                };
+                w.set_qcm_io_hint(hint.into());
+            }
+        });
+    }
+    // Quick-command import: merge from a JSON file (dedup by name+command+
+    // group; blank name/command entries skipped). Rebuild the shared model so
+    // command bar + sidebar + dialog all pick the new entries up.
+    {
+        let store_rc = store.clone();
+        let weak = window.as_weak();
+        let collapsed = collapsed_quick_groups.clone();
+        window.on_import_quick_commands(move || {
+            let Some(path) = rfd::FileDialog::new()
+                .add_filter("JSON", &["json"])
+                .pick_file()
+            else {
+                return;
+            };
+            let res = store_rc.borrow_mut().quick_commands_import_from(&path);
+            if let Some(w) = weak.upgrade() {
+                match res {
+                    Ok((added, skipped)) => {
+                        w.set_qcm_io_hint(
+                            format!(
+                                "{} {} / {} {}",
+                                t("已导入", "imported"),
+                                added,
+                                t("跳过", "skipped"),
+                                skipped
+                            )
+                            .into(),
+                        );
+                        w.set_quick_commands(quick_cmd_model(&store_rc.borrow(), &collapsed.borrow()));
+                    }
+                    Err(e) => {
+                        w.set_qcm_io_hint(
+                            format!("{}: {}", t("导入失败", "import failed"), e).into(),
+                        );
+                    }
+                }
+            }
+        });
+    }
 
     // Session sync / broadcast input: when on, a keystroke in any terminal is
     // mirrored to every online session (Xshell-style; #78 pt.4). Read on the hot
@@ -409,6 +555,7 @@ pub(super) fn wire_key_input(
         let handles = handles.clone();
         let bufs = bufs.clone();
         let sync_input = sync_input.clone();
+        let weak = window.as_weak();
         // Shared timestamp: the last time the Shift key alone was pressed
         // (key="", shift=true).  Used by the time-based Backspace filter below.
         let last_shift_time: Arc<Mutex<Option<std::time::Instant>>> = Arc::new(Mutex::new(None));
@@ -418,80 +565,7 @@ pub(super) fn wire_key_input(
             // pressing Enter re-spawns the shell + SFTP workers in the SAME tab
             // with a fresh screen instead of forcing the user to open a new one.
             if key.as_str() == "\n" && !ctrl && !alt {
-                let dead_session = {
-                    let statuses = ctx.tab_statuses.lock().unwrap();
-                    statuses
-                        .get(tab_id.as_str())
-                        .filter(|st| st.state == 2)
-                        .map(|st| st.session_id.clone())
-                };
-                if let Some(session_id) = dead_session {
-                    let Some(session) = store.borrow().get(&session_id).cloned() else {
-                        return;
-                    };
-                    // Drop the dead shell/SFTP handles for this tab.
-                    ctx.handles.borrow_mut().remove(tab_id.as_str());
-                    if let Some(h) =
-                        ctx.sftp_handles.lock().unwrap().remove(tab_id.as_str())
-                    {
-                        h.close();
-                    }
-                    // Fresh screen: new parser, cleared history/selection.
-                    {
-                        if let Some(h) = term_buf(&ctx.bufs, tab_id.as_str()) {
-                            let mut b = h.lock().unwrap();
-
-                            let is_alt = b.parser.screen().alternate_screen();
-
-                            if is_alt {
-                                b.ingest("\x1b[?1049l".to_string().as_bytes());
-                            }
-
-                            let (rows, cols) = b.parser.screen().dims();
-                            let cursor_row = b.parser.screen().cursor_position().0;
-
-                            let curr: Vec<crate::terminal::Line> = {
-                                let s = b.parser.screen();
-                                (0..rows).map(|r| crate::terminal::build_row(s, r, cols)).collect()
-                            };
-
-                            let k = cursor_row as usize;
-                            for line in curr.iter().take(k) {
-                                b.history.push_back(crate::terminal::HistLine::from(line));
-                            }
-                            while b.history.len() > crate::terminal::MAX_HISTORY {
-                                b.history.pop_front();
-                            }
-                            b.view_offset = 0;
-
-                            b.prev = Vec::new();
-                            b.displayed_text = Vec::new();
-                            b.csi_state = CsiState::Normal;
-                            b.csi_pending = Vec::new();
-                            b.charset = crate::terminal::CharsetTracker::default();
-                            b.mouse_tracked = false;
-
-                            b.parser = crate::terminal::vt_parser(rows, cols, 5000);
-
-                            if let Some(log) = b.session_log.as_mut() {
-                                log.note("reconnecting");
-                            }
-                        }
-                    }
-                    if let Some(st) =
-                        ctx.tab_statuses.lock().unwrap().get_mut(tab_id.as_str())
-                    {
-                        st.state = 0;
-                    }
-                    // Fresh session: the first OSC 7 after reconnect follows.
-                    ctx.sftp_last_cwd.lock().unwrap().remove(tab_id.as_str());
-                    if let Some(w) = ctx.weak.upgrade() {
-                        set_terminal_row(&w, tab_id.as_str(), |t| {
-                            t.status =
-                                crate::i18n::t("重连中...", "Reconnecting...").into();
-                        });
-                    }
-                    start_session_in_tab(tab_id.as_str(), session, &ctx);
+                if reconnect_tab_in_place(tab_id.as_str(), &ctx) {
                     return;
                 }
             }
@@ -499,14 +573,10 @@ pub(super) fn wire_key_input(
             // (DECCKM, set by nano/vim via \x1b[?1h). In that mode the terminal
             // must send \x1bOA/B/C/D instead of \x1b[A/B/C/D.
             let app_cursor = if let Some(h) = term_buf(&bufs, tab_id.as_str()) {
-                let mut b = h.lock().unwrap();
+                let mut b = lock_or_recover(&h);
                 // Typing snaps the view back to the live bottom so the
                 // user always sees what they're entering.
-                let cursor_row = b.parser.screen().cursor_position().0 as usize + b.view_offset;
-                let rows = b.parser.screen().dims().0 as usize;
-                if cursor_row >= rows {
-                    b.view_offset = 0;
-                }
+                b.view_offset = 0;
                 b.parser.screen().application_cursor()
             } else {
                 false
@@ -544,7 +614,7 @@ pub(super) fn wire_key_input(
             // alone fires so the filter below can catch IME-injected Backspace
             // events even if they arrive with shift=false.
             if key.as_str().is_empty() && shift && !ctrl && !alt {
-                *last_shift_time.lock().unwrap() = Some(std::time::Instant::now());
+                *lock_or_recover(&last_shift_time) = Some(std::time::Instant::now());
                 tracing::info!("[KEY_DIAG] lone-Shift recorded → timestamp saved");
             }
 
@@ -578,7 +648,7 @@ pub(super) fn wire_key_input(
                         && (0x01..=0x1f).contains(&cp)
                         && !is_standalone
                     {
-                        *last_shift_time.lock().unwrap() = Some(std::time::Instant::now());
+                        *lock_or_recover(&last_shift_time) = Some(std::time::Instant::now());
                         tracing::info!(
                             "[KEY_DIAG] DROPPED IME C0 marker U+{:04X} (shift={}) → timestamp saved",
                             cp, shift
@@ -661,7 +731,7 @@ pub(super) fn wire_key_input(
             // longer paired with this Backspace. Without clearing it, the broad
             // safety window drops legitimate Vim insert-mode Backspace (#319).
             if key.as_str() != "\u{0008}" && !key.as_str().is_empty() {
-                *last_shift_time.lock().unwrap() = None;
+                *lock_or_recover(&last_shift_time) = None;
             }
 
             if key.as_str() == "\u{0008}" && !ctrl && !alt {
@@ -674,7 +744,7 @@ pub(super) fn wire_key_input(
                 // 日志显示百度拼音注入 U+0010(右Shift标记) 到 Backspace 之间
                 // 间隔约 914ms，因此窗口设为 1500ms 以覆盖该场景。
                 let (shift_just_pressed, elapsed_ms) = {
-                    let guard = last_shift_time.lock().unwrap();
+                    let guard = lock_or_recover(&last_shift_time);
                     match *guard {
                         Some(t) => {
                             let ms = t.elapsed().as_millis();
@@ -745,25 +815,50 @@ pub(super) fn wire_key_input(
             );
             if !bytes.is_empty() {
                 let h = handles.borrow();
+                // Typing dismisses a local drag-selection (Windows Terminal /
+                // iTerm2 semantics): the highlight must not linger after the
+                // command has moved on. Cleared here — on the keystrokes that
+                // actually reach the PTY — so a bare modifier key (empty
+                // bytes) never drops a selection the user extends with
+                // Shift+click.
+                let mut cleared_tabs: Vec<String> = Vec::new();
                 if sync_input.load(std::sync::atomic::Ordering::Relaxed) {
                     // Broadcast the same bytes to every online session (#78 pt.4).
                     for (target_id, handle) in h.iter() {
                         if let Some(buffer) = term_buf(&bufs, target_id) {
-                            buffer.lock().unwrap().interactive_echo_until =
+                            let mut b = lock_or_recover(&buffer);
+                            b.interactive_echo_until =
                                 std::time::Instant::now() + INTERACTIVE_ECHO_WINDOW;
+                            if b.clear_selection() {
+                                cleared_tabs.push(target_id.clone());
+                            }
                         }
                         handle.send_raw(bytes.clone());
                     }
                 } else if let Some(handle) = h.get(tab_id.as_str()) {
                     if let Some(buffer) = term_buf(&bufs, tab_id.as_str()) {
-                        buffer.lock().unwrap().interactive_echo_until =
+                        let mut b = lock_or_recover(&buffer);
+                        b.interactive_echo_until =
                             std::time::Instant::now() + INTERACTIVE_ECHO_WINDOW;
+                        if b.clear_selection() {
+                            cleared_tabs.push(tab_id.to_string());
+                        }
                     }
                     handle.send_raw(bytes);
+                }
+                // The `handles` borrow is dropped; refresh only the tabs
+                // whose selection changed (most keystrokes have none).
+                if !cleared_tabs.is_empty() {
+                    if let Some(win) = weak.upgrade() {
+                        for tid in cleared_tabs {
+                            refresh_terminal_selection(&win, &bufs, &tid);
+                        }
+                    }
                 }
             }
         });
     }
+
 
     // Propagate PTY resize to the SSH worker and vt100 parser. Pixel
     // dimensions come from Slint; we approximate col/row counts using
@@ -843,7 +938,7 @@ pub(super) fn wire_key_input(
         window.on_copy_terminal_text(move |tab_id: SharedString| {
             let text = term_buf(&bufs, tab_id.as_str())
                 .map(|h| {
-                    let buf = h.lock().unwrap();
+                    let buf = lock_or_recover(&h);
                     // Copy the drag-selection when there is one, else the
                     // whole displayed screen.
                     let sel = buf.extract_selection_text();
@@ -862,13 +957,55 @@ pub(super) fn wire_key_input(
         });
     }
 
-    // Opt-in right-click copy; false lets the UI use the normal paste handler.
+    // Context menu → 添加为快捷命令: open the manage dialog (#55) with the live
+    // selection pre-filled as the command; the user names/groups it and hits Add.
+    {
+        let bufs_add = bufs.clone();
+        let weak = window.as_weak();
+        window.on_add_selection_to_quick(move |tab_id: SharedString| {
+            let text = term_buf(&bufs_add, tab_id.as_str())
+                .map(|h| {
+                    let buf = lock_or_recover(&h);
+                    buf.extract_selection_text()
+                })
+                .unwrap_or_default();
+            let command = text.trim().to_string();
+            if command.is_empty() {
+                // Whitespace-only selection: extent exists but nothing to save.
+                tracing::debug!("add-selection-to-quick: empty selection text, ignored");
+                return;
+            }
+            // Suggest a name from the first non-blank line, char-truncated so
+            // CJK never splits mid-glyph; Add starts enabled either way.
+            let first = command
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .unwrap_or("quick command");
+            let mut name: String = first.chars().take(40).collect();
+            if first.chars().count() > 40 {
+                name.push('…');
+            }
+            if let Some(w) = weak.upgrade() {
+                w.set_qcm_name(name.into());
+                w.set_qcm_command(command.into());
+                w.set_qcm_group("".into());
+                w.set_qcm_send_enter(true);
+                w.set_qcm_edit_index(-1);
+                w.set_qcm_io_hint("".into());
+                w.set_quick_cmd_manage_open(true);
+            }
+        });
+    }
+
+    // Opt-in right-click copy (upstream bf9c296): true copies the selected text;
+    // false lets the UI use the normal paste handler.
     {
         let bufs = bufs.clone();
         let weak = window.as_weak();
         window.on_right_click_copy_selection(move |tab_id: SharedString| {
             let text = term_buf(&bufs, tab_id.as_str()).and_then(|buffer| {
-                buffer.lock().unwrap().take_right_click_selection()
+                lock_or_recover(&buffer).take_right_click_selection()
             });
             // An empty selected region must not fall through to paste or
             // trigger the existing "copy whole screen" fallback.
@@ -885,6 +1022,7 @@ pub(super) fn wire_key_input(
             }
         });
     }
+
     // Middle-click / Ctrl+Shift+V: paste clipboard text into PTY.
     // Full clipboard payload for an open multi-line review dialog lives only
     // in `pending_paste` (not in a Slint string property): the software
@@ -922,7 +1060,8 @@ pub(super) fn wire_key_input(
                             let large = paste_requires_large_review(&text);
                             // Only a bounded preview enters the UI tree. Confirm
                             // reads the full payload via take_pending_paste.
-                            let preview = store_pending_paste(&pending_paste, tab_id.clone(), text);
+                            let preview =
+                                store_pending_paste(&pending_paste, tab_id.clone(), text);
                             let _ = slint::invoke_from_event_loop(move || {
                                 if let Some(w) = weak.upgrade() {
                                     w.set_paste_confirm_tab(tab_id.into());
@@ -987,17 +1126,28 @@ pub(super) fn wire_key_input(
         window.on_clear_terminal(move |tab_id: SharedString| {
             let tid = tab_id.to_string();
             if let Some(h) = term_buf(&bufs_clear, &tid) {
-                let mut buf = h.lock().unwrap();
+                let mut buf = lock_or_recover(&h);
                 buf.release_scrollback();
             }
             if let Some(win) = weak.upgrade() {
                 set_terminal_row(&win, &tid, |row| {
                     row.spans = ModelRc::from(Rc::new(VecModel::<TermSpan>::default()));
                     row.find_matches = ModelRc::from(Rc::new(VecModel::<TermMatch>::default()));
-                    row.find_current = TermMatch::default();
+                    row.link_matches = ModelRc::from(Rc::new(VecModel::<TermMatch>::default()));
                     row.selection = ModelRc::from(Rc::new(VecModel::<TermMatch>::default()));
+                    // The scrollback just went away with the buffer, so the
+                    // history-mode counters and the output-protection banner
+                    // would otherwise keep advertising stale matches (the find
+                    // bar stays on screen until the next render rebuilds it).
+                    row.find_active = -1;
+                    row.find_total = 0;
+                    row.backpressure = false;
+                    row.has_selection = false;
                     row.cursor_row = 0;
                     row.cursor_col = 0;
+                    // A fresh blank screen has no app-hide request, so the
+                    // caret belongs at the home cell until output says otherwise.
+                    row.cursor_visible = true;
                     row.rows_used = 0;
                     row.scroll_max = 0;
                     row.scroll_offset = 0;
@@ -1010,50 +1160,135 @@ pub(super) fn wire_key_input(
     }
 
     // Context menu → 查找: store the query and recompute highlight rectangles.
+    // Buffer mode highlights the visible window (legacy); history mode indexes
+    // every match across scrollback + live and scrolls to the first one.
+    //
+    // History mode rescans the whole scrollback (up to MAX_HISTORY rows) while
+    // holding the terminal lock, so every keystroke used to block the UI thread
+    // and the PTY ingest behind the same mutex. Buffer mode only scans the
+    // visible window and stays immediate; the scan only covers the *changed*
+    // query, so coalescing keystrokes never loses input: each timer runs with
+    // the latest (tab, query) pair, and a tab's edits while another tab is
+    // being scanned are queued instead of overwritten.
     {
         let bufs_find = bufs.clone();
         let weak = window.as_weak();
+        // FIFO of (tab-id, query) awaiting the debounced history scan. Every
+        // field is Send so the timer callback stays Send (slint::Timer requires
+        // it — plain Rc types cannot cross into the timer closure).
+        let pending_scan: Arc<Mutex<VecDeque<(String, String)>>> = Arc::default();
         window.on_find_query_changed(move |tab_id: SharedString, query: SharedString| {
             let tid = tab_id.to_string();
             let q = query.to_string();
-            let (matches, jumped) = with_term_buf(&bufs_find, &tid, |buf| {
-                if buf.find_query != q {
-                    // A new query starts over from the screen (#535).
-                    buf.find_cursor = None;
-                }
+            let history_mode = with_term_buf(&bufs_find, &tid, |buf| {
                 buf.find_query = q.clone();
-                let mut matches = compute_find_matches(&buf.displayed_text, &q);
-                let jumped = matches.is_empty() && buf.scroll_to_first_find_match(&q);
-                if jumped {
-                    buf.render();
-                    matches = compute_find_matches(&buf.displayed_text, &q);
+                if buf.search_history_mode {
+                    // The positions were computed for the previous query: mark
+                    // the index dirty so an Enter (find-navigate) landing before
+                    // the debounced scan re-computes instead of advancing a
+                    // stale index.
+                    buf.find_dirty = true;
                 }
-                (matches, jumped)
+                buf.search_history_mode
             })
-            .unwrap_or_default();
-            if let Some(win) = weak.upgrade() {
-                if jumped {
-                    rebuild_tab_display(&win, &bufs_find, &tid);
+            .unwrap_or(false);
+            if !history_mode {
+                let (matches, jumped) = with_term_buf(&bufs_find, &tid, |buf| {
+                    let mut matches = compute_find_matches(&buf.displayed_text, &q);
+                    let jumped = matches.is_empty() && buf.scroll_to_first_find_match(&q);
+                    if jumped {
+                        buf.render();
+                        matches = compute_find_matches(&buf.displayed_text, &q);
+                    }
+                    (matches, jumped)
+                })
+                .unwrap_or_default();
+                if let Some(win) = weak.upgrade() {
+                    if jumped {
+                        rebuild_tab_display(&win, &bufs_find, &tid);
+                        return;
+                    }
+                    let model = ModelRc::from(Rc::new(VecModel::from(matches)));
+                    set_terminal_row(&win, &tid, |row| {
+                        row.find_matches = model.clone();
+                    });
+                }
+                return;
+            }
+            // History mode: debounce the full scrollback scan (#find-debounce).
+            lock_or_recover(&pending_scan).push_back((tid, q));
+            let bufs_scan = bufs_find.clone();
+            let weak_scan = weak.clone();
+            let pending = pending_scan.clone();
+            slint::Timer::single_shot(std::time::Duration::from_millis(150), move || {
+                // Drain everything queued so far; only the LATEST entry per
+                // tab is worth scanning (earlier ones describe a stale query).
+                let batch = std::mem::take(&mut *lock_or_recover(&pending));
+                if batch.is_empty() {
                     return;
                 }
-                let model = ModelRc::from(Rc::new(VecModel::from(matches)));
-                set_terminal_row(&win, &tid, |row| {
-                    row.find_matches = model.clone();
-                    row.find_current = TermMatch::default();
-                });
+                let mut latest: VecDeque<(String, String)> = VecDeque::new();
+                for entry in batch.into_iter().rev() {
+                    if !latest.iter().any(|(t, _)| *t == entry.0) {
+                        latest.push_front(entry);
+                    }
+                }
+                for (tid, _q) in latest {
+                    let _ = with_term_buf(&bufs_scan, &tid, |buf| {
+                        buf.recompute_find_positions();
+                        if !buf.find_positions.is_empty() {
+                            let (abs_row, _, _) = buf.find_positions[0];
+                            if buf.scroll_to_abs_row(abs_row) {
+                                buf.render();
+                            }
+                        }
+                    });
+                    if let Some(win) = weak_scan.upgrade() {
+                        // History mode always rebuilds: the tab display carries
+                        // the "n/total" match counter fed from `find_positions`,
+                        // which changed even when the view did not scroll.
+                        rebuild_tab_display(&win, &bufs_scan, &tid);
+                    }
+                }
+            });
+        });
+    }
+    // Find bar → next / previous (history mode navigation).
+    {
+        let bufs_nav = bufs.clone();
+        let weak = window.as_weak();
+        window.on_find_navigate(move |tab_id: SharedString, reverse: bool| {
+            let tid = tab_id.to_string();
+            let changed = with_term_buf(&bufs_nav, &tid, |buf| {
+                let dir = if reverse { -1 } else { 1 };
+                let scrolled = buf.find_goto(dir);
+                if scrolled {
+                    buf.render();
+                }
+                scrolled
+            })
+            .unwrap_or(false);
+            if changed {
+                if let Some(win) = weak.upgrade() {
+                    rebuild_tab_display(&win, &bufs_nav, &tid);
+                }
+            } else if let Some(win) = weak.upgrade() {
+                // Still refresh the active/total readout even if the view did
+                // not move (e.g. a single match).
+                rebuild_tab_display(&win, &bufs_nav, &tid);
             }
         });
     }
 
-    // Find bar ▲/▼/Enter (#535): step through matches across scrollback,
-    // scroll the current one into view and report "current/total".
+    // #535: find-step (query + dir) across scrollback + screen, returning the
+    // 1-based position and total so the toolbar can show "3/12".
     {
-        let bufs_step = bufs.clone();
+        let bufs_find_step = bufs.clone();
         let weak = window.as_weak();
         window.on_find_step(move |tab_id: SharedString, query: SharedString, dir: i32| {
             let tid = tab_id.to_string();
             let q = query.to_string();
-            let (current, total) = with_term_buf(&bufs_step, &tid, |buf| {
+            let (current, total) = with_term_buf(&bufs_find_step, &tid, |buf| {
                 if buf.find_query != q {
                     buf.find_cursor = None;
                     buf.find_query = q.clone();
@@ -1062,12 +1297,53 @@ pub(super) fn wire_key_input(
             })
             .unwrap_or_default();
             if let Some(win) = weak.upgrade() {
-                rebuild_tab_display(&win, &bufs_step, &tid);
+                rebuild_tab_display(&win, &bufs_find_step, &tid);
             }
             crate::ui::FindStatus {
                 current: current as i32,
                 total: total as i32,
             }
+        });
+    }
+
+    // Ctrl+click on a terminal action link: open http(s) URLs in the browser,
+    // or fill a diagnostic command (ping / curl) for IPv4 / host:port hits.
+    // Returns true when a link was hit so the terminal skips drag-selection.
+    {
+        let bufs_link = bufs.clone();
+        let weak = window.as_weak();
+        window.on_action_link_click(move |tab_id: SharedString, row: i32, col: i32| -> bool {
+            let tid = tab_id.to_string();
+            let hit = with_term_buf(&bufs_link, &tid, |buf| {
+                buf.action_links
+                    .iter()
+                    .find(|h| h.row == row && col >= h.col && col < h.col + h.len)
+                    .map(|h| (h.kind, h.value.clone()))
+            });
+            let Some(Some((kind, value))) = hit else {
+                return false;
+            };
+            match kind {
+                ActionLinkKind::Url => {
+                    #[cfg(windows)]
+                    let _ = std::process::Command::new("explorer").arg(&value).spawn();
+                    #[cfg(target_os = "macos")]
+                    let _ = std::process::Command::new("open").arg(&value).spawn();
+                    #[cfg(all(not(windows), not(target_os = "macos")))]
+                    let _ = std::process::Command::new("xdg-open").arg(&value).spawn();
+                }
+                ActionLinkKind::Ip | ActionLinkKind::HostPort => {
+                    if let Some(cmd) = default_command(kind, &value) {
+                        if let Some(win) = weak.upgrade() {
+                            let seq = win.get_quick_external_sequence() + 1;
+                            win.set_quick_external_command(cmd.into());
+                            win.set_quick_external_send_enter(false);
+                            win.set_quick_external_sequence(seq);
+                        }
+                    }
+                }
+            }
+            true
         });
     }
 
@@ -1159,7 +1435,7 @@ pub(super) fn wire_key_input(
         window.on_terminal_wheel(move |tab_id: SharedString, dir: i32, col: i32, row: i32| {
             let tid = tab_id.to_string();
             let bytes = term_buf(&bufs_wheel, &tid).map(|h| {
-                let buf = h.lock().unwrap();
+                let buf = lock_or_recover(&h);
                 let screen = buf.parser.screen();
                 if screen.mouse_protocol_mode() != vt100::MouseProtocolMode::None {
                     // 1-based cell under the cursor, clamped to the screen.
@@ -1320,23 +1596,6 @@ pub(super) fn wire_key_input(
             }
         });
     }
-    // Drop the local selection without touching the clipboard (#542): Esc
-    // while one is shown, or a plain click forwarded to a mouse-tracking app.
-    {
-        let bufs_sel = bufs.clone();
-        let weak = window.as_weak();
-        window.on_term_select_clear(move |tab_id: SharedString| {
-            let tid = tab_id.to_string();
-            with_term_buf(&bufs_sel, &tid, |buf| {
-                buf.sel_anchor = None;
-                buf.sel_focus = None;
-                buf.sel_ranges.clear();
-            });
-            if let Some(win) = weak.upgrade() {
-                refresh_terminal_selection(&win, &bufs_sel, &tid);
-            }
-        });
-    }
     {
         let bufs_sel = bufs.clone();
         let weak = window.as_weak();
@@ -1370,7 +1629,7 @@ pub(super) fn wire_key_input(
                 return;
             };
             {
-                let mut buf = h.lock().unwrap();
+                let mut buf = lock_or_recover(&h);
                 // No scrollback on the alternate screen (vim/btop own the view).
                 if buf.parser.screen().alternate_screen() {
                     return;
@@ -1424,22 +1683,38 @@ pub(super) fn wire_key_input(
     {
         let bufs_mouse = bufs.clone();
         let handles_mouse = handles.clone();
+        let weak = window.as_weak();
         window.on_terminal_mouse(
             move |tab_id: SharedString, kind: i32, button: i32, row: i32, col: i32| -> bool {
                 let tid = tab_id.to_string();
+                let mut cleared = false;
                 let Some(bytes) = term_buf(&bufs_mouse, &tid).map(|h| {
-                    let buf = h.lock().unwrap();
-                    let screen = buf.parser.screen();
-                    let (rows, cols) = screen.dims();
+                    let mut buf = lock_or_recover(&h);
+                    let (rows, cols) = buf.parser.screen().dims();
                     if buf.mouse_tracked {
-                        let encoding = screen.mouse_protocol_encoding();
+                        // Plain left click forwarded to a mouse-tracking app:
+                        // deselect locally, matching how a click clears the
+                        // selection in a normal terminal.
+                        if kind == 0 && buf.selection_has_extent() {
+                            buf.sel_anchor = None;
+                            buf.sel_focus = None;
+                            buf.sel_ranges.clear();
+                            cleared = true;
+                        }
+                        let encoding = buf.parser.screen().mouse_protocol_encoding();
                         let (btn, release) = match kind {
-                            1 => (button as u8, true),  // release
-                            2 => (35, false),           // drag motion with button held
+                            1 => (button as u8, true), // release
+                            2 => (35, false),          // drag motion with button held
                             _ => (button as u8, false), // press
                         };
                         Some(encode_mouse_event(
-                            btn, release, col, row, cols, rows, encoding,
+                            btn,
+                            release,
+                            col,
+                            row,
+                            cols,
+                            rows,
+                            encoding,
                         ))
                     } else {
                         None
@@ -1450,12 +1725,18 @@ pub(super) fn wire_key_input(
                 let Some(bytes) = bytes else {
                     return false;
                 };
-                if let Some(h) = handles_mouse.borrow().get(&tid) {
+                let sent = if let Some(h) = handles_mouse.borrow().get(&tid) {
                     h.send_raw(bytes);
                     true
                 } else {
                     false
+                };
+                if cleared {
+                    if let Some(win) = weak.upgrade() {
+                        refresh_terminal_selection(&win, &bufs_mouse, &tid);
+                    }
                 }
+                sent
             },
         );
     }
@@ -1474,7 +1755,7 @@ pub(super) fn wire_key_input(
 /// markers, …) are revealed — those are exactly what the Shift/Backspace IME
 /// diagnostics need and are never password material. Printable characters are
 /// collapsed to a count, so the logs stay useful without exposing keystrokes.
-pub(super) fn redact_key(key: &str) -> String {
+pub(crate) fn redact_key(key: &str) -> String {
     if key.is_empty() {
         return "(empty)".to_string();
     }
@@ -1497,7 +1778,7 @@ pub(super) fn redact_key(key: &str) -> String {
 /// macOS/IME combinations may report bare physical Control as a C0 character:
 /// U+0017 opens nano search before Ctrl+X (#312), while U+0008 is encoded as
 /// Backspace and deletes the preceding character during Ctrl+Space (#348).
-pub(super) fn should_drop_macos_bare_ctrl_marker(key: &str, ctrl: bool, is_macos: bool) -> bool {
+pub(crate) fn should_drop_macos_bare_ctrl_marker(key: &str, ctrl: bool, is_macos: bool) -> bool {
     is_macos
         && ctrl
         && matches!(

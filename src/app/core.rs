@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex};
 
 use tokio::runtime::Runtime;
 
-use crate::app::dock_stacks::DockStacks;
 use crate::config::ConfigStore;
+use crate::app::dock_stacks::DockStacks;
 use crate::resource::{LocalSnap, NetHist, TabStatuses};
 use crate::sftp::{SftpHandles, SftpLastCwd};
 use crate::ssh::SessionHandle;
@@ -30,6 +30,8 @@ use crate::ui::{
 #[derive(Clone)]
 pub struct TabRoute {
     pub window: slint::Weak<AppWindow>,
+    /// The owning window's detached editor (#494): SFTP-driven editor opens
+    /// must land there when the pump thread wakes up on this route.
     pub editor: slint::Weak<EditorWindow>,
     pub window_id: u64,
     pub bufs: TermBuffers,
@@ -50,9 +52,11 @@ pub type TabRoutes = Arc<Mutex<HashMap<String, Arc<Mutex<TabRoute>>>>>;
 /// Slint thread exclusively.
 #[derive(Clone)]
 pub struct WindowState {
-    /// A hidden window must stay alive while the tray owns the application.
-    pub main_win: Rc<AppWindow>,
     pub weak: slint::Weak<AppWindow>,
+    /// Strong handle to the window itself (the tray's restore/quit paths
+    /// need the component, not just the weak registry entry). Slint 1.18 no
+    /// longer derives Clone on components, so the strong handle is an Rc.
+    pub main_win: Rc<AppWindow>,
     pub handles: Rc<RefCell<HashMap<String, SessionHandle>>>,
     pub bufs: TermBuffers,
     pub gates: RenderGates,
@@ -81,6 +85,7 @@ pub struct WindowState {
     /// `forget_window_state` drops this entry on close.
     pub proc_win: Rc<ProcWindow>,
     pub sys_win: Rc<SystemInfoWindow>,
+    /// Detached built-in editor window of this window (#70/#494).
     pub editor_win: Rc<EditorWindow>,
     pub proc_weak: slint::Weak<ProcWindow>,
     pub sys_weak: slint::Weak<SystemInfoWindow>,
@@ -167,12 +172,6 @@ pub struct AppCore {
     /// Tab id → delivery route, shared with the session pump threads so a
     /// tab can be retargeted at another window while its pumps keep running.
     pub tab_routes: TabRoutes,
-    /// Set once the first window of the process lifetime finishes opening.
-    /// The in-app update check runs only for that window — keying it off
-    /// `registry.count() == 1` would re-fire after close-then-open.
-    /// UI-thread-only, like the rest of this struct.
-    pub first_window_done: Cell<bool>,
-    pub update: RefCell<super::update::State>,
 }
 
 #[cfg(test)]

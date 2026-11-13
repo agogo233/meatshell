@@ -49,31 +49,6 @@ pub(super) fn enqueue_hostkey_prompt(
     changed: bool,
     responder: crate::ssh::HostKeyResponder,
 ) {
-    enqueue_hostkey_prompt_scoped(
-        win,
-        window_id,
-        None,
-        host,
-        port,
-        key_type,
-        fingerprint,
-        changed,
-        responder,
-    );
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn enqueue_hostkey_prompt_scoped(
-    win: &AppWindow,
-    window_id: u64,
-    test_id: Option<u64>,
-    host: String,
-    port: u16,
-    key_type: String,
-    fingerprint: String,
-    changed: bool,
-    responder: crate::ssh::HostKeyResponder,
-) {
     let id = format!("{host}:{port}");
     if let Some(ans) = HOSTKEY_DECIDED.with(|d| d.borrow().get(&id).copied()) {
         responder.respond(ans);
@@ -81,9 +56,10 @@ pub(super) fn enqueue_hostkey_prompt_scoped(
     }
     let show_now = HOSTKEY_QUEUE.with(|q| {
         let mut q = q.borrow_mut();
-        if let Some(p) = q.iter_mut().find(|p| {
-            p.window_id == window_id && p.test_id == test_id && p.host == host && p.port == port
-        }) {
+        if let Some(p) = q
+            .iter_mut()
+            .find(|p| p.window_id == window_id && p.host == host && p.port == port)
+        {
             p.responders.push(responder);
             return false;
         }
@@ -95,7 +71,7 @@ pub(super) fn enqueue_hostkey_prompt_scoped(
             hostkey_dialog_text(&host, port, &key_type, &fingerprint, changed);
         q.push_back(PendingHostKey {
             window_id,
-            test_id,
+            test_id: None,
             host,
             port,
             changed,
@@ -122,7 +98,6 @@ pub(super) fn show_front_hostkey(win: &AppWindow, window_id: u64) {
             win.set_hostkey_message(p.message.clone().into());
             win.set_hostkey_detail(p.detail.clone().into());
             win.set_hostkey_confirm_label(p.confirm_label.clone().into());
-            win.set_hostkey_prompt_is_test(p.test_id.is_some());
             win.set_hostkey_prompt_open(true);
         }
     });
@@ -157,7 +132,6 @@ pub(super) fn resolve_front_hostkey(win: &AppWindow, window_id: u64, accept: boo
     if has_next {
         show_front_hostkey(win, window_id);
     } else {
-        win.set_hostkey_prompt_is_test(false);
         win.set_hostkey_prompt_open(false);
     }
 }
@@ -222,6 +196,20 @@ thread_local! {
         RefCell::new(HashMap::new());
 }
 
+/// Forget a session's *cancelled* credential answer so the next (re)connection
+/// can prompt again: a cancelled prompt during auto-reconnect must not silence
+/// the remaining attempts, nor a later manual connect, until the process
+/// restarts. A real answer the user already gave stays cached — re-prompting
+/// on every unattended reconnect would be worse than the status quo.
+pub(super) fn forget_cred_decision(session_id: &str) {
+    CRED_DECIDED.with(|decided| {
+        let mut decided = decided.borrow_mut();
+        if matches!(decided.get(session_id), Some(None)) {
+            decided.remove(session_id);
+        }
+    });
+}
+
 /// Queue a credential prompt: answer immediately if already decided this run,
 /// merge into an existing pending entry for the same session *in the same
 /// window*, otherwise enqueue (and show it in the owning window if that
@@ -237,42 +225,16 @@ pub(super) fn enqueue_cred_prompt(
     need_password: bool,
     responder: crate::ssh::CredentialResponder,
 ) {
-    enqueue_cred_prompt_scoped(
-        win,
-        window_id,
-        None,
-        session_id,
-        host,
-        user,
-        need_user,
-        need_password,
-        responder,
-    );
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn enqueue_cred_prompt_scoped(
-    win: &AppWindow,
-    window_id: u64,
-    test_id: Option<u64>,
-    session_id: String,
-    host: String,
-    user: String,
-    need_user: bool,
-    need_password: bool,
-    responder: crate::ssh::CredentialResponder,
-) {
-    if test_id.is_none() {
-        if let Some(reply) = CRED_DECIDED.with(|d| d.borrow().get(&session_id).cloned()) {
-            responder.respond(reply);
-            return;
-        }
+    if let Some(reply) = CRED_DECIDED.with(|d| d.borrow().get(&session_id).cloned()) {
+        responder.respond(reply);
+        return;
     }
     let show_now = CRED_QUEUE.with(|q| {
         let mut q = q.borrow_mut();
-        if let Some(p) = q.iter_mut().find(|p| {
-            p.window_id == window_id && p.test_id == test_id && p.session_id == session_id
-        }) {
+        if let Some(p) = q
+            .iter_mut()
+            .find(|p| p.window_id == window_id && p.session_id == session_id)
+        {
             p.responders.push(responder);
             return false;
         }
@@ -281,7 +243,7 @@ pub(super) fn enqueue_cred_prompt_scoped(
         let show_now = !q.iter().any(|p| p.window_id == window_id);
         q.push_back(PendingCred {
             window_id,
-            test_id,
+            test_id: None,
             session_id,
             host,
             user,
@@ -307,7 +269,6 @@ pub(super) fn show_front_cred(win: &AppWindow, window_id: u64) {
             win.set_cred_user(p.user.clone().into());
             win.set_cred_password("".into());
             win.set_cred_remember(false);
-            win.set_cred_prompt_is_test(p.test_id.is_some());
             win.set_cred_prompt_open(true);
         }
     });
@@ -330,11 +291,9 @@ pub(super) fn resolve_front_cred(win: &AppWindow, window_id: u64, accept: bool) 
         let mut q = q.borrow_mut();
         if let Some(pos) = q.iter().position(|p| p.window_id == window_id) {
             let p = q.remove(pos).expect("position checked above");
-            if p.test_id.is_none() {
-                CRED_DECIDED.with(|d| {
-                    d.borrow_mut().insert(p.session_id.clone(), reply.clone());
-                });
-            }
+            CRED_DECIDED.with(|d| {
+                d.borrow_mut().insert(p.session_id.clone(), reply.clone());
+            });
             if let Some((ref u, ref pw, true)) = reply {
                 persist_credentials(&p.session_id, u, pw, p.need_user, p.need_password);
             }
@@ -349,7 +308,6 @@ pub(super) fn resolve_front_cred(win: &AppWindow, window_id: u64, accept: bool) 
     if has_next {
         show_front_cred(win, window_id);
     } else {
-        win.set_cred_prompt_is_test(false);
         win.set_cred_prompt_open(false);
     }
 }
@@ -403,27 +361,12 @@ pub(super) fn enqueue_mfa_prompt(
     echo: bool,
     responder: crate::ssh::MfaResponder,
 ) {
-    enqueue_mfa_prompt_scoped(
-        win, window_id, None, session_id, host, prompt, echo, responder,
-    );
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn enqueue_mfa_prompt_scoped(
-    win: &AppWindow,
-    window_id: u64,
-    test_id: Option<u64>,
-    session_id: String,
-    host: String,
-    prompt: String,
-    echo: bool,
-    responder: crate::ssh::MfaResponder,
-) {
     let show_now = MFA_QUEUE.with(|q| {
         let mut q = q.borrow_mut();
-        if let Some(p) = q.iter_mut().find(|p| {
-            p.window_id == window_id && p.test_id == test_id && p.session_id == session_id
-        }) {
+        if let Some(p) = q
+            .iter_mut()
+            .find(|p| p.window_id == window_id && p.session_id == session_id)
+        {
             p.responders.push(responder);
             return false;
         }
@@ -432,7 +375,7 @@ pub(super) fn enqueue_mfa_prompt_scoped(
         let show_now = !q.iter().any(|p| p.window_id == window_id);
         q.push_back(PendingMfa {
             window_id,
-            test_id,
+            test_id: None,
             session_id,
             host,
             prompt,
@@ -455,7 +398,6 @@ pub(super) fn show_front_mfa(win: &AppWindow, window_id: u64) {
             win.set_mfa_prompt(p.prompt.clone().into());
             win.set_mfa_echo(p.echo);
             win.set_mfa_answer("".into());
-            win.set_mfa_prompt_is_test(p.test_id.is_some());
             win.set_mfa_prompt_open(true);
         }
     });
@@ -463,7 +405,6 @@ pub(super) fn show_front_mfa(win: &AppWindow, window_id: u64) {
 
 /// Apply the user's answer to this window's oldest MFA prompt (or cancel),
 /// then show that window's next prompt or close its dialog.
-#[allow(dead_code)] // the ui_auth_prompts queue fixture compiles this file without the callback wiring
 pub(super) fn resolve_front_mfa(win: &AppWindow, window_id: u64, accept: bool) {
     let answer: Option<String> = if accept {
         Some(win.get_mfa_answer().to_string())
@@ -485,7 +426,6 @@ pub(super) fn resolve_front_mfa(win: &AppWindow, window_id: u64, accept: bool) {
     if has_next {
         show_front_mfa(win, window_id);
     } else {
-        win.set_mfa_prompt_is_test(false);
         win.set_mfa_prompt_open(false);
     }
 }
@@ -493,82 +433,3 @@ pub(super) fn resolve_front_mfa(win: &AppWindow, window_id: u64, accept: bool) {
 // ---------------------------------------------------------------------------
 // Split panes (v0.5)
 // ---------------------------------------------------------------------------
-
-/// Dismiss only this editor test's prompts. Do not reset the input of an
-/// unrelated foreground prompt when removing a test queued behind it.
-pub(super) fn abort_test_prompts(win: &AppWindow, window_id: u64, test_id: u64) {
-    let front_removed = HOSTKEY_QUEUE.with(|q| {
-        let mut q = q.borrow_mut();
-        let front_removed = q
-            .iter()
-            .find(|p| p.window_id == window_id)
-            .is_some_and(|p| p.test_id == Some(test_id));
-        let mut i = 0;
-        while i < q.len() {
-            if q[i].window_id == window_id && q[i].test_id == Some(test_id) {
-                let prompt = q.remove(i).expect("index checked above");
-                for responder in prompt.responders {
-                    responder.respond(false);
-                }
-            } else {
-                i += 1;
-            }
-        }
-        front_removed
-    });
-    if front_removed {
-        win.set_hostkey_prompt_open(false);
-        win.set_hostkey_prompt_is_test(false);
-        show_front_hostkey(win, window_id);
-    }
-    let front_removed = CRED_QUEUE.with(|q| {
-        let mut q = q.borrow_mut();
-        let front_removed = q
-            .iter()
-            .find(|p| p.window_id == window_id)
-            .is_some_and(|p| p.test_id == Some(test_id));
-        let mut i = 0;
-        while i < q.len() {
-            if q[i].window_id == window_id && q[i].test_id == Some(test_id) {
-                let prompt = q.remove(i).expect("index checked above");
-                for responder in prompt.responders {
-                    responder.respond(None);
-                }
-            } else {
-                i += 1;
-            }
-        }
-        front_removed
-    });
-    if front_removed {
-        win.set_cred_password("".into());
-        win.set_cred_prompt_open(false);
-        win.set_cred_prompt_is_test(false);
-        show_front_cred(win, window_id);
-    }
-    let front_removed = MFA_QUEUE.with(|q| {
-        let mut q = q.borrow_mut();
-        let front_removed = q
-            .iter()
-            .find(|p| p.window_id == window_id)
-            .is_some_and(|p| p.test_id == Some(test_id));
-        let mut i = 0;
-        while i < q.len() {
-            if q[i].window_id == window_id && q[i].test_id == Some(test_id) {
-                let prompt = q.remove(i).expect("index checked above");
-                for responder in prompt.responders {
-                    responder.respond(None);
-                }
-            } else {
-                i += 1;
-            }
-        }
-        front_removed
-    });
-    if front_removed {
-        win.set_mfa_answer("".into());
-        win.set_mfa_prompt_open(false);
-        win.set_mfa_prompt_is_test(false);
-        show_front_mfa(win, window_id);
-    }
-}

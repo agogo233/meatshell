@@ -17,7 +17,7 @@ pub(super) fn refresh_process_model(win: &AppWindow, statuses: &TabStatuses) {
     let active = win.get_active_tab_id().to_string();
     let rows = statuses
         .lock()
-        .unwrap()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(&active)
         .filter(|status| status.state == 1)
         .map(|status| proc_rows(&status.procs, &status.user, &active))
@@ -57,17 +57,17 @@ pub(super) fn refresh_sidebar(
             0.0
         }
     };
-    let snap = local.lock().unwrap().clone();
+    let snap = lock_or_recover(&local).clone();
 
     // --- Bottom network graph: always the local machine --------------------
     win.set_net_bot_up(format_bytes_per_sec(snap.net_tx_per_sec).into());
     win.set_net_bot_down(format_bytes_per_sec(snap.net_rx_per_sec).into());
-    win.set_net_bot_history(normalized_model(&local_net_hist.lock().unwrap()));
+    win.set_net_bot_history(normalized_model(&lock_or_recover(&local_net_hist)));
 
     let set_top_local = |win: &AppWindow| {
         win.set_net_top_up(format_bytes_per_sec(snap.net_tx_per_sec).into());
         win.set_net_top_down(format_bytes_per_sec(snap.net_rx_per_sec).into());
-        win.set_net_top_history(normalized_model(&local_net_hist.lock().unwrap()));
+        win.set_net_top_history(normalized_model(&lock_or_recover(&local_net_hist)));
         win.set_net_show_selector(false);
         win.set_net_selected("".into());
         win.set_net_ifaces(ModelRc::from(Rc::new(VecModel::<SharedString>::default())));
@@ -211,7 +211,7 @@ pub(super) fn refresh_sidebar(
                 down: format_bytes_per_sec(snap.net_rx_per_sec).into(),
             }],
             Vec::new(),
-            SystemDetails::default(),
+            local_system_details(&snap),
         );
     };
     win.set_proc_available(false);
@@ -222,7 +222,7 @@ pub(super) fn refresh_sidebar(
     let status = if active == "welcome" {
         None
     } else {
-        statuses.lock().unwrap().get(&active).cloned()
+        lock_or_recover(&statuses).get(&active).cloned()
     };
 
     match status {
@@ -335,107 +335,5 @@ pub(super) fn refresh_sidebar(
             set_top_local(win);
             show_local_system_models(win);
         }
-    }
-}
-
-/// Sidebar refresh on tab change, language switch and theme toggle.
-pub(super) fn wire_sidebar_refresh_and_theme(
-    ctx: &WinCtx,
-    tabs_model: &Rc<VecModel<TabInfo>>,
-    tab_statuses: &TabStatuses,
-    local_snap: &LocalSnap,
-    local_net_hist: &NetHist,
-) {
-    let WinCtx {
-        store,
-        registry,
-        bufs,
-        window,
-        proc_win,
-        editor_win,
-        ..
-    } = ctx;
-    // Recompute the sidebar whenever the active tab changes (fired from Slint's
-    // `changed active-tab-id`).
-    {
-        let weak = window.as_weak();
-        let statuses = tab_statuses.clone();
-        let local = local_snap.clone();
-        let net = local_net_hist.clone();
-        window.on_refresh_sidebar(move || {
-            if let Some(w) = weak.upgrade() {
-                refresh_sidebar(&w, &statuses, &local, &net);
-            }
-        });
-    }
-
-    // Switch UI language at runtime.  Static `@tr(...)` text updates live via
-    // select_bundled_translation; we additionally refresh the Rust-driven
-    // dynamic strings (sidebar status + the welcome tab title).
-    {
-        let weak = window.as_weak();
-        let store = store.clone();
-        let tabs_model = tabs_model.clone();
-        let registry = registry.clone();
-        window.on_set_language(move |code| {
-            crate::i18n::set_language(&code.to_string());
-            {
-                let mut s = store.borrow_mut();
-                s.set_language(crate::i18n::current_code().to_string());
-                let _ = s.save();
-            }
-            registry.broadcast_config_changed();
-            // Re-translate the welcome tab's dynamic title.
-            for i in 0..tabs_model.row_count() {
-                if let Some(mut row) = tabs_model.row_data(i) {
-                    if row.id.as_str() == "welcome" {
-                        row.title_len = tab_title_len(&t("新标签页", "New tab"));
-                        row.title = t("新标签页", "New tab").into();
-                        tabs_model.set_row_data(i, row);
-                    }
-                }
-            }
-            if let Some(w) = weak.upgrade() {
-                w.set_lang_en(crate::i18n::is_en());
-                w.invoke_refresh_sidebar();
-            }
-        });
-    }
-
-    // Theme toggle: flip dark ↔ light, persist the preference, and re-render
-    // every open terminal with the new ANSI palette so historical output is
-    // also recoloured (not just new output).
-    {
-        let weak = window.as_weak();
-        let store = store.clone();
-        let bufs_theme = bufs.clone();
-        let proc_weak = proc_win.as_weak();
-        let editor_weak = editor_win.as_weak();
-        let registry = registry.clone();
-        window.on_toggle_theme(move || {
-            let Some(w) = weak.upgrade() else { return };
-            let next_dark = !w.get_dark_mode();
-            // Flip theme + every terminal buffer + re-render (shared with wallpaper).
-            apply_dark_mode(&w, &bufs_theme, next_dark);
-            // Mirror the flip onto the detached process window (its Theme global
-            // is a separate instance) so an open process window follows.
-            if let Some(p) = proc_weak.upgrade() {
-                sync_proc_theme(&w, &p);
-            }
-            if let Some(editor) = editor_weak.upgrade() {
-                sync_editor_theme(&w, &editor);
-                if editor.get_editor_open() {
-                    let content = editor.get_editor_content();
-                    editor_syntax::refresh(&editor, content.as_str());
-                }
-            }
-            let pref = if next_dark { "dark" } else { "light" };
-            {
-                let mut s = store.borrow_mut();
-                s.set_theme_pref(pref.to_string());
-                let _ = s.save();
-            }
-            registry.broadcast_config_changed();
-        });
     }
 }

@@ -1,8 +1,12 @@
-//! Small free-standing helpers shared across the app module.
+//! Small free-standing helpers shared across the app module (clipboard,
+//! proxy URL parsing, path parent). Split out of app.rs to match the
+//! upstream module boundary (helpers).
+
+use super::*;
 
 /// `app_cursor` mirrors the remote terminal's DECCKM mode (`\x1b[?1h/l`):
 /// when true the four arrow keys must use SS3 sequences (`\x1bOA`…) instead
-/// of the default CSI sequences (`\x1b[A`…).  Full-screen apps like nano and
+/// of the default CSI sequences (`\x1b[A`…). Full-screen apps like nano and
 /// vim set this mode on startup.
 /// Write `text` to the system clipboard. Call from a dedicated thread, never the
 /// UI thread (arboard pumps the Win32 message loop / blocks).
@@ -39,18 +43,12 @@ pub(super) fn split_proxy(url: &str) -> (String, String) {
     let lower = s.to_ascii_lowercase();
     for p in ["http://", "https://"] {
         if lower.starts_with(p) {
-            return (
-                "http".to_string(),
-                s[p.len()..].trim_end_matches('/').to_string(),
-            );
+            return ("http".to_string(), s[p.len()..].trim_end_matches('/').to_string());
         }
     }
     for p in ["socks5h://", "socks5://", "socks://"] {
         if lower.starts_with(p) {
-            return (
-                "socks5".to_string(),
-                s[p.len()..].trim_end_matches('/').to_string(),
-            );
+            return ("socks5".to_string(), s[p.len()..].trim_end_matches('/').to_string());
         }
     }
     ("socks5".to_string(), s.trim_end_matches('/').to_string())
@@ -65,105 +63,5 @@ pub(super) fn parent_path(path: &str) -> String {
         Some(0) => "/".to_string(),
         Some(i) => trimmed[..i].to_string(),
         None => "/".to_string(),
-    }
-}
-
-/// Owner window for native (rfd) file and message dialogs.
-///
-/// On Windows an unowned dialog can never appear above a window that is kept
-/// on top (#450), so a picker opened from a pinned window would open hidden
-/// behind it. Owned dialogs stay above their owner. Capture the owner on the
-/// UI thread with [`DialogOwner::of`]; it is `Copy + Send`, so dialogs started
-/// from worker threads can use it too. Other platforms keep unowned dialogs:
-/// a macOS owner would turn them into sheets, and their modal panels already
-/// sit above floating windows.
-#[derive(Clone, Copy, Default)]
-pub(super) struct DialogOwner {
-    #[cfg(windows)]
-    handles: Option<(
-        raw_window_handle::RawWindowHandle,
-        raw_window_handle::RawDisplayHandle,
-    )>,
-}
-
-// SAFETY: only the raw HWND/display handles are stored and handed to rfd,
-// which itself treats them as `Send`; dialogs are opened while the owning
-// window is alive.
-#[cfg(windows)]
-unsafe impl Send for DialogOwner {}
-
-impl DialogOwner {
-    pub(super) fn of(window: &slint::Window) -> Self {
-        #[cfg(windows)]
-        {
-            use i_slint_backend_winit::WinitWindowAccessor;
-            use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-            let handles = window
-                .with_winit_window(|ww| {
-                    Some((
-                        ww.window_handle().ok()?.as_raw(),
-                        ww.display_handle().ok()?.as_raw(),
-                    ))
-                })
-                .flatten();
-            Self { handles }
-        }
-        #[cfg(not(windows))]
-        {
-            let _ = window;
-            Self::default()
-        }
-    }
-
-    /// Owner for a dialog opened from a window callback; unowned if the
-    /// window is already gone.
-    pub(super) fn of_weak<T: slint::ComponentHandle>(weak: &slint::Weak<T>) -> Self {
-        weak.upgrade()
-            .map(|w| Self::of(w.window()))
-            .unwrap_or_default()
-    }
-
-    pub(super) fn file(&self) -> rfd::FileDialog {
-        let dialog = rfd::FileDialog::new();
-        #[cfg(windows)]
-        if self.handles.is_some() {
-            return dialog.set_parent(self);
-        }
-        dialog
-    }
-
-    pub(super) fn message(&self) -> rfd::MessageDialog {
-        let dialog = rfd::MessageDialog::new();
-        #[cfg(windows)]
-        if self.handles.is_some() {
-            return dialog.set_parent(self);
-        }
-        dialog
-    }
-}
-
-#[cfg(windows)]
-impl raw_window_handle::HasWindowHandle for DialogOwner {
-    fn window_handle(
-        &self,
-    ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
-        let (window, _) = self
-            .handles
-            .ok_or(raw_window_handle::HandleError::Unavailable)?;
-        // SAFETY: the handle came from a live winit window (see `of`).
-        Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(window) })
-    }
-}
-
-#[cfg(windows)]
-impl raw_window_handle::HasDisplayHandle for DialogOwner {
-    fn display_handle(
-        &self,
-    ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
-        let (_, display) = self
-            .handles
-            .ok_or(raw_window_handle::HandleError::Unavailable)?;
-        // SAFETY: as above.
-        Ok(unsafe { raw_window_handle::DisplayHandle::borrow_raw(display) })
     }
 }

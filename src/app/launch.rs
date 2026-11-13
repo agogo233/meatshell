@@ -8,9 +8,6 @@ mod launch_intent_tests;
 /// already running it is forwarded over the single-instance socket instead
 /// of opening a second process.
 pub struct LaunchIntent {
-    // Parsed from argv and asserted by tests; run() opens windows itself, so
-    // the flag has no reader until the new-window flow is wired up.
-    #[allow(dead_code)]
     pub new_window: bool,
 }
 

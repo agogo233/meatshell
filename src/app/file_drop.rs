@@ -1,10 +1,13 @@
-//! OS file drag-and-drop onto terminal / SFTP panels (uploads).
+//! OS file-drop handling for the terminal pane and docked SFTP panel:
+//! drop-target hit routing, upload and highlight. Split out of app.rs to
+//! match the upstream module boundary (file_drop).
 
+use super::hit_test::*;
 use super::*;
 
 /// Current mouse cursor position in physical screen pixels (Windows).
 #[cfg(windows)]
-pub(super) fn cursor_pos() -> Option<(i32, i32)> {
+pub(crate) fn cursor_pos() -> Option<(i32, i32)> {
     #[repr(C)]
     struct Point {
         x: i32,
@@ -21,9 +24,9 @@ pub(super) fn cursor_pos() -> Option<(i32, i32)> {
     }
 }
 
-/// Handle an OS file drop: if it landed over the terminal panel (the shell page)
-/// of the active session tab, upload the file to that tab's current remote
-/// directory.
+/// Handle an OS file drop: if it landed over the active session's terminal
+/// pane or over the docked SFTP panel, upload the file to that session's
+/// current remote directory (#drag-onto-shell, #file-drop-sftp).
 ///
 /// `hovered_pos` is the caller's best guess at the drop point in logical
 /// window-client coordinates, taken from the most recent `CursorMoved` event
@@ -35,10 +38,11 @@ pub(super) fn cursor_pos() -> Option<(i32, i32)> {
 /// last one seen is accurate there — this is what previously left
 /// drag-and-drop upload a no-op on every non-Windows platform (#356).
 #[cfg(windows)]
-pub(super) fn handle_file_drop(
+pub(crate) fn handle_file_drop(
     win: &AppWindow,
     sftp_handles: &SftpHandles,
     path: std::path::PathBuf,
+    dock_stacks: &Rc<RefCell<DockStacks>>,
     _hovered_pos: Option<(f32, f32)>,
 ) {
     let active = win.get_active_tab_id().to_string();
@@ -56,16 +60,27 @@ pub(super) fn handle_file_drop(
     // Drop point in logical client coordinates.
     let client_x = (cx - inner.x) as f32 / scale;
     let client_y = (cy - inner.y) as f32 / scale;
-    handle_file_drop_at(win, sftp_handles, path, client_x, client_y);
+    // Accept drops anywhere over the whole terminal panel ("shell page") *and*
+    // over the docked SFTP panel, so dragging a file onto either uploads it to
+    // the session's current directory.
+    if file_drop_target(win, dock_stacks, client_x, client_y).is_none() {
+        return; // dropped outside both panels — ignore
+    }
+    upload_dropped_file(win, sftp_handles, path, &active);
 }
 
 #[cfg(not(windows))]
-pub(super) fn handle_file_drop(
+pub(crate) fn handle_file_drop(
     win: &AppWindow,
     sftp_handles: &SftpHandles,
     path: std::path::PathBuf,
+    dock_stacks: &Rc<RefCell<DockStacks>>,
     hovered_pos: Option<(f32, f32)>,
 ) {
+    let active = win.get_active_tab_id().to_string();
+    if active == "welcome" {
+        return;
+    }
     let Some((client_x, client_y)) = hovered_pos else {
         // No CursorMoved was ever observed for this drag (e.g. the file was
         // dropped the instant it entered the window). Without a position we
@@ -74,39 +89,21 @@ pub(super) fn handle_file_drop(
         // wrong place.
         return;
     };
-    handle_file_drop_at(win, sftp_handles, path, client_x, client_y);
+    // Same target rule as Windows: terminal panel or docked SFTP panel.
+    if file_drop_target(win, dock_stacks, client_x, client_y).is_none() {
+        return; // dropped outside both panels — ignore
+    }
+    upload_dropped_file(win, sftp_handles, path, &active);
 }
 
-/// Shared drop-position → upload logic for both platform front-ends above.
-pub(super) fn handle_file_drop_at(
+/// Shared drop-upload body for both platform front-ends above.
+pub(crate) fn upload_dropped_file(
     win: &AppWindow,
     sftp_handles: &SftpHandles,
     path: std::path::PathBuf,
-    client_x: f32,
-    client_y: f32,
+    active: &str,
 ) {
-    let active = win.get_active_tab_id().to_string();
-    if active == "welcome" {
-        return;
-    }
-    // Accept drops anywhere over the whole terminal panel ("shell page"), so
-    // dragging a file onto the terminal uploads it to the session's current
-    // directory — not just onto the SFTP file list (#drag-onto-shell).
-    let Some((_active, term, _term_state)) = active_terminal_panel_rects(win) else {
-        return;
-    };
-    if !contains_logical(term, client_x, client_y) {
-        return; // dropped outside the terminal panel — ignore
-    }
-
-    // Split view: dropping onto the *local* half copies the file into the local
-    // folder that half is showing instead of uploading it to the remote one.
-    if let Some((tab, dir)) = sftp_local_pane_hit(win, client_x, client_y) {
-        copy_into(win, &tab, std::path::PathBuf::from(dir), path);
-        return;
-    }
-
-    let dir = active_sftp_path(win, &active);
+    let dir = active_sftp_path(win, active);
     if dir.is_empty() {
         return;
     }
@@ -119,26 +116,90 @@ pub(super) fn handle_file_drop_at(
     } else {
         HashMap::new()
     };
-    // Ask once if the file name is already taken remotely (dropping a file onto
-    // the terminal used to overwrite silently). Done before taking the handles
-    // lock: the dialog blocks, and nothing else may wait on that mutex.
-    let Some(conflict) = resolve_upload_conflict(win, &active, std::slice::from_ref(&path)) else {
-        return;
-    };
+    // The duplicate prompt mirrors the upload button's behaviour; a dropped
+    // folder merges on the worker side, so it never prompts.
+    let dedup = configured_dedup_policy(&win.as_weak());
+    let known = terminal_sftp_entry_names(win, active);
+    let decision = upload_decision(&path, &known, dedup, path.is_dir());
     if let Ok(handles) = sftp_handles.lock() {
-        if let Some(h) = handles.get(&active) {
+        if let Some(h) = handles.get(active) {
             win.set_download_open(true);
-            h.upload(path.clone(), dir, conflict);
+            h.upload(path.clone(), dir, decision);
         }
         if sync {
+            // The decision was made against the active tab's listing; mirrors
+            // get their own live check in the worker instead.
             for (id, h) in handles.iter() {
-                if id == &active {
+                if id.as_str() == active {
                     continue;
                 }
                 if let Some(d) = other_dirs.get(id).filter(|d| !d.is_empty()) {
-                    h.upload(path.clone(), d.clone(), conflict);
+                    h.upload(path.clone(), d.clone(), UploadDecision::Proceed);
                 }
             }
         }
     }
 }
+
+/// The file-drop target under a client-space point, returned in dock-area
+/// coordinates so the highlight overlay can draw it directly. Matches the
+/// active session's terminal pane or the docked SFTP panel.
+pub(crate) fn file_drop_target(
+    win: &AppWindow,
+    dock_stacks: &Rc<RefCell<DockStacks>>,
+    x: f32,
+    y: f32,
+) -> Option<LogicalRect> {
+    let frame = dock_area_frame(win);
+    if let Some((_active, term, _state)) = active_terminal_panel_rects(win) {
+        if contains_logical(term, x, y) {
+            return Some(LogicalRect {
+                x: term.x - frame.x,
+                y: term.y - frame.y,
+                w: term.w,
+                h: term.h,
+            });
+        }
+    }
+    let Some(sftp) = sftp_panel_client_rect(win, dock_stacks) else {
+        return None;
+    };
+    contains_logical(sftp, x, y).then(|| LogicalRect {
+        x: sftp.x - frame.x,
+        y: sftp.y - frame.y,
+        w: sftp.w,
+        h: sftp.h,
+    })
+}
+
+/// (Re)draw the file-drop highlight for the current cursor position. Windows
+/// stops delivering mouse motion while an OS drag is in flight, so this runs
+/// from a timer while the drag is alive (#file-drop-hl).
+#[cfg(windows)]
+pub(crate) fn update_file_drop_highlight(win: &AppWindow, dock_stacks: &Rc<RefCell<DockStacks>>) {
+    let Some((cx, cy)) = cursor_pos() else {
+        win.set_file_drop_hl(false);
+        return;
+    };
+    let w = win.window();
+    let scale = w.scale_factor().max(0.01);
+    let Some(inner) = w.with_winit_window(|ww| ww.inner_position().ok()).flatten() else {
+        return;
+    };
+    let x = (cx - inner.x) as f32 / scale;
+    let y = (cy - inner.y) as f32 / scale;
+    match file_drop_target(win, dock_stacks, x, y) {
+        Some(hit) => {
+            win.set_file_drop_hl(true);
+            win.set_file_drop_hl_x(hit.x);
+            win.set_file_drop_hl_y(hit.y);
+            win.set_file_drop_hl_w(hit.w);
+            win.set_file_drop_hl_h(hit.h);
+        }
+        None => win.set_file_drop_hl(false),
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn update_file_drop_highlight(_win: &AppWindow, _dock_stacks: &Rc<RefCell<DockStacks>>) {}
+

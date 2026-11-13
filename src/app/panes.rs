@@ -1,10 +1,13 @@
-//! Pane/dock layout: refreshing, persisting and drag targets.
+//! Pane layout: split/tab geometry, dock refresh and drag-target hit
+//! testing for the edge-stack model. Split out of app.rs to match the
+//! upstream module boundary (panes).
 
 use super::*;
 
+
 /// Resolve a session's configured SSH jump host to the saved session it points
 /// at, ignoring a missing / dangling / self reference (#211).
-pub(super) fn save_layout(
+pub(crate) fn save_layout(
     win: &AppWindow,
     store: &Rc<RefCell<ConfigStore>>,
     dock_stacks: &Rc<RefCell<DockStacks>>,
@@ -21,27 +24,19 @@ pub(super) fn save_layout(
     s.set_sftp_panel_width(win.get_sftp_panel_width());
     s.set_sftp_panel_height(win.get_sftp_panel_height());
     s.set_sftp_dock(win.get_sftp_dock().to_string());
-    // Split view: whether it was open, the last local folder and the divider
-    // share (#532).
-    s.set_sftp_split_enabled(win.get_sftp_split_enabled());
-    s.set_sftp_local_split(win.get_sftp_local_split());
-    s.set_sftp_local_dir(&win.get_sftp_last_local_dir());
-    // Local list options (#532 follow-up).
     s.set_sftp_local_show_hidden(win.get_sftp_local_show_hidden());
-    s.set_sftp_local_sort_key(&win.get_sftp_local_sort_key());
+    s.set_sftp_local_sort_key(&win.get_sftp_local_sort_key().to_string());
     s.set_sftp_local_sort_dir(win.get_sftp_local_sort_dir());
-    // Local bookmarks / recent folders (#532); the Slint models are the live
-    // copy, the config only needs them on close.
-    let places = crate::config::LocalPlaces {
-        bookmarks: sftp_local::model_strings(&win.get_local_bookmarks()),
-        recent: sftp_local::model_strings(&win.get_local_recent()),
-    };
-    s.update_local_places(|stored| *stored = places);
     s.set_quick_panel_open(win.get_quick_panel_open());
     s.set_quick_panel_collapsed(win.get_quick_panel_collapsed());
     s.set_quick_panel_width(win.get_quick_panel_width());
     s.set_quick_panel_height(win.get_quick_panel_height());
     s.set_quick_panel_dock(win.get_quick_panel_dock().to_string());
+    s.set_ai_panel_open(win.get_ai_panel_open());
+    s.set_ai_panel_collapsed(win.get_ai_panel_collapsed());
+    s.set_ai_panel_width(win.get_ai_panel_width());
+    s.set_ai_panel_height(win.get_ai_panel_height());
+    s.set_ai_panel_dock(win.get_ai_panel_dock().to_string());
     // Per-edge stacked panels (#dock-stack), ratios included.
     s.set_dock_stacks(dock_stacks.borrow().to_saved());
     s.set_welcome_sidebar_width(win.get_welcome_sidebar_width());
@@ -52,13 +47,36 @@ pub(super) fn save_layout(
     // property can lag during startup/shutdown on frameless Windows (#234).
     let native_maximized = win
         .window()
-        .with_winit_window(|ww| ww.is_maximized() || ww.fullscreen().is_some())
-        .unwrap_or_else(|| win.get_window_maximized() || win.get_term_fullscreen());
+        .with_winit_window(|ww| ww.is_maximized())
+        .unwrap_or_else(|| win.get_window_maximized());
+    // Windows reports (-32000,-32000) for a minimized window; persisting
+    // that sentinel would make the next launch open off-screen (#save-position).
+    let native_minimized = win
+        .window()
+        .with_winit_window(|ww| ww.is_minimized().unwrap_or(false))
+        .unwrap_or(false);
     if !native_maximized && w > 200.0 && h > 200.0 {
         // Resize events normally keep this cache current. Persist the final
         // valid native geometry as well, because a close can arrive before the
         // last resize callback has reached the UI store.
         s.set_window_size(w, h);
+    }
+    // Remember the window position too, so it restores on next launch.
+    // Only when not maximized (a maximized position isn't useful) and not
+    // minimized (its sentinel position isn't either). Wayland compositors
+    // don't expose a settable window position, so `position()` reports a
+    // constant (0,0); writing that would clobber a real position saved under
+    // X11, so skip the save on Wayland (restore then centres / defers to the
+    // compositor).
+    if !native_maximized
+        && !native_minimized
+        && !is_wayland_window(win.window())
+    {
+        let pos = win.window().position();
+        s.set_window_position(pos.x as f32 / scale, pos.y as f32 / scale);
+        // Remember which monitor's scale these logical coordinates came from so
+        // a mixed-DPI restore doesn't re-project them onto a different screen.
+        s.set_window_scale(scale);
     }
     let _ = s.save();
 }
@@ -79,7 +97,7 @@ pub(crate) fn clear_zen_on_close(win: &AppWindow, store: &Rc<RefCell<ConfigStore
 /// Every quick-command group name (used to start with all groups collapsed, #55):
 /// "default" when any ungrouped command exists, plus explicit quick-groups and any
 /// group referenced by a command.
-pub(super) fn tabs_eq(a: &ModelRc<TabInfo>, b: &ModelRc<TabInfo>) -> bool {
+pub(crate) fn tabs_eq(a: &ModelRc<TabInfo>, b: &ModelRc<TabInfo>) -> bool {
     if a.row_count() != b.row_count() {
         return false;
     }
@@ -90,7 +108,7 @@ pub(super) fn tabs_eq(a: &ModelRc<TabInfo>, b: &ModelRc<TabInfo>) -> bool {
 }
 
 /// Find the terminal row with `tab_id`, apply `mutator`, and write it back.
-pub(super) fn update_terminal_row(
+pub(crate) fn update_terminal_row(
     model: &VecModel<TerminalState>,
     tab_id: &str,
     mutator: impl FnOnce(&mut TerminalState),
@@ -106,7 +124,7 @@ pub(super) fn update_terminal_row(
     }
 }
 
-pub(super) fn update_welcome_tab(layout: &mut crate::layout::Layout, as_sidebar: bool) {
+pub(crate) fn update_welcome_tab(layout: &mut crate::layout::Layout, as_sidebar: bool) {
     if as_sidebar {
         layout.remove_tab("welcome");
     } else if layout.leaf_of_tab("welcome").is_none() {
@@ -114,7 +132,9 @@ pub(super) fn update_welcome_tab(layout: &mut crate::layout::Layout, as_sidebar:
     }
 }
 
-pub(super) fn refresh_panes(
+
+
+pub(crate) fn refresh_panes(
     window: &AppWindow,
     layout: &crate::layout::Layout,
     content: (f32, f32),
@@ -144,7 +164,10 @@ pub(super) fn refresh_panes(
                 })
                 .collect();
             // Only the pane touching the top-right corner keeps room for the
-            // floating toolbar icons (#122).
+            // floating toolbar icons (#122). 7 icons at a 30px pitch leave the
+            // rightmost one at width-214px, so 210px keeps the 4px gap the
+            // 6-icon layout (180px ↔ the pin at width-184px) had before the
+            // Updates icon joined the strip.
             let top_right = p.x + p.w >= cw - 0.5 && p.y <= 0.5;
             PaneInfo {
                 id: p.id as i32,
@@ -154,9 +177,12 @@ pub(super) fn refresh_panes(
                 h: p.h,
                 active_id: p.active.clone().into(),
                 focused: p.focused,
-                // Room for the seven top-right toolbar icons (30px each, incl. the
-                // pin #450 and Updates) — only when they float over the tab row (macOS).
-                reserve_right: if top_right && toolbar_in_tab_row { 240.0 } else { 0.0 },
+                // Room for the top-right toolbar icons (#122) — only when they
+                // float over the tab row (macOS); with the custom title bar the
+                // icons sit in the title bar and no tab-row space is reserved.
+                // 7 icons at a 30px pitch leave the rightmost at width-214px, so
+                // 210px keeps the 4px gap.
+                reserve_right: if top_right && toolbar_in_tab_row { 210.0 } else { 0.0 },
                 tabs: ModelRc::from(Rc::new(VecModel::from(tabs))),
             }
         })
@@ -233,9 +259,113 @@ pub(super) fn refresh_panes(
 
 // --- Docked-panel edge stacks (#dock-stack) --------------------------------
 
+/// Mirror the ACTIVE tab's SFTP state onto the window, where the docked
+/// SftpPanel reads it (#dock-stack). Models are copied BY REFERENCE, so the
+/// docked panel shares the same VecModel as the tab's TerminalView and picks
+/// up listing updates for free. Called whenever the active tab or its SFTP
+/// state changes; overwrites unconditionally so no stale seed (e.g. the
+/// startup `collapse-sftp-default`) can leak into the dock decision.
+pub(crate) fn sync_active_sftp_to_root(win: &AppWindow, terminals: &VecModel<TerminalState>) {
+    use slint::Model as _;
+    let active = win.get_active_tab_id().to_string();
+    let Some(row) = (0..terminals.row_count()).find_map(|i| {
+        let r = terminals.row_data(i)?;
+        (r.id.as_str() == active).then_some(r)
+    }) else {
+        // Welcome / unknown tab: no session → the SFTP panel leaves the dock.
+        win.set_sftp_available(false);
+        win.set_sftp_collapsed(false);
+        win.set_sftp_path("/".into());
+        win.set_sftp_status(Default::default());
+        win.set_sftp_status_kind(0);
+        win.set_sftp_loading(false);
+        win.set_sftp_selected_count(0);
+        win.set_sftp_sort_key(Default::default());
+        win.set_sftp_sort_dir(0);
+        win.set_sftp_entries(ModelRc::from(std::rc::Rc::new(
+            VecModel::<SftpEntry>::default(),
+        )));
+        win.set_sftp_tree_nodes(ModelRc::from(std::rc::Rc::new(
+            VecModel::<SftpTreeNode>::default(),
+        )));
+        win.set_sftp_bookmarks(ModelRc::from(std::rc::Rc::new(
+            VecModel::<slint::SharedString>::default(),
+        )));
+        win.set_sftp_places_bookmarks(ModelRc::from(std::rc::Rc::new(
+            VecModel::<slint::SharedString>::default(),
+        )));
+        win.set_sftp_recent(ModelRc::from(std::rc::Rc::new(
+            VecModel::<slint::SharedString>::default(),
+        )));
+        win.set_sftp_bookmarked(false);
+        win.set_sftp_tunnels(ModelRc::from(std::rc::Rc::new(
+            VecModel::<TunnelInfo>::default(),
+        )));
+        win.set_sftp_current_tab_id("".into());
+        win.set_sftp_dual(false);
+        win.set_sftp_local_path(Default::default());
+        win.set_sftp_local_status(Default::default());
+        win.set_sftp_local_loading(false);
+        win.set_sftp_local_selected_count(0);
+        win.set_sftp_local_pane_width(0.0);
+        win.set_sftp_local_entries(ModelRc::from(std::rc::Rc::new(
+            VecModel::<SftpEntry>::default(),
+        )));
+        win.set_sftp_local_quick_places(ModelRc::from(std::rc::Rc::new(
+            VecModel::<SftpLocalPlace>::default(),
+        )));
+        win.set_sftp_local_drive_places(ModelRc::from(std::rc::Rc::new(
+            VecModel::<SftpLocalPlace>::default(),
+        )));
+        win.set_sftp_local_bookmarks(ModelRc::from(std::rc::Rc::new(
+            VecModel::<slint::SharedString>::default(),
+        )));
+        win.set_sftp_local_recent(ModelRc::from(std::rc::Rc::new(
+            VecModel::<slint::SharedString>::default(),
+        )));
+        win.set_sftp_local_bookmarked(false);
+        return;
+    };
+    win.set_sftp_available(row.sftp_available);
+    win.set_sftp_collapsed(row.sftp_collapsed);
+    win.set_sftp_path(row.sftp_path.clone());
+    win.set_sftp_status(row.sftp_status.clone());
+    win.set_sftp_status_kind(row.sftp_status_kind);
+    win.set_sftp_loading(row.sftp_loading);
+    win.set_sftp_selected_count(row.sftp_selected_count);
+    win.set_sftp_sort_key(row.sftp_sort_key.clone());
+    win.set_sftp_sort_dir(row.sftp_sort_dir);
+    win.set_sftp_entries(row.sftp_entries.clone());
+    win.set_sftp_tree_nodes(row.sftp_tree_nodes.clone());
+    win.set_sftp_bookmarks(row.sftp_bookmarks.clone());
+    win.set_sftp_places_bookmarks(row.sftp_places_bookmarks.clone());
+    win.set_sftp_recent(row.sftp_recent.clone());
+    win.set_sftp_bookmarked(row.sftp_bookmarked);
+    win.set_sftp_tunnels(row.tunnels.clone());
+    win.set_sftp_current_tab_id(row.id.clone());
+    win.set_sftp_dual(row.sftp_dual);
+    win.set_sftp_local_path(row.sftp_local_path.clone());
+    win.set_sftp_local_status(row.sftp_local_status.clone());
+    win.set_sftp_local_loading(row.sftp_local_loading);
+    win.set_sftp_local_selected_count(row.sftp_local_selected_count);
+    win.set_sftp_local_pane_width(row.sftp_local_pane_width);
+    win.set_sftp_local_entries(row.sftp_local_entries.clone());
+    // Local-pane places (#532) are machine-wide but mirrored into every tab;
+    // surface the active tab's copy so the docked panel stays in sync.
+    win.set_sftp_local_quick_places(row.sftp_local_quick_places.clone());
+    win.set_sftp_local_drive_places(row.sftp_local_drive_places.clone());
+    win.set_sftp_local_bookmarks(row.sftp_local_bookmarks.clone());
+    win.set_sftp_local_recent(row.sftp_local_recent.clone());
+    win.set_sftp_local_bookmarked(row.sftp_local_bookmarked);
+    // Panel extent follows the active tab's remembered size (#v0.5 keeps these
+    // per-tab), so a wide panel on tab A isn't crushed to tab B's narrow one.
+    win.set_sftp_panel_width(row.sftp_panel_width);
+    win.set_sftp_panel_height(row.sftp_panel_height);
+}
+
 /// The edge (left|right|top|bottom) a window panel is currently expanded on,
 /// `None` when folded, closed, or off (welcome not in sidebar mode).
-pub(super) fn panel_edge(window: &AppWindow, kind: &str) -> Option<&'static str> {
+pub(crate) fn panel_edge(window: &AppWindow, kind: &str) -> Option<&'static str> {
     let norm = |edge: &str| -> &'static str {
         match edge {
             "right" => "right",
@@ -248,17 +378,32 @@ pub(super) fn panel_edge(window: &AppWindow, kind: &str) -> Option<&'static str>
         "sidebar" => {
             (!window.get_sidebar_collapsed()).then(|| norm(window.get_sidebar_dock().as_str()))
         }
-        "welcome" => (window.get_welcome_as_sidebar() && !window.get_welcome_collapsed())
-            .then(|| norm(window.get_welcome_sidebar_dock().as_str())),
-        "quick" => (window.get_quick_panel_open() && !window.get_quick_panel_collapsed())
-            .then(|| norm(window.get_quick_panel_dock().as_str())),
+        "welcome" => {
+            (window.get_welcome_as_sidebar() && !window.get_welcome_collapsed())
+                .then(|| norm(window.get_welcome_sidebar_dock().as_str()))
+        }
+        "quick" => {
+            (window.get_quick_panel_open() && !window.get_quick_panel_collapsed())
+                .then(|| norm(window.get_quick_panel_dock().as_str()))
+        }
+        "ai" => {
+            (window.get_ai_panel_open() && !window.get_ai_panel_collapsed())
+                .then(|| norm(window.get_ai_panel_dock().as_str()))
+        }
+        // SFTP is a normal window panel now (#dock-stack): expanded when the
+        // active tab offers SFTP and hasn't collapsed it. Mirrored state lives
+        // on the window (`sync_active_sftp_to_root`).
+        "sftp" => {
+            (window.get_sftp_available() && !window.get_sftp_collapsed())
+                .then(|| norm(window.get_sftp_dock().as_str()))
+        }
         _ => None,
     }
 }
 
 /// A panel's preferred thickness along its edge's normal: width on a
 /// left/right edge, height on a top/bottom one (logical px).
-pub(super) fn panel_extent(window: &AppWindow, kind: &str) -> f32 {
+pub(crate) fn panel_extent(window: &AppWindow, kind: &str) -> f32 {
     let horizontal_edge = matches!(panel_edge(window, kind), Some("left" | "right"));
     match kind {
         "sidebar" if horizontal_edge => window.get_sidebar_width(),
@@ -266,6 +411,10 @@ pub(super) fn panel_extent(window: &AppWindow, kind: &str) -> f32 {
         "welcome" => window.get_welcome_sidebar_width(),
         "quick" if horizontal_edge => window.get_quick_panel_width(),
         "quick" => window.get_quick_panel_height(),
+        "ai" if horizontal_edge => window.get_ai_panel_width(),
+        "ai" => window.get_ai_panel_height(),
+        "sftp" if horizontal_edge => window.get_sftp_panel_width(),
+        "sftp" => window.get_sftp_panel_height(),
         _ => 220.0,
     }
 }
@@ -274,7 +423,7 @@ pub(super) fn panel_extent(window: &AppWindow, kind: &str) -> f32 {
 /// whose folded form docks there (welcome counts only in sidebar mode, where
 /// its strip actually renders). Multiple folded panels on one edge merge
 /// into a single band, hence the boolean.
-pub(super) fn strip_on_edge(window: &AppWindow, edge: &str) -> bool {
+pub(crate) fn strip_on_edge(window: &AppWindow, edge: &str) -> bool {
     let docks = |s: slint::SharedString| s.as_str() == edge;
     (window.get_sidebar_collapsed() && docks(window.get_sidebar_dock()))
         || (window.get_welcome_as_sidebar()
@@ -283,6 +432,14 @@ pub(super) fn strip_on_edge(window: &AppWindow, edge: &str) -> bool {
         || (window.get_quick_panel_open()
             && window.get_quick_panel_collapsed()
             && docks(window.get_quick_panel_dock()))
+        || (window.get_ai_panel_open()
+            && window.get_ai_panel_collapsed()
+            && docks(window.get_ai_panel_dock()))
+        // A collapsed SFTP panel keeps its 36px band on its docked edge, exactly
+        // like the other window panels (#dock-stack).
+        || (window.get_sftp_available()
+            && window.get_sftp_collapsed()
+            && docks(window.get_sftp_dock()))
 }
 
 /// Rebuild the edge stacks from the current window panel state, recompute the
@@ -298,7 +455,7 @@ pub(super) fn strip_on_edge(window: &AppWindow, edge: &str) -> bool {
 /// which strands the drag (its end handler never runs). The deferred run
 /// retries until the flag drops, so a release commit still lands ~100ms
 /// later.
-pub(super) fn refresh_dock(
+pub(crate) fn refresh_dock(
     window: &AppWindow,
     dock_stacks: &Rc<RefCell<DockStacks>>,
     panels_model: &Rc<VecModel<PanelGeomInfo>>,
@@ -314,7 +471,7 @@ pub(super) fn refresh_dock(
     );
 }
 
-pub(super) fn refresh_dock_inner(
+pub(crate) fn refresh_dock_inner(
     window: slint::Weak<AppWindow>,
     dock_stacks: Rc<RefCell<DockStacks>>,
     panels_model: Rc<VecModel<PanelGeomInfo>>,
@@ -334,9 +491,8 @@ pub(super) fn refresh_dock_inner(
         });
         return;
     }
-    // Zen mode (and terminal fullscreen, #495) hides every docked panel and
-    // the terminal fills the window.
-    if panels_hidden(&w) {
+    // Zen mode hides every docked panel and the terminal fills the window.
+    if w.get_zen_mode() {
         panels_model.set_vec(Vec::new());
         dividers_model.set_vec(Vec::new());
         w.set_dock_central_x(0.0);
@@ -368,22 +524,14 @@ pub(super) fn refresh_dock_inner(
             h: p.rect.h,
         })
         .collect();
-    // Update the rows in place whenever the list keeps its shape. `set_vec`
-    // resets the repeater and rebuilds every panel component, which would
-    // destroy the resize handle a drag currently holds (and renumber the items
-    // the pointer grab points at, stranding a divider drag) — so a resize would
-    // stop following the cursor after its first event. A changing panel count
-    // (dock / collapse / zen) is the only thing that needs the reset.
+    // Same row-level path as the dividers below: VecModel::set_vec resets the
+    // model, and a Slint repeater reacts by destroying and re-creating every
+    // panel component — visible as the edge panels popping in a frame or two
+    // late whenever a restore-only 1px geometry tweak churns the whole model.
+    // Only a structural change (row count) may take the set_vec path.
     if panels_model.row_count() == panels.len() {
         for (i, p) in panels.into_iter().enumerate() {
-            let unchanged = panels_model.row_data(i).is_some_and(|old| {
-                old.kind == p.kind
-                    && old.edge == p.edge
-                    && old.x == p.x
-                    && old.y == p.y
-                    && old.w == p.w
-                    && old.h == p.h
-            });
+            let unchanged = panels_model.row_data(i).is_some_and(|old| old == p);
             if !unchanged {
                 panels_model.set_row_data(i, p);
             }
@@ -402,6 +550,8 @@ pub(super) fn refresh_dock_inner(
             w: d.rect.w,
             h: d.rect.h,
             vertical: d.vertical,
+            axis_start: d.axis_start,
+            axis_len: d.axis_len,
         })
         .collect();
     if dividers_model.row_count() == dividers.len() {
@@ -414,6 +564,8 @@ pub(super) fn refresh_dock_inner(
                     && old.w == d.w
                     && old.h == d.h
                     && old.vertical == d.vertical
+                    && old.axis_start == d.axis_start
+                    && old.axis_len == d.axis_len
             });
             if !unchanged {
                 dividers_model.set_row_data(i, d);
@@ -433,7 +585,7 @@ pub(super) fn refresh_dock_inner(
 /// "tabstrip"/"left"/"right"/"up"/"down"/"center"; `None` when the point is
 /// outside every pane. The 30% edge bands trigger a split; the tab strip and
 /// middle drop into the pane's tab group.
-pub(super) fn drag_target(
+pub(crate) fn drag_target(
     layout: &crate::layout::Layout,
     content: (f32, f32),
     x: f32,
@@ -471,128 +623,3 @@ pub(super) fn drag_target(
     Some((p.id, zone, rect))
 }
 
-pub(super) fn set_terminal_row(
-    win: &AppWindow,
-    tab_id: &str,
-    mutator: impl Fn(&mut TerminalState),
-) {
-    let terminals = win.get_terminals();
-    let Some(model) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>() else {
-        return;
-    };
-    for i in 0..model.row_count() {
-        if let Some(mut row) = model.row_data(i) {
-            if row.id.as_str() == tab_id {
-                mutator(&mut row);
-                model.set_row_data(i, row);
-                break;
-            }
-        }
-    }
-}
-
-/// Per-pane SFTP collapse / size state and per-tab terminal font zoom.
-pub(super) fn wire_pane_sftp_and_font_zoom(
-    ctx: &WinCtx,
-    terminals_model: &Rc<VecModel<TerminalState>>,
-) {
-    let WinCtx { store, window, .. } = ctx;
-    // Per-session SFTP state: collapse + sizes live in each tab's TerminalState so
-    // split panes / other tabs each keep their own (resizing/collapsing one no
-    // longer bleeds onto the rest) (#v0.5).
-    {
-        let terminals_model = terminals_model.clone();
-        window.on_set_pane_sftp_collapsed(move |tab_id: SharedString, v: bool| {
-            update_terminal_row(&terminals_model, &tab_id, |r| r.sftp_collapsed = v);
-        });
-    }
-    {
-        // Font zoom shortcuts. Ctrl+=/-/0 zooms one session: a per-tab px
-        // override; Ctrl+0 resets that session to the size chosen in
-        // Settings. Ctrl+Shift+=/-/0 zooms every session in this window
-        // (shared term-font-size, cleared per-tab overrides so it visibly
-        // applies to all); Ctrl+Shift+0 resets the window to the Settings
-        // size. Zoom never persists globally — the settings stepper owns
-        // that. Changing the size re-measures the cell grid and triggers the
-        // PTY resize on its own.
-        let weak = window.as_weak();
-        let store = store.clone();
-        let terminals_model = terminals_model.clone();
-        window.on_zoom_term_font(
-            move |tab_id: SharedString, direction: i32, window_wide: bool| {
-                let Some(w) = weak.upgrade() else {
-                    return;
-                };
-                let settings_size = store.borrow().font_size() as i32;
-                if window_wide {
-                    let next = if direction == 0 {
-                        settings_size
-                    } else {
-                        w.get_term_font_size() as i32 + direction
-                    };
-                    w.set_term_font_size(next.clamp(8, 32) as f32);
-                    // Per-tab overrides would pin sessions at their old size and
-                    // defeat "zoom everything", so drop them.
-                    use slint::Model as _;
-                    for row in terminals_model.iter() {
-                        if row.font_size > 0 {
-                            let id = row.id.to_string();
-                            update_terminal_row(&terminals_model, &id, |r| r.font_size = 0);
-                        }
-                    }
-                    return;
-                }
-                let tab_id = tab_id.to_string();
-                if tab_id.is_empty() || tab_id == "welcome" {
-                    return;
-                }
-                use slint::Model as _;
-                let Some(row) = terminals_model.iter().find(|r| r.id.to_string() == tab_id) else {
-                    return;
-                };
-                if direction == 0 {
-                    // Back to the Settings size, regardless of the window base.
-                    update_terminal_row(&terminals_model, &tab_id, |r| {
-                        r.font_size = settings_size.clamp(8, 32)
-                    });
-                    return;
-                }
-                let base = if row.font_size > 0 {
-                    row.font_size
-                } else {
-                    w.get_term_font_size() as i32
-                };
-                let next = (base + direction).clamp(8, 32);
-                update_terminal_row(&terminals_model, &tab_id, |r| r.font_size = next);
-            },
-        );
-    }
-    {
-        let terminals_model = terminals_model.clone();
-        let weak = window.as_weak();
-        window.on_set_pane_sftp_height(move |tab_id: SharedString, v: f32| {
-            update_terminal_row(&terminals_model, &tab_id, |r| r.sftp_panel_height = v);
-            // Mirror to the global default so it persists (saved on close) and
-            // seeds new sessions; other open tabs use their own field, unaffected.
-            if let Some(w) = weak.upgrade() {
-                w.set_sftp_panel_height(v);
-            }
-        });
-    }
-    {
-        let terminals_model = terminals_model.clone();
-        let weak = window.as_weak();
-        window.on_set_pane_sftp_width(move |tab_id: SharedString, v: f32| {
-            update_terminal_row(&terminals_model, &tab_id, |r| r.sftp_panel_width = v);
-            if let Some(w) = weak.upgrade() {
-                w.set_sftp_panel_width(v);
-            }
-        });
-    }
-    {
-        let terminals_model = terminals_model.clone();
-        window.on_set_pane_sftp_saved_height(move |tab_id: SharedString, v: f32| {
-            update_terminal_row(&terminals_model, &tab_id, |r| r.sftp_saved_height = v);
-        });
-    }
-}

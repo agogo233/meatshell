@@ -9,14 +9,12 @@ use sysinfo::{Disks, Networks, System};
 
 use super::system_types::{SystemSampler, SystemSnapshot};
 
-
 impl SystemSampler {
     pub fn new() -> Self {
         let mut sys = System::new_all();
         sys.refresh_all();
         let nets = Networks::new_with_refreshed_list();
-        let last_rx_total = nets.iter().map(|(_, d)| d.total_received()).sum();
-        let last_tx_total = nets.iter().map(|(_, d)| d.total_transmitted()).sum();
+        let (last_rx_total, last_tx_total, last_fallback) = net_totals(&nets);
         let disks = Disks::new_with_refreshed_list();
         Self {
             sys,
@@ -24,6 +22,7 @@ impl SystemSampler {
             disks,
             last_rx_total,
             last_tx_total,
+            last_fallback,
             last_instant: std::time::Instant::now(),
         }
     }
@@ -56,9 +55,18 @@ impl SystemSampler {
             0.0
         };
 
-        // RX / TX bytes/sec from the delta across the iface list.
-        let rx_total: u64 = self.nets.iter().map(|(_, d)| d.total_received()).sum();
-        let tx_total: u64 = self.nets.iter().map(|(_, d)| d.total_transmitted()).sum();
+        // RX / TX bytes/sec from the delta across the physical iface list
+        // (all adapters when no physical one exists); virtual adapters would
+        // otherwise double-count the same frames (see `should_count_interface`).
+        let (rx_total, tx_total, fallback) = net_totals(&self.nets);
+        // A flip between the two counting scopes (physical-only ⇄ all) would
+        // otherwise replay a since-boot counter as a one-shot spike (or, the
+        // other way, under-report); re-baseline instead — one flat second.
+        if fallback != self.last_fallback {
+            self.last_rx_total = rx_total;
+            self.last_tx_total = tx_total;
+            self.last_fallback = fallback;
+        }
         let now = std::time::Instant::now();
         let elapsed = now
             .duration_since(self.last_instant)
@@ -95,12 +103,107 @@ impl SystemSampler {
             mem_total_mib: mem_total / 1024 / 1024,
             swap_used_mib: swap_used / 1024 / 1024,
             swap_total_mib: swap_total / 1024 / 1024,
-            net_bytes_per_sec: net_rx_per_sec + net_tx_per_sec,
+            // Saturating like the per-NIC accumulations above: two near-u64::MAX
+            // rates could overflow a plain add (theoretically unreachable, but
+            // the wrap would show a plausible-looking tiny number).
+            net_bytes_per_sec: net_rx_per_sec.saturating_add(net_tx_per_sec),
             net_rx_per_sec,
             net_tx_per_sec,
             disks,
         }
     }
+}
+
+/// Which adapters count toward the aggregated local network rate.
+///
+ /// A docker bridge, a WSL/Hyper-V `vEthernet` switch, a bond or the loopback
+ /// re-delivers frames that are already counted on the physical NIC, so summing
+ /// every adapter inflates the total (usually the receive side). Keep only the
+ /// physical adapters here; when *no* adapter is physical (tunnel-only or
+ /// fully virtualised box) `net_totals` falls back to counting all of them so
+ /// the panel shows real traffic instead of a permanent zero.
+fn should_count_interface(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    // Loopback ("lo", "lo0", …) — but not Windows "Local Area Connection".
+    if upper.starts_with("LO") && !upper.starts_with("LOCAL") {
+        return false;
+    }
+    const EXCLUDED_PREFIXES: [&str; 19] = [
+        "DOCKER",
+        "VETH",
+        "BR",
+        "VIRBR",
+        "BOND",
+        "TAP",
+        "TUN",
+        "WG",
+        "DUMMY",
+        "CAN",
+        "IFB",
+        "AWDL",
+        "UTUN",
+        "ISATAP",
+        "PPP",
+        "VBOX",
+        "MACVTAP",
+        "MACVLAN",
+        "TAILSCALE",
+    ];
+    if EXCLUDED_PREFIXES.iter().any(|p| upper.starts_with(p)) {
+        return false;
+    }
+    // Brand prefixes stay ASCII even when the rest of the name is localized
+    // (e.g. "vEthernet (默认交换机)").
+    const EXCLUDED_SUBSTRINGS: [&str; 4] = ["VETHERNET", "HYPER-V", "VMWARE", "WSL"];
+    !EXCLUDED_SUBSTRINGS.iter().any(|s| upper.contains(s))
+}
+
+/// Sum the cumulative receive/transmit counters of the physical adapters only
+/// (see [`should_count_interface`]).
+///
+/// When no adapter counts as physical — a tunnel-only or fully virtualised
+/// machine whose traffic rides entirely on `tun`/`vEthernet`/bridge devices —
+/// fall back to counting *all* adapters instead of reporting a permanent
+/// zero, since nothing else on the box carries the real traffic. The boolean
+/// return tells the sampler which scope produced the totals, so a later flip
+/// between the two scopes can be re-baselined instead of spiking the delta.
+///
+/// An adapter that disappears and reappears (e.g. a Wi‑Fi reconnect) is
+/// re‑baselined on the next sample, so its since‑boot counter isn't replayed;
+/// at most one one‑second spike shows up in the graph.
+fn net_totals(nets: &Networks) -> (u64, u64, bool) {
+    let mut rx = 0u64;
+    let mut tx = 0u64;
+    let mut all_rx = 0u64;
+    let mut all_tx = 0u64;
+    let mut counted = Vec::new();
+    let mut skipped = Vec::new();
+    for (name, data) in nets.iter() {
+        let r = data.total_received();
+        let t = data.total_transmitted();
+        all_rx = all_rx.saturating_add(r);
+        all_tx = all_tx.saturating_add(t);
+        if should_count_interface(name) {
+            rx = rx.saturating_add(r);
+            tx = tx.saturating_add(t);
+            counted.push(name.as_str());
+        } else {
+            skipped.push(name.as_str());
+        }
+    }
+    if counted.is_empty() {
+        tracing::debug!(
+            skipped = ?skipped,
+            "local net counters: no physical adapter matched, counting all"
+        );
+        return (all_rx, all_tx, true);
+    }
+    tracing::debug!(
+        counted = ?counted,
+        skipped = ?skipped,
+        "local net counters: physical adapters only"
+    );
+    (rx, tx, false)
 }
 
 /// Format a used/total memory pair (both in MiB) for the narrow sidebar.
@@ -136,5 +239,69 @@ pub fn format_bytes_per_sec(bytes: u64) -> String {
         format!("{} {}", bytes, UNITS[idx])
     } else {
         format!("{:.1} {}", value, UNITS[idx])
+    }
+}
+
+#[cfg(test)]
+mod interface_filter_tests {
+    use super::*;
+
+    #[test]
+    fn physical_adapters_are_counted() {
+        for name in [
+            "eth0",
+            "en0",
+            "wlan0",
+            "wlp2s0",
+            "Ethernet",
+            "WLAN",
+            "以太网",
+            "Wi-Fi",
+            "enx001122334455",
+            "Local Area Connection",
+            "Local Area Connection* 2",
+        ] {
+            assert!(should_count_interface(name), "{name} should count");
+        }
+    }
+
+    #[test]
+    fn virtual_adapters_are_skipped() {
+        for name in [
+            "lo",
+            "lo0",
+            "docker0",
+            "veth1a2b3c",
+            "br0",
+            "br-abc123",
+            "virbr0",
+            "bond0",
+            "bonding_masters",
+            "tap0",
+            "tun0",
+            "wg0",
+            "dummy0",
+            "can0",
+            "ifb0",
+            "bridge0",
+            "awdl0",
+            "utun4",
+            "isatap.3.4.5.6",
+            "ppp0",
+            "vboxnet0",
+            "macvtap0",
+            "macvlan0",
+            "tailscale0",
+            "Tailscale",
+            "vEthernet (WSL)",
+            "vEthernet (Default Switch)",
+            "vEthernet (默认交换机)",
+            "我的虚拟 vEthernet 网卡",
+            "VMware Network Adapter VMnet1",
+            "Hyper-V 虚拟交换器 (Internal)",
+            "Loopback Pseudo-Interface 1st Edition",
+        ] {
+            assert!(!should_count_interface(name), "{name} must be skipped");
+        }
     }
 }

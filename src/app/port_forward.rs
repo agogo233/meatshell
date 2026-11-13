@@ -2,14 +2,14 @@ use super::*;
 
 pub(super) fn blank_forward_draft() -> PortFwd {
     PortFwd {
-        id: "".into(),
         kind: "local".into(),
-        auto_start: true,
         name: "".into(),
         bind_addr: "127.0.0.1".into(),
         bind_port: "".into(),
         host: "".into(),
         host_port: "".into(),
+        auto_start: false,
+        id: String::new().into(),
     }
 }
 
@@ -17,9 +17,7 @@ pub(super) fn forward_drafts(forwards: &[crate::config::PortForward]) -> Vec<Por
     forwards
         .iter()
         .map(|forward| PortFwd {
-            id: forward.id.clone().into(),
             kind: forward.kind.clone().into(),
-            auto_start: forward.auto_start,
             name: forward.name.clone().into(),
             bind_addr: if forward.bind_addr.trim().is_empty() {
                 "127.0.0.1".into()
@@ -33,6 +31,8 @@ pub(super) fn forward_drafts(forwards: &[crate::config::PortForward]) -> Vec<Por
             } else {
                 forward.host_port.to_string().into()
             },
+            auto_start: forward.auto_start,
+            id: forward.id.clone().into(),
         })
         .collect()
 }
@@ -68,6 +68,19 @@ pub(super) fn validated_port_forwards(
                 .to_string()
             })?;
         let kind = draft.kind.as_str();
+        let bind_addr = if draft.bind_addr.trim().is_empty() {
+            "127.0.0.1".to_string()
+        } else {
+            draft.bind_addr.trim().to_string()
+        };
+        // `remote` forwards bind on the server, so they are exempt.
+        if kind != "remote" && !crate::tunnel::is_loopback_bind(&bind_addr) {
+            return Err(t(
+                "本地/动态转发的监听地址仅允许回环地址（127.0.0.1 / localhost / ::1）",
+                "A local or dynamic forward may only bind a loopback address (127.0.0.1 / localhost / ::1).",
+            )
+            .to_string());
+        }
         let (host, host_port) = if kind == "dynamic" {
             (String::new(), 0)
         } else {
@@ -89,18 +102,16 @@ pub(super) fn validated_port_forwards(
         };
 
         forwards.push(crate::config::PortForward {
+            // Editing an existing rule must keep its id so saves update it
+            // instead of appending a duplicate (matches upstream).
             id: draft.id.to_string(),
             kind: kind.to_string(),
-            auto_start: draft.auto_start,
             name: draft.name.trim().to_string(),
-            bind_addr: if draft.bind_addr.trim().is_empty() {
-                "127.0.0.1".to_string()
-            } else {
-                draft.bind_addr.trim().to_string()
-            },
+            bind_addr,
             bind_port,
             host,
             host_port,
+            auto_start: draft.auto_start,
         });
     }
     Ok(forwards)

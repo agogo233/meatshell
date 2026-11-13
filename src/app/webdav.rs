@@ -1,5 +1,23 @@
 use super::*;
 
+/// Percent-encode a remote path for safe URL embedding: keep `/` separators
+/// and the RFC-3986 unreserved set, encode everything else (spaces, `#`, `?`,
+/// `%`, non-ASCII). Without this a path like `my share/#1.json` silently
+/// becomes a fragment or a different URL.
+fn encode_webdav_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        match byte {
+            b'/' => out.push('/'),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 fn webdav_url(base: &str, remote_path: &str) -> Result<String> {
     let base = base.trim().trim_end_matches('/');
     if !base.starts_with("http://") && !base.starts_with("https://") {
@@ -48,7 +66,7 @@ fn webdav_url(base: &str, remote_path: &str) -> Result<String> {
     if remote.is_empty() {
         anyhow::bail!("{}", t("远端文件不能为空", "remote file cannot be empty"));
     }
-    Ok(format!("{base}/{remote}"))
+    Ok(format!("{base}/{}", encode_webdav_path(remote)))
 }
 
 fn webdav_url_uses_port(base: &str, port: u16) -> bool {
@@ -182,14 +200,27 @@ fn webdav_dir_missing_or_no_create_error() -> anyhow::Error {
     )
 }
 
+/// 401/403 is an auth problem, not a missing folder: saying "folder does not
+/// exist" sends users to check the path while the real fix is the credentials.
+fn webdav_auth_error() -> anyhow::Error {
+    anyhow::anyhow!(
+        "{}",
+        t(
+            "WebDAV 凭据被拒绝或无权限（401/403），请检查用户名/密码",
+            "WebDAV rejected the credentials or denied access (401/403); check the username and password"
+        )
+    )
+}
+
 fn webdav_dir_exists(agent: &ureq::Agent, url: &str, auth: Option<&str>) -> Result<bool> {
     let req = webdav_auth_req(agent.request("PROPFIND", url).set("Depth", "0"), auth);
     match req.call() {
         Ok(_) => Ok(true),
         Err(ureq::Error::Status(status, _)) if status == 404 || status == 409 => Ok(false),
-        Err(ureq::Error::Status(status, _)) if status == 401 || status == 403 || status == 405 => {
-            Err(webdav_dir_missing_or_no_create_error())
+        Err(ureq::Error::Status(status, _)) if status == 401 || status == 403 => {
+            Err(webdav_auth_error())
         }
+        Err(ureq::Error::Status(405, _)) => Err(webdav_dir_missing_or_no_create_error()),
         Err(e) => Err(webdav_error(e)),
     }
 }
@@ -199,9 +230,10 @@ fn webdav_create_dir(agent: &ureq::Agent, url: &str, auth: Option<&str>) -> Resu
     match req.call() {
         Ok(_) => Ok(()),
         Err(ureq::Error::Status(status, _)) if status == 405 => Ok(()),
-        Err(ureq::Error::Status(status, _))
-            if status == 401 || status == 403 || status == 404 || status == 409 =>
-        {
+        Err(ureq::Error::Status(status, _)) if status == 401 || status == 403 => {
+            Err(webdav_auth_error())
+        }
+        Err(ureq::Error::Status(status, _)) if status == 404 || status == 409 => {
             Err(webdav_dir_missing_or_no_create_error())
         }
         Err(e) => Err(webdav_error(e)),
@@ -217,6 +249,58 @@ fn webdav_ensure_parent_dirs(agent: &ureq::Agent, url: &str, auth: Option<&str>)
     Ok(())
 }
 
+/// Certificate verification is only meaningful for TLS, so skipping it over
+/// plain HTTP would ship every saved credential in cleartext. Enforced in the
+/// two transport chokepoints below, which every WebDAV path goes through.
+pub(super) fn require_tls_for_skipped_verification(
+    accept_invalid_certs: bool,
+    base_url: &str,
+) -> Result<()> {
+    if !accept_invalid_certs || base_url.trim().to_ascii_lowercase().starts_with("https://") {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{}",
+        t(
+            "关闭证书校验时仅支持 https:// 地址，否则密码会明文传输",
+            "with certificate verification disabled only https:// is allowed; plain HTTP would send passwords in cleartext"
+        )
+    )
+}
+
+/// One explicit confirmation before certificate verification is switched off:
+/// once it is off, a man in the middle can read the credentials of every saved
+/// session. Persisted settings keep whatever the user answered here.
+pub(super) fn confirm_skip_cert_verification() -> bool {
+    rfd::MessageDialog::new()
+        .set_title(t("关闭证书校验？", "Disable certificate verification?"))
+        .set_description(t(
+            "关闭后本机无法确认 WebDAV 服务器身份，已保存的所有会话密码都可能被中间人读取。建议仅用于自签证书的可信局域网。",
+            "After this the app cannot verify the WebDAV server's identity, and the passwords of every saved session can be read by a man in the middle. Use it only for trusted self-signed servers.",
+        ))
+        .set_level(rfd::MessageLevel::Warning)
+        .set_buttons(rfd::MessageButtons::YesNo)
+        .show()
+        == rfd::MessageDialogResult::Yes
+}
+
+/// Suffix for WebDAV status lines while verification is off, so the risk stays
+/// visible at the point of use and not only in the settings page.
+pub(super) fn webdav_status_suffix(accept_invalid_certs: bool) -> String {
+    if accept_invalid_certs {
+        t("（证书校验已关闭）", "(certificate verification disabled)").to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// The URL a remote path resolves to, or `None` when it is invalid. Callers
+/// compare resolved URLs rather than paths, since a base URL that already
+/// ends in the file name ignores the remote path entirely.
+pub(super) fn resolved_url(base_url: &str, remote_path: &str) -> Option<String> {
+    webdav_url(base_url, remote_path).ok()
+}
+
 pub(super) fn webdav_put_json(
     base_url: &str,
     remote_path: &str,
@@ -225,6 +309,7 @@ pub(super) fn webdav_put_json(
     accept_invalid_certs: bool,
     json: String,
 ) -> Result<()> {
+    require_tls_for_skipped_verification(accept_invalid_certs, base_url)?;
     let url = webdav_url(base_url, remote_path)?;
     let agent = webdav_agent(accept_invalid_certs);
     let auth = webdav_auth_header(username, password);
@@ -243,6 +328,7 @@ pub(super) fn webdav_get_json(
     password: &str,
     accept_invalid_certs: bool,
 ) -> Result<String> {
+    require_tls_for_skipped_verification(accept_invalid_certs, base_url)?;
     let url = webdav_url(base_url, remote_path)?;
     let agent = webdav_agent(accept_invalid_certs);
     let auth = webdav_auth_header(username, password);
@@ -253,150 +339,108 @@ pub(super) fn webdav_get_json(
         .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
-/// WebDAV config sync (#185): settings and manual upload.
-pub(super) fn wire_webdav_upload(ctx: &WinCtx) {
-    let WinCtx { store, window, .. } = ctx;
-    // WebDAV config sync (#185): manual upload/download of the portable session
-    // export JSON. It is intentionally not automatic on startup.
-    {
-        let s = store.borrow();
-        window.set_webdav_enabled(s.webdav_enabled());
-        window.set_webdav_url(s.webdav_url().into());
-        window.set_webdav_username(s.webdav_username().into());
-        window.set_webdav_password(s.webdav_password().into());
-        window.set_webdav_remote_path(s.webdav_remote_path().into());
-        window.set_webdav_accept_invalid_certs(s.webdav_accept_invalid_certs());
-        window.set_webdav_status(String::new().into());
-    }
-    {
-        let store = store.clone();
-        window.on_save_webdav_settings(
-            move |enabled: bool,
-                  url: SharedString,
-                  username: SharedString,
-                  password: SharedString,
-                  remote_path: SharedString,
-                  accept_invalid_certs: bool| {
-                let mut s = store.borrow_mut();
-                s.set_webdav_settings(
-                    enabled,
-                    url.to_string(),
-                    username.to_string(),
-                    password.to_string(),
-                    remote_path.to_string(),
-                    accept_invalid_certs,
-                );
-                let _ = s.save();
-            },
-        );
-    }
-    {
-        let weak = window.as_weak();
-        let store = store.clone();
-        window.on_webdav_upload(move || {
-            let Some(w) = weak.upgrade() else { return };
-            let enabled = w.get_webdav_enabled();
-            let url = w.get_webdav_url().to_string();
-            let username = w.get_webdav_username().to_string();
-            let password = w.get_webdav_password().to_string();
-            let remote_path = w.get_webdav_remote_path().to_string();
-            let accept_invalid_certs = w.get_webdav_accept_invalid_certs();
-            {
-                let mut s = store.borrow_mut();
-                s.set_webdav_settings(
-                    enabled,
-                    url.clone(),
-                    username.clone(),
-                    password.clone(),
-                    remote_path.clone(),
-                    accept_invalid_certs,
-                );
-                let _ = s.save();
-            }
-            if !enabled {
-                w.set_webdav_status(t("请先启用 WebDAV 同步", "enable WebDAV sync first").into());
-                return;
-            }
-            let res = store.borrow().export_json().and_then(|(json, count)| {
-                webdav_put_json(
-                    &url,
-                    &remote_path,
-                    &username,
-                    &password,
-                    accept_invalid_certs,
-                    json,
-                )
-                .map(|_| count)
-            });
-            let msg = match res {
-                Ok(n) => format!("{} {}", t("已上传连接", "uploaded connections"), n),
-                Err(e) => format!("{}: {}", t("上传失败", "upload failed"), e),
-            };
-            w.set_webdav_status(msg.into());
-        });
+/// Fetch a remote file; `Ok(None)` when the server says there is nothing there
+/// (404/409/410). Callers use the difference to tell "bundle not uploaded yet"
+/// apart from a failed decryption, so a wrong passphrase never silently
+/// falls back to the legacy plaintext file.
+pub(super) fn webdav_get_optional(
+    base_url: &str,
+    remote_path: &str,
+    username: &str,
+    password: &str,
+    accept_invalid_certs: bool,
+) -> Result<Option<String>> {
+    require_tls_for_skipped_verification(accept_invalid_certs, base_url)?;
+    let url = webdav_url(base_url, remote_path)?;
+    let agent = webdav_agent(accept_invalid_certs);
+    let auth = webdav_auth_header(username, password);
+    let req = webdav_auth_req(agent.get(&url), auth.as_deref());
+    match req.call() {
+        Ok(response) => response
+            .into_string()
+            .map(Some)
+            .map_err(|e| anyhow::anyhow!("{e}")),
+        Err(ureq::Error::Status(status, _)) if status == 404 || status == 409 || status == 410 => {
+            Ok(None)
+        }
+        Err(e) => Err(webdav_error(e)),
     }
 }
 
-/// WebDAV config sync (#185): manual download and import.
-pub(super) fn wire_webdav_download(ctx: &WinCtx, sessions_model: &Rc<VecModel<SessionInfo>>) {
-    let WinCtx {
-        store,
-        registry,
-        window,
-        ..
-    } = ctx;
-    {
-        let weak = window.as_weak();
-        let store = store.clone();
-        let sessions_model = sessions_model.clone();
-        let registry = registry.clone();
-        window.on_webdav_download(move || {
-            let Some(w) = weak.upgrade() else { return };
-            let enabled = w.get_webdav_enabled();
-            let url = w.get_webdav_url().to_string();
-            let username = w.get_webdav_username().to_string();
-            let password = w.get_webdav_password().to_string();
-            let remote_path = w.get_webdav_remote_path().to_string();
-            let accept_invalid_certs = w.get_webdav_accept_invalid_certs();
-            {
-                let mut s = store.borrow_mut();
-                s.set_webdav_settings(
-                    enabled,
-                    url.clone(),
-                    username.clone(),
-                    password.clone(),
-                    remote_path.clone(),
-                    accept_invalid_certs,
-                );
-                let _ = s.save();
-            }
-            if !enabled {
-                w.set_webdav_status(t("请先启用 WebDAV 同步", "enable WebDAV sync first").into());
-                return;
-            }
-            let res = webdav_get_json(
-                &url,
-                &remote_path,
-                &username,
-                &password,
-                accept_invalid_certs,
-            )
-            .and_then(|json| store.borrow_mut().import_json(&json));
-            let msg = match res {
-                Ok((added, skipped)) => {
-                    sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
-                    registry.broadcast_config_changed();
-                    format!(
-                        "{} {}, {} {}",
-                        t("已导入", "imported"),
-                        added,
-                        t("跳过", "skipped"),
-                        skipped
-                    )
-                }
-                Err(e) => format!("{}: {}", t("下载失败", "download failed"), e),
-            };
-            w.set_webdav_status(msg.into());
-        });
+/// Delete a remote file: `404`/`409` mean it is already gone, which counts as
+/// success. Used for best-effort cleanup of the pre-encryption connections
+/// file, so a server that forbids `DELETE` cannot fail the upload.
+pub(super) fn webdav_delete(
+    base_url: &str,
+    remote_path: &str,
+    username: &str,
+    password: &str,
+    accept_invalid_certs: bool,
+) -> Result<()> {
+    require_tls_for_skipped_verification(accept_invalid_certs, base_url)?;
+    let url = webdav_url(base_url, remote_path)?;
+    let agent = webdav_agent(accept_invalid_certs);
+    let auth = webdav_auth_header(username, password);
+    let req = webdav_auth_req(agent.delete(&url), auth.as_deref());
+    match req.call() {
+        Ok(_) => Ok(()),
+        Err(ureq::Error::Status(status, _)) if status == 404 || status == 409 => Ok(()),
+        Err(e) => Err(webdav_error(e)),
+    }
+}
+
+/// Derive the WebDAV path for the encrypted bundle from the configured
+/// connections path: swap the extension for `.mpack` so the two never collide.
+pub(super) fn bundle_remote_path(connections_path: &str) -> String {
+    // A trailing slash would produce a hidden `.mpack` file in the folder.
+    let p = connections_path.trim().trim_end_matches('/');
+    if p.is_empty() {
+        return "meatshell.mpack".to_string();
+    }
+    match p.rfind('.') {
+        Some(i) if i > p.rfind('/').unwrap_or(0) => format!("{}.mpack", &p[..i]),
+        _ => format!("{p}.mpack"),
+    }
+}
+
+/// Pull the base64url bundle out of the `{"meatshell_bundle":1,"data":"..."}`
+/// envelope written by the upload path. Parsed as JSON (not string-searched)
+/// so an unexpected server body can't be mis-read as a bundle.
+pub(super) fn extract_bundle_data(body: &str) -> Result<String, anyhow::Error> {
+    let value: serde_json::Value =
+        serde_json::from_str(body).map_err(|_| anyhow::anyhow!("not a bundle envelope"))?;
+    if value.get("meatshell_bundle").and_then(|v| v.as_i64()) != Some(1) {
+        return Err(anyhow::anyhow!("not a meatshell bundle envelope"));
+    }
+    value
+        .get("data")
+        .and_then(|v| v.as_str())
+        .map(|data| data.to_string())
+        .ok_or_else(|| anyhow::anyhow!("malformed bundle envelope"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skipped_cert_verification_requires_https() {
+        // Verification on: plain HTTP is an ordinary (unencrypted) choice.
+        assert!(require_tls_for_skipped_verification(false, "http://nas:5005/all/").is_ok());
+        // Verification off: HTTP must be refused, HTTPS stays allowed.
+        assert!(require_tls_for_skipped_verification(true, "http://nas:5005/all/").is_err());
+        assert!(require_tls_for_skipped_verification(true, "https://nas:5006/all/").is_ok());
+    }
+
+    #[test]
+    fn remote_paths_are_percent_encoded() {
+        assert_eq!(encode_webdav_path("all/meatshell.json"), "all/meatshell.json");
+        assert_eq!(encode_webdav_path("my share/a#1.json"), "my%20share/a%231.json");
+        assert_eq!(encode_webdav_path("中文/文件.txt"), "%E4%B8%AD%E6%96%87/%E6%96%87%E4%BB%B6.txt");
+        // A full URL through webdav_url keeps its separators intact.
+        assert_eq!(
+            webdav_url("https://nas/all/", "my share/x.json").unwrap(),
+            "https://nas/all/my%20share/x.json"
+        );
     }
 }

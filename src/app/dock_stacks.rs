@@ -1,8 +1,9 @@
 //! Runtime state of the docked-panel edge stacks (#dock-stack).
 //!
-//! Window-level panels (sidebar / welcome / quick) can share one window
-//! edge: `DockStacks` keeps, per edge, the ordered list of simultaneously-
-//! expanded panels and how the edge's secondary axis is divided between them.
+//! Window-level panels (sidebar / welcome / quick / ai / sftp) can share one
+//! window edge: `DockStacks` keeps, per edge, the ordered list of
+//! simultaneously-expanded panels and how the edge's secondary axis is divided
+//! between them.
 //! Pure logic — no Slint — so it is unit-testable; `app.rs` pushes the stacks
 //! into the UI and persists them via `crate::config`.
 
@@ -27,12 +28,47 @@ pub const DIVIDER: f32 = 4.0;
 /// Clamp bounds for a stacked panel's thickness along its edge's normal
 /// (its width on a left/right edge, height on a top/bottom one).
 pub const MIN_THICK: f32 = 120.0;
+/// Floor for a side-docked SFTP panel's width. The file list (icon + name +
+/// perms columns) is unreadable below it, and a width saved from an older
+/// layout can be far smaller, so every write path and the config getter hold
+/// this line (#505). `MIN_THICK` stays shared with the other panels.
+pub const MIN_SFTP_WIDTH: f32 = 300.0;
 /// Max share of the dock-area an edge stack may take. Kept well under half so
 /// the terminal never fully disappears even with opposite edges both maxed.
 const MAX_THICK_FRAC: f32 = 0.38;
 /// Outer band an edge reserves for the collapsed-panel ToolStrip (a folded
 /// panel still shows its 36px icon strip; stacked panels live inside it).
 pub const STRIP: f32 = 36.0;
+
+/// Smallest dock-area extent that can still lay out a two-panel stack. The
+/// real main window never gets near it (720x420 minimum minus the title bar
+/// leaves ~720x377), so anything below is a transient size, not user intent.
+pub const MIN_LAYOUT_EXTENT: f32 = 2.0 * MIN_THICK;
+
+/// True when `w`/`h` is a transient degenerate dock-area size. Pushing the
+/// geometry computed from one would strand every panel as an invisible
+/// sliver (compute_geom clamps thickness down to a 1px line); keeping the
+/// last pushed layout until a real size arrives avoids the pop.
+pub fn area_is_transient(w: f32, h: f32) -> bool {
+    w < MIN_LAYOUT_EXTENT || h < MIN_LAYOUT_EXTENT
+}
+
+/// True when `next` differs from the last pushed area `prev` by at most
+/// `eps` logical px on both axes. Window restore re-derives the size through
+/// DPI rounding and can report 1-2px of pure noise; refreshing on it churns
+/// the panel model for no visible gain.
+pub fn area_is_noise(prev: (f32, f32), next: (f32, f32), eps: f32) -> bool {
+    (next.0 - prev.0).abs() <= eps && (next.1 - prev.1).abs() <= eps
+}
+
+/// Slot index a drop should land at: the number of stacked panels whose
+/// stacking-axis midpoint is at or above the pointer. Slot indices grow along
+/// the stacking axis, so that count is exactly the dragged panel's destination
+/// slot. `midpoints` must exclude the dragged panel itself, or a small nudge
+/// past its own centre would already swap it with its neighbour.
+pub fn insertion_index(midpoints: &[f32], axis_pos: f32) -> usize {
+    midpoints.iter().filter(|&&m| m <= axis_pos).count()
+}
 
 /// Absolute rectangle in dock-area logical px.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -55,6 +91,10 @@ pub struct PanelGeom {
 
 /// A draggable divider between two stacked panels; dragging updates the
 /// boundary via [`DockStacks::set_ratio`] with `index` = the slot before it.
+/// `axis_start`/`axis_len` are the stack's split window along its secondary
+/// axis (dock-area px): the drag handler maps a cursor position through them,
+/// which matters for top/bottom stacks laid out inside the x range the side
+/// stacks left behind.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DividerGeom {
     pub edge: &'static str,
@@ -62,6 +102,8 @@ pub struct DividerGeom {
     pub rect: RectGeom,
     /// True when the handle is vertical (left/right edge → drag up/down).
     pub vertical: bool,
+    pub axis_start: f32,
+    pub axis_len: f32,
 }
 
 /// Full layout output: the central content rect (after every edge stack is
@@ -74,7 +116,9 @@ pub struct DockGeom {
 }
 
 /// Known panel kinds, in the order they appear in the config / UI.
-pub const KINDS: [&str; 3] = ["sidebar", "welcome", "quick"];
+/// `sftp` docks like any other window panel; its per-tab data is mirrored onto
+/// the window by `sync_active_sftp_to_root` (#dock-stack).
+pub const KINDS: [&str; 5] = ["sidebar", "welcome", "quick", "ai", "sftp"];
 
 fn edges() -> impl Iterator<Item = &'static str> {
     ["left", "right", "top", "bottom"].into_iter()
@@ -110,7 +154,6 @@ impl DockStacks {
     }
 
     /// The edge a panel currently stacks on (None when it is not in any stack).
-    #[allow(dead_code)] // dock rearrange API; only exercised by tests for now
     pub fn edge_of(&self, kind: &str) -> Option<&'static str> {
         for (e, table) in [
             ("left", self.table("left")),
@@ -127,7 +170,6 @@ impl DockStacks {
 
     /// Move (or add) `kind` onto `edge`, taking it off whatever edge it was on.
     /// Ratios are rebalanced evenly for the edge's new member count.
-    #[allow(dead_code)] // dock rearrange API; only exercised by tests for now
     pub fn dock_to(&mut self, edge: &str, kind: &'static str) {
         if let Some(old_edge) = self.edge_of(kind) {
             if old_edge == edge {
@@ -146,7 +188,6 @@ impl DockStacks {
     }
 
     /// Remove `kind` from `edge` (a fold / close).
-    #[allow(dead_code)] // dock rearrange API; only exercised by tests for now
     pub fn remove(&mut self, edge: &str, kind: &str) {
         if let Some(t) = self.table_mut(edge) {
             t.retain(|s| s.kind != kind);
@@ -179,6 +220,32 @@ impl DockStacks {
             }
             rebalance(t);
         }
+    }
+
+    /// Move `kind` to slot `target` (an index into the table *before* the
+    /// move) within its `edge` stack. Every slot keeps its own ratio, so a
+    /// reorder never changes how much space anyone gets — only who is where.
+    /// Returns `true` when the order actually changed.
+    pub fn move_to_index(&mut self, edge: &str, kind: &str, target: usize) -> bool {
+        let Some(t) = self.table_mut(edge) else {
+            return false;
+        };
+        if t.len() < 2 {
+            return false;
+        }
+        let Some(cur) = t.iter().position(|s| s.kind == kind) else {
+            return false;
+        };
+        let target = target.min(t.len() - 1);
+        if target == cur {
+            return false;
+        }
+        let slot = t.remove(cur);
+        // `target` is already the slot the panel should occupy afterwards:
+        // `remove` + `insert(target, ..)` puts it there regardless of whether
+        // it moved up or down.
+        t.insert(target, slot);
+        true
     }
 
     /// Serialize the current stacks for config persistence (2+ slots only).
@@ -306,6 +373,10 @@ impl DockStacks {
     /// 36px ToolStrip band: the band stays at the very edge and the whole
     /// stack is carved INSIDE it (the band spans the full edge, so the split
     /// axis and ratios are unaffected).
+    ///
+    /// Left/right stacks own the full edge height; the top/bottom stacks are
+    /// laid out inside the x range the side stacks left behind, so no two
+    /// edges ever overlap (#dock-cross-edge).
     pub fn compute_geom(
         &self,
         extent: &dyn Fn(&str) -> f32,
@@ -323,6 +394,18 @@ impl DockStacks {
             ..Default::default()
         };
         let (cw, ch) = (w.max(1.0), h.max(1.0));
+        // The x range a side edge claims: its band plus the stack it holds
+        // there (band alone when nothing is expanded on it).
+        let side_taken = |edge: &str| -> f32 {
+            let band = if has_strip(edge) { STRIP } else { 0.0 };
+            let Some(slots) = self.table(edge).filter(|t| !t.is_empty()) else {
+                return band;
+            };
+            band + Self::stack_thickness(slots, cw, band, extent)
+        };
+        let left_taken = side_taken("left");
+        let right_taken = side_taken("right");
+        let h_axis_len = (cw - left_taken - right_taken).max(0.0);
         for edge in ["left", "right", "top", "bottom"] {
             // A collapsed panel's ToolStrip band is reserved even when no
             // panel on this edge is expanded (the edge is strip-only).
@@ -357,44 +440,53 @@ impl DockStacks {
             // put the cap below MIN_THICK — f32::clamp panics when
             // min > max, so floor the cap at MIN_THICK; the next real
             // resize pass overwrites the transient geometry.
-            let cap = ((((if horizontal { cw } else { ch }) - band).max(0.0)) * MAX_THICK_FRAC)
-                .max(MIN_THICK);
-            let thickness = slots
-                .iter()
-                .map(|s| extent(s.kind))
-                .fold(0.0, f32::max)
-                .clamp(MIN_THICK, cap);
+            let thickness = Self::stack_thickness(
+                slots,
+                if horizontal { cw } else { ch },
+                band,
+                extent,
+            );
+            // The split axis: the full edge height for side stacks, or the
+            // central x range for top/bottom ones.
+            let (axis_start, axis_len) = if horizontal {
+                (0.0, ch)
+            } else {
+                (left_taken, h_axis_len)
+            };
             // The stack sits inside the band; the split axis spans the full
             // edge (the band runs along it), so only the normal offsets move.
-            let axis = if horizontal { ch } else { cw };
-            let mut pos = 0.0;
+            let mut offset = 0.0;
             for (i, s) in slots.iter().enumerate() {
-                let seg = if i == slots.len() - 1 {
-                    (axis - pos).max(0.0)
+                let seg = if i + 1 == slots.len() {
+                    (axis_len - offset).max(0.0)
                 } else {
-                    (s.ratio * axis).max(0.0)
+                    (s.ratio * axis_len).max(0.0)
                 };
+                let at = axis_start + offset;
                 let rect = match edge {
-                    "left" => RectGeom { x: band, y: pos, w: thickness, h: seg },
-                    "right" => RectGeom { x: cw - band - thickness, y: pos, w: thickness, h: seg },
-                    "top" => RectGeom { x: pos, y: band, w: seg, h: thickness },
-                    _ => RectGeom { x: pos, y: ch - band - thickness, w: seg, h: thickness },
+                    "left" => RectGeom { x: band, y: at, w: thickness, h: seg },
+                    "right" => RectGeom { x: cw - band - thickness, y: at, w: thickness, h: seg },
+                    "top" => RectGeom { x: at, y: band, w: seg, h: thickness },
+                    _ => RectGeom { x: at, y: ch - band - thickness, w: seg, h: thickness },
                 };
                 g.panels.push(PanelGeom { kind: s.kind, edge, rect });
-                if i < slots.len() - 1 {
+                if i + 1 < slots.len() {
+                    let boundary = at + seg;
                     let drect = if horizontal {
-                        RectGeom { x: rect.x, y: pos + seg, w: thickness, h: DIVIDER }
+                        RectGeom { x: rect.x, y: boundary, w: thickness, h: DIVIDER }
                     } else {
-                        RectGeom { x: pos + seg, y: rect.y, w: DIVIDER, h: thickness }
+                        RectGeom { x: boundary, y: rect.y, w: DIVIDER, h: thickness }
                     };
                     g.dividers.push(DividerGeom {
                         edge,
                         index: i,
                         rect: drect,
                         vertical: horizontal,
+                        axis_start,
+                        axis_len,
                     });
                 }
-                pos += seg;
+                offset += seg;
             }
             // Carve this edge's band + stack off the central content rect.
             let taken = band + thickness;
@@ -422,6 +514,27 @@ impl DockStacks {
         g.central.w = g.central.w.max(0.0);
         g.central.h = g.central.h.max(0.0);
         g
+    }
+
+    /// A stack's shared thickness: the largest preferred extent of its panels,
+    /// clamped to `MIN_THICK..=MAX_THICK_FRAC` of the edge's normal axis so
+    /// the central area keeps at least half of the dock-area. `band` is the
+    /// collapsed-panel band carved off that axis first.
+    fn stack_thickness(
+        slots: &[DockSlotInfo],
+        normal: f32,
+        band: f32,
+        extent: &dyn Fn(&str) -> f32,
+    ) -> f32 {
+        // Floor the cap at MIN_THICK: a tiny dock-area (the pre-show 0×0 pass
+        // or a user-shrunk window) puts it below MIN_THICK, and f32::clamp
+        // panics when min > max. The next real resize overwrites the transient.
+        let cap = (((normal - band).max(0.0)) * MAX_THICK_FRAC).max(MIN_THICK);
+        slots
+            .iter()
+            .map(|s| extent(s.kind))
+            .fold(0.0, f32::max)
+            .clamp(MIN_THICK, cap)
     }
 }
 
@@ -480,6 +593,69 @@ fn rebalance(t: &mut [DockSlotInfo]) {
             rem -= share;
         }
     }
+    // The clamps above keep every panel visible at the cost of the two
+    // invariants the rest of the module relies on, so repair them here.
+    enforce_ratio_invariant(t);
+}
+
+/// Guarantee `ratio >= MIN_RATIO` for every slot and shares summing to 1.0.
+///
+/// The clamping normalisation inside [`rebalance`] can clamp several small
+/// shares up to `MIN_RATIO` at once (a fresh panel on an already busy edge),
+/// which leaves the tail loop with nothing left to hand out: a middle slot
+/// ends up at 0.0 and the total drifts above 1.0. A 0.0 share is the "just
+/// joined" sentinel, so `to_saved` persists it and the config sanitiser drops
+/// that panel on the next load — losing the user's stacked layout for good.
+///
+/// Correction is taken from (or given back to) the slots with room to move,
+/// in proportion to that room, so a split the user just dragged — which
+/// already satisfies both invariants — is left exactly where it was.
+fn enforce_ratio_invariant(t: &mut [DockSlotInfo]) {
+    let n = t.len();
+    match n {
+        0 => return,
+        1 => t[0].ratio = 1.0,
+        _ => {}
+    }
+
+    // Lift every starved slot to the floor; the total drift that costs is
+    // corrected below against the same floor.
+    for s in t.iter_mut() {
+        if s.ratio < MIN_RATIO {
+            s.ratio = MIN_RATIO;
+        }
+    }
+
+    let diff = 1.0 - t.iter().map(|s| s.ratio).sum::<f32>();
+    if diff.abs() < 1e-6 {
+        return;
+    }
+    if diff > 0.0 {
+        // Under 1.0: hand the remainder back out, never past 1 - MIN_RATIO.
+        let room: f32 = t.iter().map(|s| (1.0 - MIN_RATIO - s.ratio).max(0.0)).sum();
+        if room <= 0.0 {
+            return;
+        }
+        for s in t.iter_mut() {
+            s.ratio += diff * ((1.0 - MIN_RATIO - s.ratio).max(0.0) / room);
+        }
+        return;
+    }
+
+    // Over 1.0: take it back from whoever can spare.
+    let room: f32 = t.iter().map(|s| (s.ratio - MIN_RATIO).max(0.0)).sum();
+    if room <= 0.0 {
+        // Nobody is above the floor, i.e. n > 1/MIN_RATIO. Even shares keep
+        // every panel visible rather than persisting zeros.
+        let each = (1.0 / n as f32).max(MIN_RATIO);
+        for s in t.iter_mut() {
+            s.ratio = each;
+        }
+        return;
+    }
+    for s in t.iter_mut() {
+        s.ratio = (s.ratio - diff.abs() * ((s.ratio - MIN_RATIO).max(0.0) / room)).max(MIN_RATIO);
+    }
 }
 
 #[cfg(test)]
@@ -508,6 +684,87 @@ mod tests {
     }
 
     #[test]
+    fn move_to_index_moves_slot_and_keeps_its_ratio() {
+        let mut s = DockStacks::default();
+        s.dock_to("left", "sidebar");
+        s.dock_to("left", "quick");
+        s.dock_to("left", "ai");
+        s.set_ratio("left", 1, 0.4);
+        let (a, b, c) = (s.left[0].ratio, s.left[1].ratio, s.left[2].ratio);
+        assert!(s.move_to_index("left", "ai", 0));
+        assert_eq!(
+            s.left.iter().map(|x| x.kind).collect::<Vec<_>>(),
+            vec!["ai", "sidebar", "quick"]
+        );
+        // Ratios travel with their slot: nobody lost or gained space.
+        assert_eq!(
+            s.left.iter().map(|x| x.ratio).collect::<Vec<_>>(),
+            vec![c, a, b]
+        );
+    }
+
+    #[test]
+    fn move_to_index_noop_when_unmoved_or_unknown() {
+        let mut s = DockStacks::default();
+        s.dock_to("left", "sidebar");
+        s.dock_to("left", "quick");
+        // Same slot: nothing to do.
+        assert!(!s.move_to_index("left", "sidebar", 0));
+        assert!(!s.move_to_index("left", "quick", 1));
+        // Panel on another edge, on an empty edge, or not docked at all.
+        assert!(!s.move_to_index("right", "sidebar", 0));
+        assert!(!s.move_to_index("nope", "sidebar", 0));
+        assert!(!s.move_to_index("left", "sftp", 0));
+        assert_eq!(s.left.len(), 2);
+    }
+
+    #[test]
+    fn move_to_index_clamps_past_the_last_slot() {
+        let mut s = DockStacks::default();
+        s.dock_to("bottom", "quick");
+        s.dock_to("bottom", "sftp");
+        assert!(s.move_to_index("bottom", "quick", 99));
+        assert_eq!(s.bottom[1].kind, "quick");
+    }
+
+    #[test]
+    fn move_to_index_moves_a_middle_slot_both_ways() {
+        let mut s = DockStacks::default();
+        s.dock_to("left", "sidebar");
+        s.dock_to("left", "quick");
+        s.dock_to("left", "ai");
+        assert!(s.move_to_index("left", "quick", 0));
+        assert_eq!(
+            s.left.iter().map(|x| x.kind).collect::<Vec<_>>(),
+            vec!["quick", "sidebar", "ai"]
+        );
+        // Back to the tail: `target` is the final slot, not an offset.
+        assert!(s.move_to_index("left", "quick", 2));
+        assert_eq!(
+            s.left.iter().map(|x| x.kind).collect::<Vec<_>>(),
+            vec!["sidebar", "ai", "quick"]
+        );
+    }
+
+    #[test]
+    fn move_to_index_refuses_a_single_slot_stack() {
+        let mut s = DockStacks::default();
+        s.dock_to("left", "sidebar");
+        assert!(!s.move_to_index("left", "sidebar", 0));
+    }
+
+    #[test]
+    fn insertion_index_counts_panels_above_the_pointer() {
+        let midpoints = [50.0, 150.0, 250.0];
+        assert_eq!(insertion_index(&midpoints, 0.0), 0);
+        assert_eq!(insertion_index(&midpoints, 50.0), 1);
+        assert_eq!(insertion_index(&midpoints, 100.0), 1);
+        assert_eq!(insertion_index(&midpoints, 150.0), 2);
+        assert_eq!(insertion_index(&midpoints, 999.0), 3);
+        assert_eq!(insertion_index(&[], 0.0), 0);
+    }
+
+    #[test]
     fn remove_folds_panel() {
         let mut s = DockStacks::default();
         s.dock_to("left", "sidebar");
@@ -526,7 +783,7 @@ mod tests {
         // A merge onto an occupied edge splits it in halves, not slivers.
         assert!((s.left[0].ratio - 0.5).abs() < 1e-5);
         assert!((s.left[1].ratio - 0.5).abs() < 1e-5);
-        s.dock_to("left", "welcome");
+        s.dock_to("left", "ai");
         assert_eq!(s.left.len(), 3);
         let sum: f32 = s.left.iter().map(|x| x.ratio).sum();
         assert!((sum - 1.0).abs() < 1e-5);
@@ -541,7 +798,7 @@ mod tests {
         s.dock_to("left", "sidebar");
         s.dock_to("left", "quick");
         s.set_ratio("left", 0, 0.7);
-        s.dock_to("left", "welcome");
+        s.dock_to("left", "ai");
         // The 70/30 tuning survives as its original 7:3 ratio inside the
         // share the newcomer did NOT take; the newcomer itself gets an
         // even third.
@@ -577,7 +834,7 @@ mod tests {
             ratio: 0.92,
         });
         let expanded = |k: &str| match k {
-            "sidebar" | "welcome" => Some("left"),
+            "sidebar" | "ai" => Some("left"),
             _ => None,
         };
         let mut cur = DockStacks::default();
@@ -592,7 +849,7 @@ mod tests {
         let mut s = DockStacks::default();
         s.dock_to("left", "sidebar");
         s.dock_to("left", "quick");
-        s.dock_to("left", "welcome");
+        s.dock_to("left", "ai");
         s.set_ratio("left", 0, 0.6);
         assert!((s.left[0].ratio - 0.6).abs() < 1e-5);
         let sum: f32 = s.left.iter().map(|x| x.ratio).sum();
@@ -604,10 +861,117 @@ mod tests {
     }
 
     #[test]
+    fn rebalance_never_starves_a_middle_slot() {
+        // Four newcomers on a nearly occupied edge: each takes far less than
+        // MIN_RATIO, the clamps push the total over 1.0, and the tail pass
+        // used to leave a middle slot at 0.0 — the "just joined" sentinel,
+        // which `to_saved` persists and the config layer then drops.
+        let mut t = [
+            DockSlotInfo {
+                kind: "sidebar",
+                ratio: 0.91,
+            },
+            DockSlotInfo {
+                kind: "quick",
+                ratio: 0.0225,
+            },
+            DockSlotInfo {
+                kind: "ai",
+                ratio: 0.0225,
+            },
+            DockSlotInfo {
+                kind: "welcome",
+                ratio: 0.0225,
+            },
+            DockSlotInfo {
+                kind: "sftp",
+                ratio: 0.0225,
+            },
+        ];
+        rebalance(&mut t);
+        let sum: f32 = t.iter().map(|s| s.ratio).sum();
+        assert!((sum - 1.0).abs() < 1e-5, "shares must sum to 1.0, got {sum:?}");
+        for s in &t {
+            assert!(
+                s.ratio > 0.0,
+                "{} starved to {s:?}: a zero share is dropped on the next load",
+                s.kind
+            );
+            assert!(s.ratio >= MIN_RATIO, "{} below the floor: {s:?}", s.kind);
+        }
+    }
+
+    #[test]
+    fn rebalance_repairs_a_clamped_total_overflow() {
+        let mut t = [
+            DockSlotInfo {
+                kind: "sidebar",
+                ratio: 0.95,
+            },
+            DockSlotInfo {
+                kind: "quick",
+                ratio: 0.03,
+            },
+            DockSlotInfo {
+                kind: "ai",
+                ratio: 0.02,
+            },
+        ];
+        rebalance(&mut t);
+        let sum: f32 = t.iter().map(|s| s.ratio).sum();
+        assert!((sum - 1.0).abs() < 1e-5, "shares must sum to 1.0, got {sum:?}");
+        for s in &t {
+            assert!(s.ratio >= MIN_RATIO, "{} below the floor: {s:?}", s.kind);
+        }
+    }
+
+    #[test]
+    fn rebalance_leaves_a_dragged_split_alone() {
+        // The repair must not touch an already-consistent split, or every
+        // divider drag would snap back to a differently-shaped split.
+        let mut t = [
+            DockSlotInfo {
+                kind: "sidebar",
+                ratio: 0.92,
+            },
+            DockSlotInfo {
+                kind: "quick",
+                ratio: 0.08,
+            },
+        ];
+        rebalance(&mut t);
+        assert!((t[0].ratio - 0.92).abs() < 1e-6);
+        assert!((t[1].ratio - 0.08).abs() < 1e-6);
+    }
+
+    #[test]
+    fn crowded_edge_survives_a_save_reload() {
+        let mut saved = DockStacks::default();
+        saved.left.push(DockSlotInfo {
+            kind: "sidebar",
+            ratio: 0.91,
+        });
+        let expanded = |k: &str| {
+            matches!(k, "sidebar" | "quick" | "ai" | "welcome" | "sftp").then_some("left")
+        };
+        let mut cur = DockStacks::default();
+        cur.rebuild_from(&saved, &expanded);
+        let saved = cur.to_saved();
+        assert!(saved[0].slots.iter().all(|s| s.ratio > 0.0));
+        let mut t = DockStacks::default();
+        t.from_saved(&saved);
+        assert_eq!(t.left.len(), 5, "a panel was lost across the round trip");
+        assert_eq!(
+            t.left.iter().map(|s| s.kind).collect::<Vec<_>>(),
+            ["sidebar", "welcome", "quick", "ai", "sftp"]
+        );
+    }
+
+    #[test]
     fn saved_roundtrip_keeps_stack() {
         let mut s = DockStacks::default();
         s.dock_to("bottom", "sidebar");
-        s.dock_to("bottom", "welcome");
+        s.dock_to("bottom", "ai");
         let saved = s.to_saved();
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].edge, "bottom");
@@ -615,8 +979,99 @@ mod tests {
         t.from_saved(&saved);
         assert_eq!(t.bottom.len(), 2);
         assert_eq!(t.bottom[0].kind, "sidebar");
-        assert_eq!(t.bottom[1].kind, "welcome");
+        assert_eq!(t.bottom[1].kind, "ai");
         assert!((t.bottom.iter().map(|x| x.ratio).sum::<f32>() - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn sftp_stacks_with_sidebar_on_same_edge() {
+        // SFTP docked to the right alongside a resource sidebar: the two share
+        // the edge, split evenly, and SFTP survives a persist roundtrip.
+        let mut s = DockStacks::default();
+        s.dock_to("right", "sidebar");
+        s.dock_to("right", "sftp");
+        assert_eq!(s.right.len(), 2);
+        assert!((s.right[0].ratio - 0.5).abs() < 1e-5);
+        assert!((s.right[1].ratio - 0.5).abs() < 1e-5);
+        let saved = s.to_saved();
+        let mut t = DockStacks::default();
+        t.from_saved(&saved);
+        assert_eq!(t.right.len(), 2);
+        assert_eq!(t.right[1].kind, "sftp");
+        assert!((t.right.iter().map(|x| x.ratio).sum::<f32>() - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn sftp_moves_between_edges_and_can_fold() {
+        let mut s = DockStacks::default();
+        s.dock_to("bottom", "sftp");
+        s.dock_to("right", "sftp");
+        assert!(s.bottom.is_empty());
+        assert_eq!(s.right.len(), 1);
+        assert_eq!(s.right[0].kind, "sftp");
+        // Collapse = remove; a lone sftp stack is not persisted either.
+        s.remove("right", "sftp");
+        assert!(s.right.is_empty());
+        assert!(s.to_saved().is_empty());
+        assert_eq!(s.edge_of("sftp"), None);
+    }
+
+    #[test]
+    fn sftp_geom_splits_right_edge_with_sidebar() {
+        let mut s = DockStacks::default();
+        s.dock_to("right", "sidebar");
+        s.dock_to("right", "sftp");
+        let extent = |k: &str| match k {
+            "sidebar" => 240.0,
+            _ => 320.0,
+        };
+        let g = s.compute_geom(&extent, &no_strip, 1000.0, 600.0);
+        assert_eq!(g.panels.len(), 2);
+        assert_eq!(g.panels[0].kind, "sidebar");
+        assert_eq!(g.panels[1].kind, "sftp");
+        // Both share the right-edge thickness and split the height in halves.
+        assert_eq!(g.panels[0].rect.w, 320.0);
+        assert_eq!(g.panels[0].rect.h, 300.0);
+        assert_eq!(g.panels[1].rect.h, 300.0);
+        assert_eq!(g.dividers.len(), 1);
+        assert!(g.dividers[0].vertical);
+    }
+
+    #[test]
+    fn sftp_rebuild_joins_existing_sidebar_on_reexpand() {
+        // A live layout where the resource sidebar is expanded on the right and
+        // SFTP re-expands (tab switched back to an SFTP-backed session): the
+        // fresh sftp panel joins behind the established one with an even share.
+        let mut saved = DockStacks::default();
+        saved.dock_to("right", "sidebar");
+        let expanded = |k: &str| match k {
+            "sidebar" | "sftp" => Some("right"),
+            _ => None,
+        };
+        let mut cur = DockStacks::default();
+        cur.rebuild_from(&saved, &expanded);
+        assert_eq!(cur.right.len(), 2);
+        assert_eq!(cur.right[0].kind, "sidebar");
+        assert_eq!(cur.right[1].kind, "sftp");
+        assert!((cur.right[0].ratio - 0.5).abs() < 1e-3);
+        assert!((cur.right[1].ratio - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn sftp_rebuild_drops_when_folded() {
+        let mut saved = DockStacks::default();
+        saved.dock_to("right", "sidebar");
+        saved.dock_to("right", "sftp");
+        // SFTP folded (local tab): it leaves the stack; only the sidebar is
+        // still expanded, so the rebuild keeps exactly that one slot.
+        let expanded = |k: &str| match k {
+            "sidebar" => Some("right"),
+            _ => None,
+        };
+        let mut cur = DockStacks::default();
+        cur.rebuild_from(&saved, &expanded);
+        assert_eq!(cur.right.len(), 1);
+        assert_eq!(cur.right[0].kind, "sidebar");
     }
 
     #[test]
@@ -670,7 +1125,7 @@ mod tests {
     #[test]
     fn geom_single_panel_carves_edge_full_height() {
         let mut s = DockStacks::default();
-        s.dock_to("right", "welcome");
+        s.dock_to("right", "ai");
         let g = s.compute_geom(&extent_220, &no_strip, 800.0, 600.0);
         assert_eq!(g.panels.len(), 1);
         assert_eq!(g.panels[0].rect, RectGeom { x: 580.0, y: 0.0, w: 220.0, h: 600.0 });
@@ -682,7 +1137,7 @@ mod tests {
     fn geom_top_edge_splits_horizontally() {
         let mut s = DockStacks::default();
         s.dock_to("top", "sidebar");
-        s.dock_to("top", "welcome");
+        s.dock_to("top", "ai");
         let g = s.compute_geom(&extent_220, &no_strip, 800.0, 600.0);
         assert_eq!(g.panels.len(), 2);
         assert_eq!(g.panels[0].rect, RectGeom { x: 0.0, y: 0.0, w: 400.0, h: 220.0 });
@@ -741,8 +1196,68 @@ mod tests {
         assert_eq!(g.central.w, 800.0 - 256.0 - 36.0);
     }
 
-    fn expanded_left_sidebar_welcome(k: &str) -> Option<&'static str> {
-        matches!(k, "sidebar" | "welcome").then_some("left")
+    #[test]
+    fn geom_side_stack_owns_full_height_and_bottom_stays_clear() {
+        // A left-docked panel keeps the whole edge height; a bottom-docked
+        // stack lays out inside the x range the left panel left behind, so
+        // the two never overlap (#dock-cross-edge).
+        let mut s = DockStacks::default();
+        s.dock_to("left", "sidebar");
+        s.dock_to("bottom", "sftp");
+        s.dock_to("bottom", "quick");
+        let extent = |k: &str| if k == "sidebar" { 200.0 } else { 180.0 };
+        let g = s.compute_geom(&extent, &no_strip, 1000.0, 600.0);
+        let left = g.panels.iter().find(|p| p.kind == "sidebar").unwrap();
+        assert_eq!(left.rect, RectGeom { x: 0.0, y: 0.0, w: 200.0, h: 600.0 });
+        let bottom: Vec<&PanelGeom> = g.panels.iter().filter(|p| p.edge == "bottom").collect();
+        assert_eq!(bottom.len(), 2);
+        // Both sit right of the left panel, tiled edge to edge without overlap.
+        assert_eq!(bottom[0].rect.x, 200.0);
+        assert_eq!(bottom[1].rect.x, bottom[0].rect.x + bottom[0].rect.w);
+        for p in &bottom {
+            assert!(p.rect.w > 0.0);
+            assert!(p.rect.y + p.rect.h <= 600.0);
+        }
+        let last = bottom.last().unwrap();
+        assert_eq!(last.rect.x + last.rect.w, 1000.0);
+    }
+
+    #[test]
+    fn geom_bottom_divider_reports_clipped_axis_window() {
+        let mut s = DockStacks::default();
+        s.dock_to("left", "sidebar");
+        s.dock_to("right", "ai");
+        s.dock_to("bottom", "sftp");
+        s.dock_to("bottom", "quick");
+        let extent = |k: &str| if k == "sidebar" { 200.0 } else { 160.0 };
+        let g = s.compute_geom(&extent, &no_strip, 1000.0, 600.0);
+        let d = g.dividers.iter().find(|d| d.edge == "bottom").unwrap();
+        // The bottom stack splits the range between the two side stacks, so
+        // the divider's drag window must be reported with that same offset.
+        assert!(!d.vertical);
+        assert_eq!(d.axis_start, 200.0);
+        assert_eq!(d.axis_len, 1000.0 - 200.0 - 160.0);
+        assert_eq!(d.rect.x, 200.0 + d.axis_len / 2.0);
+    }
+
+    #[test]
+    fn geom_top_bottom_stacks_cleave_from_side_strip_bands() {
+        // No panel expanded on the sides, only collapsed strips: the top/bottom
+        // stack still starts behind the left band, and its divider window spans
+        // from that band to the right one.
+        let mut s = DockStacks::default();
+        s.dock_to("bottom", "sftp");
+        s.dock_to("bottom", "quick");
+        let strip = |_edge: &str| true;
+        let g = s.compute_geom(&extent_220, &strip, 800.0, 600.0);
+        let bottom = g.panels.iter().find(|p| p.edge == "bottom").unwrap();
+        assert_eq!(bottom.rect.x, STRIP);
+        assert_eq!(g.dividers[0].axis_start, STRIP);
+        assert_eq!(g.dividers[0].axis_len, 800.0 - 2.0 * STRIP);
+    }
+
+    fn expanded_left_sidebar_ai(k: &str) -> Option<&'static str> {
+        matches!(k, "sidebar" | "ai").then_some("left")
     }
 
     fn expanded_none(_: &str) -> Option<&'static str> {
@@ -755,12 +1270,12 @@ mod tests {
         saved.dock_to("left", "sidebar");
         saved.dock_to("left", "quick");
         saved.set_ratio("left", 0, 0.7);
-        // Quick folds; welcome joins the left edge.
+        // Quick folds; AI joins the left edge.
         let mut cur = DockStacks::default();
-        cur.rebuild_from(&saved, &expanded_left_sidebar_welcome);
+        cur.rebuild_from(&saved, &expanded_left_sidebar_ai);
         assert_eq!(cur.left.len(), 2);
         assert_eq!(cur.left[0].kind, "sidebar");
-        assert_eq!(cur.left[1].kind, "welcome");
+        assert_eq!(cur.left[1].kind, "ai");
         // The tuned 0.70 split for the surface panel is kept.
         assert!((cur.left[0].ratio - 0.7).abs() < 1e-3);
         assert!((cur.left.iter().map(|s| s.ratio).sum::<f32>() - 1.0).abs() < 1e-5);
@@ -787,5 +1302,25 @@ mod tests {
         assert!(cur.left.is_empty());
         assert_eq!(cur.right.len(), 1);
         assert_eq!(cur.right[0].kind, "sidebar");
+    }
+
+    #[test]
+    fn area_noise_covers_dpi_rounding_only() {
+        assert!(area_is_noise((700.0, 370.0), (701.0, 371.0), 2.0));
+        assert!(area_is_noise((700.0, 370.0), (702.0, 368.0), 2.0));
+        // Past 2px on either axis the change is real (window drag, snap).
+        assert!(!area_is_noise((700.0, 370.0), (703.0, 370.0), 2.0));
+        assert!(!area_is_noise((700.0, 370.0), (700.0, 300.0), 2.0));
+    }
+
+    #[test]
+    fn area_transient_flags_degenerate_sizes() {
+        assert!(area_is_transient(1.0, 370.0));
+        assert!(area_is_transient(700.0, 1.0));
+        assert!(area_is_transient(239.9, 500.0));
+        // The smallest real dock area (window min 720x420 minus title bar)
+        // stays comfortably above the threshold.
+        assert!(!area_is_transient(700.0, 240.0));
+        assert!(!area_is_transient(360.0, 384.0));
     }
 }

@@ -317,7 +317,7 @@ fn modal_keyboard_state_is_local_to_each_window() {
 }
 
 #[test]
-fn detached_windows_share_cancel_keys_and_editor_guards_unsaved_changes() {
+fn detached_windows_share_cancel_keys() {
     std::thread::spawn(|| {
         let (_main, _, windows) = host();
         let process_ui = ProcWindow::new().unwrap();
@@ -340,38 +340,6 @@ fn detached_windows_share_cancel_keys_and_editor_guards_unsaved_changes() {
         settle(&system_window);
         key(&system_window, Key::Escape);
         assert_eq!(closes.get(), 2);
-
-        let editor = EditorWindow::new().unwrap();
-        editor.set_editor_open(true);
-        editor.show().unwrap();
-        let editor_window = windows.borrow()[3].clone();
-        editor_window.set_size(slint::PhysicalSize::new(1000, 850));
-        let count = closes.clone();
-        editor.on_close_editor(move || count.set(count.get() + 1));
-        settle(&editor_window);
-        key(&editor_window, "x");
-        assert_eq!(
-            editor.get_editor_content(),
-            "x",
-            "editor must restore input focus"
-        );
-        assert!(editor.get_editor_dirty());
-        key(&editor_window, Key::Escape);
-        settle(&editor_window);
-        assert!(editor.get_discard_confirm_open());
-        assert_eq!(closes.get(), 2);
-        key(&editor_window, Key::Return);
-        assert!(
-            editor.get_discard_confirm_open(),
-            "Enter must not discard changes"
-        );
-        key(&editor_window, Key::Escape);
-        settle(&editor_window);
-        assert!(!editor.get_discard_confirm_open());
-        assert_eq!(editor.get_editor_content(), "x");
-        editor.set_editor_dirty(false);
-        key(&editor_window, Key::Escape);
-        assert_eq!(closes.get(), 3);
     })
     .join()
     .unwrap();
@@ -429,7 +397,7 @@ fn saved_secret_reveal_flows_through_the_real_app_window() {
             Default::default(),
             Default::default(),
             Default::default(),
-            Rc::new(EditorWindow::new().unwrap()),
+            Default::default(),
         );
         ui.invoke_edit_session(saved.id.clone().into());
         let render = || {

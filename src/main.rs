@@ -16,8 +16,6 @@ mod i18n;
 #[cfg(not(feature = "headless"))]
 mod layout;
 mod logging;
-#[cfg(any(test, not(feature = "headless")))]
-mod session_test;
 mod mcp;
 #[cfg(not(feature = "headless"))]
 mod rdp;
@@ -35,8 +33,6 @@ mod terminal;
 mod tunnel;
 #[cfg(not(feature = "headless"))]
 mod ui;
-#[cfg(not(feature = "headless"))]
-mod update;
 #[cfg(not(feature = "headless"))]
 mod wallpaper;
 #[cfg(not(feature = "headless"))]
@@ -61,10 +57,13 @@ impl StartMode {
 }
 
 fn main() -> anyhow::Result<()> {
+    // First thing the process does: a release build sets panic = "abort", so
+    // any panic kills the app without unwinding — and without the tracing
+    // layers ever flushing. The hook appends the panic site straight to
+    // error.log so a one-shot crash still leaves a diagnosable scene.
+    logging::install_panic_hook();
+
     let mut args: Vec<String> = std::env::args().collect();
-    // Started by a one-click update: let the previous process exit first (#390).
-    #[cfg(not(feature = "headless"))]
-    update::inplace::wait_for_previous(&mut args);
     if args.iter().any(|arg| arg == "--http-config") {
         anyhow::ensure!(args.iter().any(|arg| arg == "--data-dir") || std::env::var_os("MEATSHELL_DATA_DIR").is_some(),
             "HTTP service requires an explicitly selected --data-dir or MEATSHELL_DATA_DIR profile");
@@ -171,55 +170,38 @@ fn init_tracing() {
         .with_filter(env_filter);
 
     // One file, capped at 50 MiB, auto-overwriting when full (5 MiB was too
-    // small to diagnose anything useful).
-    let file_layer = logging::path()
-        .and_then(|p| logging::CappedFile::open(p, 50 * 1024 * 1024).ok())
-        .map(|cf| {
-            fmt::layer()
-                .with_ansi(false)
-                .with_writer(logging::CappedWriter::new(cf))
-                .with_filter(quiet_noise(EnvFilter::new("warn")))
-        });
+    // small to diagnose anything useful). An open failure is NOT silently
+    // dropped any more: surface it once the subscriber is up so a user who
+    // goes looking for error.log learns why it isn't there.
+    let mut file_open_error: Option<String> = None;
+    let file_layer = match logging::path() {
+        Some(p) => match logging::CappedFile::open(p, 50 * 1024 * 1024) {
+            Ok(cf) => Some(
+                fmt::layer()
+                    .with_ansi(false)
+                    .with_writer(logging::CappedWriter::new(cf))
+                    .with_filter(quiet_noise(EnvFilter::new("warn"))),
+            ),
+            Err(error) => {
+                file_open_error = Some(error.to_string());
+                None
+            }
+        },
+        None => {
+            file_open_error = Some("no log dir resolved".to_string());
+            None
+        }
+    };
 
     tracing_subscriber::registry()
         .with(stderr_layer)
         .with(file_layer)
         .init();
 
-    install_panic_logger();
-}
-
-/// Release builds use `panic = "abort"` and run without a console, so a panic
-/// used to kill the app without a trace: the default hook only prints to
-/// stderr (#544). Log the message, location and thread to `error.log` first,
-/// then fall through to the default hook. The file writer is unbuffered, so the
-/// line is on disk before the process aborts.
-fn install_panic_logger() {
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let msg = info
-            .payload()
-            .downcast_ref::<&str>()
-            .map(|s| (*s).to_string())
-            .or_else(|| info.payload().downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "<non-string panic payload>".to_string());
-        let location = info
-            .location()
-            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
-            .unwrap_or_else(|| "<unknown>".to_string());
-        let thread = std::thread::current();
-        let thread = thread.name().unwrap_or("<unnamed>");
-        let version = env!("CARGO_PKG_VERSION");
-        // Symbols are stripped in release, so a backtrace there is just raw
-        // addresses; only spend the lines on it in debug builds.
-        if cfg!(debug_assertions) {
-            let bt = std::backtrace::Backtrace::force_capture();
-            tracing::error!(%location, thread, version, "panic: {msg}\n{bt}");
-        } else {
-            tracing::error!(%location, thread, version, "panic: {msg}");
-        }
-        default_hook(info);
-    }));
+    tracing::info!("log dir: {:?}", logging::path());
+    if let Some(error) = file_open_error {
+        tracing::warn!("error.log unavailable: {error}");
+    }
 }
 
 #[cfg(test)]
