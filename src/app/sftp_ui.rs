@@ -14,6 +14,33 @@ pub(super) fn terminal_sftp_paths(w: &AppWindow) -> HashMap<String, String> {
     out
 }
 
+/// Names currently shown in a tab's SFTP listing (UI thread only). The upload
+/// path uses this to decide whether the duplicate-file prompt is needed before
+/// the file-picker thread starts.
+pub(super) fn terminal_sftp_entry_names(w: &AppWindow, tab_id: &str) -> Vec<String> {
+    use slint::Model as _;
+    let model = w.get_terminals();
+    let Some(terminals) = model.as_any().downcast_ref::<VecModel<TerminalState>>() else {
+        return Vec::new();
+    };
+    for i in 0..terminals.row_count() {
+        let Some(row) = terminals.row_data(i) else {
+            continue;
+        };
+        if row.id != tab_id {
+            continue;
+        }
+        let Some(entries) = row.sftp_entries.as_any().downcast_ref::<VecModel<SftpEntry>>() else {
+            return Vec::new();
+        };
+        return (0..entries.row_count())
+            .filter_map(|j| entries.row_data(j))
+            .map(|entry| entry.name.to_string())
+            .collect();
+    }
+    Vec::new()
+}
+
 pub(super) fn sorted_sftp_entries_from_model(
     model: &ModelRc<SftpEntry>,
     key: &str,
@@ -171,51 +198,6 @@ pub(super) fn collect_sftp_selected(
         break;
     }
     paths
-}
-
-/// What a drag starting on `row` carries (#504): every checked entry when the
-/// row is one of several checked ones, otherwise just that row.
-pub(super) fn drag_out_items(
-    w: &AppWindow,
-    tab_id: &str,
-    row: i32,
-) -> Vec<super::drag_out::DragItem> {
-    let terminals = w.get_terminals();
-    let Some(tm) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>() else {
-        return Vec::new();
-    };
-    let Some(term) = (0..tm.row_count())
-        .filter_map(|i| tm.row_data(i))
-        .find(|t| t.id.as_str() == tab_id)
-    else {
-        return Vec::new();
-    };
-    let Some(entry) = usize::try_from(row)
-        .ok()
-        .and_then(|i| term.sftp_entries.row_data(i))
-    else {
-        return Vec::new();
-    };
-    if entry.selected && term.sftp_selected_count > 1 {
-        // macOS needs to know folders up front (the drag's file types).
-        let dirs: std::collections::HashSet<String> = (0..term.sftp_entries.row_count())
-            .filter_map(|i| term.sftp_entries.row_data(i))
-            .filter(|e| e.is_dir)
-            .map(|e| e.full_path.to_string())
-            .collect();
-        collect_sftp_selected(tm, tab_id)
-            .into_iter()
-            .map(|remote| super::drag_out::DragItem {
-                is_dir: dirs.contains(&remote),
-                remote,
-            })
-            .collect()
-    } else {
-        vec![super::drag_out::DragItem {
-            remote: entry.full_path.to_string(),
-            is_dir: entry.is_dir,
-        }]
-    }
 }
 
 /// Shift+click range selection: make the checked set exactly the rows between

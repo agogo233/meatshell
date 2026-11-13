@@ -207,12 +207,32 @@ impl Elevation {
         &self,
         handle: &client::Handle<H>,
         cmd: &str,
+        timeout: std::time::Duration,
     ) -> Result<u32> {
         let status = match &self.sudo {
-            Some(sudo) => exec_status(handle, &sudo.wrap(cmd), sudo.stdin().as_deref()).await?,
-            None => exec_status(handle, cmd, None).await?,
+            Some(sudo) => {
+                exec_status(handle, &sudo.wrap(cmd), sudo.stdin().as_deref(), timeout).await?
+            }
+            None => exec_status(handle, cmd, None, timeout).await?,
         };
         Ok(status.unwrap_or(255))
+    }
+
+    /// Like [`Self::exec_shell`], but also return the command's output. Used by
+    /// the SCP fallback backend, whose directory listing reads `stat`'s stdout.
+    pub(super) async fn exec_shell_output<H: client::Handler>(
+        &self,
+        handle: &client::Handle<H>,
+        cmd: &str,
+        timeout: std::time::Duration,
+    ) -> Result<(u32, String)> {
+        match &self.sudo {
+            Some(sudo) => {
+                exec_status_output(handle, &sudo.wrap(cmd), sudo.stdin().as_deref(), timeout)
+                    .await
+            }
+            None => exec_status_output(handle, cmd, None, timeout).await,
+        }
     }
 }
 
@@ -222,7 +242,7 @@ async fn detect_sudo<H: client::Handler>(
     session: &Session,
     password: &str,
 ) -> Result<Sudo> {
-    match exec_status(handle, "sudo -n true", None).await? {
+    match exec_status(handle, "sudo -n true", None, super::common::SCP_CMD_IO_TIMEOUT).await? {
         Some(0) => return Ok(Sudo::NoPassword),
         Some(127) => {
             return Err(elevation_error(t(
@@ -241,7 +261,7 @@ async fn detect_sudo<H: client::Handler>(
         )));
     }
     let sudo = Sudo::Password(password.to_string());
-    match exec_status(handle, &sudo.wrap("true"), sudo.stdin().as_deref()).await? {
+    match exec_status(handle, &sudo.wrap("true"), sudo.stdin().as_deref(), super::common::SCP_CMD_IO_TIMEOUT).await? {
         Some(0) => Ok(sudo),
         _ => Err(elevation_error(t(
             "sudo 拒绝了登录密码，或该用户没有 sudo 权限",
@@ -268,6 +288,7 @@ async fn exec_status<H: client::Handler>(
     handle: &client::Handle<H>,
     cmd: &str,
     stdin: Option<&str>,
+    timeout: std::time::Duration,
 ) -> Result<Option<u32>> {
     let mut channel = handle
         .channel_open_session()
@@ -285,7 +306,18 @@ async fn exec_status<H: client::Handler>(
     }
     let _ = channel.eof().await;
     let mut status = None;
-    while let Some(msg) = channel.wait().await {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let msg = match tokio::time::timeout_at(deadline, channel.wait()).await {
+            Ok(Some(msg)) => msg,
+            Ok(None) => break,
+            Err(_) => {
+                // Deadline hit: release the channel instead of dropping it
+                // while the remote command may still be running.
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(2), channel.close()).await;
+                return Err(anyhow::anyhow!(t("命令执行超时", "command timed out")));
+            }
+        };
         match msg {
             russh::ChannelMsg::ExitStatus { exit_status } => status = Some(exit_status),
             russh::ChannelMsg::Close => break,
@@ -293,6 +325,53 @@ async fn exec_status<H: client::Handler>(
         }
     }
     Ok(status)
+}
+
+/// Like [`exec_status`], but also collect the channel's stdout + stderr. The
+/// SCP fallback backend needs `stat`/`find` output, not just the exit code.
+async fn exec_status_output<H: client::Handler>(
+    handle: &client::Handle<H>,
+    cmd: &str,
+    stdin: Option<&str>,
+    timeout: std::time::Duration,
+) -> Result<(u32, String)> {
+    let mut channel = handle
+        .channel_open_session()
+        .await
+        .context("open exec channel")?;
+    channel
+        .exec(true, cmd.as_bytes())
+        .await
+        .context("exec remote command")?;
+    if let Some(stdin) = stdin {
+        channel
+            .data(stdin.as_bytes())
+            .await
+            .context("write stdin")?;
+    }
+    let _ = channel.eof().await;
+    let mut status = 0u32;
+    let mut output = Vec::new();
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let msg = match tokio::time::timeout_at(deadline, channel.wait()).await {
+            Ok(Some(msg)) => msg,
+            Ok(None) => break,
+            Err(_) => {
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(2), channel.close()).await;
+                return Err(anyhow::anyhow!(t("命令执行超时", "command timed out")));
+            }
+        };
+        match msg {
+            russh::ChannelMsg::Data { data } | russh::ChannelMsg::ExtendedData { data, .. } => {
+                output.extend_from_slice(&data)
+            }
+            russh::ChannelMsg::ExitStatus { exit_status } => status = exit_status,
+            russh::ChannelMsg::Close => break,
+            _ => {}
+        }
+    }
+    Ok((status, String::from_utf8_lossy(&output).into_owned()))
 }
 
 /// Single-quoted POSIX shell word.

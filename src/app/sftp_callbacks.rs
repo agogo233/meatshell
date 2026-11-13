@@ -1,19 +1,32 @@
+use super::hit_test::*;
 use super::*;
+use super::sftp_local::{
+    current_path, home_dir, load_dir, navigate, navigate_up, select_range, select_single,
+    selected_paths, toggle_selected,
+};
 
 fn choose_download_conflict(
-    owner: DialogOwner,
     remote: &str,
     local_dir: &str,
+    policy: DedupPolicy,
 ) -> Option<DownloadConflict> {
     let target = download_target_path(remote, local_dir);
     if !target.is_file() {
-        return Some(DownloadConflict::Replace);
+        // Nothing to conflict with *now*; the worker re-checks before writing
+        // and applies the policy if a file appears in the meantime.
+        return Some(DownloadConflict::Absent);
+    }
+    // A configured policy resolves the conflict without prompting.
+    match policy {
+        DedupPolicy::Overwrite => return Some(DownloadConflict::Replace),
+        DedupPolicy::Rename => return Some(DownloadConflict::KeepBoth),
+        DedupPolicy::Skip => return None,
+        DedupPolicy::Ask => {}
     }
     let replace = t("替换", "Replace");
     let keep_both = t("共存", "Keep both");
     let cancel = t("取消", "Cancel");
-    let result = owner
-        .message()
+    let result = rfd::MessageDialog::new()
         .set_title(t("文件已存在", "File already exists"))
         .set_description(format!(
             "{}\n{}",
@@ -40,6 +53,69 @@ fn choose_download_conflict(
             Some(DownloadConflict::KeepBoth)
         }
         _ => None,
+    }
+}
+
+/// Decide how to handle an upload whose name already appears in the current
+/// remote listing. Only `Ask` prompts here; the other policies resolve
+/// silently, and the worker re-checks against the live server state anyway
+/// (the listing can be stale). Folder uploads merge, so they never prompt.
+pub(super) fn upload_decision(
+    local: &std::path::Path,
+    known: &[String],
+    policy: DedupPolicy,
+    folder: bool,
+) -> UploadDecision {
+    if policy != DedupPolicy::Ask || folder {
+        return UploadDecision::Proceed;
+    }
+    let Some(name) = local.file_name().and_then(|name| name.to_str()) else {
+        return UploadDecision::Proceed;
+    };
+    if !known.iter().any(|entry| entry == name) {
+        return UploadDecision::Proceed;
+    }
+    let replace = t("替换", "Replace");
+    let keep_both = t("共存", "Keep both");
+    let cancel = t("取消", "Cancel");
+    let result = rfd::MessageDialog::new()
+        .set_title(t("远端文件已存在", "Remote file already exists"))
+        .set_description(format!(
+            "{}\n{}",
+            name,
+            t(
+                "请选择替换远端文件，或保留两份文件。",
+                "Choose whether to replace the remote file or keep both files."
+            )
+        ))
+        .set_level(rfd::MessageLevel::Warning)
+        .set_buttons(rfd::MessageButtons::YesNoCancelCustom(
+            replace.to_string(),
+            keep_both.to_string(),
+            cancel.to_string(),
+        ))
+        .show();
+    match result {
+        rfd::MessageDialogResult::Yes => UploadDecision::Overwrite,
+        rfd::MessageDialogResult::No => UploadDecision::KeepBoth,
+        rfd::MessageDialogResult::Custom(value) if value == replace => UploadDecision::Overwrite,
+        rfd::MessageDialogResult::Custom(value) if value == keep_both => UploadDecision::KeepBoth,
+        _ => UploadDecision::Skip,
+    }
+}
+
+/// Read the configured duplicate-target policy from the window mirror of the
+/// global setting (defaults to `Ask` when the window is gone).
+pub(super) fn configured_dedup_policy(weak: &slint::Weak<AppWindow>) -> DedupPolicy {
+    match weak
+        .upgrade()
+        .map(|w| w.get_sftp_queue_dedup().to_string())
+        .as_deref()
+    {
+        Some("overwrite") => DedupPolicy::Overwrite,
+        Some("skip") => DedupPolicy::Skip,
+        Some("rename") => DedupPolicy::Rename,
+        _ => DedupPolicy::Ask,
     }
 }
 
@@ -119,12 +195,18 @@ fn remote_names(window: &AppWindow, tab_id: &str) -> Vec<String> {
     Vec::new()
 }
 
-/// Top-level names of `paths` that the remote listing already has. Exact match:
-/// the server may be case-sensitive, and a wrong "no clash" here only means the
-/// overwrite happens without a prompt (it is still reported afterwards).
+/// Top-level *file* names of `paths` that the remote listing already has.
+/// Folders are excluded: a folder upload merges into the remote folder, so it
+/// never conflicts (matching the file-picker path, which never prompts for
+/// folders). Exact match: the server may be case-sensitive, and a wrong
+/// "no clash" here only means the overwrite happens without a prompt (it is
+/// still reported afterwards).
 fn conflicting_names(paths: &[std::path::PathBuf], existing: &[String]) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     for path in paths {
+        if path.is_dir() {
+            continue;
+        }
         let Some(name) = path.file_name().map(|name| name.to_string_lossy().to_string()) else {
             continue;
         };
@@ -135,30 +217,74 @@ fn conflicting_names(paths: &[std::path::PathBuf], existing: &[String]) -> Vec<S
     names
 }
 
-/// Ask once for a whole upload batch that would land on existing names; the
-/// mirror image of [`choose_batch_download_conflict`]. `None` = cancelled.
+/// Resolve a whole upload batch to one decision per local path. `None` means
+/// the user cancelled the batch (nothing is uploaded).
+///
+/// Files that clash with the known listing resolve by the configured policy;
+/// `Ask` collapses to a single batch dialog whose answer applies to every
+/// clashing file. Files without a clash `Proceed` and let the worker re-check
+/// the live server state, so a target that appears after the click is never
+/// silently replaced.
 pub(super) fn resolve_upload_conflict(
     window: &AppWindow,
     tab_id: &str,
     paths: &[std::path::PathBuf],
-) -> Option<UploadConflict> {
+) -> Option<Vec<UploadDecision>> {
     let clashes = conflicting_names(paths, &remote_names(window, tab_id));
-    if clashes.is_empty() {
-        return Some(UploadConflict::Replace);
-    }
-    choose_batch_upload_conflict(
-        DialogOwner::of(window.window()),
-        &clashes,
-        &active_sftp_path(window, tab_id),
-    )
+    let policy = configured_dedup_policy(&window.as_weak());
+    let batch_answer = if policy == DedupPolicy::Ask && !clashes.is_empty() {
+        // `None` (dialog dismissed) cancels the whole batch.
+        Some(choose_batch_upload_conflict(
+            DialogOwner::of_weak(&window.as_weak()),
+            &clashes,
+            &active_sftp_path(window, tab_id),
+        )?)
+    } else {
+        None
+    };
+    Some(per_path_upload_decisions(paths, &clashes, policy, batch_answer))
+}
+
+/// Pure core of [`resolve_upload_conflict`]: fold `paths` into per-path
+/// decisions. `clashes` are the already-computed conflicting top-level file
+/// names; `batch_answer` carries the dialog answer (only present under `Ask`).
+fn per_path_upload_decisions(
+    paths: &[std::path::PathBuf],
+    clashes: &[String],
+    policy: DedupPolicy,
+    batch_answer: Option<UploadDecision>,
+) -> Vec<UploadDecision> {
+    paths
+        .iter()
+        .map(|path| {
+            if path.is_dir() {
+                return UploadDecision::Proceed;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                return UploadDecision::Proceed;
+            };
+            if !clashes.iter().any(|clash| clash == name) {
+                return UploadDecision::Proceed;
+            }
+            match policy {
+                DedupPolicy::Overwrite => UploadDecision::Overwrite,
+                DedupPolicy::Skip => UploadDecision::Skip,
+                DedupPolicy::Rename => UploadDecision::KeepBoth,
+                // Only reachable when the dialog answered; `Skip` is the
+                // conservative stand-in (never overwrite) if the answer is gone.
+                DedupPolicy::Ask => batch_answer.unwrap_or(UploadDecision::Skip),
+            }
+        })
+        .collect()
 }
 
 /// The dialog itself: replace / keep both / cancel, once per batch.
+/// `None` = the batch is cancelled.
 fn choose_batch_upload_conflict(
     owner: DialogOwner,
     clashes: &[String],
     remote_dir: &str,
-) -> Option<UploadConflict> {
+) -> Option<UploadDecision> {
     let replace = t("替换", "Replace");
     let keep_both = t("保留两份", "Keep both");
     let cancel = t("取消", "Cancel");
@@ -190,13 +316,13 @@ fn choose_batch_upload_conflict(
         ))
         .show();
     match result {
-        rfd::MessageDialogResult::Yes => Some(UploadConflict::Replace),
-        rfd::MessageDialogResult::No => Some(UploadConflict::KeepBoth),
+        rfd::MessageDialogResult::Yes => Some(UploadDecision::Overwrite),
+        rfd::MessageDialogResult::No => Some(UploadDecision::KeepBoth),
         rfd::MessageDialogResult::Custom(value) if value == replace => {
-            Some(UploadConflict::Replace)
+            Some(UploadDecision::Overwrite)
         }
         rfd::MessageDialogResult::Custom(value) if value == keep_both => {
-            Some(UploadConflict::KeepBoth)
+            Some(UploadDecision::KeepBoth)
         }
         _ => None,
     }
@@ -217,7 +343,7 @@ fn upload_local_paths(
         return;
     }
     let locals: Vec<std::path::PathBuf> = paths.into_iter().map(std::path::PathBuf::from).collect();
-    let Some(conflict) = resolve_upload_conflict(window, tab_id, &locals) else {
+    let Some(decisions) = resolve_upload_conflict(window, tab_id, &locals) else {
         set_sftp_status(window, tab_id, t("已取消上传", "Upload cancelled"));
         return;
     };
@@ -225,8 +351,8 @@ fn upload_local_paths(
         let Some(handle) = handles.get(tab_id) else {
             return;
         };
-        for path in locals {
-            handle.upload(path, remote_dir.clone(), conflict);
+        for (path, decision) in locals.iter().zip(&decisions) {
+            handle.upload(path.clone(), remote_dir.clone(), *decision);
         }
         window.set_download_open(true);
     }
@@ -256,7 +382,7 @@ fn download_into_local_pane(
         DownloadConflict::Replace
     } else {
         match choose_batch_download_conflict(
-            DialogOwner::of(window.window()),
+            DialogOwner::of_weak(&window.as_weak()),
             overwrites,
             &local_dir,
         ) {
@@ -299,6 +425,7 @@ fn wire_sftp_split_callbacks(window: &AppWindow, sftp_handles: &SftpHandles) {
                 break;
             }
             update_terminal_row(model, &tab, |row| row.sftp_dual = enable);
+            w.invoke_refresh_sidebar();
             // Remember the choice so the next launch opens the same view (#532).
             w.set_sftp_split_enabled(enable);
             if enable {
@@ -370,6 +497,7 @@ fn wire_sftp_split_callbacks(window: &AppWindow, sftp_handles: &SftpHandles) {
                 return;
             };
             toggle_selected(model, tab_id.as_str(), index);
+            w.invoke_refresh_sidebar();
         });
     }
     {
@@ -383,6 +511,24 @@ fn wire_sftp_split_callbacks(window: &AppWindow, sftp_handles: &SftpHandles) {
                     return;
                 };
                 select_range(model, tab_id.as_str(), from, to);
+                w.invoke_refresh_sidebar();
+            },
+        );
+    }
+    // SFTP multi-select: clicking a local row's label selects exactly that
+    // entry (#540): the checked set collapses to one.
+    {
+        let weak = window.as_weak();
+        window.on_sftp_local_select_single(
+            move |tab_id: SharedString, index: i32| {
+                let Some(w) = weak.upgrade() else { return };
+                let terminals = w.get_terminals();
+                let Some(model) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>()
+                else {
+                    return;
+                };
+                select_single(model, tab_id.as_str(), index);
+                w.invoke_refresh_sidebar();
             },
         );
     }
@@ -551,6 +697,8 @@ pub(super) fn wire_sftp_callbacks(
     editor: &EditorWindow,
     sftp_handles: SftpHandles,
     sftp_last_cwd: SftpLastCwd,
+    store: Rc<RefCell<ConfigStore>>,
+    tab_statuses: TabStatuses,
 ) {
     // Navigate to a remote path (or ".." to go up one level).
     {
@@ -583,7 +731,7 @@ pub(super) fn wire_sftp_callbacks(
             // Forget the followed cwd so the next OSC 7 — even at an unchanged
             // directory — snaps the panel back to the shell's cwd; manual
             // navigation never permanently disables cd-follow.
-            sftp_last_cwd.lock().unwrap().remove(&tab_id);
+            lock_or_recover(&sftp_last_cwd).remove(&tab_id);
             if let Ok(handles) = sftp_handles.lock() {
                 if let Some(h) = handles.get(&tab_id) {
                     h.list_dir(resolved);
@@ -632,10 +780,6 @@ pub(super) fn wire_sftp_callbacks(
                 })
                 .map(|(d, n)| (Some(d), n))
                 .unwrap_or((None, Vec::new()));
-            let owner = weak
-                .upgrade()
-                .map(|w| DialogOwner::of(w.window()))
-                .unwrap_or_default();
             // "Always ask" (#87) forces the folder picker, ignoring the preset.
             let (preset, always_ask) = weak
                 .upgrade()
@@ -647,41 +791,56 @@ pub(super) fn wire_sftp_callbacks(
                 })
                 .unwrap_or_default();
             if !always_ask && !preset.is_empty() {
+                let mut dispatched = false;
                 if let Ok(handles) = sftp_handles.lock() {
                     if let Some(h) = handles.get(&tab_id) {
+                        let dedup = configured_dedup_policy(&weak);
                         if let Some(ref dir) = arc_dir {
                             h.download_archive(dir.clone(), arc_names.clone(), preset);
+                            dispatched = true;
                         } else if let Some(conflict) =
-                            choose_download_conflict(owner, &remote_path, &preset)
+                            choose_download_conflict(&remote_path, &preset, dedup)
                         {
-                            h.download(remote_path, preset, conflict);
+                            h.download(remote_path, preset, conflict, dedup);
+                            dispatched = true;
                         }
-                        // Pop the transfers panel so progress is visible (user
-                        // request: any download opens the download popup).
-                        if let Some(w) = weak.upgrade() {
-                            w.set_download_open(true);
-                        }
+                    }
+                }
+                // Pop the transfers panel so progress is visible (user request:
+                // any download opens the download popup) — but not when the
+                // file was skipped or the conflict dialog cancelled.
+                if dispatched {
+                    if let Some(w) = weak.upgrade() {
+                        w.set_download_open(true);
                     }
                 }
                 return;
             }
             let sftp_handles = sftp_handles.clone();
             let weak = weak.clone();
+            // Read the policy on the UI thread; `Weak::upgrade` is not
+            // thread-safe, so the spawned thread must not call it.
+            let dedup = configured_dedup_policy(&weak);
             std::thread::spawn(move || {
-                if let Some(dir) = owner.file().pick_folder() {
+                if let Some(dir) = rfd::FileDialog::new().pick_folder() {
                     let local_dir = dir.to_string_lossy().to_string();
+                    let mut dispatched = false;
                     if let Ok(handles) = sftp_handles.lock() {
                         if let Some(h) = handles.get(&tab_id) {
                             if let Some(ref rdir) = arc_dir {
                                 h.download_archive(rdir.clone(), arc_names.clone(), local_dir);
+                                dispatched = true;
                             } else if let Some(conflict) =
-                                choose_download_conflict(owner, &remote_path, &local_dir)
+                                choose_download_conflict(&remote_path, &local_dir, dedup)
                             {
-                                h.download(remote_path, local_dir, conflict);
+                                h.download(remote_path, local_dir, conflict, dedup);
+                                dispatched = true;
                             }
                         }
                     }
-                    let _ = weak.upgrade_in_event_loop(|w| w.set_download_open(true));
+                    if dispatched {
+                        let _ = weak.upgrade_in_event_loop(|w| w.set_download_open(true));
+                    }
                 }
             });
         });
@@ -701,9 +860,12 @@ pub(super) fn wire_sftp_callbacks(
                     .upgrade()
                     .map(|w| upload_sync_targets(&w, &sftp_handles, &tab_id))
                     .unwrap_or_default();
-                let owner = weak
+                // The duplicate prompt needs the policy and the current listing,
+                // both only reachable on the UI thread.
+                let dedup = configured_dedup_policy(&weak);
+                let known: Vec<String> = weak
                     .upgrade()
-                    .map(|w| DialogOwner::of(w.window()))
+                    .map(|w| terminal_sftp_entry_names(&w, &tab_id))
                     .unwrap_or_default();
                 // The thread reports the picked paths back to the UI thread,
                 // where the overwrite question can read the remote listing.
@@ -713,14 +875,12 @@ pub(super) fn wire_sftp_callbacks(
                     // only the local picker differs (#85). Folder uploads one dir;
                     // file mode allows selecting several at once.
                     let locals: Vec<std::path::PathBuf> = if folder {
-                        owner
-                            .file()
+                        rfd::FileDialog::new()
                             .pick_folder()
                             .map(|p| vec![p])
                             .unwrap_or_default()
                     } else {
-                        owner
-                            .file()
+                        rfd::FileDialog::new()
                             .pick_files()
                             .map(|v| v.into_iter().collect())
                             .unwrap_or_default()
@@ -728,22 +888,33 @@ pub(super) fn wire_sftp_callbacks(
                     if locals.is_empty() {
                         return;
                     }
-                    // The overwrite question needs the remote listing, which lives
-                    // on the UI thread; ask there before queueing the batch.
-                    let _ = weak.upgrade_in_event_loop(move |w| {
-                        let Some(conflict) = resolve_upload_conflict(&w, &tab_id, &locals) else {
-                            set_sftp_status(&w, &tab_id, t("已取消上传", "Upload cancelled"));
-                            return;
-                        };
-                        queue_uploads(
-                            &sftp_handles,
-                            &tab_id,
-                            &remote_dir,
-                            &locals,
-                            &sync_targets,
-                            conflict,
-                        );
-                    });
+                    // One decision per picked file; sync mirrors reuse it.
+                    let picked: Vec<(std::path::PathBuf, UploadDecision)> = locals
+                        .iter()
+                        .map(|local| {
+                            let decision = upload_decision(local, &known, dedup, folder);
+                            (local.clone(), decision)
+                        })
+                        .collect();
+                    if let Ok(handles) = sftp_handles.lock() {
+                        if let Some(h) = handles.get(&tab_id) {
+                            for (local, decision) in &picked {
+                                h.upload(local.clone(), remote_dir.clone(), *decision);
+                            }
+                        }
+                        // Mirror to the other online sessions, each into its own
+                        // current SFTP directory. The picked file's decision was
+                        // computed against *this* tab's listing; a mirror may
+                        // have a completely different state, so let each worker
+                        // apply the configured policy to its own target.
+                        for (id, dir) in &sync_targets {
+                            if let Some(h) = handles.get(id) {
+                                for (local, _) in &picked {
+                                    h.upload(local.clone(), dir.clone(), UploadDecision::Proceed);
+                                }
+                            }
+                        }
+                    }
                 });
             },
         );
@@ -775,7 +946,7 @@ pub(super) fn wire_sftp_callbacks(
                 return;
             }
             let sync_targets = upload_sync_targets(&w, &sftp_handles, &tab_id);
-            let Some(conflict) = resolve_upload_conflict(&w, &tab_id, &locals) else {
+            let Some(decisions) = resolve_upload_conflict(&w, &tab_id, &locals) else {
                 set_sftp_status(&w, &tab_id, t("已取消上传", "Upload cancelled"));
                 return;
             };
@@ -785,7 +956,7 @@ pub(super) fn wire_sftp_callbacks(
                 &remote_dir,
                 &locals,
                 &sync_targets,
-                conflict,
+                &decisions,
             );
             w.set_download_open(true);
             set_sftp_status(
@@ -828,7 +999,9 @@ pub(super) fn wire_sftp_callbacks(
             // behind — single source of truth (#sftp-refresh-selection).
             if let Some(w) = weak.upgrade() {
                 let terminals = w.get_terminals();
-                if let Some(tm) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>() {
+                if let Some(tm) =
+                    terminals.as_any().downcast_ref::<VecModel<TerminalState>>()
+                {
                     clear_sftp_selection(tm, &tab_id);
                 }
             }
@@ -844,7 +1017,7 @@ pub(super) fn wire_sftp_callbacks(
             let path = path.to_string();
             // Forget the followed cwd (see on_sftp_navigate): tree navigation
             // must never permanently disable cd-follow.
-            sftp_last_cwd.lock().unwrap().remove(&tab_id);
+            lock_or_recover(&sftp_last_cwd).remove(&tab_id);
             if let Ok(handles) = sftp_handles.lock() {
                 if let Some(h) = handles.get(&tab_id) {
                     h.toggle_tree_node(path.clone());
@@ -910,6 +1083,47 @@ pub(super) fn wire_sftp_callbacks(
         });
     }
 
+    // Keyboard type-ahead (#sftp-typeahead): return the index of the first entry
+    // in the tab's listing whose name starts with `prefix` (case-insensitive), or
+    // -1 when nothing matches. Purely a lookup — the Slint side owns selection
+    // and scrolling. Model order is the displayed order, so the match follows the
+    // active sort.
+    {
+        let weak = window.as_weak();
+        window.on_sftp_type_ahead(move |tab_id: SharedString, prefix: SharedString| -> i32 {
+            let prefix = prefix.trim().to_uppercase();
+            if prefix.is_empty() {
+                return -1;
+            }
+            let Some(w) = weak.upgrade() else { return -1 };
+            let terminals = w.get_terminals();
+            let Some(tm) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>() else {
+                return -1;
+            };
+            for ti in 0..tm.row_count() {
+                let Some(row) = tm.row_data(ti) else { continue };
+                if row.id.as_str() != tab_id.as_str() {
+                    continue;
+                }
+                let Some(entries) = row
+                    .sftp_entries
+                    .as_any()
+                    .downcast_ref::<VecModel<SftpEntry>>()
+                else {
+                    return -1;
+                };
+                for j in 0..entries.row_count() {
+                    let Some(entry) = entries.row_data(j) else { continue };
+                    if entry.name.to_uppercase().starts_with(&prefix) {
+                        return j as i32;
+                    }
+                }
+                return -1;
+            }
+            -1
+        });
+    }
+
     // SFTP multi-select: toggle a row's checkbox + recount (#100).
     {
         let weak = window.as_weak();
@@ -948,6 +1162,35 @@ pub(super) fn wire_sftp_callbacks(
             }
         });
     }
+    // SFTP multi-select: clicking a row's label selects exactly that entry
+    // (#540): the checked set collapses to one, the toolbar count follows.
+    {
+        let weak = window.as_weak();
+        window.on_sftp_select_single(move |tab_id: SharedString, idx: i32| {
+            let Some(w) = weak.upgrade() else { return };
+            let terminals = w.get_terminals();
+            let Some(tm) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>() else {
+                return;
+            };
+            for ti in 0..tm.row_count() {
+                let Some(row) = tm.row_data(ti) else { continue };
+                if row.id.as_str() != tab_id.as_str() {
+                    continue;
+                }
+                if let Some(em) = row
+                    .sftp_entries
+                    .as_any()
+                    .downcast_ref::<VecModel<SftpEntry>>()
+                {
+                    let n = apply_range_selection(em, idx, idx);
+                    let mut r = row.clone();
+                    r.sftp_selected_count = n as i32;
+                    tm.set_row_data(ti, r);
+                }
+                break;
+            }
+        });
+    }
     // SFTP multi-select: Shift+click range. Like a file manager, the checked
     // set becomes exactly rows `from..=to` (either order); everything else is
     // unchecked.
@@ -979,50 +1222,10 @@ pub(super) fn wire_sftp_callbacks(
         });
     }
     // Drag rows out of the file list into the OS file manager (#504).
-    // Windows and macOS; on Linux the gesture is ignored.
-    if super::drag_out::SUPPORTED {
+    // Windows only for now; elsewhere the gesture is ignored.
+    if cfg!(windows) {
         let sftp_handles = sftp_handles.clone();
         let weak = window.as_weak();
-        window.on_sftp_drag_out(move |tab_id: SharedString, row: i32| {
-            let Some(w) = weak.upgrade() else { return };
-            let items = drag_out_items(&w, tab_id.as_str(), row);
-            let commands = sftp_handles
-                .lock()
-                .ok()
-                .and_then(|h| h.get(tab_id.as_str()).map(|h| h.commands.clone()));
-            let Some(commands) = commands.filter(|_| !items.is_empty()) else {
-                return;
-            };
-            // The OS drag consumed the button-up; release Slint's pointer
-            // grab so the row doesn't stay "pressed". Off-window, so it
-            // never counts as a click.
-            let release = |weak: slint::Weak<AppWindow>| {
-                if let Some(w) = weak.upgrade() {
-                    w.window().dispatch_event(slint::platform::WindowEvent::PointerReleased {
-                        position: slint::LogicalPosition::new(-1.0, -1.0),
-                        button: slint::platform::PointerEventButton::Left,
-                    });
-                }
-            };
-            let weak = w.as_weak();
-            if cfg!(target_os = "macos") {
-                // AppKit starts the session from the mouse event being
-                // handled right now and returns at once; the drag then runs
-                // on its own.
-                if super::drag_out::start(w.window(), commands, items) {
-                    slint::Timer::single_shot(std::time::Duration::ZERO, move || release(weak));
-                }
-            } else {
-                // Start on a fresh event-loop turn rather than inside Slint's
-                // pointer-move dispatch: DoDragDrop runs its own modal loop.
-                slint::Timer::single_shot(std::time::Duration::ZERO, move || {
-                    if let Some(w) = weak.upgrade() {
-                        super::drag_out::start(w.window(), commands, items);
-                    }
-                    release(weak);
-                });
-            }
-        });
     }
     // SFTP multi-select: download all checked entries into one folder (#100).
     {
@@ -1053,38 +1256,48 @@ pub(super) fn wire_sftp_callbacks(
                         .to_string()
                 })
                 .collect();
-            let owner = DialogOwner::of(w.window());
             let preset = w.get_download_dir().to_string();
             let always_ask = w.get_download_always_ask();
             if !always_ask && !preset.is_empty() {
+                let mut dispatched = false;
                 if let Ok(handles) = sftp_handles.lock() {
                     if let Some(h) = handles.get(tab_id.as_str()) {
+                        let dedup = configured_dedup_policy(&weak);
                         if single {
                             if let Some(conflict) =
-                                choose_download_conflict(owner, &paths[0], &preset)
+                                choose_download_conflict(&paths[0], &preset, dedup)
                             {
-                                h.download(paths[0].clone(), preset.clone(), conflict);
+                                h.download(paths[0].clone(), preset.clone(), conflict, dedup);
+                                dispatched = true;
                             }
                         } else {
                             h.download_archive(remote_dir.clone(), names.clone(), preset.clone());
+                            dispatched = true;
                         }
                     }
                 }
-                w.set_download_open(true);
+                if dispatched {
+                    w.set_download_open(true);
+                }
             } else {
                 let sftp_handles = sftp_handles.clone();
                 let weak2 = weak.clone();
                 let tab = tab_id.to_string();
+                // Read the policy on the UI thread before spawning (Weak::upgrade
+                // is not thread-safe).
+                let dedup = configured_dedup_policy(&weak2);
                 std::thread::spawn(move || {
-                    if let Some(dir) = owner.file().pick_folder() {
+                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
                         let dir = dir.to_string_lossy().to_string();
+                        let mut dispatched = false;
                         if let Ok(handles) = sftp_handles.lock() {
                             if let Some(h) = handles.get(&tab) {
                                 if single {
                                     if let Some(conflict) =
-                                        choose_download_conflict(owner, &paths[0], &dir)
+                                        choose_download_conflict(&paths[0], &dir, dedup)
                                     {
-                                        h.download(paths[0].clone(), dir.clone(), conflict);
+                                        h.download(paths[0].clone(), dir.clone(), conflict, dedup);
+                                        dispatched = true;
                                     }
                                 } else {
                                     h.download_archive(
@@ -1092,10 +1305,13 @@ pub(super) fn wire_sftp_callbacks(
                                         names.clone(),
                                         dir.clone(),
                                     );
+                                    dispatched = true;
                                 }
                             }
                         }
-                        let _ = weak2.upgrade_in_event_loop(|w| w.set_download_open(true));
+                        if dispatched {
+                            let _ = weak2.upgrade_in_event_loop(|w| w.set_download_open(true));
+                        }
                     }
                 });
             }
@@ -1351,6 +1567,90 @@ pub(super) fn wire_sftp_callbacks(
     // Built-in editor (#70), detached-window mode. Editor tabs (#494) are
     // wired in editor_tabs::wire_editor_tabs.
     wire_editor_window(editor, sftp_handles);
+
+    // Per-server path bookmarks: the panel menu adds the tab's current dir and
+    // drops saved entries; jumping reuses sftp-navigate in Slint. Both
+    // mutations persist the config and refresh the owning tab's model (other
+    // tabs on the same server catch up when next opened — bookmarks rarely
+    // churn mid-session).
+    {
+        let store = store.clone();
+        let tab_statuses = tab_statuses.clone();
+        let weak = window.as_weak();
+        window.on_sftp_bookmark_add(move |tab_id: SharedString| {
+            let tab_id = tab_id.to_string();
+            let Some(w) = weak.upgrade() else { return };
+            let Some(server) = sftp_server_key(&tab_statuses, &tab_id) else {
+                return;
+            };
+            let terminals_rc = w.get_terminals();
+            let Some(terminals) =
+                terminals_rc.as_any().downcast_ref::<VecModel<TerminalState>>()
+            else {
+                return;
+            };
+            let path = (0..terminals.row_count())
+                .filter_map(|i| terminals.row_data(i))
+                .find(|row| row.id.as_str() == tab_id)
+                .map(|row| row.sftp_path.to_string());
+            let Some(path) = path else { return };
+            {
+                let mut s = store.borrow_mut();
+                s.add_sftp_bookmark(server.clone(), path);
+                let _ = s.save();
+            }
+            set_tab_bookmarks(terminals, &tab_id, store.borrow().sftp_bookmarks(&server));
+        });
+    }
+    {
+        let store = store.clone();
+        let tab_statuses = tab_statuses.clone();
+        let weak = window.as_weak();
+        window.on_sftp_bookmark_remove(move |tab_id: SharedString, path: SharedString| {
+            let tab_id = tab_id.to_string();
+            let Some(w) = weak.upgrade() else { return };
+            let Some(server) = sftp_server_key(&tab_statuses, &tab_id) else {
+                return;
+            };
+            let terminals_rc = w.get_terminals();
+            let Some(terminals) =
+                terminals_rc.as_any().downcast_ref::<VecModel<TerminalState>>()
+            else {
+                return;
+            };
+            {
+                let mut s = store.borrow_mut();
+                s.remove_sftp_bookmark(&server, path.as_str());
+                let _ = s.save();
+            }
+            set_tab_bookmarks(terminals, &tab_id, store.borrow().sftp_bookmarks(&server));
+        });
+    }
+}
+
+/// Bookmark key for a tab: its connection label ("user@host"), the same string
+/// the sidebar shows. Local/telnet tabs never expose SFTP, so no special case.
+fn sftp_server_key(tab_statuses: &TabStatuses, tab_id: &str) -> Option<String> {
+    let host = lock_or_recover(tab_statuses)
+        .get(tab_id)
+        .map(|st| st.host.clone())?;
+    (!host.is_empty()).then_some(host)
+}
+
+/// Replace one tab's bookmark model with `paths` (clone-modify-set: rows are
+/// plain structs, the Slint binding re-reads on set_row_data).
+fn set_tab_bookmarks(terminals: &VecModel<TerminalState>, tab_id: &str, paths: &[String]) {
+    let model: Vec<SharedString> = paths.iter().map(|p| p.as_str().into()).collect();
+    for i in 0..terminals.row_count() {
+        let Some(mut row) = terminals.row_data(i) else {
+            continue;
+        };
+        if row.id.as_str() == tab_id {
+            row.sftp_bookmarks = ModelRc::from(std::rc::Rc::new(VecModel::from(model)));
+            terminals.set_row_data(i, row);
+            return;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1386,27 +1686,29 @@ fn upload_sync_targets(
 }
 
 /// Queue `locals` (files or folders) for upload into `remote_dir` of
-/// `tab_id`, and into each sync target's own directory.
+/// `tab_id`, and into each sync target's own directory. The per-path
+/// `decisions` (one per `locals` entry) are shared with the sync targets,
+/// whose own workers re-resolve against their live listings.
 fn queue_uploads(
     sftp_handles: &SftpHandles,
     tab_id: &str,
     remote_dir: &str,
     locals: &[std::path::PathBuf],
     sync_targets: &[(String, String)],
-    conflict: UploadConflict,
+    decisions: &[UploadDecision],
 ) {
     let Ok(handles) = sftp_handles.lock() else {
         return;
     };
     if let Some(h) = handles.get(tab_id) {
-        for local in locals {
-            h.upload(local.clone(), remote_dir.to_string(), conflict);
+        for (local, decision) in locals.iter().zip(decisions) {
+            h.upload(local.clone(), remote_dir.to_string(), *decision);
         }
     }
     for (id, dir) in sync_targets {
         if let Some(h) = handles.get(id) {
-            for local in locals {
-                h.upload(local.clone(), dir.clone(), conflict);
+            for (local, decision) in locals.iter().zip(decisions) {
+                h.upload(local.clone(), dir.clone(), *decision);
             }
         }
     }
@@ -1470,7 +1772,10 @@ fn set_sftp_status(w: &AppWindow, tab_id: &str, message: &str) {
 
 #[cfg(test)]
 mod paste_upload_tests {
-    use super::{conflicting_names, upload_candidates, upload_summary_parts};
+    use super::{
+        conflicting_names, per_path_upload_decisions, upload_candidates, upload_summary_parts,
+    };
+    use crate::sftp::{DedupPolicy, UploadDecision};
     use std::path::PathBuf;
 
     /// Real OS clipboard: copy two files as a file list (what Explorer /
@@ -1534,14 +1839,17 @@ mod paste_upload_tests {
     #[test]
     fn upload_clashes_only_match_existing_top_level_names() {
         let existing = vec!["a.txt".to_string(), "docs".to_string()];
-        // A file or a folder with the same name both count.
+        // A file with the same name counts.
         assert_eq!(
-            conflicting_names(
-                &[PathBuf::from("/x/a.txt"), PathBuf::from("/x/docs")],
-                &existing
-            ),
-            ["a.txt".to_string(), "docs".to_string()]
+            conflicting_names(&[PathBuf::from("/x/a.txt")], &existing),
+            ["a.txt".to_string()]
         );
+        // A folder that exists on disk merges instead of conflicting.
+        let dir = std::env::temp_dir().join(format!("meatshell-clash-{}", std::process::id()));
+        let nested = dir.join("docs");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert!(conflicting_names(&[nested], &existing).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
         // A single file picked from a subfolder still lands under its own name,
         // so that is what the clash check compares.
         assert_eq!(
@@ -1559,5 +1867,75 @@ mod paste_upload_tests {
             ),
             ["a.txt".to_string()]
         );
+    }
+
+    #[test]
+    fn per_path_decisions_fold_policy_and_folders() {
+        // A real folder merges; files resolve by the configured policy.
+        let dir = std::env::temp_dir().join(format!("meatshell-decs-{}", std::process::id()));
+        let nested = dir.join("docs");
+        std::fs::create_dir_all(&nested).unwrap();
+        let a = dir.join("a.txt");
+        let b = dir.join("b.txt");
+        let c = dir.join("c.txt");
+        std::fs::write(&a, b"a").unwrap();
+        std::fs::write(&b, b"b").unwrap();
+        std::fs::write(&c, b"c").unwrap();
+        let paths = vec![nested.clone(), a.clone(), b.clone(), c.clone()];
+        let clashes = vec!["a.txt".to_string()];
+        let expected = [
+            UploadDecision::Proceed, // folder merges
+            UploadDecision::Overwrite,
+            UploadDecision::Proceed, // no clash
+            UploadDecision::Proceed,
+        ];
+        assert_eq!(
+            per_path_upload_decisions(&paths, &clashes, DedupPolicy::Overwrite, None),
+            expected
+        );
+        assert_eq!(
+            per_path_upload_decisions(&paths, &clashes, DedupPolicy::Skip, None),
+            [
+                UploadDecision::Proceed,
+                UploadDecision::Skip,
+                UploadDecision::Proceed,
+                UploadDecision::Proceed
+            ]
+        );
+        assert_eq!(
+            per_path_upload_decisions(&paths, &clashes, DedupPolicy::Rename, None),
+            [
+                UploadDecision::Proceed,
+                UploadDecision::KeepBoth,
+                UploadDecision::Proceed,
+                UploadDecision::Proceed
+            ]
+        );
+        // Ask: the batch answer applies to the clashing file only.
+        assert_eq!(
+            per_path_upload_decisions(
+                &paths,
+                &clashes,
+                DedupPolicy::Ask,
+                Some(UploadDecision::KeepBoth)
+            ),
+            [
+                UploadDecision::Proceed,
+                UploadDecision::KeepBoth,
+                UploadDecision::Proceed,
+                UploadDecision::Proceed
+            ]
+        );
+        // Ask with no answer is the defensive stand-in: never overwrite.
+        assert_eq!(
+            per_path_upload_decisions(&paths, &clashes, DedupPolicy::Ask, None),
+            [
+                UploadDecision::Proceed,
+                UploadDecision::Skip,
+                UploadDecision::Proceed,
+                UploadDecision::Proceed
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

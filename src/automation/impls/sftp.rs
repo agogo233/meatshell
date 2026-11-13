@@ -25,7 +25,6 @@ impl Drop for AutomationSftp {
     }
 }
 
-
 pub(super) async fn list(
     session: Session,
     jump: Vec<Session>,
@@ -33,7 +32,13 @@ pub(super) async fn list(
     timeout: Duration,
 ) -> Result<Value> {
     let (events, mut event_rx) = mpsc::unbounded_channel();
-    let handle = AutomationSftp(crate::sftp::spawn_sftp(&tokio::runtime::Handle::current(), session, jump, events));
+    let handle = AutomationSftp(crate::sftp::spawn_sftp(
+        &tokio::runtime::Handle::current(),
+        session,
+        jump,
+        events,
+        crate::sftp::SftpQueueConfig::default(),
+    ));
     handle
         .commands
         .send(SftpCommand::ListDir(path.clone()))
@@ -106,7 +111,13 @@ pub(super) async fn read_text(
     timeout: Duration,
 ) -> Result<Value> {
     let (events, mut event_rx) = mpsc::unbounded_channel();
-    let handle = AutomationSftp(crate::sftp::spawn_sftp(&tokio::runtime::Handle::current(), session, jump, events));
+    let handle = AutomationSftp(crate::sftp::spawn_sftp(
+        &tokio::runtime::Handle::current(),
+        session,
+        jump,
+        events,
+        crate::sftp::SftpQueueConfig::default(),
+    ));
     handle
         .commands
         .send(SftpCommand::ReadText {
@@ -169,7 +180,13 @@ pub(super) async fn transfer(
     timeout: Duration,
 ) -> Result<Value> {
     let (events, mut event_rx) = mpsc::unbounded_channel();
-    let handle = AutomationSftp(crate::sftp::spawn_sftp(&tokio::runtime::Handle::current(), session, jump, events));
+    let handle = AutomationSftp(crate::sftp::spawn_sftp(
+        &tokio::runtime::Handle::current(),
+        session,
+        jump,
+        events,
+        crate::sftp::SftpQueueConfig::default(),
+    ));
     handle
         .commands
         .send(command)

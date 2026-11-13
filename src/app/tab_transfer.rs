@@ -392,7 +392,10 @@ pub(super) fn move_tab_between_windows(
     else {
         return false;
     };
-    let tab_row = src.tabs_model.row_data(tab_i).unwrap();
+    let Some(tab_row) = src.tabs_model.row_data(tab_i) else {
+        tracing::warn!("tab {tab_id} vanished from source model mid-move");
+        return false;
+    };
     src.tabs_model.remove(tab_i);
     let term_row = {
         let mut row = None;
@@ -452,9 +455,10 @@ pub(super) fn move_tab_between_windows(
         dst.terminals_model.push(row);
     }
     if let Some(w) = dst.weak.upgrade() {
+        let lay = dst.layout.borrow().clone();
         refresh_panes(
             &w,
-            &dst.layout.borrow(),
+            &lay,
             dst.content_size.get(),
             &dst.tabs_model,
             &dst.panes_model,
@@ -463,9 +467,10 @@ pub(super) fn move_tab_between_windows(
         rebuild_tab_display(&w, &dst.bufs, tab_id);
     }
     if let Some(w) = src.weak.upgrade() {
+        let lay = src.layout.borrow().clone();
         refresh_panes(
             &w,
-            &src.layout.borrow(),
+            &lay,
             src.content_size.get(),
             &src.tabs_model,
             &src.panes_model,
@@ -511,7 +516,6 @@ pub(super) fn forget_window_state(core: &Rc<AppCore>, window_id: u64) {
         st.transfer_speeds.clear();
         let _ = st.proc_win.hide();
         let _ = st.sys_win.hide();
-        let _ = st.editor_win.hide();
     }
     if let Ok(mut routes) = core.tab_routes.lock() {
         routes.retain(|_, route| {

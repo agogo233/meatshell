@@ -28,6 +28,9 @@ pub enum SftpCommand {
         remote: String,
         local_dir: String,
         conflict: DownloadConflict,
+        /// Applied by the worker if the target appears after the caller's
+        /// existence check (the race the check alone cannot close).
+        policy: DedupPolicy,
     },
     /// Download entries straight into one local directory (the dual-pane view):
     /// files are written one after another under their own names — no remote
@@ -47,13 +50,15 @@ pub enum SftpCommand {
     /// Cancel an in-progress transfer by its id (#100). The partial local file
     /// (and any remote temp archive) are cleaned up.
     CancelTransfer(String),
-    /// Upload a local file into a remote directory. `conflict` says what to do
-    /// when the name is already taken (only `Replace` truncates).
+    /// Upload a local file into a remote directory. `decision` says what to do
+    /// when the name is already taken (`Overwrite` truncates, `KeepBoth`
+    /// renames).
     Upload {
         local: PathBuf,
         remote_dir: String,
         cleanup_after: Option<PathBuf>,
-        conflict: UploadConflict,
+        /// What the caller decided about an already-existing remote target.
+        decision: UploadDecision,
     },
     /// Re-upload an externally edited temp file to its exact original path.
     /// The local name may include a host prefix, so deriving the remote name
@@ -168,18 +173,67 @@ impl DragTransfer {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DownloadConflict {
+    /// Nothing was there when the caller checked. The worker re-checks right
+    /// before writing and applies the configured policy if a file appeared in
+    /// the meantime, so a race can never silently truncate a file the user
+    /// never saw.
+    Absent,
     Replace,
     KeepBoth,
+    /// Refuse instead of overwriting: the download fails if the target exists.
+    /// Kept out of the UI path, which always asks; automation tools use it.
+    Fail,
 }
 
-/// What to do when an upload's target name already exists remotely. Mirrors
-/// [`DownloadConflict`] so both directions ask the same question.
+/// Duplicate-target decision for an upload, resolved by the UI (which can
+/// prompt) and re-checked by the worker against the live server state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum UploadConflict {
-    /// Overwrite the existing remote file / merge into the existing folder.
-    Replace,
-    /// Upload under a free name instead (`name (1).ext`).
+pub enum UploadDecision {
+    /// No conflict was seen by the caller; the worker applies the configured
+    /// policy if the target turns out to exist.
+    Proceed,
+    /// The target existed and the user / policy chose to replace it.
+    Overwrite,
+    /// The target existed and the user / policy chose to keep both copies.
     KeepBoth,
+    /// The target existed and the user / policy chose to skip the upload.
+    Skip,
+}
+
+/// Duplicate-target policy for transfers, chosen from settings. `Ask` keeps the
+/// interactive prompt; the others resolve automatically.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DedupPolicy {
+    Ask,
+    Overwrite,
+    Skip,
+    Rename,
+}
+
+/// Per-session SFTP transfer-queue tuning, snapshotted from the global config
+/// when the worker spawns. Automation callers use [`SftpQueueConfig::default`]
+/// (unlimited, sequential-ish).
+#[derive(Clone, Debug)]
+pub struct SftpQueueConfig {
+    /// Max concurrent transfer tasks (1..=4).
+    pub concurrency: u32,
+    /// Per-transfer rate limit in KiB/s (0 = unlimited).
+    pub rate_limit_kbps: u32,
+    /// Duplicate-target policy.
+    pub dedup: DedupPolicy,
+    /// Preserve file mtimes across transfer.
+    pub preserve_mtime: bool,
+}
+
+impl Default for SftpQueueConfig {
+    fn default() -> Self {
+        Self {
+            concurrency: 2,
+            rate_limit_kbps: 0,
+            dedup: DedupPolicy::Ask,
+            preserve_mtime: false,
+        }
+    }
 }
 
 /// `name` with a ` (n)` suffix before its extension: `a.txt` + 1 → `a (1).txt`,
@@ -198,7 +252,6 @@ pub(crate) fn numbered_name(name: &str, n: u32) -> String {
 /// Handle retained by the UI to drive a running SFTP worker.
 pub struct SftpHandle {
     pub commands: UnboundedSender<SftpCommand>,
-    #[allow(dead_code)]
     pub join: JoinHandle<()>,
 }
 

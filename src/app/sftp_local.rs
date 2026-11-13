@@ -300,6 +300,9 @@ fn publish_local_listing(
         row.sftp_local_status = status.into();
         row.sftp_local_bookmarked = bookmarked;
     });
+    // The docked panel mirrors this row onto window properties (#dock-stack):
+    // re-sync so the split view's local panes always show fresh state.
+    window.invoke_refresh_sidebar();
     // Remember the folder for the next tab / restart (#532). Written to the
     // global property, persisted with the rest of the layout on close.
     window.set_sftp_last_local_dir(listing.path.into());
@@ -420,6 +423,7 @@ pub(super) fn load_dir_with_status(
             // and writing a status here would pop the error strip in and out
             // on every navigation.
             update_terminal_row(model, tab_id, |row| row.sftp_local_loading = true);
+            window.invoke_refresh_sidebar();
         }
     }
     let weak = window.as_weak();
@@ -438,6 +442,7 @@ pub(super) fn load_dir_with_status(
                         row.sftp_local_loading = false;
                         row.sftp_local_status = message.into();
                     });
+                    window.invoke_refresh_sidebar();
                 }
             }
         });
@@ -579,6 +584,29 @@ pub(super) fn toggle_selected(model: &VecModel<TerminalState>, tab_id: &str, ind
         }
         let mut row = row.clone();
         row.sftp_local_selected_count = count;
+        model.set_row_data(i, row);
+        return;
+    }
+}
+
+/// Clicking a row's label selects exactly that entry (#540): the checked set
+/// collapses to one, the toolbar count follows, like a file manager.
+pub(super) fn select_single(model: &VecModel<TerminalState>, tab_id: &str, index: i32) {
+    let Ok(index) = usize::try_from(index) else {
+        return;
+    };
+    for i in 0..model.row_count() {
+        let Some(row) = model.row_data(i) else { continue; };
+        if row.id.as_str() != tab_id {
+            continue;
+        }
+        let Some(entries) = row.sftp_local_entries.as_any().downcast_ref::<VecModel<SftpEntry>>()
+        else {
+            return;
+        };
+        let n = apply_range_selection(entries, index as i32, index as i32);
+        let mut row = row.clone();
+        row.sftp_local_selected_count = n as i32;
         model.set_row_data(i, row);
         return;
     }
