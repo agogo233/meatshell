@@ -593,10 +593,11 @@ fn path_completion_popup_renders_under_the_remote_path_bar() {
             model.set_row_data(0, t);
         }
         render_frame(&window, 1100, 800);
-        // Click the remote path field (300px local pane + divider, field spans
-        // the rest of the 1100px panel at the top of the split view).
-        press(&window, 500.0, 587.0);
-        release(&window, 500.0, 587.0);
+        // Click the remote path field: the docked panel spans y 500..800, its
+        // 34px toolbar ends at 534 and the 28px split-view path bar sits at
+        // 534..562 (300px local pane + divider, field spans the rest).
+        press(&window, 500.0, 548.0);
+        release(&window, 500.0, 548.0);
         window.dispatch_event(WindowEvent::KeyPressed {
             text: "x".into(),
         });
@@ -612,7 +613,7 @@ fn path_completion_popup_renders_under_the_remote_path_bar() {
         .unwrap();
         // Two folder glyphs are accent-coloured; the file rows below sit behind
         // the popup, so any accent pixels in this band belong to the popup.
-        let accent = (610..680)
+        let accent = (545..690)
             .flat_map(|y| (335..560).map(move |x| (x, y)))
             .filter(|(x, y)| is_accent(pixels[y * 1100 + x]))
             .count();
@@ -629,8 +630,10 @@ fn path_completion_popup_renders_under_the_remote_path_bar() {
                 picked.borrow_mut().push(path.to_string());
             });
         }
-        press(&window, 400.0, 639.0);
-        release(&window, 400.0, 639.0);
+        // Popup top = path field bottom + 2px (561); second row centre = 561
+        // + 4px padding + 24px first row + 1px spacing + 12px.
+        press(&window, 400.0, 602.0);
+        release(&window, 400.0, 602.0);
         assert_eq!(picked.borrow().as_slice(), ["/home/bob/"]);
 
         // The caret sits at the end of the completed path: typing appends, so
@@ -688,10 +691,11 @@ fn path_completion_popup_works_in_the_local_pane() {
             model.set_row_data(0, t);
         }
         render_frame(&window, 1100, 800);
-        // Focus the local pane's path field and type: the popup opens with the
-        // rows Rust would have produced.
-        press(&window, 120.0, 587.0);
-        release(&window, 120.0, 587.0);
+        // Focus the local pane's path field (top path bar at y 534..562, same
+        // tier as the remote half) and type: the popup opens with the rows
+        // Rust would have produced.
+        press(&window, 120.0, 548.0);
+        release(&window, 120.0, 548.0);
         window.dispatch_event(WindowEvent::KeyPressed {
             text: "x".into(),
         });
@@ -706,7 +710,7 @@ fn path_completion_popup_works_in_the_local_pane() {
             image::ColorType::Rgb8,
         )
         .unwrap();
-        let accent = (610..680)
+        let accent = (545..690)
             .flat_map(|y| (20..280).map(move |x| (x, y)))
             .filter(|(x, y)| is_accent(pixels[y * 1100 + x]))
             .count();
@@ -724,8 +728,10 @@ fn path_completion_popup_works_in_the_local_pane() {
                 picked.borrow_mut().push(path.to_string());
             });
         }
-        press(&window, 100.0, 639.0);
-        release(&window, 100.0, 639.0);
+        // Popup top = path field bottom + 2px (561); second row ("docs")
+        // centre = 561 + 4px padding + 24px first row + 1px spacing + 12px.
+        press(&window, 100.0, 602.0);
+        release(&window, 100.0, 602.0);
         assert_eq!(picked.borrow().as_slice(), ["C:\\Users\\me\\docs\\"]);
         window.dispatch_event(WindowEvent::KeyPressed {
             text: "x".into(),
