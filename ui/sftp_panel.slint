@@ -1463,7 +1463,6 @@ export component SftpPanel inherits Rectangle {
     // path row keeps copies of refresh / collapse for the very narrowest band so
     // those actions stay reachable.
     property <bool> row1-refresh: root.narrow-toolbar && root.width >= 142px;
-    property <bool> row1-more: root.narrow-toolbar && root.width >= 168px;
     property <bool> row1-min: root.narrow-toolbar && root.width >= 194px;
     // The user's own toggle (column menu). The effective `show-*-col` above may
     // drop a column the panel's width can't hold, so the menu marks the
@@ -2300,80 +2299,6 @@ export component SftpPanel inherits Rectangle {
                                 SftpMenuItem {
                                     label: @tr("Upload folder");
                                     clicked => { root.upload-clicked(root.current-path, true); }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Secondary path actions move into an overflow menu in compact
-                // mode so they never compete with the path field for width.
-                if root.panel-mode == "files" && !root.dual && root.row1-more : Rectangle {
-                    // On a wide-enough panel the overflow menu moves up to the first
-                    // row, so refresh and collapse take the path row only in the
-                    // narrowest band (see row1-refresh / row1-min below).
-
-                    width: 24px;
-                    height: 22px;
-                    border-radius: Theme.radius-sm;
-                    background: compact-more-ta.has-hover ? Theme.bg-hover : transparent;
-                    compact-more-ta := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { compact-more-menu.show(); }
-                    }
-                    Text {
-                        text: "\u{E5D4}";
-                        font-family: "Material Icons";
-                        color: Theme.text-secondary;
-                        font-size: Theme.fs-md;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                    compact-more-menu := PopupWindow {
-                        // Right-anchored on the button, but clamped to the panel's
-                        // left edge so it never spills off the window.
-                        x: max(parent.width - self.width, -(parent.absolute-position.x - root.absolute-position.x));
-                        y: parent.height + 2px;
-                        width: 142px;
-                        height: (2 + (root.tight-toolbar ? 2 : 0) + (!root.row1-refresh ? 1 : 0)) * 27px + 8px;
-                        Rectangle {
-                            background: Theme.popup-bg;
-                            border-radius: Theme.radius-sm;
-                            border-width: 1px;
-                            border-color: Theme.border-strong;
-                            drop-shadow-blur: 12px;
-                            drop-shadow-color: #00000060;
-                            VerticalLayout {
-                                padding: 4px;
-                                spacing: 1px;
-                                // Upload folds in here in the tight tiers (#sftp-tight-toolbar).
-                                if root.tight-toolbar : SftpMenuItem {
-                                    label: @tr("Upload file");
-                                    clicked => { root.upload-clicked(root.current-path, false); }
-                                }
-                                if root.tight-toolbar : SftpMenuItem {
-                                    label: @tr("Upload folder");
-                                    clicked => { root.upload-clicked(root.current-path, true); }
-                                }
-                                SftpMenuItem {
-                                    label: @tr("Copy path");
-                                    clicked => {
-                                        compact-path-input.select-all();
-                                        compact-path-input.copy();
-                                        compact-path-input.clear-selection();
-                                    }
-                                }
-                                SftpMenuItem {
-                                    label: @tr("Paste and go");
-                                    clicked => {
-                                        compact-path-input.select-all();
-                                        compact-path-input.paste();
-                                        root.navigate(compact-path-input.text);
-                                    }
-                                }
-                                if !root.row1-refresh : SftpMenuItem {
-                                    label: @tr("Refresh");
-                                    clicked => { root.refresh(root.current-path); }
                                 }
                             }
                         }
