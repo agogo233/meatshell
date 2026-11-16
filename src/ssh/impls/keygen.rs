@@ -90,6 +90,8 @@ impl rand_core::TryRng for OsCryptoRng {
     }
 }
 
+impl rand_core::TryCryptoRng for OsCryptoRng {}
+
 pub(crate) fn generate_keypair(algo: KeyAlgorithm) -> Result<GeneratedKey> {
     let mut rng = OsCryptoRng;
     let private = PrivateKey::random(&mut rng, algo.to_ssh_algorithm())
