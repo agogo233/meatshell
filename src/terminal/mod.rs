@@ -3,6 +3,8 @@ mod state;
 
 #[path = "impls/action_links.rs"]
 mod action_links;
+#[path = "impls/args.rs"]
+pub(crate) mod args;
 #[path = "impls/input.rs"]
 mod input;
 #[path = "impls/json_output.rs"]

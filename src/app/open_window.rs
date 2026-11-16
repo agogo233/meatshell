@@ -535,6 +535,45 @@ pub(crate) fn open_window(
         });
     }
 
+    // Settings → SFTP → External editor (#553): the program "Edit with
+    // external editor" starts; empty = the OS default app.
+    super::session_callbacks::sync_external_editor(&window, &store.borrow());
+    {
+        let store = store.clone();
+        let registry = registry.clone();
+        window.on_set_external_editor(move |program, args| {
+            let mut s = store.borrow_mut();
+            s.set_external_editor(&program, &args);
+            let _ = s.save();
+            drop(s);
+            registry.broadcast_config_changed();
+        });
+    }
+    {
+        let weak = window.as_weak();
+        let store = store.clone();
+        let registry = registry.clone();
+        window.on_pick_external_editor(move || {
+            let mut dialog = DialogOwner::of_weak(&weak).file();
+            if cfg!(windows) {
+                dialog = dialog.add_filter("Programs", &["exe", "cmd", "bat", "com"]);
+            }
+            let Some(file) = dialog.pick_file() else {
+                return;
+            };
+            let Some(w) = weak.upgrade() else {
+                return;
+            };
+            let program = file.to_string_lossy().to_string();
+            w.set_external_editor(program.clone().into());
+            let mut s = store.borrow_mut();
+            s.set_external_editor(&program, &w.get_external_editor_args());
+            let _ = s.save();
+            drop(s);
+            registry.broadcast_config_changed();
+        });
+    }
+
     // Grace auto-reconnect settings (#P3-H). The timer itself is created once
     // the window's ConnectCtx exists (see below); here we only mirror + persist.
     window.set_auto_reconnect_enabled(store.borrow().auto_reconnect_enabled());
@@ -1536,210 +1575,28 @@ pub(crate) fn open_window(
     window.set_sessions(ModelRc::from(sessions_model.clone()));
     sync_sessions_to_model(&store.borrow(), &sessions_model);
     window.set_wsl_profiles(wsl_profile_model(&store.borrow()));
-    // Cross-window propagation: when another window persists sessions / theme /
-    // language it broadcasts; re-sync what this window shows. The listener only
-    // READS the store and updates this window's models (never saves), so a
-    // broadcast can never re-enter the broadcast path.
-    {
-        let weak = window.as_weak();
-        let store = store.clone();
-        let sessions_model = sessions_model.clone();
-        let bufs = bufs.clone();
-        registry.add_config_listener(window_id, Rc::new(move || {
-            let Some(w) = weak.upgrade() else { return };
-            // Rebuild the list with the window's current search filter.
-            sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
-            // Re-apply the theme to the chrome AND every open terminal buffer.
-            // Terminal colour schemes first (upstream 126072b): they feed the
-            // terminal palette the dark-mode re-apply paints with.
-            terminal_scheme::apply_terminal_schemes(&w, &store.borrow());
-            apply_dark_mode(&w, &bufs, theme_pref_is_dark(&store.borrow()));
-            // Colour theme preset + immersive switch (Settings › Wallpaper & theme).
-            color_theme::apply_color_theme(&w, &store.borrow());
-            // Language translations are process-global; refresh our flag only.
-            w.set_lang_en(crate::i18n::is_en());
-            // Local shells / WSL profiles and detected agents can change in
-            // another window; rebuild this window's launch-menu groups.
-            w.set_launch_shells(launch_shell_model(&store.borrow()));
-            w.invoke_refresh_agent_launchers();
-            // Command-bar visibility is a global preference.
-            w.set_cmd_bar_hidden(store.borrow().cmd_bar_hidden());
-            // Opt-in right-click copy or paste is a global preference too.
-            w.set_right_click_copy(store.borrow().right_click_copy());
-            // Persisted terminal font size (settings stepper) is global too.
-            w.set_term_font_size(store.borrow().font_size() as f32);
-        }));
-    }
-    {
-        let weak = window.as_weak();
-        window.on_pick_wsl_directory(move || {
-            if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                if let Some(w) = weak.upgrade() {
-                    w.set_wsl_new_directory(folder.to_string_lossy().to_string().into());
-                }
-            }
-        });
-    }
-    {
-        let weak = window.as_weak();
-        let store = store.clone();
-        let sessions_model = sessions_model.clone();
-        let registry = registry.clone();
-        window.on_add_wsl_profile(move |name, distribution, directory| {
-            {
-                let mut s = store.borrow_mut();
-                s.add_wsl_profile(
-                    name.to_string(),
-                    distribution.to_string(),
-                    directory.to_string(),
-                );
-                let _ = s.save();
-                if let Some(w) = weak.upgrade() {
-                    w.set_wsl_profiles(wsl_profile_model(&s));
-                    sync_sessions_for_window(&weak, &s, &sessions_model);
-                }
-            }
-            registry.broadcast_config_changed();
-        });
-    }
-    {
-        let weak = window.as_weak();
-        let store = store.clone();
-        let sessions_model = sessions_model.clone();
-        let registry = registry.clone();
-        window.on_remove_wsl_profile(move |id| {
-            {
-                let mut s = store.borrow_mut();
-                s.remove_wsl_profile(id.as_str());
-                let _ = s.save();
-                if let Some(w) = weak.upgrade() {
-                    w.set_wsl_profiles(wsl_profile_model(&s));
-                    sync_sessions_for_window(&weak, &s, &sessions_model);
-                }
-            }
-            registry.broadcast_config_changed();
-        });
-    }
-    {
-        let weak = window.as_weak();
-        let store = store.clone();
-        let sessions_model = sessions_model.clone();
-        let registry = registry.clone();
-        let mailbox = bundle_mailbox.clone();
-        window.on_webdav_download(move || {
-            let Some(w) = weak.upgrade() else { return };
-            let enabled = w.get_webdav_enabled();
-            let url = w.get_webdav_url().to_string();
-            let username = w.get_webdav_username().to_string();
-            let password = w.get_webdav_password().to_string();
-            let remote_path = w.get_webdav_remote_path().to_string();
-            let accept_invalid_certs = w.get_webdav_accept_invalid_certs();
-            {
-                let mut s = store.borrow_mut();
-                s.set_webdav_settings(
-                    enabled,
-                    url.clone(),
-                    username.clone(),
-                    password.clone(),
-                    remote_path.clone(),
-                    accept_invalid_certs,
-                );
-                let _ = s.save();
-            }
-            if !enabled {
-                w.set_webdav_status(t("请先启用 WebDAV 同步", "enable WebDAV sync first").into());
-                return;
-            }
-            // Encrypted bundle first; a server holding only the pre-encryption
-            // file falls back to the legacy JSON export. A bundle that fails to
-            // open never falls back, so a wrong passphrase can't double-import.
-            let pass = w.get_portable_passphrase().to_string();
-            if pass.is_empty() {
-                // Without a passphrase only the legacy plaintext file can be
-                // tried, and that import is fast (no KDF), so it stays inline.
-                let res: Result<(usize, usize), anyhow::Error> = webdav_get_json(
-                    &url,
-                    &remote_path,
-                    &username,
-                    &password,
-                    accept_invalid_certs,
-                )
-                .and_then(|json| store.borrow_mut().import_json(&json))
-                .map_err(|e| {
-                    // The bundle was never tried, so a missing legacy file most
-                    // likely means the server only holds the encrypted bundle.
-                    anyhow::anyhow!(
-                        "{} ({e})",
-                        t(
-                            "远端可能只保存了加密同步包，请先填写便携包口令",
-                            "the server may only hold an encrypted bundle; enter a bundle passphrase first"
-                        )
-                    )
-                });
-                let msg = match res {
-                    Ok((added, skipped)) => {
-                        sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
-                        registry.broadcast_config_changed();
-                        format!(
-                            "{} {}, {} {}{}",
-                            t("已导入", "imported"),
-                            added,
-                            t("跳过", "skipped"),
-                            skipped,
-                            webdav_status_suffix(accept_invalid_certs)
-                        )
-                    }
-                    Err(e) => format!("{}: {}", t("下载失败", "download failed"), e),
-                };
-                w.set_webdav_status(msg.into());
-                return;
-            }
-            // Fetch + Argon2 off the UI thread; the bundle timer applies the
-            // decrypted config (or runs the legacy fallback) where the store
-            // lives.
-            let bundle_path = bundle_remote_path(&remote_path);
-            w.set_webdav_status(t("下载中...", "downloading...").into());
-            let mailbox = mailbox.clone();
-            std::thread::spawn(move || {
-                let (result, fallback) = match webdav_get_optional(
-                    &url,
-                    &bundle_path,
-                    &username,
-                    &password,
-                    accept_invalid_certs,
-                ) {
-                    Ok(Some(body)) => (
-                        extract_bundle_data(&body)
-                            .map_err(|e| format!("{e:#}"))
-                            .and_then(|pack| {
-                                ConfigStore::decrypt_bundle(&pass, &pack)
-                                    .map_err(|e| format!("{e:#}"))
-                            }),
-                        None,
-                    ),
-                    Ok(None) => (
-                        // Placeholder: the timer checks `fallback` before
-                        // `result`, so this Err never surfaces.
-                        Err(String::new()),
-                        Some(WebdavFallback {
-                            url,
-                            remote_path,
-                            username,
-                            password,
-                            accept_invalid_certs,
-                        }),
-                    ),
-                    Err(e) => (Err(format!("{e:#}")), None),
-                };
-                lock_or_recover(&mailbox).push(BundleDelivery {
-                    result,
-                    download: true,
-                    webdav: true,
-                    fallback,
-                });
-            });
-        });
-    }
+    let ctx = WinCtx {
+        core: core.clone(),
+        store: store.clone(),
+        registry: registry.clone(),
+        handles: handles.clone(),
+        sftp_handles: sftp_handles.clone(),
+        bufs: bufs.clone(),
+        window: window.clone(),
+        proc_win: proc_win.clone(),
+        sys_win: sys_win.clone(),
+        editor_win: editor_win.clone(),
+        window_id,
+        pending_window_size_restore: pending_window_size_restore.clone(),
+        window_size_tracking_ready: window_size_tracking_ready.clone(),
+    };
+    window.set_launch_shells(launch_shell_model(&store.borrow()));
+    super::local_shells::wire_custom_shells(&ctx);
+    super::credentials::wire(&ctx);
+    super::agents::wire_agent_launchers(&ctx, &sessions_model);
+    listen_for_config_changes(&ctx, &sessions_model);
+    wire_wsl_profiles(&ctx, &sessions_model);
+    wire_webdav_download(&ctx, &sessions_model);
 
     let tabs_model: Rc<VecModel<TabInfo>> = Rc::new(VecModel::default());
     tabs_model.push(TabInfo {
@@ -2877,8 +2734,8 @@ pub(crate) fn open_window(
         let libs: Vec<SharedString> = [
             t("Slint — 图形界面框架 (GUI)", "Slint — GUI framework"),
             t(
-                "russh / russh-keys — SSH 协议实现",
-                "russh / russh-keys — SSH protocol",
+                "russh — SSH 协议实现",
+                "russh — SSH protocol",
             ),
             t(
                 "russh-sftp — SFTP 文件传输",

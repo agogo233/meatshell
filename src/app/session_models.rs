@@ -552,6 +552,38 @@ mod wsl_probe_tests {
 // Session callbacks (welcome page + dialog)
 // ---------------------------------------------------------------------------
 
+/// Show the saved-credential picker (#526) in the session editor with
+/// `selected` picked. Labels and ids are parallel; row 0 = no credential.
+pub(super) fn set_dialog_credentials(w: &AppWindow, store: &ConfigStore, selected: &str) {
+    let mut labels = vec![SharedString::from(t(
+        "不使用（在下方填写登录信息）",
+        "None (enter the login below)",
+    ))];
+    let mut ids = vec![SharedString::new()];
+    for credential in store.credentials() {
+        labels.push(format!("{}  ({})", credential.name, credential.summary()).into());
+        ids.push(credential.id.clone().into());
+    }
+    let index = ids
+        .iter()
+        .position(|id| !selected.is_empty() && id.as_str() == selected)
+        .unwrap_or(0);
+    w.set_credential_choices(ModelRc::from(Rc::new(VecModel::from(labels))));
+    w.set_credential_ids(ModelRc::from(Rc::new(VecModel::from(ids))));
+    w.set_dialog_credential_index(index as i32);
+    w.set_dialog_credential_id(if index == 0 { "".into() } else { selected.into() });
+}
+
+/// Fill a dialog-built session's login from the saved credential it picked
+/// (#526), so a test connects with exactly what a save would store. An
+/// auto-generated name then uses the credential's username.
+pub(super) fn link_draft_credential(store: &ConfigStore, draft: &SessionDraft, session: &mut Session) {
+    store.apply_credential(session);
+    if draft.name.trim().is_empty() && !session.credential_id.is_empty() && !session.user.is_empty() {
+        session.name = format!("{}@{}", session.user, session.host);
+    }
+}
+
 /// Build the effective session represented by the dialog. When editing, blank
 /// secret fields retain their saved values because real passwords and pasted
 /// private keys are deliberately never echoed back into the UI (#10, #276).
@@ -583,6 +615,15 @@ pub(super) fn session_from_draft(
         draft.private_key_path.to_string().replace('\\', "/")
     };
     let kind = SessionKind::from_str(&draft.kind.to_string());
+    // An SSH agent session (#528) keeps no secrets of its own: the agent
+    // holds the key, so drop any password / key left from another method.
+    let agent = kind == SessionKind::Ssh && AuthMethod::from_str(&draft.auth.to_string()) == AuthMethod::Agent;
+    let (password, private_key_inline, private_key_path) = if agent {
+        (Secret::default(), Secret::default(), String::new())
+    } else {
+        (password, private_key_inline, private_key_path)
+    };
+    // Auto-name: serial uses the device; otherwise user@host or just host (#110).
     let auto_name = match kind {
         SessionKind::Serial => format!("{} @{}", draft.serial_port, draft.baud_rate),
         _ if draft.user.trim().is_empty() => draft.host.to_string(),
@@ -616,6 +657,12 @@ pub(super) fn session_from_draft(
         password,
         private_key_path,
         private_key_inline,
+        // The store fills in the linked login on upsert / apply_credential.
+        credential_id: if kind == SessionKind::Ssh {
+            draft.credential_id.to_string()
+        } else {
+            String::new()
+        },
         proxy: Secret::new(draft.proxy.to_string()),
         last_used: None,
         group: draft.group.to_string(),

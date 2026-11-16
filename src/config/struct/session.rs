@@ -153,6 +153,9 @@ pub enum AuthMethod {
     #[serde(rename = "keyboard-interactive")]
     KeyboardInteractive,
     Key,
+    /// Keys held by a running SSH agent — Bitwarden, 1Password, KeePassXC,
+    /// the OpenSSH agent (#528). Nothing secret is stored in the session.
+    Agent,
 }
 
 impl AuthMethod {
@@ -161,6 +164,7 @@ impl AuthMethod {
             AuthMethod::Password => "password",
             AuthMethod::KeyboardInteractive => "keyboard-interactive",
             AuthMethod::Key => "key",
+            AuthMethod::Agent => "agent",
         }
     }
 
@@ -168,6 +172,7 @@ impl AuthMethod {
         match s {
             "keyboard-interactive" | "keyboard" | "interactive" => AuthMethod::KeyboardInteractive,
             "key" => AuthMethod::Key,
+            "agent" => AuthMethod::Agent,
             _ => AuthMethod::Password,
         }
     }
@@ -188,6 +193,12 @@ pub struct Session {
     pub private_key_path: String,
     #[serde(default)]
     pub private_key_inline: Secret,
+    /// Saved credential this SSH session logs in with (#526). When set, the
+    /// user / auth / password / key fields above mirror that credential: the
+    /// store fills them in on load and whenever the credential changes, and
+    /// leaves the secrets out of the session on disk. Empty = own login.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub credential_id: String,
     /// Optional outbound proxy, e.g. "socks5://127.0.0.1:1080" or
     /// "http://user:pass@host:8080". Empty = use $ALL_PROXY, else direct.
     /// `Secret` so a proxy password is encrypted on disk and redacted from
@@ -504,6 +515,7 @@ impl Session {
             password: Secret::default(),
             private_key_path: String::new(),
             private_key_inline: Secret::default(),
+            credential_id: String::new(),
             proxy: Secret::default(),
             jump_session_id: String::new(),
             jump_session_ids: Vec::new(),

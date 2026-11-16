@@ -1,6 +1,6 @@
 import { ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { SftpEntry, SftpTreeNode, SftpLocalPlace, TunnelInfo } from "sftp_panel.slint";
+import { SftpEntry, SftpTreeNode, SftpLocalPlace, TunnelInfo, SftpPathSuggestion } from "sftp_panel.slint";
 import { TabInfo } from "tabs.slint";
 import { DockExpandButton, ToolStrip } from "widgets.slint";
 
@@ -515,6 +515,8 @@ export component AIPanel inherits Rectangle {
 export component TerminalView inherits Rectangle {
     in property <bool> active: true;
     in property <bool> zen-mode: false;
+    // Width of the whole window, for popups that must stay inside it (#553).
+    in property <length> window-width;
     in property <float> terminal-line-spacing: 1.0;
     in property <bool> extra-paste-shortcuts-enabled: true;
     in property <bool> right-click-copy: false;
@@ -551,6 +553,9 @@ export component TerminalView inherits Rectangle {
 
     in property <string>  sftp-path: "/";
     in property <[SftpEntry]> sftp-entries;
+    in property <string>  sftp-filter;
+    in property <[SftpPathSuggestion]> sftp-suggestions;
+    in property <[SftpPathSuggestion]> sftp-local-suggestions;
     in property <string>  sftp-status: "";
     in property <int>     sftp-status-kind: 0; // 0 neutral / 1 saved / 2 failed
     in property <bool>    sftp-loading: false;
@@ -600,6 +605,9 @@ export component TerminalView inherits Rectangle {
     callback sftp-local-toggle-hidden();
     callback sftp-local-sort(string);
     callback sftp-local-set-filter(string);
+    callback sftp-set-filter(string);
+    callback sftp-complete-path(string);
+    callback sftp-local-complete-path(string);
     callback sftp-local-remove-recent(string);
     callback sftp-local-move-bookmark(string, int);
     callback sftp-local-reveal();
@@ -712,6 +720,7 @@ export component TerminalView inherits Rectangle {
     callback sftp-edit(string);
     callback sftp-open-external(string);
     callback sftp-edit-external(string);
+    callback sftp-open-with(string, bool);
     callback sftp-sort-request(string);
     callback sftp-clear-sort();
 // Keyboard type-ahead in the file list (#sftp-typeahead): returns the first

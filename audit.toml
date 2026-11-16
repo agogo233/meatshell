@@ -1,23 +1,12 @@
 # cargo-audit configuration (https://rustsec.org).
 #
-# ── RUSTSEC-2026-0154 — russh "unbounded 32-bit allocation" (DoS), russh < 0.60.3 ──
+# RUSTSEC-2026-0154 (russh "unbounded 32-bit allocation" DoS in SSH-agent frame
+# parsing, russh < 0.60.3) is fixed: meatshell is on russh 0.61. SSH-agent
+# login (#528) still uses meatshell's own minimal agent client
+# (src/ssh/impls/agent.rs) with the same 256 KiB frame cap.
 #
-# The flaw is in russh's SSH-AGENT frame parsing: it accepts an unchecked frame
-# length from a peer and allocates before validating, so a malicious peer can
-# force a large allocation (denial of service). The fix caps the agent frame at
-# 256 KiB.
-#
-# meatshell does NOT use the ssh-agent in any way — no agent authentication, no
-# agent forwarding (grep the source tree for "agent": the only hits are HTTP
-# "User-Agent" and colour comments). The vulnerable code path is therefore never
-# reached in this binary, so the advisory is not exploitable here.
-#
-# We are deliberately NOT upgrading to the patched russh yet: the only fixed
-# release (>= 0.60.3) pulls in a stack of *pre-release* crypto crates
-# (ed25519-dalek 3.0.0-pre, curve25519-dalek 5.0.0-pre, aes-gcm 0.11.0-rc,
-# ecdsa / elliptic-curve / p256 rc, …). Swapping battle-tested, audited crypto
-# for unaudited release candidates in a production SSH client is a worse trade
-# than this unreachable DoS. Revisit once russh's crypto dependencies leave the
-# -rc / -pre channel; then do the API migration (see PR #151 for the shape of it).
+# russh 0.61 depends on release-candidate crypto crates (ssh-key 0.7.0-rc,
+# rsa 0.10.0-rc, ed25519-dalek 3.0.0-rc, p256 0.14.0-rc, ...). Move to the final
+# releases as soon as russh does.
 [advisories]
-ignore = ["RUSTSEC-2026-0154"]
+ignore = []

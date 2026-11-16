@@ -50,19 +50,49 @@ export struct TunnelInfo {
     active: bool,
 }
 
+// One row of a path field's completion popup (a folder under the typed path).
+export struct SftpPathSuggestion {
+    name: string,
+    path: string,   // completed text (folder path plus separator)
+}
+
+// Per-tab cache for one path field's completion popup. Kept in TerminalState so
+// a late local/SFTP listing can be matched against the text typed since.
+export struct SftpPathSuggestions {
+    dir: string,        // folder the cached `names` belong to
+    prefix: string,     // literal text before the typed fragment
+    sep: string,        // separator appended to completed folder names
+    fragment: string,   // text after the last separator
+    names: [string],    // every folder in `dir`
+    entries: [SftpPathSuggestion], // filtered rows the popup shows
+}
+
 // One row of the file-list right-click context menu.
 component SftpMenuItem inherits Rectangle {
     in property <string> label;
     in property <string> icon;
     in property <brush> tint: Theme.text-primary;
     in property <bool> enabled: true;   // disabled items grey out + ignore clicks
+    in property <bool> submenu: false;  // opens a second-level menu: show ›
+    in property <bool> highlighted: false;  // its submenu is the one shown
     callback clicked();
+    // Menus that stay open on clicks inside (close-on-click-outside) are told
+    // to close after an item runs; an item that opens a submenu keeps it open.
+    callback close-menu();
+    callback hovered();   // the pointer entered the row (#553)
     height: 26px;
     border-radius: Theme.radius-sm;
-    background: (root.enabled && ta.has-hover) ? Theme.bg-hover : transparent;
+    background: (root.enabled && (ta.has-hover || root.highlighted)) ? Theme.bg-hover : transparent;
+    property <bool> hovering: ta.has-hover;
+    changed hovering => { if (self.hovering) { root.hovered(); } }
     ta := TouchArea {
         mouse-cursor: root.enabled ? pointer : default;
-        clicked => { if (root.enabled) { root.clicked(); } }
+        clicked => {
+            if (root.enabled) {
+                root.clicked();
+                if (!root.submenu) { root.close-menu(); }
+            }
+        }
     }
     Text {
         x: 8px;
@@ -82,6 +112,69 @@ component SftpMenuItem inherits Rectangle {
         font-size: Theme.fs-sm;
         vertical-alignment: center;
         height: parent.height;
+    }
+    if root.submenu : Text {
+        x: parent.width - 18px;
+        width: 12px;
+        height: parent.height;
+        text: "›";
+        color: root.enabled ? Theme.text-secondary : Theme.text-muted;
+        font-size: Theme.fs-md;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// Floating folder list below a path field (path completion). The owner sets the
+// geometry and the selected row; picking a row is reported by index.
+component PathSuggestionPopup inherits Rectangle {
+    in property <[SftpPathSuggestion]> items;
+    in property <int> selected: 0;
+    callback pick(int);
+    clip: true;
+    height: root.items.length * 24px + 8px;
+    background: Theme.popup-bg;
+    border-radius: Theme.radius-sm;
+    border-width: 1px;
+    border-color: Theme.border-strong;
+    drop-shadow-blur: 12px;
+    drop-shadow-color: #00000060;
+    VerticalLayout {
+        padding: 4px;
+        spacing: 1px;
+        for item[i] in root.items : Rectangle {
+            height: 24px;
+            border-radius: Theme.radius-sm;
+            background: i == root.selected
+                ? Theme.bg-active
+                : (row-ta.has-hover ? Theme.bg-hover : transparent);
+            row-ta := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.pick(i); }
+            }
+            HorizontalLayout {
+                padding-left: 6px;
+                padding-right: 6px;
+                spacing: 6px;
+                Text {
+                    width: 16px;
+                    text: "\u{E2C7}"; // folder
+                    font-family: "Material Icons";
+                    color: Theme.accent;
+                    font-size: Theme.fs-sm;
+                    vertical-alignment: center;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: item.name;
+                    color: Theme.text-primary;
+                    font-size: Theme.fs-sm;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+            }
+        }
     }
 }
 
@@ -473,6 +566,14 @@ component LocalPane inherits Rectangle {
     in property <string> sort-key;
     in property <int> sort-dir: 0;
     in property <string> filter: "";
+    // The panel shows the local and remote filter rows together so the two
+    // listings line up in the split view.
+    in property <bool> show-filter: false;
+    // Path completion (sftp_complete.rs): the Rust side lists the typed folder
+    // and hands back the matching rows; this pane renders the popup and applies
+    // a picked row to its path field.
+    in property <[SftpPathSuggestion]> suggestions;
+    callback complete-path(string);
 
     callback navigate(string);      // "..", "~" or a typed path
     callback up();
@@ -511,6 +612,12 @@ component LocalPane inherits Rectangle {
     property <length> menu-y;
     property <string> menu-target;
     property <bool> menu-target-is-dir;
+    // Path completion popup.
+    property <bool> suggest-open: false;
+    property <int> suggest-selected: 0;
+    property <length> suggest-x;
+    property <length> suggest-y;
+    property <length> suggest-w;
     // Narrow halves drop the optional columns so the name stays readable.
     property <bool> show-size: root.width > 250px;
     property <bool> show-modified: root.width > 350px;
@@ -522,8 +629,72 @@ component LocalPane inherits Rectangle {
     // (up / home / double-click), mirroring the panel's own path bar.
     changed path => {
         path-input.text = root.path;
+        root.suggest-open = false;
         root.selected-row = -1;
         root.select-anchor = -1;
+    }
+
+    // The suggestion model is replaced on every keystroke; keep the highlighted
+    // row inside it so Tab/Enter always applies a real row.
+    changed suggestions => {
+        if (root.suggest-selected >= root.suggestions.length) {
+            root.suggest-selected = max(0, root.suggestions.length - 1);
+        }
+    }
+
+    // --- Path completion popup -----------------------------------------------
+    // `ax`/`ay` are the path field's window coordinates; converted here so the
+    // popup never reads `absolute-position` from a binding (that would recurse).
+    function open-suggestions(ax: length, ay: length, w: length, text: string) {
+        root.suggest-x = ax - root.absolute-position.x;
+        root.suggest-y = ay - root.absolute-position.y;
+        root.suggest-w = w;
+        root.suggest-selected = 0;
+        root.suggest-open = true;
+        root.complete-path(text);
+    }
+    function apply-suggestion(index: int, go: bool, drill: bool) {
+        if (index < 0 || index >= root.suggestions.length) { return; }
+        path-input.text = root.suggestions[index].path;
+        // Continue typing at the end of the completed folder.
+        path-input.set-selection-offsets(1000000, 1000000);
+        root.suggest-open = false;
+        if (go) {
+            root.navigate(root.suggestions[index].path);
+        } else if (drill) {
+            // Keep the list open on the folder just completed.
+            root.suggest-open = true;
+            root.suggest-selected = 0;
+            root.complete-path(root.suggestions[index].path);
+        }
+    }
+    // Keys the popup owns while it is open; false lets the TextInput handle them.
+    function handle-suggest-key(e: KeyEvent) -> bool {
+        if (!root.suggest-open) { return false; }
+        if (e.text == Key.Escape) {
+            root.suggest-open = false;
+            return true;
+        }
+        if (root.suggestions.length == 0) { return false; }
+        if (e.text == Key.UpArrow) {
+            root.suggest-selected = root.suggest-selected <= 0
+                ? root.suggestions.length - 1 : root.suggest-selected - 1;
+            return true;
+        }
+        if (e.text == Key.DownArrow) {
+            root.suggest-selected = root.suggest-selected >= root.suggestions.length - 1
+                ? 0 : root.suggest-selected + 1;
+            return true;
+        }
+        if (e.text == Key.Tab) {
+            root.apply-suggestion(root.suggest-selected, false, true);
+            return true;
+        }
+        if (e.text == Key.Return) {
+            root.apply-suggestion(root.suggest-selected, true, false);
+            return true;
+        }
+        return false;
     }
 
     VerticalLayout {
@@ -546,7 +717,7 @@ component LocalPane inherits Rectangle {
                     horizontal-alignment: center;
                     vertical-alignment: center;
                 }
-                Rectangle {
+                path-field := Rectangle {
                     horizontal-stretch: 1;
                     height: 22px;
                     border-radius: Theme.radius-sm;
@@ -563,7 +734,29 @@ component LocalPane inherits Rectangle {
                         font-size: Theme.fs-sm;
                         vertical-alignment: center;
                         single-line: true;
-                        accepted => { root.navigate(self.text); }
+                        edited => {
+                            root.open-suggestions(
+                                path-field.absolute-position.x,
+                                path-field.absolute-position.y + path-field.height + 2px,
+                                path-field.width, self.text);
+                        }
+                        key-pressed(e) => {
+                            if (root.handle-suggest-key(e)) {
+                                accept
+                            } else if (e.text == Key.Tab) {
+                                root.open-suggestions(
+                                    path-field.absolute-position.x,
+                                    path-field.absolute-position.y + path-field.height + 2px,
+                                    path-field.width, self.text);
+                                accept
+                            } else {
+                                reject
+                            }
+                        }
+                        accepted => {
+                            root.suggest-open = false;
+                            root.navigate(self.text);
+                        }
                     }
                 }
                 // Bookmark the folder being shown; hidden when the pane is too
@@ -660,7 +853,7 @@ component LocalPane inherits Rectangle {
         Rectangle { height: 1px; background: Theme.border-subtle; }
 
         // --- Filter row -----------------------------------------------------
-        if root.width > 320px : Rectangle {
+        if root.show-filter : Rectangle {
             height: 26px;
             background: Theme.bg-panel-alt;
             HorizontalLayout {
@@ -1012,6 +1205,21 @@ component LocalPane inherits Rectangle {
             }
         }
     }
+
+    // Path completion: any click outside the popup cancels it — including while
+    // a listing is still in flight, so a late answer cannot pop up over the file
+    // list after the user has moved on. The list itself is drawn last, on top.
+    if root.suggest-open : TouchArea {
+        clicked => { root.suggest-open = false; }
+    }
+    if root.suggest-open && root.suggestions.length > 0 : PathSuggestionPopup {
+        x: root.suggest-x;
+        y: root.suggest-y;
+        width: min(max(220px, root.suggest-w), max(120px, root.width - root.suggest-x));
+        items: root.suggestions;
+        selected: root.suggest-selected;
+        pick(i) => { root.apply-suggestion(i, true, false); }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1022,6 +1230,16 @@ export component SftpPanel inherits Rectangle {
     // --- Properties --------------------------------------------------------
     in property <string>  current-path: "/";
     in property <[SftpEntry]>    entries;
+    // Width of the whole window (#553): the context menu's submenu column goes
+    // on the left when it would leave the window on the right.
+    in property <length> window-width;
+    // Remote name filter (split view). Rust keeps the unfiltered listing in
+    // TerminalState and republishes `entries` for the current text.
+    in property <string>  filter: "";
+    // Remote path completion rows (sftp_complete.rs); one popup for all three
+    // remote path fields (classic wide, classic compact and the split view).
+    in property <[SftpPathSuggestion]> suggestions;
+    in property <[SftpPathSuggestion]> local-suggestions;
     in property <string>  status: @tr("SFTP not connected");
     in property <int>     status-kind: 0;   // 0 neutral / 1 saved / 2 failed
     in property <bool>    loading: false;
@@ -1051,6 +1269,13 @@ export component SftpPanel inherits Rectangle {
     // into the other. The remote path bar and its buttons keep working as before,
     // so the toolbar always describes the *remote* side.
     in property <bool> dual: false;
+    // The two panes show their name-filter rows as a pair, so in the split view
+    // both listings start at the same height. One threshold for the whole panel
+    // (roughly two 320px panes plus the divider) keeps the rows from eating a
+    // narrow side dock; an active filter keeps them visible after a resize so
+    // the text can still be edited or cleared.
+    property <bool> filter-row-shown:
+        root.width > 660px || root.local-filter != "" || root.filter != "";
     in property <[SftpEntry]> local-entries;
     in property <string> local-path: "";
     in property <string> local-status: "";
@@ -1162,6 +1387,27 @@ export component SftpPanel inherits Rectangle {
     // out the item-specific actions (download/rename/…) but keeps new/refresh.
     property <length> menu-x;
     property <length> menu-y;
+    // Second-level menus (#553), shown on hover in a column of the same popup:
+    // "open" / "edit" (external program) or "copy" (copy to session); "" = none.
+    property <string> open-submenu;
+    property <length> submenu-y;
+    // The column goes left of the menu when there is no room on the right.
+    property <bool> submenu-on-left;
+    property <length> submenu-width: 170px;
+    property <length> file-menu-width: 186px;
+    property <length> file-menu-height: (15 + (root.dual ? 2 : 0)) * 27px + 8px;
+    property <length> copy-menu-height: max(1, root.transfer-targets.length) * 27px + 8px;
+    // Show submenu `key` beside the row at `row-y` (its offset in the menu),
+    // kept inside the popup; a disabled row closes any open submenu instead.
+    function show-submenu(key: string, enabled: bool, row-y: length) {
+        if (!enabled) {
+            root.open-submenu = "";
+            return;
+        }
+        let height = key == "copy" ? root.copy-menu-height : 2 * 27px + 8px;
+        root.submenu-y = max(0px, min(row-y - 4px, max(root.file-menu-height, root.copy-menu-height) - height));
+        root.open-submenu = key;
+    }
     property <string> menu-target;          // "" = whitespace
     property <string> menu-target-name;
     property <bool>   menu-target-is-dir;
@@ -1170,16 +1416,35 @@ export component SftpPanel inherits Rectangle {
     // on the whole selection, as in a file manager (#531).
     property <bool>   menu-on-selection: false;
     property <string> panel-mode: "files";
+    // Text of the toolbar path fields (wide and compact). The fields live inside
+    // conditional layouts, so their ids cannot be reached from the changed
+    // handler; the two-way binding keeps every copy in sync, including text set
+    // by the completion popup.
+    in-out property <string> toolbar-path-text: root.current-path;
+    // Text of the split view's remote path field. The field lives inside the
+    // conditional Files area, so its id cannot be reached from here; the
+    // two-way binding keeps the field in sync, including text set by the
+    // completion popup.
+    in-out property <string> pane-path-text: root.current-path;
+    // Remote path completion popup: one shared state for the three remote path
+    // fields. `target` remembers which field opened it so a picked row updates
+    // the right mirror ("pane" = split view, "toolbar" = classic path bar).
+    property <bool> suggest-open: false;
+    property <int> suggest-selected: 0;
+    property <string> suggest-target: "pane";
+    // The path just applied from the popup: the focused field compares its new
+    // text with this and moves the caret to the end (the field ids are out of
+    // scope here).
+    property <string> suggest-caret-text: "";
+    property <length> suggest-x;
+    property <length> suggest-y;
+    property <length> suggest-w;
     property <string> tunnel-kind: "local";
     property <string> tunnel-name: "";
     property <string> tunnel-bind: "127.0.0.1";
     property <string> tunnel-bind-port: "1080";
     property <string> tunnel-host: "127.0.0.1";
     property <string> tunnel-host-port: "80";
-    // The full toolbar needs roughly 480px once a useful path field is included.
-    // Below that, switch deliberately to a two-row compact layout instead of
-    // allowing fixed-size controls to squeeze the path and each other (#285).
-    property <bool> narrow-toolbar: root.width < (480px + (root.show-tree ? root.tree-width + 5px : 0px));
     // Below 280px the upload button moves into the "…" overflow menu so
     // bookmarks and parent navigation stay visible instead of being pushed out
     // (#sftp-tight-toolbar). The overflow menu itself surfaces from ~168px; in
@@ -1205,6 +1470,21 @@ export component SftpPanel inherits Rectangle {
     // preference — otherwise an auto-hidden column reads as "you turned it off".
     property <bool> tunnel-save: false;
     property <bool> tunnel-auto-start: true;
+    // The full toolbar needs roughly 560px once a useful path field, the
+    // Files/Tunnels tabs and the Split view toggle are included. Below that,
+    // switch deliberately to a two-row compact layout instead of allowing
+    // fixed-size controls to squeeze the path and each other (#285). When the
+    // directory tree is visible (panel docked top/bottom), the toolbar still
+    // spans the full panel width — but the *content* area below is narrower by
+    // the tree extent. Raise the narrow threshold so the toolbar adapts before
+    // buttons get clipped at the right edge (#433).
+    //
+    // The split view is the exception: its path bar and remote controls move
+    // into the right pane, so the toolbar only carries the tabs, the checked
+    // actions and the Split view toggle. It keeps the tab labels and the single
+    // 34px row at any dock width.
+    property <bool> narrow-toolbar: root.width < (560px + (root.tree-shown ? root.tree-width + 5px : 0px));
+
     property <length> column-menu-x: 8px;
     property <length> column-menu-y: 22px;
 
@@ -1229,6 +1509,8 @@ export component SftpPanel inherits Rectangle {
     callback edit(string);          // open writable in the built-in editor
     callback open-external(string);     // open with the OS default app (#81)
     callback edit-external(string);     // open externally + watch/re-upload (#81)
+    // Open / edit with a program picked now, for this file only (#553).
+    callback open-with(string /* path */, bool /* edit */);
     callback sort-request(string /* name|size|modified */);
     callback clear-sort();
     callback type-ahead(string /* prefix */) -> int;   // first row whose name starts with prefix, -1 if none
@@ -1271,6 +1553,12 @@ export component SftpPanel inherits Rectangle {
     // Split view: local pane + two-way transfers (the panel forwards these to
     // the app shell, which owns the local filesystem side).
     callback toggle-dual();
+    // Remote name filter (split view).
+    callback set-filter(string /* text */);
+    // Remote path field edited / Tab pressed: ask Rust for folder suggestions.
+    callback complete-path(string /* text */);
+    // The local pane's path field asks Rust for its own suggestions.
+    callback local-complete-path(string /* text */);
     callback local-navigate(string /* path */);
     callback local-up();
     callback local-home();
@@ -1324,7 +1612,7 @@ export component SftpPanel inherits Rectangle {
     // Top of the panel's content area (below the toolbar): the drag hit test
     // and the drop highlight both start here. Mirrors the toolbar height in the
     // layout below.
-    property <length> content-top: root.narrow-toolbar && root.panel-mode == "files" ? 62px : 34px;
+    property <length> content-top: root.narrow-toolbar && root.panel-mode == "files" && !root.dual ? 62px : 34px;
 
     public function begin-drag(from: string, row: int, count: int, label: string,
                                ax: length, ay: length) {
@@ -1405,6 +1693,9 @@ export component SftpPanel inherits Rectangle {
     // `if`-scoped ids are invisible to this root-level handler, and a one-way
     // `text` binding breaks as soon as the user types.
     changed current-path => {
+        root.toolbar-path-text = root.current-path;
+        root.pane-path-text = root.current-path;
+        root.suggest-open = false;
         // Also reset the list selection and type-ahead state when the
         // directory changes (#54).
         root.selected-row = -1;
@@ -1437,6 +1728,75 @@ export component SftpPanel inherits Rectangle {
         running: root.jump-prefix != "";
         triggered => { root.jump-prefix = ""; }
     }
+    // The path fields disappear with the view they belong to; don't leave a
+    // suggestion popup floating over the tunnels page or the classic toolbar.
+    changed dual => { root.suggest-open = false; }
+    changed panel-mode => { root.suggest-open = false; }
+    // The model is replaced on every keystroke; keep the highlighted row inside
+    // it so Tab/Enter always applies a real row.
+    changed suggestions => {
+        if (root.suggest-selected >= root.suggestions.length) {
+            root.suggest-selected = max(0, root.suggestions.length - 1);
+        }
+    }
+
+    // --- Remote path completion ---------------------------------------------
+    function open-suggestions(ax: length, ay: length, w: length, target: string, text: string) {
+        root.suggest-x = ax - root.absolute-position.x;
+        root.suggest-y = ay - root.absolute-position.y;
+        root.suggest-w = w;
+        root.suggest-target = target;
+        root.suggest-selected = 0;
+        root.suggest-open = true;
+        root.complete-path(text);
+    }
+    function apply-suggestion(index: int, go: bool, drill: bool) {
+        if (index < 0 || index >= root.suggestions.length) { return; }
+        if (root.suggest-target == "pane") {
+            root.suggest-caret-text = root.suggestions[index].path;
+            root.pane-path-text = root.suggestions[index].path;
+        } else {
+            root.suggest-caret-text = root.suggestions[index].path;
+            root.toolbar-path-text = root.suggestions[index].path;
+        }
+        root.suggest-open = false;
+        if (go) {
+            root.navigate(root.suggestions[index].path);
+        } else if (drill) {
+            // Keep the list open on the folder just completed.
+            root.suggest-open = true;
+            root.suggest-selected = 0;
+            root.complete-path(root.suggestions[index].path);
+        }
+    }
+    // Keys the popup owns while it is open; false lets the TextInput handle them.
+    function handle-suggest-key(e: KeyEvent) -> bool {
+        if (!root.suggest-open) { return false; }
+        if (e.text == Key.Escape) {
+            root.suggest-open = false;
+            return true;
+        }
+        if (root.suggestions.length == 0) { return false; }
+        if (e.text == Key.UpArrow) {
+            root.suggest-selected = root.suggest-selected <= 0
+                ? root.suggestions.length - 1 : root.suggest-selected - 1;
+            return true;
+        }
+        if (e.text == Key.DownArrow) {
+            root.suggest-selected = root.suggest-selected >= root.suggestions.length - 1
+                ? 0 : root.suggest-selected + 1;
+            return true;
+        }
+        if (e.text == Key.Tab) {
+            root.apply-suggestion(root.suggest-selected, false, true);
+            return true;
+        }
+        if (e.text == Key.Return) {
+            root.apply-suggestion(root.suggest-selected, true, false);
+            return true;
+        }
+        return false;
+    }
 
     // Drag empty space to re-dock; interactive widgets (file list, tree, toolbar
     // buttons) sit in front and capture their own events (#dock). Move cursor
@@ -1459,15 +1819,17 @@ export component SftpPanel inherits Rectangle {
 
     // Hidden entirely when side-docked + collapsed: the horizontal toolbar would
     // otherwise squish into an unusable vertical strip. `visible` (not `if`) so
-    // ids like path-input stay accessible to handlers. The parent floats a clean
-    // expand button over this (#dock).
+    // the toolbar's own elements (and their handlers) stay alive while it is
+    // hidden. The parent floats a clean expand button over this (#dock).
     VerticalLayout {
         visible: !root.compact;
         spacing: 0;
 
         // --- Toolbar (full width) ------------------------------------------
         Rectangle {
-            height: root.narrow-toolbar && (root.panel-mode == "files" || root.x-tight-toolbar) ? 62px : 34px;
+            // The split view keeps a single toolbar row: the remote path bar and
+            // its actions move down into the right pane, next to the local ones.
+            height: root.narrow-toolbar && !root.dual && (root.panel-mode == "files" || root.x-tight-toolbar) ? 62px : 34px;
             background: Theme.bg-panel-alt;
 
             VerticalLayout {
@@ -1533,7 +1895,9 @@ export component SftpPanel inherits Rectangle {
                 }
 
                 Rectangle {
-                    width: root.narrow-toolbar ? (root.x-tight-toolbar ? 24px : 28px) : 48px;
+                    // The split view has no path row, so the toolbar can keep the
+                    // tab labels even below the usual compact threshold.
+                    width: root.narrow-toolbar && !root.dual ? (root.x-tight-toolbar ? 24px : 28px) : 48px;
                     height: 22px;
                     border-radius: Theme.radius-sm;
                     background: root.panel-mode == "files" ? Theme.accent : (files-tab-ta.has-hover ? Theme.bg-hover : transparent);
@@ -1542,8 +1906,8 @@ export component SftpPanel inherits Rectangle {
                         clicked => { root.panel-mode = "files"; }
                     }
                     Text {
-                        text: root.narrow-toolbar ? "\u{E2C7}" : @tr("Files");
-                        font-family: root.narrow-toolbar ? "Material Icons" : Theme.ui-font-family;
+                        text: root.narrow-toolbar && !root.dual ? "\u{E2C7}" : @tr("Files");
+                        font-family: root.narrow-toolbar && !root.dual ? "Material Icons" : Theme.ui-font-family;
                         color: root.panel-mode == "files" ? #ffffff : Theme.text-secondary;
                         font-size: Theme.fs-xs;
                         horizontal-alignment: center;
@@ -1551,7 +1915,7 @@ export component SftpPanel inherits Rectangle {
                     }
                 }
                 Rectangle {
-                    width: root.narrow-toolbar ? (root.x-tight-toolbar ? 24px : 28px) : 58px;
+                    width: root.narrow-toolbar && !root.dual ? (root.x-tight-toolbar ? 24px : 28px) : 58px;
                     height: 22px;
                     border-radius: Theme.radius-sm;
                     background: root.panel-mode == "tunnels" ? Theme.accent : (tunnels-tab-ta.has-hover ? Theme.bg-hover : transparent);
@@ -1560,32 +1924,9 @@ export component SftpPanel inherits Rectangle {
                         clicked => { root.panel-mode = "tunnels"; }
                     }
                     Text {
-                        text: root.narrow-toolbar ? "\u{E0B6}" : @tr("Tunnels");
-                        font-family: root.narrow-toolbar ? "Material Icons" : Theme.ui-font-family;
+                        text: root.narrow-toolbar && !root.dual ? "\u{E0B6}" : @tr("Tunnels");
+                        font-family: root.narrow-toolbar && !root.dual ? "Material Icons" : Theme.ui-font-family;
                         color: root.panel-mode == "tunnels" ? #ffffff : Theme.text-secondary;
-                        font-size: Theme.fs-xs;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-
-                // Split view toggle: swaps the left directory tree for a local
-                // folder browser so files can be pushed to / pulled from the
-                // host side by side. Highlighted while the split view is on.
-                Rectangle {
-                    visible: root.panel-mode == "files";
-                    width: root.width > 420px ? 76px : 24px;
-                    height: 22px;
-                    border-radius: Theme.radius-sm;
-                    background: root.dual ? Theme.accent : (dual-ta.has-hover ? Theme.bg-hover : transparent);
-                    dual-ta := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.toggle-dual(); }
-                    }
-                    Text {
-                        text: root.width > 420px ? @tr("Split view") : "\u{E8D2}";
-                        font-family: root.width > 420px ? Theme.ui-font-family : "Material Icons";
-                        color: root.dual ? #ffffff : Theme.text-secondary;
                         font-size: Theme.fs-xs;
                         horizontal-alignment: center;
                         vertical-alignment: center;
@@ -1594,12 +1935,14 @@ export component SftpPanel inherits Rectangle {
 
                 // In compact mode keep navigation tabs at the left and primary
                 // actions aligned at the right. The path gets the full second row.
-                if root.narrow-toolbar : Rectangle { horizontal-stretch: 1; }
+                // The split view has no path row either, so its remaining global
+                // actions (checked count, Split view, collapse) hug the right edge.
+                if root.narrow-toolbar || root.dual : Rectangle { horizontal-stretch: 1; }
 
                 // Keep parent navigation discoverable in the narrow layout
                 // instead of hiding this primary action in the overflow menu
                 // (#322). It stays beside the other compact toolbar actions.
-                if root.narrow-toolbar && !root.tree-shown && root.panel-mode == "files" : Rectangle {
+                if root.narrow-toolbar && !root.tree-shown && !root.dual && root.panel-mode == "files" : Rectangle {
                     width: 24px; height: 22px;
                     border-radius: Theme.radius-sm;
                     background: compact-up-ta.has-hover ? Theme.bg-hover : transparent;
@@ -1618,14 +1961,19 @@ export component SftpPanel inherits Rectangle {
                 // `visible:false` element still occupies a layout cell (and its
                 // spacing) in Slint, and those orphaned gaps are what pushed the
                 // bookmark icon off the 120px panel (#sftp-narrow-dock).
-                if root.panel-mode == "files" && !root.narrow-toolbar : HorizontalLayout {
+                // The whole cluster (path, bookmark, places, copy/paste, up,
+                // refresh) is conditional rather than merely invisible: in the
+                // split view the remote path bar moves into the right pane, and
+                // an invisible element would still reserve layout space and
+                // push the Split view toggle off the toolbar.
+                if root.panel-mode == "files" && !root.narrow-toolbar && !root.dual : HorizontalLayout {
                     spacing: 4px;
                     horizontal-stretch: 1;
-                    // Floor the path field at 100px so switching to Files mode
-                    // (which reveals copy/paste/up/upload next to it) doesn't
-                    // squeeze the input down to an unreadable strip in
-                    // mid-width panels (~380–480px) (#toolbar-input-shrink).
-                    Rectangle {
+                    toolbar-path-field := Rectangle {
+                        // Floor the path field at 100px so switching to Files mode
+                        // (which reveals copy/paste/up/upload next to it) doesn't
+                        // squeeze the input down to an unreadable strip in
+                        // mid-width panels (~380–480px) (#toolbar-input-shrink).
                         min-width: 100px;
                         horizontal-stretch: 1;
                         height: 22px;
@@ -1633,24 +1981,45 @@ export component SftpPanel inherits Rectangle {
                         background: Theme.bg-root;
                         border-width: 1px;
                         border-color: path-input.has-focus ? Theme.accent : Theme.border-subtle;
-                        // Mirror directory changes into the editable field: the
-                        // one-way `text` binding below breaks once the user
-                        // types, and ids declared inside `if` branches are not
-                        // visible to the root-level `changed current-path`.
-                        property <string> current-dir: root.current-path;
-                        changed current-dir => { path-input.text = root.current-path; }
                         path-input := TextInput {
                             x: 6px;
                             width: parent.width - 12px;
                             height: parent.height;
-                            text: root.current-path;
+                            text <=> root.toolbar-path-text;
                             color: Theme.text-primary;
                             // CJK-capable font so typed Chinese isn't tofu (#54).
                             font-family: Theme.ui-font-family;
                             font-size: Theme.fs-sm;
                             vertical-alignment: center;
                             single-line: true;
-                            accepted => { root.navigate(self.text); }
+                            changed text => {
+                                if (self.text == root.suggest-caret-text) {
+                                    self.set-selection-offsets(1000000, 1000000);
+                                }
+                            }
+                            edited => {
+                                root.open-suggestions(
+                                    toolbar-path-field.absolute-position.x,
+                                    toolbar-path-field.absolute-position.y + toolbar-path-field.height + 2px,
+                                    toolbar-path-field.width, "toolbar", self.text);
+                            }
+                            key-pressed(e) => {
+                                if (root.handle-suggest-key(e)) {
+                                    accept
+                                } else if (e.text == Key.Tab) {
+                                    root.open-suggestions(
+                                        toolbar-path-field.absolute-position.x,
+                                        toolbar-path-field.absolute-position.y + toolbar-path-field.height + 2px,
+                                        toolbar-path-field.width, "toolbar", self.text);
+                                    accept
+                                } else {
+                                    reject
+                                }
+                            }
+                            accepted => {
+                                root.suggest-open = false;
+                                root.navigate(self.text);
+                            }
                         }
                     }
                     // Copy the current path to the clipboard.
@@ -1891,7 +2260,7 @@ export component SftpPanel inherits Rectangle {
 
                 // Upload: a small menu offers file vs folder (#85). The remote
                 // SFTP upload handles both — only the local picker differs.
-                if root.panel-mode == "files" && !root.tight-toolbar : Rectangle {
+                if root.panel-mode == "files" && !root.tight-toolbar && !root.dual : Rectangle {
                     // The tight tiers fold upload into the "…" menu so bookmarks
                     // and parent navigation stay visible (#sftp-tight-toolbar).
                     // Narrow shows the Material Icons file_upload glyph (E2C6,
@@ -1939,7 +2308,7 @@ export component SftpPanel inherits Rectangle {
 
                 // Secondary path actions move into an overflow menu in compact
                 // mode so they never compete with the path field for width.
-                if root.panel-mode == "files" && root.row1-more : Rectangle {
+                if root.panel-mode == "files" && !root.dual && root.row1-more : Rectangle {
                     // On a wide-enough panel the overflow menu moves up to the first
                     // row, so refresh and collapse take the path row only in the
                     // narrowest band (see row1-refresh / row1-min below).
@@ -2012,7 +2381,9 @@ export component SftpPanel inherits Rectangle {
                 }
 
                 // Batch actions on checked entries — only when something's checked (#100).
-                if root.panel-mode == "files" && root.selected-count > 0 && !root.narrow-toolbar : HorizontalLayout {
+                // In the split view they stay in the toolbar, which has room for
+                // them once the remote path bar moved into its pane.
+                if root.panel-mode == "files" && root.selected-count > 0 && (!root.narrow-toolbar || root.dual) : HorizontalLayout {
                     spacing: 2px;
                     width: 34px;
                     Text {
@@ -2029,7 +2400,7 @@ export component SftpPanel inherits Rectangle {
                         vertical-alignment: center;
                     }
                 }
-                if root.panel-mode == "files" && root.selected-count > 0 && !root.narrow-toolbar : Rectangle {
+                if root.panel-mode == "files" && root.selected-count > 0 && (!root.narrow-toolbar || root.dual) : Rectangle {
                     width: 24px; height: 22px;
                     border-radius: Theme.radius-sm;
                     background: dls-ta.has-hover ? Theme.bg-hover : transparent;
@@ -2037,7 +2408,7 @@ export component SftpPanel inherits Rectangle {
                     Text { text: "\u{E2C4}"; font-family: "Material Icons"; color: Theme.text-secondary;
                            font-size: Theme.fs-md; horizontal-alignment: center; vertical-alignment: center; }
                 }
-                if root.panel-mode == "files" && root.selected-count > 0 && !root.narrow-toolbar : Rectangle {
+                if root.panel-mode == "files" && root.selected-count > 0 && (!root.narrow-toolbar || root.dual) : Rectangle {
                     width: 24px; height: 22px;
                     border-radius: Theme.radius-sm;
                     background: dels-ta.has-hover ? Theme.danger.with-alpha(0.18) : transparent;
@@ -2046,17 +2417,28 @@ export component SftpPanel inherits Rectangle {
                            font-size: Theme.fs-md; horizontal-alignment: center; vertical-alignment: center; }
                 }
 
-                if root.panel-mode == "files" && (root.row1-refresh || !root.narrow-toolbar) : Rectangle {
-                    width: 24px; height: 22px;
+                // Split view toggle: swaps the left directory tree for a local
+                // folder browser so files can be pushed to / pulled from the
+                // host side by side. Kept apart from the Files/Tunnels tabs, at
+                // the right end of the toolbar: it is a view mode for the pane,
+                // not a third panel. Highlighted while the split view is on.
+                if root.panel-mode == "files" : Rectangle {
+                    width: root.width > 420px ? 76px : 24px;
+                    height: 22px;
                     border-radius: Theme.radius-sm;
-                    background: ref-ta.has-hover ? Theme.bg-hover : transparent;
-                    ref-ta := TouchArea {
+                    background: root.dual ? Theme.accent : (dual-ta.has-hover ? Theme.bg-hover : transparent);
+                    dual-ta := TouchArea {
                         mouse-cursor: pointer;
-                        clicked => { root.refresh(root.current-path); }
+                        clicked => { root.toggle-dual(); }
                     }
-                    Text { text: "\u{E5D5}"; font-family: "Material Icons";
-                           color: Theme.text-secondary; font-size: Theme.fs-sm;
-                           horizontal-alignment: center; vertical-alignment: center; }
+                    Text {
+                        text: root.width > 420px ? @tr("Split view") : "\u{E8D2}";
+                        font-family: root.width > 420px ? Theme.ui-font-family : "Material Icons";
+                        color: root.dual ? #ffffff : Theme.text-secondary;
+                        font-size: Theme.fs-xs;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
                 }
 
                 // Minimise / restore the SFTP panel (#41). In wide mode it always
@@ -2082,16 +2464,12 @@ export component SftpPanel inherits Rectangle {
                 // Preserve path navigation in the side-docked compact layout by
                 // moving it to a real second layout row. The layout spacing keeps
                 // a stable gutter regardless of first-row alignment/padding.
-                HorizontalLayout {
-                    // Also visible in Tunnels mode while the collapse copy below
-                    // isn't surfaced on the first row yet, so the panel stays foldable.
-                    visible: root.narrow-toolbar && (root.panel-mode == "files" || !root.row1-min);
-                    height: self.visible ? 22px : 0px;
+                // Conditional so the row leaves no 6px gutter when the wide
+                // toolbar (or the split view) is in charge of the path.
+                if root.narrow-toolbar && !root.tree-shown && !root.dual && root.panel-mode == "files" : HorizontalLayout {
                     padding-left: 6px;
                     padding-right: 6px;
-                    spacing: 4px;
-                    Rectangle {
-                        visible: root.panel-mode == "files";
+                    compact-path-field := Rectangle {
                         // 100px keeps the wide tiers readable; the tightest tier
                         // shares the row with refresh + collapse and floors the
                         // field at what's left of a 120px panel.
@@ -2102,21 +2480,44 @@ export component SftpPanel inherits Rectangle {
                         background: Theme.bg-root;
                         border-width: 1px;
                         border-color: compact-path-input.has-focus ? Theme.accent : Theme.border-subtle;
-                        // Same bridge as the wide tier: keep this field in sync
-                        // with directory changes after the user has typed.
-                        property <string> current-dir: root.current-path;
-                        changed current-dir => { compact-path-input.text = root.current-path; }
                         compact-path-input := TextInput {
                             x: 6px;
                             width: parent.width - 12px;
                             height: parent.height;
-                            text: root.current-path;
+                            text <=> root.toolbar-path-text;
                             color: Theme.text-primary;
                             font-family: Theme.ui-font-family;
                             font-size: Theme.fs-sm;
                             vertical-alignment: center;
                             single-line: true;
-                            accepted => { root.navigate(self.text); }
+                            changed text => {
+                                if (self.text == root.suggest-caret-text) {
+                                    self.set-selection-offsets(1000000, 1000000);
+                                }
+                            }
+                            edited => {
+                                root.open-suggestions(
+                                    compact-path-field.absolute-position.x,
+                                    compact-path-field.absolute-position.y + compact-path-field.height + 2px,
+                                    compact-path-field.width, "toolbar", self.text);
+                            }
+                            key-pressed(e) => {
+                                if (root.handle-suggest-key(e)) {
+                                    accept
+                                } else if (e.text == Key.Tab) {
+                                    root.open-suggestions(
+                                        compact-path-field.absolute-position.x,
+                                        compact-path-field.absolute-position.y + compact-path-field.height + 2px,
+                                        compact-path-field.width, "toolbar", self.text);
+                                    accept
+                                } else {
+                                    reject
+                                }
+                            }
+                            accepted => {
+                                root.suggest-open = false;
+                                root.navigate(self.text);
+                            }
                         }
                     }
                     // The first row surfaces refresh once wide enough (row1-refresh);
@@ -2144,6 +2545,64 @@ export component SftpPanel inherits Rectangle {
                         Text { text: root.collapsed ? "\u{E5CE}" : "\u{E5CF}"; font-family: "Material Icons";
                                color: Theme.text-secondary; font-size: Theme.fs-md;
                                horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                    // Secondary path actions live in the overflow menu so they
+                    // never compete with the path field for width.
+                    compact-more-btn := Rectangle {
+                        width: 24px;
+                        height: 22px;
+                        border-radius: Theme.radius-sm;
+                        background: compact-more-ta.has-hover ? Theme.bg-hover : transparent;
+                        compact-more-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { compact-more-menu.show(); }
+                        }
+                        Text {
+                            text: "\u{E5D4}";
+                            font-family: "Material Icons";
+                            color: Theme.text-secondary;
+                            font-size: Theme.fs-md;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        compact-more-menu := PopupWindow {
+                            x: parent.width - self.width;
+                            y: parent.height + 2px;
+                            width: 142px;
+                            height: 3 * 27px + 8px;
+                            Rectangle {
+                                background: Theme.popup-bg;
+                                border-radius: Theme.radius-sm;
+                                border-width: 1px;
+                                border-color: Theme.border-strong;
+                                drop-shadow-blur: 12px;
+                                drop-shadow-color: #00000060;
+                                VerticalLayout {
+                                    padding: 4px;
+                                    spacing: 1px;
+                                    SftpMenuItem {
+                                        label: @tr("Copy path");
+                                        clicked => {
+                                            compact-path-input.select-all();
+                                            compact-path-input.copy();
+                                            compact-path-input.clear-selection();
+                                        }
+                                    }
+                                    SftpMenuItem {
+                                        label: @tr("Paste and go");
+                                        clicked => {
+                                            compact-path-input.select-all();
+                                            compact-path-input.paste();
+                                            root.navigate(compact-path-input.text);
+                                        }
+                                    }
+                                    SftpMenuItem {
+                                        label: @tr("Refresh");
+                                        clicked => { root.refresh(root.current-path); }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -2268,6 +2727,10 @@ export component SftpPanel inherits Rectangle {
                 loading: root.local-loading;
                 status: root.local-status;
                 selected-count: root.local-selected-count;
+                filter: root.local-filter;
+                show-filter: root.filter-row-shown;
+                suggestions: root.local-suggestions;
+                complete-path(text) => { root.local-complete-path(text); }
                 quick-places: root.local-quick-places;
                 drive-places: root.local-drive-places;
                 bookmarks: root.local-bookmarks;
@@ -2276,7 +2739,6 @@ export component SftpPanel inherits Rectangle {
                 show-hidden: root.local-show-hidden;
                 sort-key: root.local-sort-key;
                 sort-dir: root.local-sort-dir;
-                filter: root.local-filter;
                 navigate(path)        => { root.local-navigate(path); }
                 up()                  => { root.local-up(); }
                 home()                => { root.local-home(); }
@@ -2345,6 +2807,214 @@ export component SftpPanel inherits Rectangle {
             VerticalLayout {
                 horizontal-stretch: 1;
                 spacing: 0;
+
+                // Split view: the remote half gets the same path bar as the local
+                // half opposite it, with the same controls (bookmark, places,
+                // copy/paste, up, refresh, upload). The panel toolbar therefore
+                // keeps only the Files/Tunnels tabs and the Split view toggle,
+                // and both listings start at the same height. In the classic
+                // single-pane view the toolbar keeps the remote path bar so it
+                // still spans the directory tree too.
+                Rectangle {
+                    visible: root.dual;
+                    height: 28px;
+                    background: Theme.bg-panel-alt;
+                    HorizontalLayout {
+                        padding-left: 6px;
+                        padding-right: 4px;
+                        spacing: 3px;
+                        Text {
+                            width: 16px;
+                            text: "\u{E875}"; // server
+                            font-family: "Material Icons";
+                            color: Theme.text-secondary;
+                            font-size: Theme.fs-sm;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        pane-path-field := Rectangle {
+                            horizontal-stretch: 1;
+                            // Keep a readable path even in a narrow side-docked
+                            // panel; the optional buttons below drop out first.
+                            min-width: 60px;
+                            height: 22px;
+                            border-radius: Theme.radius-sm;
+                            background: Theme.bg-root;
+                            border-width: 1px;
+                            border-color: pane-path-input.has-focus ? Theme.accent : Theme.border-subtle;
+                            pane-path-input := TextInput {
+                                x: 6px;
+                                width: parent.width - 12px;
+                                height: parent.height;
+                                text <=> root.pane-path-text;
+                                color: Theme.text-primary;
+                                font-family: Theme.ui-font-family;
+                                font-size: Theme.fs-sm;
+                                vertical-alignment: center;
+                                single-line: true;
+                                changed text => {
+                                    if (self.text == root.suggest-caret-text) {
+                                        self.set-selection-offsets(1000000, 1000000);
+                                    }
+                                }
+                                edited => {
+                                    root.open-suggestions(
+                                        pane-path-field.absolute-position.x,
+                                        pane-path-field.absolute-position.y + pane-path-field.height + 2px,
+                                        pane-path-field.width, "pane", self.text);
+                                }
+                                key-pressed(e) => {
+                                    if (root.handle-suggest-key(e)) {
+                                        accept
+                                    } else if (e.text == Key.Tab) {
+                                        root.open-suggestions(
+                                            pane-path-field.absolute-position.x,
+                                            pane-path-field.absolute-position.y + pane-path-field.height + 2px,
+                                            pane-path-field.width, "pane", self.text);
+                                        accept
+                                    } else {
+                                        reject
+                                    }
+                                }
+                                accepted => {
+                                    root.suggest-open = false;
+                                    root.navigate(self.text);
+                                }
+                            }
+                        }
+                        if root.list-w > 280px : SftpStarButton {
+                            bookmarked: root.bookmarked;
+                            toggled => { root.toggle-bookmark(root.current-path); }
+                        }
+                        SftpPlacesButton {
+                            bookmarks: root.bookmarks;
+                            recent: root.recent;
+                            current-path: root.current-path;
+                            opened => { root.places-refresh(); }
+                            navigate(p) => { root.navigate(p); }
+                            remove-bookmark(p) => { root.remove-bookmark(p); }
+                            clear-recent => { root.clear-recent(); }
+                        }
+                        // Copy / paste-jump the remote path; the first controls to
+                        // go when the pane is too narrow to hold them all.
+                        if root.list-w > 360px : Rectangle {
+                            width: 24px; height: 22px;
+                            border-radius: Theme.radius-sm;
+                            background: pane-copy-ta.has-hover ? Theme.bg-hover : transparent;
+                            pane-copy-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    pane-path-input.select-all();
+                                    pane-path-input.copy();
+                                    pane-path-input.clear-selection();
+                                }
+                            }
+                            Text { text: "\u{E14D}"; font-family: "Material Icons";
+                                   color: Theme.text-secondary; font-size: Theme.fs-sm;
+                                   horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                        if root.list-w > 360px : Rectangle {
+                            width: 24px; height: 22px;
+                            border-radius: Theme.radius-sm;
+                            background: pane-paste-ta.has-hover ? Theme.bg-hover : transparent;
+                            pane-paste-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    pane-path-input.select-all();
+                                    pane-path-input.paste();
+                                    root.navigate(pane-path-input.text);
+                                }
+                            }
+                            Text { text: "\u{E14F}"; font-family: "Material Icons";
+                                   color: Theme.text-secondary; font-size: Theme.fs-sm;
+                                   horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                        Rectangle {
+                            width: 24px; height: 22px;
+                            border-radius: Theme.radius-sm;
+                            background: pane-up-ta.has-hover ? Theme.bg-hover : transparent;
+                            pane-up-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.navigate(".."); }
+                            }
+                            Text { text: "↑"; color: Theme.text-secondary; font-size: Theme.fs-md;
+                                   horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                        Rectangle {
+                            width: 24px; height: 22px;
+                            border-radius: Theme.radius-sm;
+                            background: pane-ref-ta.has-hover ? Theme.bg-hover : transparent;
+                            pane-ref-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.refresh(root.current-path); }
+                            }
+                            Text { text: "\u{E5D5}"; font-family: "Material Icons";
+                                   color: Theme.text-secondary; font-size: Theme.fs-sm;
+                                   horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                        Rectangle {
+                            width: root.list-w > 330px ? 52px : 24px;
+                            height: 22px;
+                            border-radius: Theme.radius-sm;
+                            background: pane-ul-ta.has-hover ? Theme.accent-hover : Theme.accent;
+                            pane-ul-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.upload-clicked(root.current-path, false); }
+                            }
+                            Text {
+                                text: root.list-w > 330px ? @tr("Upload") : "\u{E2C6}";
+                                font-family: root.list-w > 330px ? Theme.ui-font-family : "Material Icons";
+                                color: #ffffff;
+                                font-size: Theme.fs-sm;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+                Rectangle { visible: root.dual; height: 1px; background: Theme.border-subtle; }
+
+                // Remote name filter: mirrors the local pane's row so both
+                // listings start at the same height. Rust filters the unfiltered
+                // listing held by the tab, so no extra SFTP round trip is needed.
+                if root.dual && root.filter-row-shown : Rectangle {
+                    height: 26px;
+                    background: Theme.bg-panel-alt;
+                    HorizontalLayout {
+                        padding-left: 6px; padding-right: 6px; spacing: 4px;
+                        Text {
+                            width: 14px;
+                            text: "\u{E8B6}";
+                            font-family: "Material Icons";
+                            color: Theme.text-muted; font-size: Theme.fs-xs;
+                            vertical-alignment: center;
+                        }
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            height: 20px;
+                            border-radius: Theme.radius-sm;
+                            background: Theme.bg-root;
+                            border-width: 1px;
+                            border-color: remote-filter-input.has-focus ? Theme.accent : Theme.border-subtle;
+                            remote-filter-input := TextInput {
+                                x: 6px; width: parent.width - 12px; height: parent.height;
+                                text: root.filter;
+                                color: Theme.text-primary;
+                                font-family: Theme.ui-font-family;
+                                font-size: Theme.fs-sm;
+                                vertical-alignment: center;
+                                single-line: true;
+                                edited => { root.set-filter(remote-filter-input.text); }
+                            }
+                            if remote-filter-input.text == "" : Text {
+                                x: 6px; height: parent.height;
+                                text: @tr("Filter names");
+                                color: Theme.text-muted; font-size: Theme.fs-xs;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
 
                 // Column headers
                 column-header := Rectangle {
@@ -2745,7 +3415,10 @@ export component SftpPanel inherits Rectangle {
                                             root.menu-target-is-dir = entry.is-dir;
                                             root.menu-target-mode = entry.mode;
                                             root.menu-on-selection = entry.selected && root.selected-count >= 2;
-                                            root.menu-x = self.absolute-position.x + self.mouse-x - file-area.absolute-position.x;
+                                            root.open-submenu = "";
+                                            // Room for the submenu column: right of the menu, else left (#553).
+                                            root.submenu-on-left = root.window-width > 0px && self.absolute-position.x + self.mouse-x + root.file-menu-width + root.submenu-width > root.window-width;
+                                            root.menu-x = self.absolute-position.x + self.mouse-x - file-area.absolute-position.x - (root.submenu-on-left ? root.submenu-width - 4px : 0px);
                                             root.menu-y = self.absolute-position.y + self.mouse-y - file-area.absolute-position.y;
                                             file-menu.show();
                                         }
@@ -2865,7 +3538,10 @@ export component SftpPanel inherits Rectangle {
                                             root.selected-row = -1;
                                             root.menu-target = "";
                                             root.menu-on-selection = false;
-                                            root.menu-x = self.absolute-position.x + self.mouse-x - file-area.absolute-position.x;
+                                            root.open-submenu = "";
+                                            // Room for the submenu column: right of the menu, else left (#553).
+                                            root.submenu-on-left = root.window-width > 0px && self.absolute-position.x + self.mouse-x + root.file-menu-width + root.submenu-width > root.window-width;
+                                            root.menu-x = self.absolute-position.x + self.mouse-x - file-area.absolute-position.x - (root.submenu-on-left ? root.submenu-width - 4px : 0px);
                                             root.menu-y = self.absolute-position.y + self.mouse-y - file-area.absolute-position.y;
                                             file-menu.show();
                                         }
@@ -2878,12 +3554,217 @@ export component SftpPanel inherits Rectangle {
                     // One context menu for the whole list (#84). Item actions are
                     // enabled only when an item was right-clicked (menu-target set);
                     // new/refresh are always available.
-                    copy-target-menu := PopupWindow {
-                        x: root.menu-x + 148px;
+                    //
+                    // Second-level menus (#553) live in the same popup, in a column
+                    // beside the main menu, so hovering a row can open and switch
+                    // them: Slint routes no pointer events to a parent popup while
+                    // a child PopupWindow is open. The column sits on the left when
+                    // the right side would leave the window.
+                    file-menu := PopupWindow {
+                        x: root.menu-x;
                         y: root.menu-y;
-                        width: 148px;
-                        height: max(1, root.transfer-targets.length) * 27px + 8px;
+                        close-policy: close-on-click-outside;
+                        width: root.file-menu-width + root.submenu-width - 4px;
+                        height: max(root.file-menu-height, root.copy-menu-height);
+                        // The empty part of the popup (where no submenu is
+                        // shown) closes the menu like a click outside would.
+                        TouchArea { clicked => { file-menu.close(); } }
                         Rectangle {
+                            x: root.submenu-on-left ? root.submenu-width - 4px : 0px;
+                            y: 0px;
+                            width: root.file-menu-width;
+                            height: root.file-menu-height;
+                            background: Theme.popup-bg;
+                            border-radius: Theme.radius-sm;
+                            border-width: 1px;
+                            border-color: Theme.border-strong;
+                            drop-shadow-blur: 12px;
+                            drop-shadow-color: #00000060;
+                            VerticalLayout {
+                                padding: 4px;
+                                spacing: 1px;
+                                SftpMenuItem {
+                                    label: @tr("Download");
+                                    enabled: root.menu-target != "";
+                                    clicked => { root.download(root.menu-target); }
+                                    hovered => { root.open-submenu = ""; }
+                                    close-menu => { file-menu.close(); }
+                                }
+                                // Split view only: pull straight into the folder
+                                // the local pane is showing (no folder picker).
+                                if root.dual : SftpMenuItem {
+                                    label: @tr("Download to local folder");
+                                    enabled: root.menu-target != "";
+                                    clicked => { root.download-to-local(root.menu-target); }
+                                    hovered => { root.open-submenu = ""; }
+                                    close-menu => { file-menu.close(); }
+                                }
+                                if root.dual : SftpMenuItem {
+                                    label: @tr("Download checked to local folder");
+                                    enabled: root.selected-count > 0;
+                                    clicked => { root.download-selected-to-local(); }
+                                    hovered => { root.open-submenu = ""; }
+                                    close-menu => { file-menu.close(); }
+                                }
+                                SftpMenuItem {
+                                    label: @tr("View");
+                                    enabled: root.menu-target != "" && !root.menu-target-is-dir;
+                                    clicked => { root.view(root.menu-target); }
+                                    hovered => { root.open-submenu = ""; }
+                                    close-menu => { file-menu.close(); }
+                                }
+                                SftpMenuItem {
+                                    label: @tr("Edit");
+                                    enabled: root.menu-target != "" && !root.menu-target-is-dir;
+                                    clicked => { root.edit(root.menu-target); }
+                                    hovered => { root.open-submenu = ""; }
+                                    close-menu => { file-menu.close(); }
+                                }
+                                // Hover (or click) opens the second level: the
+                                // default program, or one picked for this file.
+                                open-ext-item := SftpMenuItem {
+                                    label: @tr("Open externally");
+                                    submenu: true;
+                                    highlighted: root.open-submenu == "open";
+                                    enabled: root.menu-target != "" && !root.menu-target-is-dir;
+                                    hovered => { root.show-submenu("open", self.enabled, self.y); }
+                                    clicked => { root.show-submenu("open", true, self.y); }
+                                }
+                                edit-ext-item := SftpMenuItem {
+                                    label: @tr("Edit externally");
+                                    submenu: true;
+                                    highlighted: root.open-submenu == "edit";
+                                    enabled: root.menu-target != "" && !root.menu-target-is-dir;
+                                    hovered => { root.show-submenu("edit", self.enabled, self.y); }
+                                    clicked => { root.show-submenu("edit", true, self.y); }
+                                }
+                                SftpMenuItem {
+                                    label: @tr("Rename");
+                                    enabled: root.menu-target != "";
+                                    clicked => { root.rename-request(root.menu-target, root.menu-target-name); }
+                                    hovered => { root.open-submenu = ""; }
+                                    close-menu => { file-menu.close(); }
+                                }
+                                SftpMenuItem {
+                                    label: @tr("Permissions");
+                                    enabled: root.menu-target != "";
+                                    clicked => { root.chmod-request(root.menu-target, root.menu-target-name, root.menu-target-mode); }
+                                    hovered => { root.open-submenu = ""; }
+                                    close-menu => { file-menu.close(); }
+                                }
+                                SftpMenuItem {
+                                    label: @tr("Copy path");
+                                    enabled: root.menu-target != "";
+                                    clicked => { root.copy-path(root.menu-target); }
+                                    hovered => { root.open-submenu = ""; }
+                                    close-menu => { file-menu.close(); }
+                                }
+                                copy-to-item := SftpMenuItem {
+                                    label: @tr("Copy to session...");
+                                    submenu: true;
+                                    highlighted: root.open-submenu == "copy";
+                                    enabled: (root.menu-target != "" || root.selected-count > 0) && root.transfer-targets.length > 1;
+                                    hovered => { root.show-submenu("copy", self.enabled, self.y); }
+                                    clicked => { root.show-submenu("copy", true, self.y); }
+                                }
+                                // Right-clicking one of several checked rows
+                                // deletes all of them; an unchecked row only
+                                // itself (#531). Both paths ask for confirmation.
+                                SftpMenuItem {
+                                    label: root.menu-on-selection ? @tr("Delete checked items") : @tr("Delete");
+                                    tint: #d86c6c;
+                                    enabled: root.menu-target != "";
+                                    clicked => {
+                                        if (root.menu-on-selection) {
+                                            root.delete-selected();
+                                        } else {
+                                            root.delete(root.menu-target);
+                                        }
+                                    }
+                                    hovered => { root.open-submenu = ""; }
+                                    close-menu => { file-menu.close(); }
+                                }
+                                Rectangle { height: 1px; background: Theme.border-subtle; }
+                                // Upload copied files (#508): into the right-clicked
+                                // folder, else the folder being shown.
+                                SftpMenuItem {
+                                    label: @tr("Paste");
+                                    clicked => {
+                                        root.paste-upload(root.menu-target != "" && root.menu-target-is-dir
+                                            ? root.menu-target : root.current-path);
+                                    }
+                                    hovered => { root.open-submenu = ""; }
+                                    close-menu => { file-menu.close(); }
+                                }
+                                SftpMenuItem {
+                                    label: @tr("New folder");
+                                    clicked => { root.new-folder(root.current-path); }
+                                    hovered => { root.open-submenu = ""; }
+                                    close-menu => { file-menu.close(); }
+                                }
+                                SftpMenuItem {
+                                    label: @tr("New file");
+                                    clicked => { root.new-file(root.current-path); }
+                                    hovered => { root.open-submenu = ""; }
+                                    close-menu => { file-menu.close(); }
+                                }
+                                SftpMenuItem {
+                                    label: @tr("Refresh");
+                                    clicked => { root.refresh(root.current-path); }
+                                    hovered => { root.open-submenu = ""; }
+                                    close-menu => { file-menu.close(); }
+                                }
+                                SftpMenuItem {
+                                    label: @tr("Clear sort");
+                                    enabled: root.sort-dir != 0;
+                                    clicked => { root.clear-sort(); }
+                                    hovered => { root.open-submenu = ""; }
+                                    close-menu => { file-menu.close(); }
+                                }
+                            }
+                        }
+
+                        // "Open externally" / "Edit externally" (#553).
+                        if root.open-submenu == "open" || root.open-submenu == "edit" : Rectangle {
+                            x: root.submenu-on-left ? 0px : root.file-menu-width - 4px;
+                            y: root.submenu-y;
+                            width: root.submenu-width;
+                            height: 2 * 27px + 8px;
+                            background: Theme.popup-bg;
+                            border-radius: Theme.radius-sm;
+                            border-width: 1px;
+                            border-color: Theme.border-strong;
+                            drop-shadow-blur: 12px;
+                            drop-shadow-color: #00000060;
+                            VerticalLayout {
+                                padding: 4px;
+                                spacing: 1px;
+                                SftpMenuItem {
+                                    // Edit: the editor from Settings › SFTP, else the system app.
+                                    label: root.open-submenu == "edit" ? @tr("Default editor") : @tr("Default app");
+                                    clicked => {
+                                        if (root.open-submenu == "edit") {
+                                            root.edit-external(root.menu-target);
+                                        } else {
+                                            root.open-external(root.menu-target);
+                                        }
+                                    }
+                                    close-menu => { file-menu.close(); }
+                                }
+                                SftpMenuItem {
+                                    label: @tr("Choose program…");
+                                    clicked => { root.open-with(root.menu-target, root.open-submenu == "edit"); }
+                                    close-menu => { file-menu.close(); }
+                                }
+                            }
+                        }
+
+                        // "Copy to session…": the other connected sessions.
+                        if root.open-submenu == "copy" : Rectangle {
+                            x: root.submenu-on-left ? 0px : root.file-menu-width - 4px;
+                            y: root.submenu-y;
+                            width: root.submenu-width;
+                            height: max(1, root.transfer-targets.length) * 27px + 8px;
                             background: Theme.popup-bg;
                             border-radius: Theme.radius-sm;
                             border-width: 1px;
@@ -2905,124 +3786,7 @@ export component SftpPanel inherits Rectangle {
                                             root.copy-selected-to-target(target.id);
                                         }
                                     }
-                                }
-                            }
-                        }
-                    }
-
-                    file-menu := PopupWindow {
-                        x: root.menu-x;
-                        y: root.menu-y;
-                        width: 186px;
-                        height: (15 + (root.dual ? 2 : 0)) * 27px + 8px;
-                        Rectangle {
-                            background: Theme.popup-bg;
-                            border-radius: Theme.radius-sm;
-                            border-width: 1px;
-                            border-color: Theme.border-strong;
-                            drop-shadow-blur: 12px;
-                            drop-shadow-color: #00000060;
-                            VerticalLayout {
-                                padding: 4px;
-                                spacing: 1px;
-                                SftpMenuItem {
-                                    label: @tr("Download");
-                                    enabled: root.menu-target != "";
-                                    clicked => { root.download(root.menu-target); }
-                                }
-                                // Split view only: pull straight into the folder
-                                // the local pane is showing (no folder picker).
-                                if root.dual : SftpMenuItem {
-                                    label: @tr("Download to local folder");
-                                    enabled: root.menu-target != "";
-                                    clicked => { root.download-to-local(root.menu-target); }
-                                }
-                                if root.dual : SftpMenuItem {
-                                    label: @tr("Download checked to local folder");
-                                    enabled: root.selected-count > 0;
-                                    clicked => { root.download-selected-to-local(); }
-                                }
-                                SftpMenuItem {
-                                    label: @tr("View");
-                                    enabled: root.menu-target != "" && !root.menu-target-is-dir;
-                                    clicked => { root.view(root.menu-target); }
-                                }
-                                SftpMenuItem {
-                                    label: @tr("Edit");
-                                    enabled: root.menu-target != "" && !root.menu-target-is-dir;
-                                    clicked => { root.edit(root.menu-target); }
-                                }
-                                SftpMenuItem {
-                                    label: @tr("Open externally");
-                                    enabled: root.menu-target != "" && !root.menu-target-is-dir;
-                                    clicked => { root.open-external(root.menu-target); }
-                                }
-                                SftpMenuItem {
-                                    label: @tr("Edit externally");
-                                    enabled: root.menu-target != "" && !root.menu-target-is-dir;
-                                    clicked => { root.edit-external(root.menu-target); }
-                                }
-                                SftpMenuItem {
-                                    label: @tr("Rename");
-                                    enabled: root.menu-target != "";
-                                    clicked => { root.rename-request(root.menu-target, root.menu-target-name); }
-                                }
-                                SftpMenuItem {
-                                    label: @tr("Permissions");
-                                    enabled: root.menu-target != "";
-                                    clicked => { root.chmod-request(root.menu-target, root.menu-target-name, root.menu-target-mode); }
-                                }
-                                SftpMenuItem {
-                                    label: @tr("Copy path");
-                                    enabled: root.menu-target != "";
-                                    clicked => { root.copy-path(root.menu-target); }
-                                }
-                                SftpMenuItem {
-                                    label: @tr("Copy to session...");
-                                    enabled: (root.menu-target != "" || root.selected-count > 0) && root.transfer-targets.length > 1;
-                                    clicked => { copy-target-menu.show(); }
-                                }
-                                // Right-clicking one of several checked rows
-                                // deletes all of them; an unchecked row only
-                                // itself (#531). Both paths ask for confirmation.
-                                SftpMenuItem {
-                                    label: root.menu-on-selection ? @tr("Delete checked items") : @tr("Delete");
-                                    tint: #d86c6c;
-                                    enabled: root.menu-target != "";
-                                    clicked => {
-                                        if (root.menu-on-selection) {
-                                            root.delete-selected();
-                                        } else {
-                                            root.delete(root.menu-target);
-                                        }
-                                    }
-                                }
-                                Rectangle { height: 1px; background: Theme.border-subtle; }
-                                // Upload copied files (#508): into the right-clicked
-                                // folder, else the folder being shown.
-                                SftpMenuItem {
-                                    label: @tr("Paste");
-                                    clicked => {
-                                        root.paste-upload(root.menu-target != "" && root.menu-target-is-dir
-                                            ? root.menu-target : root.current-path);
-                                    }
-                                }
-                                SftpMenuItem {
-                                    label: @tr("New folder");
-                                    clicked => { root.new-folder(root.current-path); }
-                                }
-                                SftpMenuItem {
-                                    label: @tr("New file");
-                                    clicked => { root.new-file(root.current-path); }
-                                }
-                                SftpMenuItem {
-                                    label: @tr("Refresh");
-                                    clicked => { root.refresh(root.current-path); }
-                                }
-                                SftpMenuItem {
-                                    label: @tr("Clear sort");
-                                    enabled: root.sort-dir != 0;
-                                    clicked => { root.clear-sort(); }
+                                    close-menu => { file-menu.close(); }
                                 }
                             }
                         }
@@ -3245,5 +4009,20 @@ export component SftpPanel inherits Rectangle {
                 vertical-alignment: center;
             }
         }
+    }
+
+    // --- Path completion popup ---------------------------------------------
+    // Any click outside cancels, even while a listing is in flight; the list is
+    // drawn last so it sits on top.
+    if root.suggest-open : TouchArea {
+        clicked => { root.suggest-open = false; }
+    }
+    if root.suggest-open && root.suggestions.length > 0 : PathSuggestionPopup {
+        x: root.suggest-x;
+        y: root.suggest-y;
+        width: min(max(220px, root.suggest-w), max(120px, root.width - root.suggest-x));
+        items: root.suggestions;
+        selected: root.suggest-selected;
+        pick(i) => { root.apply-suggestion(i, true, false); }
     }
 }

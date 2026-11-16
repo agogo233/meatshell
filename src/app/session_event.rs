@@ -280,17 +280,28 @@ pub(super) fn apply_session_event_to_window(
                     selected: false,
                 })
                 .collect();
-            let (sort_key, sort_dir) = (0..terminals.row_count())
+            let (sort_key, sort_dir, filter) = (0..terminals.row_count())
                 .find_map(|i| {
                     let row = terminals.row_data(i)?;
-                    (row.id.as_str() == tab_id)
-                        .then(|| (row.sftp_sort_key.to_string(), row.sftp_sort_dir))
+                    (row.id.as_str() == tab_id).then(|| {
+                        (
+                            row.sftp_sort_key.to_string(),
+                            row.sftp_sort_dir,
+                            row.sftp_filter.to_string(),
+                        )
+                    })
                 })
                 .unwrap_or_default();
             sort_sftp_entries(&mut slint_entries, &sort_key, sort_dir);
-            let model = ModelRc::from(std::rc::Rc::new(VecModel::from(slint_entries)));
+            // Keep the full listing so the name filter can be edited without
+            // another round trip to the server.
+            let all_entries =
+                ModelRc::from(std::rc::Rc::new(VecModel::from(slint_entries.clone())));
+            let shown = filter_entries(&slint_entries, &filter);
+            let model = ModelRc::from(std::rc::Rc::new(VecModel::from(shown)));
             update_terminal(&|t| {
                 t.sftp_path = path.clone().into();
+                t.sftp_all_entries = all_entries.clone();
                 t.sftp_entries = model.clone();
                 t.sftp_loading = false;
                 // Reset the multi-select counter (#sftp-entries-selection).
@@ -316,6 +327,10 @@ pub(super) fn apply_session_event_to_window(
             // The folder really opened: record it in this session's recent
             // folders and update the bookmark star for the new path (#500).
             win.invoke_sftp_record_visit(tab_id.into(), path.clone().into());
+        }
+        SessionEvent::SftpDirPeek { path, names } => {
+            // Path completion: only the popup changes; the panel stays put.
+            update_terminal(&|t| apply_remote_peek(t, &path, &names));
         }
         SessionEvent::SftpStatus(msg) => {
             update_terminal(&|t| {
@@ -525,8 +540,15 @@ pub(super) fn apply_session_event_to_window(
                     }
                 }
                 1 => t("已完成", "Done").to_string(),
-                // Remote-side prep (e.g. tar packing) before bytes start flowing (#100).
-                3 => t("文件准备中", "Preparing...").to_string(),
+                // Remote-side prep (e.g. tar packing) before bytes start flowing
+                // (#100), or waiting for a free transfer slot ("Queued", #554).
+                3 => {
+                    if msg.is_empty() {
+                        t("文件准备中", "Preparing...").to_string()
+                    } else {
+                        msg
+                    }
+                }
                 // User-cancelled transfer (#100).
                 4 => t("已取消", "Cancelled").to_string(),
                 _ => {

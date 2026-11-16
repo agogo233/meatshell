@@ -18,14 +18,13 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use anyhow::{anyhow, Context, Result};
-use async_trait::async_trait;
 use futures::stream::{FuturesUnordered, StreamExt};
 use russh::client::{self, Handler};
 use russh::keys::key::PrivateKeyWithHashAlg;
 use russh_sftp::client::error::Error as SftpError;
 use russh_sftp::client::{RawSftpSession, SftpSession};
 use russh_sftp::protocol::{FileAttributes, OpenFlags, StatusCode};
-use ssh_key::{HashAlg, PublicKey};
+use ssh_key::PublicKey;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::config::{AuthMethod, Session};
@@ -59,6 +58,10 @@ fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 impl SftpHandle {
     pub fn list_dir(&self, path: String) {
         let _ = self.commands.send(SftpCommand::ListDir(path));
+    }
+    /// Path completion: folders in `path`, without navigating the panel.
+    pub fn peek_dir(&self, path: String) {
+        let _ = self.commands.send(SftpCommand::PeekDir(path));
     }
     pub fn refresh_dir(&self, path: String) {
         let _ = self.commands.send(SftpCommand::RefreshDir(path));
@@ -127,7 +130,12 @@ impl SftpHandle {
         let _ = self.commands.send(SftpCommand::Delete(path));
     }
     pub fn open_temp(&self, remote: String, edit: bool) {
-        let _ = self.commands.send(SftpCommand::OpenTemp { remote, edit });
+        let _ = self.commands.send(SftpCommand::OpenTemp { remote, edit, with: OpenWith::Default });
+    }
+    /// Open / edit with a program picked for this file only, or (Windows)
+    /// chosen in the system "Open with" dialog (#553).
+    pub fn open_temp_with(&self, remote: String, edit: bool, with: OpenWith) {
+        let _ = self.commands.send(SftpCommand::OpenTemp { remote, edit, with });
     }
     pub fn rename(&self, from: String, to: String) {
         let _ = self.commands.send(SftpCommand::Rename { from, to });
@@ -422,7 +430,8 @@ async fn run_sftp(
                 ),
                 handle.authenticate_password(&user, password.as_str()),
             )
-            .await?;
+            .await?
+            .success();
             if !ok {
                 // Match the shell session's fallback: russh can hang if a second
                 // auth method is attempted on the same failed handle, so reconnect
@@ -484,10 +493,8 @@ async fn run_sftp(
             // shell but fails SFTP with "the key is encrypted" (#133).
             let pass = password.as_str();
             let keypair = crate::ssh::load_session_private_key(&session, pass)?;
-            // RSA keys need an explicit SHA-2 hash; other key types don't.
-            let hash = keypair.algorithm().is_rsa().then_some(HashAlg::Sha256);
-            let key_with_hash = PrivateKeyWithHashAlg::new(Arc::new(keypair), hash)
-                .context("invalid private key")?;
+            let hash = crate::ssh::rsa_hash(&handle, keypair.algorithm().is_rsa()).await;
+            let key_with_hash = PrivateKeyWithHashAlg::new(Arc::new(keypair), hash);
             crate::ssh::network_stage(
                 &format!(
                     "SFTP public-key authentication at {}:{}",
@@ -496,7 +503,10 @@ async fn run_sftp(
                 handle.authenticate_publickey(&user, key_with_hash),
             )
             .await?
+            .success()
         }
+        // Its own connection, so the agent signs (and may ask) again (#528).
+        AuthMethod::Agent => crate::ssh::agent_auth(&mut handle, &user, &session, &events).await?,
     };
 
     if !authed {
@@ -634,7 +644,7 @@ async fn run_sftp(
     // Share the session + connection so transfers can run on their own task,
     // leaving the command loop free to list/switch directories meanwhile (#116-2).
     let sftp = std::sync::Arc::new(sftp);
-    let handle = std::sync::Arc::new(SftpLink { handle, elevation });
+    let handle = std::sync::Arc::new(SftpLink::new(handle, elevation));
 
     let home = sftp
         .canonicalize(".")
@@ -840,6 +850,20 @@ async fn run_sftp(
                         let _ = events.send(SessionEvent::SftpError(list_error_msg(&path, &e)));
                     }
                 }
+            }
+
+            // Path completion: folder names only. No navigation, status line or
+            // tree round-trip — the panel must stay exactly where it is.
+            SftpCommand::PeekDir(path) => {
+                let names = match list_dir_impl(&sftp, &path).await {
+                    Ok(entries) => entries
+                        .into_iter()
+                        .filter(|entry| entry.is_dir)
+                        .map(|entry| entry.name)
+                        .collect(),
+                    Err(_) => Vec::new(),
+                };
+                let _ = events.send(SessionEvent::SftpDirPeek { path, names });
             }
 
             SftpCommand::RefreshDir(path) => {
@@ -1861,7 +1885,7 @@ async fn run_sftp(
                 }
             }
 
-            SftpCommand::OpenTemp { remote, edit } => {
+            SftpCommand::OpenTemp { remote, edit, with } => {
                 // Runs inline on the command pump rather than as a transfer
                 // task: the editor must not open before the bytes are on disk,
                 // and the pump is already serialized, so no slot is needed (and
@@ -1900,18 +1924,57 @@ async fn run_sftp(
                 .await
                 {
                     Ok(_) => {
-                        open_with_os(&local_str);
-                        let _ = events.send(SessionEvent::SftpStatus(format!(
-                            "{}: {}",
-                            if edit {
-                                t("已打开编辑", "Opened for editing")
-                            } else {
-                                t("已打开", "Opened")
-                            },
-                            filename
-                        )));
-                        if edit {
-                            spawn_edit_watcher(self_tx.clone(), local_str, remote.clone());
+                        // A program picked in the menu wins; otherwise viewing
+                        // uses the OS default app and editing the editor chosen
+                        // in Settings › SFTP when set (#553).
+                        let launched = match &with {
+                            OpenWith::Program(program) => launch_editor(program, "", &local_str)
+                                .map(|_| true)
+                                .map_err(|error| format!("{program}: {error}")),
+                            OpenWith::Choose => choose_and_open(local_str.clone()).await,
+                            OpenWith::Default if edit => edit_with_editor(&local_str).map(|_| true),
+                            OpenWith::Default => {
+                                open_with_os(&local_str);
+                                Ok(true)
+                            }
+                        };
+                        match launched {
+                            // Cancelled in the "Open with" dialog: nothing opened.
+                            Ok(false) => {
+                                let _ = events.send(SessionEvent::SftpStatus(format!(
+                                    "{}: {}",
+                                    t("已取消打开", "Open cancelled"),
+                                    filename
+                                )));
+                                let _ = tokio::fs::remove_file(&local_str).await;
+                            }
+                            Ok(true) => {
+                                let _ = events.send(SessionEvent::SftpStatus(format!(
+                                    "{}: {}",
+                                    if edit {
+                                        t("已打开编辑", "Opened for editing")
+                                    } else {
+                                        t("已打开", "Opened")
+                                    },
+                                    filename
+                                )));
+                                if edit {
+                                    spawn_edit_watcher(self_tx.clone(), local_str, remote.clone());
+                                }
+                            }
+                            Err(error) => {
+                                let _ = events.send(SessionEvent::SftpStatus(format!(
+                                    "{}: {error}",
+                                    if with != OpenWith::Default {
+                                        t("无法启动所选程序", "Couldn't start the chosen program")
+                                    } else {
+                                        t(
+                                            "无法启动外部编辑器（请在 设置 › SFTP 中检查）",
+                                            "Couldn't start the external editor (check Settings › SFTP)",
+                                        )
+                                    }
+                                )));
+                            }
                         }
                     }
                     Err(e) => {
@@ -4811,6 +4874,12 @@ async fn stream_file_impl(
     const CHUNK: usize = 32 * 1024;
     const MAX_INFLIGHT: usize = 32;
 
+    // Drag-out files share the per-connection channel budget too (#554). The
+    // drag has one Transfers row for all its files, so queueing stays silent.
+    let Some(_slot) = wait_for_slot(&handle.transfer_slots, &progress.cancel, || {}, || {}).await
+    else {
+        return Err(anyhow!("{}", t("已取消", "Cancelled")));
+    };
     let stream = handle
         .elevation
         .open_stream(&handle.handle)
@@ -5159,6 +5228,238 @@ pub(crate) fn open_with_os(path: &str) {
 #[cfg(all(not(windows), not(target_os = "macos")))]
 pub(crate) fn open_with_os(path: &str) {
     let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+}
+
+/// External editor chosen in Settings › SFTP (#553): program + argument line.
+/// Empty program = edit with the OS default app, as before.
+static EXTERNAL_EDITOR: std::sync::RwLock<(String, String)> =
+    std::sync::RwLock::new((String::new(), String::new()));
+
+/// Set by the config store on load and whenever the setting changes.
+pub(crate) fn set_external_editor(program: &str, args: &str) {
+    if let Ok(mut editor) = EXTERNAL_EDITOR.write() {
+        *editor = (program.to_string(), args.to_string());
+    }
+}
+
+/// The argv for opening `file` in `program`: the argument line split like a
+/// command line, with `{file}` replaced by the path; without `{file}` the path
+/// is appended as the last argument.
+fn editor_argv(args: &str, file: &str) -> Vec<String> {
+    let mut argv = crate::terminal::args::split_args(args);
+    let mut placed = false;
+    for arg in &mut argv {
+        if arg.contains("{file}") {
+            *arg = arg.replace("{file}", file);
+            placed = true;
+        }
+    }
+    if !placed {
+        argv.push(file.to_string());
+    }
+    argv
+}
+
+/// Start `program` on `file` directly — never through a shell, so a remote
+/// file name can't inject commands. On macOS an `.app` bundle is started
+/// with `open -a`.
+pub(crate) fn launch_editor(program: &str, args: &str, file: &str) -> std::io::Result<()> {
+    let argv = editor_argv(args, file);
+    #[cfg(target_os = "macos")]
+    if program.trim_end_matches('/').ends_with(".app") {
+        let mut command = std::process::Command::new("open");
+        command.arg("-a").arg(program).arg(file);
+        let extra: Vec<_> = argv.iter().filter(|a| a.as_str() != file).collect();
+        if !extra.is_empty() {
+            command.arg("--args").args(extra);
+        }
+        return command.spawn().map(|_| ());
+    }
+    std::process::Command::new(program).args(&argv).spawn().map(|_| ())
+}
+
+/// Open a downloaded copy for editing: in the editor chosen in Settings, else
+/// with the OS default app. A configured editor that fails to start is an
+/// error — never a fallback to the file association, which on Windows *runs*
+/// `.js` / `.vbs` files instead of opening them (#553).
+fn edit_with_editor(path: &str) -> Result<(), String> {
+    let (program, args) = EXTERNAL_EDITOR
+        .read()
+        .map(|editor| editor.clone())
+        .unwrap_or_default();
+    if program.trim().is_empty() {
+        open_with_os(path);
+        return Ok(());
+    }
+    launch_editor(program.trim(), &args, path).map_err(|error| format!("{program}: {error}"))
+}
+
+/// "Choose program…" on Windows (#553): ask with the system "Open with"
+/// dialog for `path`. It lists the apps registered for the file's extension
+/// (and "look for another app"), then opens the file in the one picked.
+/// `Ok(false)` = the user cancelled.
+async fn choose_and_open(path: String) -> Result<bool, String> {
+    #[cfg(windows)]
+    {
+        // Shell dialogs need a single-threaded COM apartment; a thread of its
+        // own also keeps the modal dialog from blocking this SFTP worker.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(open_with_dialog(&path));
+        });
+        rx.await.map_err(|_| "the Open with dialog stopped unexpectedly".to_string())?
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Err("the system Open with dialog is only available on Windows".to_string())
+    }
+}
+
+#[cfg(windows)]
+fn open_with_dialog(path: &str) -> Result<bool, String> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    #[repr(C)]
+    struct OpenAsInfo {
+        file: *const u16,
+        class: *const u16,
+        flags: u32,
+    }
+    #[link(name = "shell32")]
+    extern "system" {
+        fn SHOpenWithDialog(hwnd_parent: isize, info: *const OpenAsInfo) -> i32;
+    }
+    #[link(name = "ole32")]
+    extern "system" {
+        fn CoInitializeEx(reserved: *mut core::ffi::c_void, co_init: u32) -> i32;
+        fn CoUninitialize();
+    }
+    // Open the file in the chosen app; never offer "always use this app", so
+    // picking an editor here doesn't change the system file association.
+    const OAIF_EXEC: u32 = 0x4;
+    const OAIF_HIDE_REGISTRATION: u32 = 0x20;
+    const COINIT_APARTMENTTHREADED: u32 = 0x2;
+    const HRESULT_ERROR_CANCELLED: i32 = 0x8007_04C7_u32 as i32;
+    let file: Vec<u16> = OsStr::new(path).encode_wide().chain(Some(0)).collect();
+    let info = OpenAsInfo {
+        file: file.as_ptr(),
+        class: std::ptr::null(),
+        flags: OAIF_EXEC | OAIF_HIDE_REGISTRATION,
+    };
+    // SAFETY: `info` and `file` outlive the (modal, synchronous) call, and
+    // every successful CoInitializeEx is balanced by CoUninitialize.
+    unsafe {
+        let init = CoInitializeEx(std::ptr::null_mut(), COINIT_APARTMENTTHREADED);
+        let result = SHOpenWithDialog(0, &info);
+        if init >= 0 {
+            CoUninitialize();
+        }
+        match result {
+            0 => Ok(true),
+            HRESULT_ERROR_CANCELLED => Ok(false),
+            other => Err(format!("Open with dialog failed (0x{:08X})", other as u32)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod transfer_slot_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    #[tokio::test]
+    async fn a_free_slot_is_taken_without_queueing() {
+        let slots = Arc::new(tokio::sync::Semaphore::new(MAX_PARALLEL_TRANSFERS));
+        let queued = AtomicUsize::new(0);
+        let cancel = AtomicBool::new(false);
+        let mut held = Vec::new();
+        for _ in 0..MAX_PARALLEL_TRANSFERS {
+            let permit = wait_for_slot(&slots, &cancel, || { queued.fetch_add(1, Ordering::SeqCst); }, || {}).await;
+            held.push(permit.expect("a free slot"));
+        }
+        assert_eq!(queued.load(Ordering::SeqCst), 0);
+        assert_eq!(slots.available_permits(), 0);
+    }
+
+    #[tokio::test]
+    async fn extra_transfers_wait_their_turn_instead_of_failing() {
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let busy = slots.clone().try_acquire_owned().unwrap();
+        let queued = Arc::new(AtomicUsize::new(0));
+        let waiter = {
+            let (slots, queued) = (slots.clone(), queued.clone());
+            tokio::spawn(async move {
+                let cancel = AtomicBool::new(false);
+                wait_for_slot(&slots, &cancel, || { queued.fetch_add(1, Ordering::SeqCst); }, || {})
+                    .await
+                    .is_some()
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(queued.load(Ordering::SeqCst), 1, "shown as Queued");
+        assert!(!waiter.is_finished(), "still waiting while the slot is busy");
+        drop(busy);
+        assert!(waiter.await.unwrap(), "starts once a slot frees up");
+    }
+
+    #[tokio::test]
+    async fn a_queued_transfer_can_be_cancelled() {
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let _busy = slots.clone().try_acquire_owned().unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let waiter = {
+            let (slots, cancel, cancelled) = (slots.clone(), cancel.clone(), cancelled.clone());
+            tokio::spawn(async move {
+                wait_for_slot(&slots, &cancel, || {}, || { cancelled.fetch_add(1, Ordering::SeqCst); })
+                    .await
+                    .is_none()
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        cancel.store(true, Ordering::SeqCst);
+        assert!(waiter.await.unwrap(), "gave up the place in the queue");
+        assert_eq!(cancelled.load(Ordering::SeqCst), 1);
+        assert_eq!(slots.available_permits(), 0, "the running transfer keeps its slot");
+    }
+}
+
+#[cfg(test)]
+mod external_editor_tests {
+    use super::editor_argv;
+
+    #[test]
+    fn the_file_is_appended_unless_placed_with_a_placeholder() {
+        assert_eq!(editor_argv("", "C:/t/a.js"), ["C:/t/a.js"]);
+        assert_eq!(editor_argv("-n --wait", "a.js"), ["-n", "--wait", "a.js"]);
+        assert_eq!(editor_argv("-multiInst \"{file}\" -n1", "a b.js"), ["-multiInst", "a b.js", "-n1"]);
+        assert_eq!(editor_argv("--goto={file}:1", "a.js"), ["--goto=a.js:1"]);
+    }
+
+    #[test]
+    fn a_missing_editor_is_an_error_not_a_fallback() {
+        let missing = std::env::temp_dir().join("meatshell-no-such-editor-553.exe");
+        let result = super::launch_editor(missing.to_str().unwrap(), "", "a.js");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn an_existing_editor_is_started_with_the_file() {
+        // A harmless stand-in editor that exits at once.
+        #[cfg(windows)]
+        let (program, args) = ("cmd.exe", "/c exit 0 {file}");
+        #[cfg(not(windows))]
+        let (program, args) = ("true", "");
+        assert!(super::launch_editor(program, args, "a.js").is_ok());
+    }
+
+    #[test]
+    fn a_file_name_stays_one_argument() {
+        // Spaces and shell characters in a (sanitised) name never split it.
+        let argv = editor_argv("-r", "my file & more.js");
+        assert_eq!(argv, ["-r", "my file & more.js"]);
+    }
 }
 
 /// Make a remote-supplied file name safe to use as a *local* file name (for
@@ -6027,6 +6328,10 @@ async fn download_impl(
     const CHUNK: usize = 32 * 1024;
     const MAX_INFLIGHT: usize = 32; // ~1 MB outstanding hides the RTT
 
+    // At most MAX_PARALLEL_TRANSFERS channels at once; the rest wait (#554).
+    let Some(_slot) = handle.transfer_slot(events, id, name, false, cancel).await else {
+        return Ok(false);
+    };
     let stream = handle
         .elevation
         .open_stream(&handle.handle)
@@ -6530,6 +6835,10 @@ async fn upload_pipelined(
     const CHUNK: usize = 32 * 1024; // safe SFTP write size
     const MAX_INFLIGHT: usize = 32; // ~1 MB of outstanding writes hides the RTT
 
+    // At most MAX_PARALLEL_TRANSFERS channels at once; the rest wait (#554).
+    let Some(_slot) = handle.transfer_slot(events, id, name, true, cancel).await else {
+        return Ok(false);
+    };
     // Upload-side mtime would need a remote SETSTAT; the raw SFTP API for it is
     // not exercised elsewhere in this crate, so we keep the flag for symmetry but
     // only honour download-side mtime for now.
@@ -6672,6 +6981,74 @@ struct SftpClientHandler {
 struct SftpLink {
     handle: client::Handle<SftpClientHandler>,
     elevation: Elevation,
+    /// One permit per transfer that may run at once (#554); see
+    /// `MAX_PARALLEL_TRANSFERS`. Tokio's semaphore is fair, so files start in
+    /// the order they were queued.
+    transfer_slots: Arc<tokio::sync::Semaphore>,
+}
+
+/// Transfers that may run at once on one SFTP connection (#554). Each file
+/// opens its own SFTP channel, and servers cap the channels per connection
+/// (OpenSSH `MaxSessions`, default 10, also used by the browse channel and
+/// remote commands). Uploading many files at once opened one channel per file,
+/// so the extra ones failed with "open sftp upload channel"; now they wait.
+const MAX_PARALLEL_TRANSFERS: usize = 4;
+
+impl SftpLink {
+    fn new(handle: client::Handle<SftpClientHandler>, elevation: Elevation) -> Self {
+        Self {
+            handle,
+            elevation,
+            transfer_slots: Arc::new(tokio::sync::Semaphore::new(MAX_PARALLEL_TRANSFERS)),
+        }
+    }
+
+    /// Wait for a free transfer slot, held until the returned permit drops.
+    /// A file that has to wait shows "Queued" in the transfer panel and can
+    /// still be cancelled there: `None` = cancelled while queued (the row is
+    /// then marked cancelled).
+    async fn transfer_slot(
+        &self,
+        events: &UnboundedSender<SessionEvent>,
+        id: &str,
+        name: &str,
+        is_upload: bool,
+        cancel: &AtomicBool,
+    ) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        wait_for_slot(&self.transfer_slots, cancel, || {
+            emit_transfer(events, id, name, is_upload, 0, 0, 3, t("排队等待中", "Queued"));
+        }, || {
+            emit_transfer(events, id, name, is_upload, 0, 0, 4, t("已取消", "Cancelled"));
+        })
+        .await
+    }
+}
+
+/// Take a permit from `slots`, calling `queued` once if it has to wait and
+/// `cancelled` if `cancel` is set while waiting (then `None`).
+async fn wait_for_slot(
+    slots: &Arc<tokio::sync::Semaphore>,
+    cancel: &AtomicBool,
+    queued: impl FnOnce(),
+    cancelled: impl FnOnce(),
+) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    if let Ok(permit) = slots.clone().try_acquire_owned() {
+        return Some(permit);
+    }
+    queued();
+    let acquire = slots.clone().acquire_owned();
+    tokio::pin!(acquire);
+    loop {
+        tokio::select! {
+            permit = &mut acquire => return permit.ok(),
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {
+                if cancel.load(Ordering::Relaxed) {
+                    cancelled();
+                    return None;
+                }
+            }
+        }
+    }
 }
 
 impl std::ops::Deref for SftpLink {
@@ -6697,7 +7074,6 @@ fn sftp_handler(session: &Session, events: &UnboundedSender<SessionEvent>) -> Sf
     }
 }
 
-#[async_trait]
 impl Handler for SftpClientHandler {
     type Error = russh::Error;
 

@@ -11,6 +11,7 @@ mod transfer;
 
 pub(crate) use sftp::*;
 pub(crate) use transfer::{
-    DedupPolicy, DownloadConflict, DragTransfer, ExportEntry, SftpCommand, SftpHandle, SftpHandles,
-    SftpLastCwd, SftpQueueConfig, UploadDecision,
+pub(crate) use transfer::{
+    DedupPolicy, DownloadConflict, DragTransfer, ExportEntry, OpenWith, SftpCommand, SftpHandle,
+    SftpHandles, SftpLastCwd, SftpQueueConfig, UploadDecision,
 };
