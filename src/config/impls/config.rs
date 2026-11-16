@@ -2896,6 +2896,22 @@ impl ConfigStore {
 
     // ── Portable export / import (issue #46) ──────────────────────────────
 
+    /// Encrypt a password with the portable export key → `"enc:exp:v1:<b64>"`.
+    fn encrypt_export(plaintext: &str) -> Result<String> {
+        let cipher = ChaCha20Poly1305::new((&Self::EXPORT_KEY).into());
+        let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
+        let ciphertext = cipher
+            .encrypt(&nonce, plaintext.as_bytes())
+            .map_err(|e| anyhow::anyhow!("export encrypt error: {e}"))?;
+        let mut blob = nonce.to_vec();
+        blob.extend_from_slice(&ciphertext);
+        Ok(format!(
+            "{}{}",
+            Self::EXPORT_PREFIX,
+            URL_SAFE_NO_PAD.encode(&blob)
+        ))
+    }
+
     /// Decrypt a `enc:exp:v1:` value written by a legacy portable export
     /// (fixed-key format, pre-Argon2id bundles); `None` if it isn't one.
     /// Read-only compatibility: new exports never produce this prefix.
@@ -2910,6 +2926,39 @@ impl ConfigStore {
         let nonce = chacha20poly1305::Nonce::from_slice(nonce_bytes);
         let plain = cipher.decrypt(nonce, ciphertext).ok()?;
         String::from_utf8(plain).ok()
+    }
+
+    /// Export all sessions to a portable JSON file. Passwords are re-encrypted
+    /// with the built-in export key; everything else stays plaintext so the
+    /// file is human-readable and editable. Returns the number of sessions.
+    pub fn export_json(&self) -> Result<(String, usize)> {
+        let mut out = ExportFile {
+            meatshell_export: 1,
+            sessions: self.cache.sessions.clone(),
+        };
+        for s in &mut out.sessions {
+            // `cache` holds plaintext passwords; obfuscate with the export key.
+            if !s.password.is_empty() {
+                let enc = Self::encrypt_export(s.password.as_str())?;
+                s.password = Secret::new(enc);
+            }
+            if !s.private_key_inline.is_empty() {
+                let enc = Self::encrypt_export(s.private_key_inline.as_str())?;
+                s.private_key_inline = Secret::new(enc);
+            }
+            for trigger in &mut s.triggers {
+                if !trigger.response.is_empty() {
+                    let enc = Self::encrypt_export(trigger.response.as_str())?;
+                    trigger.response = Secret::new(enc);
+                }
+            }
+            // `last_used` is machine-local noise — don't carry it across.
+            s.last_used = None;
+            // Saved credentials stay on this machine (#526); the session
+            // already holds its own copy of the login, so it stands alone.
+            s.credential_id.clear();
+        }
+        Ok((serde_json::to_string_pretty(&out)?, out.sessions.len()))
     }
 
     /// Decode a GBK/GB2312 byte stream only when the bytes actually look

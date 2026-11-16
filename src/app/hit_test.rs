@@ -5,6 +5,12 @@
 use crate::terminal::ScreenDims as _;
 use super::*;
 
+/// Width of a left/right-docked SFTP panel as terminal_view.slint lays it out:
+/// never narrower than 300px, whatever width was saved (#505).
+pub(super) fn side_sftp_width(saved: f32) -> f32 {
+    saved.max(300.0)
+}
+
 /// The active terminal tab's current SFTP directory ("" if unknown).
 pub(crate) fn active_sftp_path(win: &AppWindow, tab_id: &str) -> String {
     let model = win.get_terminals();
@@ -101,6 +107,12 @@ pub(crate) fn shrink_edge(x: &mut f32, y: &mut f32, w: &mut f32, h: &mut f32, do
 
 pub(crate) fn contains_logical(rect: LogicalRect, x: f32, y: f32) -> bool {
     x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h
+}
+
+/// Zen mode and terminal fullscreen (#495) both hide every docked panel and
+/// the terminal status strip — mirrors `hide-panels` in app.slint.
+pub(super) fn panels_hidden(win: &AppWindow) -> bool {
+    win.get_zen_mode() || win.get_term_fullscreen()
 }
 
 pub(crate) fn app_content_area(win: &AppWindow) -> LogicalRect {
@@ -244,6 +256,87 @@ pub(crate) fn active_terminal_panel_rects(win: &AppWindow) -> Option<(String, Lo
             h: (pane.h - 40.0).max(0.0),
         },
         term_state,
+    ))
+}
+
+/// The split view's local-pane rectangle for the active terminal tab, or `None`
+/// when the panel is hidden, collapsed, or the tab is not in the split view.
+///
+/// Mirrors the layout in `ui/terminal_view.slint` (24px status strip, docked
+/// panel at the chosen edge) and `ui/sftp_panel.slint` (toolbar + content +
+/// 18px status bar; the local half is `local-w` wide). Used to route OS file
+/// drops: dropping on the local half copies files into that local folder,
+/// dropping anywhere else uploads them to the remote directory.
+pub(super) fn active_sftp_local_pane_rect(win: &AppWindow) -> Option<(String, LogicalRect)> {
+    if panels_hidden(win) {
+        return None;
+    }
+    let (active, term, state) = active_terminal_panel_rects(win)?;
+    if state.sftp_collapsed || !state.sftp_dual {
+        return None;
+    }
+
+    // TerminalView starts with a 24px connection-status strip; the SFTP panel
+    // is docked inside the region below it.
+    let region = LogicalRect {
+        x: term.x,
+        y: term.y + 24.0,
+        w: term.w,
+        h: (term.h - 24.0).max(0.0),
+    };
+    let dock = win.get_sftp_dock().to_string();
+    let vertical = dock == "left" || dock == "right";
+    let panel_w = if vertical {
+        side_sftp_width(state.sftp_panel_width)
+    } else {
+        region.w
+    };
+    let panel_h = if vertical {
+        region.h
+    } else {
+        state.sftp_panel_height
+    };
+    let panel = LogicalRect {
+        x: if dock == "right" {
+            region.x + (region.w - panel_w).max(0.0)
+        } else {
+            region.x
+        },
+        y: if dock == "bottom" {
+            region.y + (region.h - panel_h).max(0.0)
+        } else {
+            region.y
+        },
+        w: panel_w,
+        h: panel_h,
+    };
+
+    // SftpPanel: toolbar, content, 18px status bar. The split view always uses
+    // the single 34px toolbar row (the split toggle and checked-count actions
+    // hug its right edge) because the remote path bar and its controls move
+    // down into the right pane, next to the local pane's own path bar.
+    let toolbar = 34.0;
+    let content_h = (panel.h - toolbar - 18.0).max(0.0);
+    // Mirrors `local-w` in ui/sftp_panel.slint: the dragged width, else the
+    // remembered share, else an even split.
+    let ratio = win.get_sftp_local_split();
+    let wanted = if state.sftp_local_pane_width > 0.0 {
+        state.sftp_local_pane_width
+    } else if ratio > 0.0 {
+        panel.w * ratio
+    } else {
+        panel.w / 2.0
+    };
+    let local_w = wanted.clamp(160.0, (panel.w - 200.0).max(160.0));
+
+    Some((
+        active,
+        LogicalRect {
+            x: panel.x,
+            y: panel.y + toolbar,
+            w: local_w,
+            h: content_h,
+        },
     ))
 }
 

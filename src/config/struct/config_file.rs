@@ -561,3 +561,13 @@ pub(crate) struct QuickCommandsExportFile {
     #[serde(default)]
     pub(crate) groups: Vec<String>,
 }
+
+/// Security note: a built-in key in open-source code is **obfuscation, not real
+/// security** — anyone with the source can derive it. It only stops a casual
+/// over-the-shoulder read of the file, same level as FinalShell's export.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ExportFile {
+    /// Format marker / version so the schema can evolve later.
+    pub(crate) meatshell_export: u32,
+    pub(crate) sessions: Vec<Session>,
+}
