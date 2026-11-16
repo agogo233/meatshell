@@ -324,6 +324,8 @@ pub(crate) fn sync_active_sftp_to_root(win: &AppWindow, terminals: &VecModel<Ter
             VecModel::<slint::SharedString>::default(),
         )));
         win.set_sftp_local_bookmarked(false);
+        win.set_sftp_suggest(Default::default());
+        win.set_sftp_local_suggest(Default::default());
         return;
     };
     win.set_sftp_available(row.sftp_available);
@@ -357,6 +359,10 @@ pub(crate) fn sync_active_sftp_to_root(win: &AppWindow, terminals: &VecModel<Ter
     win.set_sftp_local_bookmarks(row.sftp_local_bookmarks.clone());
     win.set_sftp_local_recent(row.sftp_local_recent.clone());
     win.set_sftp_local_bookmarked(row.sftp_local_bookmarked);
+    // Path-completion suggestions ride along with the rest of the per-tab
+    // SFTP state so the docked panel (outside the terminals loop) shows them.
+    win.set_sftp_suggest(row.sftp_suggest.clone());
+    win.set_sftp_local_suggest(row.sftp_local_suggest.clone());
     // Panel extent follows the active tab's remembered size (#v0.5 keeps these
     // per-tab), so a wide panel on tab A isn't crushed to tab B's narrow one.
     win.set_sftp_panel_width(row.sftp_panel_width);

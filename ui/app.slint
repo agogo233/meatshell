@@ -1640,6 +1640,10 @@ export component AppWindow inherits Window {
     // the folder being completed (remote through SFTP, local on a thread).
     callback sftp-complete-path(string /* tab-id */, string /* text */);
     callback sftp-local-complete-path(string /* tab-id */, string /* text */);
+    // Path-completion suggestions for the docked panel, mirrored from the
+    // active tab's TerminalState (the panel lives outside the terminals loop).
+    in-out property <SftpPathSuggestions> sftp-suggest;
+    in-out property <SftpPathSuggestions> sftp-local-suggest;
     callback sftp-local-remove-recent(string /* tab-id */, string /* path */);
     callback sftp-local-move-bookmark(string /* tab-id */, string /* path */, int /* delta */);
     callback sftp-local-reveal(string /* tab-id */);
@@ -3695,6 +3699,16 @@ export component AppWindow inherits Window {
                     edit(path) => { root.sftp-edit(root.sftp-current-tab-id, path); }
                     open-external(path) => { root.sftp-open-external(root.sftp-current-tab-id, path); }
                     edit-external(path) => { root.sftp-edit-external(root.sftp-current-tab-id, path); }
+                    open-with(path, edit) => { root.sftp-open-with(root.sftp-current-tab-id, path, edit); }
+                    drag-out(i) => { root.sftp-drag-out(root.sftp-current-tab-id, i); }
+                    complete-path(text) => { root.sftp-complete-path(root.sftp-current-tab-id, text); }
+                    local-complete-path(text) => { root.sftp-local-complete-path(root.sftp-current-tab-id, text); }
+                    suggestions: root.sftp-suggest.entries;
+                    local-suggestions: root.sftp-local-suggest.entries;
+                    set-filter(text) => { root.sftp-set-filter(root.sftp-current-tab-id, text); }
+                    toggle-bookmark(p) => { root.sftp-toggle-bookmark(root.sftp-current-tab-id, p); }
+                    remove-bookmark(p) => { root.sftp-remove-bookmark(root.sftp-current-tab-id, p); }
+                    clear-recent() => { root.sftp-clear-recent(root.sftp-current-tab-id); }
                     sort-request(key) => { root.sftp-sort-request(root.sftp-current-tab-id, key); }
                     clear-sort() => { root.sftp-clear-sort(root.sftp-current-tab-id); }
                     type-ahead(prefix) => { return root.sftp-type-ahead(root.sftp-current-tab-id, prefix); }

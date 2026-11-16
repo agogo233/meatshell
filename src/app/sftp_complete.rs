@@ -344,6 +344,8 @@ pub(super) fn request_remote(window: &AppWindow, handle: &SftpHandle, tab_id: &s
             &edit.fragment,
         ));
     });
+    // The docked panel lives outside the terminals loop; refresh its mirror.
+    sync_active_sftp_to_root(window, model);
 }
 
 /// Local path field changed: answer from the cached folder listing, or read the
@@ -377,6 +379,8 @@ pub(super) fn request_local(window: &AppWindow, tab_id: &str, text: &str) {
             &edit.fragment,
         ));
     });
+    // The docked panel lives outside the terminals loop; refresh its mirror.
+    sync_active_sftp_to_root(window, model);
     let Some(dir) = list else { return };
     let weak = window.as_weak();
     let tab = tab_id.to_string();
@@ -388,6 +392,8 @@ pub(super) fn request_local(window: &AppWindow, tab_id: &str, text: &str) {
                 return;
             };
             update_terminal_row(model, &tab, |row| apply_local_peek(row, &dir, &names));
+            // Refresh the docked panel's mirror with the arrived suggestions.
+            sync_active_sftp_to_root(window, model);
         });
     });
 }
