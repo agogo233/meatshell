@@ -655,9 +655,17 @@ component LocalPane inherits Rectangle {
     }
     function apply-suggestion(index: int, go: bool, drill: bool) {
         if (index < 0 || index >= root.suggestions.length) { return; }
-        path-input.text = root.suggestions[index].path;
-        // Continue typing at the end of the completed folder.
-        path-input.set-selection-offsets(1000000, 1000000);
+        // In split view the popup hangs off the right pane's path field; in
+        // the classic view it hangs off the toolbar path bar.
+        if (root.dual) {
+            pane-path-input.text = root.suggestions[index].path;
+            // Continue typing at the end of the completed folder.
+            pane-path-input.set-selection-offsets(1000000, 1000000);
+        } else {
+            path-input.text = root.suggestions[index].path;
+            // Continue typing at the end of the completed folder.
+            path-input.set-selection-offsets(1000000, 1000000);
+        }
         root.suggest-open = false;
         if (go) {
             root.navigate(root.suggestions[index].path);

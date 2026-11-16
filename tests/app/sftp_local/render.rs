@@ -633,11 +633,21 @@ fn path_completion_popup_renders_under_the_remote_path_bar() {
                 picked.borrow_mut().push(path.to_string());
             });
         }
-        // Popup top = path field bottom + 2px (561); second row centre = 561
-        // + 4px padding + 24px first row + 1px spacing + 12px.
-        press(&window, 400.0, 602.0);
-        release(&window, 400.0, 602.0);
-        assert_eq!(picked.borrow().as_slice(), ["/home/bob/"]);
+        // Locate the popup rows by their accent folder glyphs instead of a
+        // hard-coded y: the popup paints two 24px rows just below the path
+        // field (its opaque background hides the list rows underneath).
+        let popup_rows = accent_bands(&pixels, 1100, 365, 455, 545, 690);
+        let click_y = popup_rows
+            .get(1)
+            .map(|(s, e)| ((s + e) as f32) / 2.0)
+            .unwrap_or(602.0);
+        press(&window, 400.0, click_y);
+        release(&window, 400.0, click_y);
+        assert_eq!(
+            picked.borrow().as_slice(),
+            ["/home/bob/"],
+            "popup rows detected: {popup_rows:?}"
+        );
 
         // The caret sits at the end of the completed path: typing appends, so
         // Enter navigates to "/home/bob/x" (not "/home/bobx/").
@@ -734,11 +744,20 @@ fn path_completion_popup_works_in_the_local_pane() {
                 picked.borrow_mut().push(path.to_string());
             });
         }
-        // Popup top = path field bottom + 2px (561); second row ("docs")
-        // centre = 561 + 4px padding + 24px first row + 1px spacing + 12px.
-        press(&window, 100.0, 602.0);
-        release(&window, 100.0, 602.0);
-        assert_eq!(picked.borrow().as_slice(), ["C:\\Users\\me\\docs\\"]);
+        // Locate the popup rows by their accent folder glyphs (see the remote
+        // variant above) and pick the second row ("docs").
+        let popup_rows = accent_bands(&pixels, 1100, 30, 120, 545, 690);
+        let click_y = popup_rows
+            .get(1)
+            .map(|(s, e)| ((s + e) as f32) / 2.0)
+            .unwrap_or(602.0);
+        press(&window, 100.0, click_y);
+        release(&window, 100.0, click_y);
+        assert_eq!(
+            picked.borrow().as_slice(),
+            ["C:\\Users\\me\\docs\\"],
+            "popup rows detected: {popup_rows:?}"
+        );
         window.dispatch_event(WindowEvent::KeyPressed {
             text: "x".into(),
         });
