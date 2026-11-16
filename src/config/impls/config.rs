@@ -530,6 +530,15 @@ impl ConfigStore {
         Self::open_secret(key, &mut cfg.ai_api_key, lost, recovered);
     }
 
+    /// Upstream-named bridge over the local secret-opening pass: the merged
+    /// tests and the re-seal path call it directly. The lost/recovered counts
+    /// are local-only diagnostics and are discarded here.
+    fn decrypt_local_secrets(key: &[u8; 32], cfg: &mut ConfigFile) {
+        let mut lost = 0usize;
+        let mut recovered = 0usize;
+        Self::open_config_secrets(key, cfg, &mut lost, &mut recovered);
+    }
+
     /// Take the number of secrets that could not be decrypted at load, so the
     /// UI warns exactly once per process run.
     pub fn take_lost_secrets(&mut self) -> usize {
