@@ -393,7 +393,7 @@ pub(super) fn request_local(window: &AppWindow, tab_id: &str, text: &str) {
             };
             update_terminal_row(model, &tab, |row| apply_local_peek(row, &dir, &names));
             // Refresh the docked panel's mirror with the arrived suggestions.
-            sync_active_sftp_to_root(window, model);
+            sync_active_sftp_to_root(&window, model);
         });
     });
 }

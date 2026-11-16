@@ -73,6 +73,10 @@ ssh-key = "=0.7.0-rc.10"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rand = "0.8"
+# ssh-key 0.7.0-rc's `PrivateKey::random` wants the new `rand_core` 0.10
+# `CryptoRng`, which the pinned `rand` 0.8 `OsRng` does not implement; the
+# keygen module bridges the two (no OsRng exists in rand_core 0.10 yet).
+rand_core = "0.10"
 futures = "0.3"
 # 0.16.2+ clamps the saved cursor on resize; older versions panic after
 # resizing inside nano/vim and leaving the alternate screen (#490).

@@ -1851,24 +1851,11 @@ pub(crate) fn wire_session_callbacks(
                     )
                 })
                 .unwrap_or((false, String::new(), 0));
-            // Split view on/off and the last local folder are remembered (#532);
-            // so are the machine-wide local bookmarks / recent feeds.
-            let (split_default, local_dir, local_bookmarks, local_recent) = weak
+            // Split view on/off and the last local folder are remembered (#532).
+            let (split_default, local_dir) = weak
                 .upgrade()
-                .map(|w| {
-                    (
-                        w.get_sftp_split_enabled(),
-                        w.get_sftp_last_local_dir().to_string(),
-                        w.get_local_bookmarks(),
-                        w.get_local_recent(),
-                    )
-                })
-                .unwrap_or((
-                    false,
-                    String::new(),
-                    ModelRc::<SharedString>::default(),
-                    ModelRc::<SharedString>::default(),
-                ));
+                .map(|w| (w.get_sftp_split_enabled(), w.get_sftp_last_local_dir().to_string()))
+                .unwrap_or((false, String::new()));
             terminals_model.push(TerminalState {
                 id: tab_id.clone().into(),
                 status: t("连接中...", "Connecting...").into(),
@@ -1968,23 +1955,6 @@ pub(crate) fn wire_session_callbacks(
                         .iter()
                         .any(|p| p.as_str() == "/")
                 },
-                sftp_local_quick_places: ModelRc::from(std::rc::Rc::new(
-                    VecModel::<SftpLocalPlace>::default(),
-                )),
-                sftp_local_drive_places: ModelRc::from(std::rc::Rc::new(
-                    VecModel::<SftpLocalPlace>::default(),
-                )),
-                // Machine-wide local places; refreshed again whenever they change.
-                sftp_local_bookmarks: local_bookmarks,
-                sftp_local_recent: local_recent,
-                sftp_local_bookmarked: false,
-                sftp_local_show_hidden: local_show_hidden,
-                sftp_local_sort_key: local_sort_key.into(),
-                sftp_local_sort_dir: local_sort_dir,
-                sftp_local_filter: "".into(),
-                sftp_local_all_entries: ModelRc::from(std::rc::Rc::new(
-                    VecModel::<SftpEntry>::default(),
-                )),
                 sftp_suggest: empty_suggestions(),
                 sftp_local_suggest: empty_suggestions(),
                 font_size: 0,

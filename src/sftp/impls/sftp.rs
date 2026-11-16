@@ -42,7 +42,7 @@ use super::common::{
 use super::elevation::Elevation;
 use super::scp::ScpPeer;
 use super::transfer::{
-    numbered_name, DedupPolicy, DownloadConflict, DragReport, SftpCommand, SftpHandle,
+    numbered_name, DedupPolicy, DownloadConflict, DragReport, OpenWith, SftpCommand, SftpHandle,
     SftpQueueConfig, UploadDecision,
 };
 
@@ -542,7 +542,7 @@ async fn run_sftp(
                         session.host,
                         session.port
                     );
-                    let handle = std::sync::Arc::new(SftpLink { handle, elevation });
+                    let handle = std::sync::Arc::new(SftpLink::new(handle, elevation));
                     let _ = events.send(SessionEvent::SftpStatus(
                         t(
                             "已切换 SCP 模式（服务器未提供 SFTP）...",
@@ -584,7 +584,7 @@ async fn run_sftp(
                                 session.port
                             );
                             scp_fallback_mark(key);
-                            let handle = std::sync::Arc::new(SftpLink { handle, elevation });
+                            let handle = std::sync::Arc::new(SftpLink::new(handle, elevation));
                             let _ = events.send(SessionEvent::SftpStatus(
                                 t(
                                     "已切换 SCP 模式（服务器未提供 SFTP）...",

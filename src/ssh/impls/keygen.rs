@@ -13,6 +13,7 @@ use std::{fs, io};
 
 use anyhow::{anyhow, Context, Result};
 use rand::rngs::OsRng;
+use rand::RngCore;
 use ssh_key::{Algorithm, HashAlg, LineEnding, PrivateKey};
 use uuid::Uuid;
 
@@ -63,8 +64,34 @@ impl KeyAlgorithm {
 /// Generate a keypair. Synchronous and potentially slow (RSA-3072 takes a
 /// moment), so callers run this inside `spawn_blocking` and never while
 /// holding the UI thread.
+/// Bridge the OS CSPRNG (`rand` 0.8 `OsRng`) to the `rand_core` 0.10
+/// `CryptoRng` bound that ssh-key 0.7-rc's `PrivateKey::random` requires; no
+/// released `OsRng` implements that trait yet.
+struct OsCryptoRng;
+
+impl rand_core::TryRng for OsCryptoRng {
+    type Error = core::convert::Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        let mut b = [0u8; 4];
+        OsRng.fill_bytes(&mut b);
+        Ok(u32::from_le_bytes(b))
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        let mut b = [0u8; 8];
+        OsRng.fill_bytes(&mut b);
+        Ok(u64::from_le_bytes(b))
+    }
+
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+        OsRng.fill_bytes(dst);
+        Ok(())
+    }
+}
+
 pub(crate) fn generate_keypair(algo: KeyAlgorithm) -> Result<GeneratedKey> {
-    let mut rng = OsRng;
+    let mut rng = OsCryptoRng;
     let private = PrivateKey::random(&mut rng, algo.to_ssh_algorithm())
         .context("failed to generate SSH keypair")?;
     let public = private.public_key().clone();

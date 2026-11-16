@@ -33,9 +33,9 @@ pub(crate) fn terminal_wheel_hit(
     y: f32,
 ) -> Option<TerminalWheelHit> {
     let (active, term, _) = active_terminal_panel_rects(win)?;
-    let mut term_x = term.x;
+    let term_x = term.x;
     let mut term_y = term.y;
-    let mut term_w = term.w;
+    let term_w = term.w;
     let mut term_h = term.h;
 
     // Zen mode removes only the 24px status strip; docks and the command bar
