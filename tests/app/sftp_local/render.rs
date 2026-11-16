@@ -591,6 +591,9 @@ fn path_completion_popup_renders_under_the_remote_path_bar() {
                 ]))),
             };
             model.set_row_data(0, t);
+            // The popup's rows bind to the root-mirrored cache, not the tab
+            // model directly; re-mirror so the cache reaches the panel.
+            sync_active_sftp_to_root(&ui, model);
         }
         render_frame(&window, 1100, 800);
         // Click the remote path field: the docked panel spans y 500..800, its
@@ -689,6 +692,9 @@ fn path_completion_popup_works_in_the_local_pane() {
                 ]))),
             };
             model.set_row_data(0, t);
+            // Same mirror as the remote popup: the local popup binds to the
+            // root-mirrored local suggestion cache.
+            sync_active_sftp_to_root(&ui, model);
         }
         render_frame(&window, 1100, 800);
         // Focus the local pane's path field (top path bar at y 534..562, same
