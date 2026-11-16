@@ -444,3 +444,140 @@ mod tests {
         );
     }
 }
+
+/// WebDAV config sync (#185): manual download and import. The encrypted
+/// bundle is tried first (fork enhancement); a server holding only the
+/// legacy plaintext export falls back to it, and a wrong passphrase never
+/// silently double-imports.
+pub(super) fn wire_webdav_download(
+    ctx: &WinCtx,
+    sessions_model: &Rc<VecModel<SessionInfo>>,
+    mailbox: &BundleMailbox,
+) {
+    let WinCtx {
+        store,
+        registry,
+        window,
+        ..
+    } = ctx;
+    {
+        let weak = window.as_weak();
+        let store = store.clone();
+        let sessions_model = sessions_model.clone();
+        let registry = registry.clone();
+        let mailbox = mailbox.clone();
+        window.on_webdav_download(move || {
+            let Some(w) = weak.upgrade() else { return };
+            let enabled = w.get_webdav_enabled();
+            let url = w.get_webdav_url().to_string();
+            let username = w.get_webdav_username().to_string();
+            let password = w.get_webdav_password().to_string();
+            let remote_path = w.get_webdav_remote_path().to_string();
+            let accept_invalid_certs = w.get_webdav_accept_invalid_certs();
+            {
+                let mut s = store.borrow_mut();
+                s.set_webdav_settings(
+                    enabled,
+                    url.clone(),
+                    username.clone(),
+                    password.clone(),
+                    remote_path.clone(),
+                    accept_invalid_certs,
+                );
+                let _ = s.save();
+            }
+            if !enabled {
+                w.set_webdav_status(t("请先启用 WebDAV 同步", "enable WebDAV sync first").into());
+                return;
+            }
+            // Encrypted bundle first; a server holding only the pre-encryption
+            // file falls back to the legacy JSON export. A bundle that fails to
+            // open never falls back, so a wrong passphrase can't double-import.
+            let pass = w.get_portable_passphrase().to_string();
+            if pass.is_empty() {
+                // Without a passphrase only the legacy plaintext file can be
+                // tried, and that import is fast (no KDF), so it stays inline.
+                let res: Result<(usize, usize), anyhow::Error> = webdav_get_json(
+                    &url,
+                    &remote_path,
+                    &username,
+                    &password,
+                    accept_invalid_certs,
+                )
+                .and_then(|json| store.borrow_mut().import_json(&json))
+                .map_err(|e| {
+                    // The bundle was never tried, so a missing legacy file most
+                    // likely means the server only holds the encrypted bundle.
+                    anyhow::anyhow!(
+                        "{} ({e})",
+                        t(
+                            "远端可能只保存了加密同步包，请先填写便携包口令",
+                            "the server may only hold an encrypted bundle; enter a bundle passphrase first"
+                        )
+                    )
+                });
+                let msg = match res {
+                    Ok((added, skipped)) => {
+                        sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
+                        registry.broadcast_config_changed();
+                        format!(
+                            "{} {}, {} {}{}",
+                            t("已导入", "imported"),
+                            added,
+                            t("跳过", "skipped"),
+                            skipped,
+                            webdav_status_suffix(accept_invalid_certs)
+                        )
+                    }
+                    Err(e) => format!("{}: {}", t("下载失败", "download failed"), e),
+                };
+                w.set_webdav_status(msg.into());
+                return;
+            }
+            // Fetch + Argon2 off the UI thread; the bundle timer applies the
+            // decrypted config (or runs the legacy fallback) where the store
+            // lives.
+            let bundle_path = bundle_remote_path(&remote_path);
+            w.set_webdav_status(t("下载中...", "downloading...").into());
+            let mailbox = mailbox.clone();
+            std::thread::spawn(move || {
+                let (result, fallback) = match webdav_get_optional(
+                    &url,
+                    &bundle_path,
+                    &username,
+                    &password,
+                    accept_invalid_certs,
+                ) {
+                    Ok(Some(body)) => (
+                        extract_bundle_data(&body)
+                            .map_err(|e| format!("{e:#}"))
+                            .and_then(|pack| {
+                                ConfigStore::decrypt_bundle(&pass, &pack)
+                                    .map_err(|e| format!("{e:#}"))
+                            }),
+                        None,
+                    ),
+                    Ok(None) => (
+                        // Placeholder: the timer checks `fallback` before
+                        // `result`, so this Err never surfaces.
+                        Err(String::new()),
+                        Some(WebdavFallback {
+                            url,
+                            remote_path,
+                            username,
+                            password,
+                            accept_invalid_certs,
+                        }),
+                    ),
+                    Err(e) => (Err(format!("{e:#}")), None),
+                };
+                lock_or_recover(&mailbox).push(BundleDelivery {
+                    result,
+                    download: true,
+                    webdav: true,
+                    fallback,
+                });
+            });
+        });
+    }
+}

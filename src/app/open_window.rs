@@ -1596,7 +1596,7 @@ pub(crate) fn open_window(
     super::agents::wire_agent_launchers(&ctx, &sessions_model);
     listen_for_config_changes(&ctx, &sessions_model);
     wire_wsl_profiles(&ctx, &sessions_model);
-    wire_webdav_download(&ctx, &sessions_model);
+    wire_webdav_download(&ctx, &sessions_model, &bundle_mailbox);
 
     let tabs_model: Rc<VecModel<TabInfo>> = Rc::new(VecModel::default());
     tabs_model.push(TabInfo {
