@@ -532,7 +532,10 @@ fn advanced_session_body_scrolls_to_bottom_trigger_button_without_occlusion() {
             pixels
         };
         render_short();
-        for _ in 0..40 {
+        // The merged advanced body stacks local additions on top of upstream's
+        // X11 block, so it is taller than either parent: scroll far more than
+        // the old 40 ticks (Slint clamps at the bottom, so extra ticks are free).
+        for _ in 0..200 {
             window.dispatch_event(WindowEvent::PointerMoved {
                 position: slint::LogicalPosition::new(350., 300.),
             });
