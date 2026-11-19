@@ -2007,13 +2007,14 @@ pub(crate) async fn push_authorized_keys(
     events: UnboundedSender<SessionEvent>,
 ) -> Result<()> {
     let config = ssh_client_config();
-    let (mut handle, mut jump_handle, mut remote_forwards) =
+    let (mut handle, mut jump_handle, mut remote_forwards, mut x11_state) =
         connect_ssh(&session, &jump, config.clone(), &events).await?;
 
     let auth = match authenticate_session(
         &mut handle,
         &mut jump_handle,
         &mut remote_forwards,
+        &mut x11_state,
         &session,
         &jump,
         config,
