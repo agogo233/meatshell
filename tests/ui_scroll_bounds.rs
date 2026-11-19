@@ -186,7 +186,17 @@ fn settings_webdav_page_scrolls_to_bottom_without_occlusion() {
             !blue_ys.is_empty(),
             "WebDAV Upload button must be rendered inside the scrolled viewport"
         );
-        let btn_center_y = (blue_ys[0] + blue_ys[blue_ys.len() - 1]) * 0.5;
+        // The page stacks two primary buttons ("Upload" and the portable-bundle
+        // "Upload to WebDAV"). Only the first contiguous blue run is the WebDAV
+        // upload button; the midpoint of all blue pixels would fall between them.
+        let mut first_run = vec![blue_ys[0]];
+        for &y in blue_ys.iter().skip(1) {
+            if y - first_run[first_run.len() - 1] > 4.0 {
+                break;
+            }
+            first_run.push(y);
+        }
+        let btn_center_y = (first_run[0] + first_run[first_run.len() - 1]) * 0.5;
         click(&window, 660., btn_center_y);
         render_size(&window, 720, 435);
         assert!(
