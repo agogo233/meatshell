@@ -5,6 +5,14 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ## [Unreleased]
 
+- **内置 SSH 密钥生成与一键推送。** 会话编辑器的私钥区新增"生成密钥对"：可选 Ed25519 / RSA，私钥直接写入本机 `~/.ssh`（权限 0600），并可一键把对应公钥推送到目标服务器——复用登录与主机密钥确认交互，推送前会先修好 `authorized_keys` 的换行与权限。
+- **Built-in SSH key generation with one-click push.** The session editor's private-key area gains "Generate keypair": choose Ed25519 / RSA, the private key is written to the local `~/.ssh` (mode 0600), and the matching public key is pushed to the target server in one click — reusing the login and host-key prompts, with `authorized_keys` line endings and permissions repaired before appending.
+- **SSH 会话支持 X11 转发。** 新建/编辑对话框可开启 X11 转发并配置 DISPLAY 与 XAUTHORITY；连接后远端 X 程序经加密通道回连本机 X 服务。
+- **SSH sessions support X11 forwarding.** The new/edit dialog can enable X11 forwarding and configure DISPLAY and XAUTHORITY; after connecting, remote X programs reach the local X server through the encrypted channel.
+- **欢迎页显示最近连接。** 空白欢迎区现在列出最近连接的会话卡片，一键重连，少一次翻找。
+- **The welcome page shows recent connections.** The empty welcome area now lists cards of recently connected sessions for one-click reconnecting.
+- **跳板机下拉支持搜索与滚动。** 跳板选择列表在条目很多时可滚动浏览，并支持按名称即时过滤。
+- **The jump-host dropdown supports search and scrolling.** Long jump-host lists can now be scrolled and filtered by name on the fly.
 - **Esc 键恢复"清除终端本地选区"语义。** 终端里有选中高亮时按 Esc，此前没有任何反应（高亮一直残留，要再点一下鼠标才能清掉）；现在按一下即清除本地高亮，且不会把 Esc 发给远端程序——vim、less 等全屏程序不会因此退出或误响应；没有选区时 Esc 照常透传给远端。
 - **Esc restores dropping the terminal's local selection.** With a selection highlight on screen, Esc used to do nothing and the highlight lingered until another mouse click; it now clears the local highlight at once without sending anything to the remote, so full-screen programs like vim/less are not interrupted. With no selection, Esc still reaches the remote as usual.
 - **修复会话列表双击建立两条连接。** 快速双击同一个会话此前会触发两次连接：SSH/Telnet 会开出两个标签页、登录两次（对限制并发的堡垒机可能互踢）；RDP 会拉起两个系统远程桌面窗口互相顶掉。现在 500 毫秒内的重复点击只建立第一条连接；点击不同会话、或稍作停顿后再点，行为不变。

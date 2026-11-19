@@ -92,7 +92,7 @@ open /Applications/meatshell.app
   - 配置位置：`%APPDATA%/meatshell/sessions.json`（Windows）
     / `~/.config/meatshell/sessions.json`（Linux）
     / `~/Library/Application Support/meatshell/sessions.json`（macOS）
-- [x] SSH（`russh`，纯 Rust）：密码 / 私钥 / 加密私钥（密码短语）
+- [x] SSH（`russh`，纯 Rust）：密码 / 私钥 / 加密私钥（密码短语）/ SSH Agent / 多级跳板 / X11 转发 / 内置密钥生成（Ed25519 / RSA，一键推送公钥）
 - [x] SFTP 文件浏览 + 上传 / 下载（拖拽）+ 双栏（本地 / 远程）互传（可拖拽）+ 终端内 ZMODEM（`sz` 下载 / `rz` 多文件上传）
 - [x] 内置编辑器语法高亮：Shell / JSON / YAML / TOML / INI / Python（按扩展名或 shebang 识别），可在设置开关；高亮文件不折行、横向滚动，超 2000 行自动退回纯文本
 - [x] SSH 端口转发 / 隧道：本地 -L / 远程 -R / 动态 -D（SOCKS5）
