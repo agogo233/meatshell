@@ -75,7 +75,7 @@ where
 {
     tokio::time::timeout(budget, future)
         .await
-        .map_err(|_| stage_timeout(label))?
+        .map_err(|_| stage_timeout(label, budget))?
         .map_err(Into::into)
         .with_context(|| label.to_owned())
 }
@@ -102,10 +102,10 @@ pub(crate) async fn disconnect_jump_chain<H: Handler + Send + 'static>(
     }
 }
 
-fn stage_timeout(label: &str) -> anyhow::Error {
+fn stage_timeout(label: &str, budget: Duration) -> anyhow::Error {
     anyhow!(
         "{label} timed out after {} seconds",
-        SSH_NETWORK_TIMEOUT.as_secs()
+        budget.as_secs()
     )
 }
 
@@ -191,7 +191,7 @@ where
         client::connect_stream(config, stream, handler),
     )
     .await
-    .map_err(|_| stage_timeout(label))?
+    .map_err(|_| stage_timeout(label, SSH_NETWORK_TIMEOUT))?
     .with_context(|| label.to_owned())?;
     cancel.0 = None;
     Ok(result)

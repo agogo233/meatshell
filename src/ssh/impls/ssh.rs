@@ -2062,14 +2062,21 @@ pub(crate) async fn push_authorized_keys(
         escaped
     );
 
-    let mut channel = handle
-        .channel_open_session()
-        .await
-        .context("open command channel")?;
-    channel
-        .exec(true, command.as_bytes())
-        .await
-        .context("execute remote command")?;
+    let mut channel = match handle.channel_open_session().await {
+        Ok(channel) => channel,
+        Err(e) => {
+            // A failed channel open leaves the transport half-open too; give
+            // the peer a clean disconnect instead of relying on the drop.
+            disconnect_ssh(&handle, "push channel error").await;
+            disconnect_jump_chain(&jump_handle, "push channel error").await;
+            return Err(anyhow::Error::from(e).context("open command channel"));
+        }
+    };
+    if let Err(e) = channel.exec(true, command.as_bytes()).await {
+        disconnect_ssh(&handle, "push exec error").await;
+        disconnect_jump_chain(&jump_handle, "push exec error").await;
+        return Err(anyhow::Error::from(e).context("execute remote command"));
+    }
 
     let collect = async {
         let mut exit_code = None;
