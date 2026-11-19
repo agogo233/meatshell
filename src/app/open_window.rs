@@ -1591,6 +1591,8 @@ pub(crate) fn open_window(
         window_size_tracking_ready: window_size_tracking_ready.clone(),
     };
     window.set_launch_shells(launch_shell_model(&store.borrow()));
+    super::recents::publish(&window, &store.borrow());
+    super::recents::wire(&window, store.clone());
     super::local_shells::wire_custom_shells(&ctx);
     super::credentials::wire(&ctx);
     super::agents::wire_agent_launchers(&ctx, &sessions_model);
@@ -3855,4 +3857,6 @@ pub(crate) fn sync_sessions_for_window(
     if !refresh_session_rows_in_place(store, model, &query) {
         window.set_sessions_revision(window.get_sessions_revision() + 1);
     }
+    // Renamed or deleted sessions update their recent entries too.
+    super::recents::publish(&window, store);
 }

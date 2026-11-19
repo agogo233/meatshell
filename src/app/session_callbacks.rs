@@ -85,6 +85,9 @@ pub(crate) fn wire_session_callbacks(
     // the session event pump through `ConnectCtx`.
     editor: slint::Weak<EditorWindow>,
 ) {
+    window.global::<crate::ui::JumpSearch>().on_matches(|label, query| {
+        super::jump_picker::matches(label.as_str(), query.as_str())
+    });
     // Working set of port forwards (#56) for the session being created/edited.
     // The forward add/delete callbacks mutate it; saving reads it into
     // Session.forwards; opening the dialog (new/edit) resets it.
@@ -140,6 +143,9 @@ pub(crate) fn wire_session_callbacks(
             w.set_jump_choices(jump_labels);
             w.set_jump_ids(jump_ids);
             w.set_dialog_jumps(ModelRc::default());
+            w.set_dialog_x11_forwarding_enabled(false);
+            w.set_dialog_x11_display("".into());
+            w.set_dialog_x11_xauthority("".into());
             w.set_dialog_id(empty.id.into());
             w.set_dialog_name("".into());
             w.set_dialog_host("".into());
@@ -650,6 +656,9 @@ pub(crate) fn wire_session_callbacks(
                     }
                 };
                 w.set_dialog_jumps(jump_rows(ids, &jump_ids));
+                w.set_dialog_x11_forwarding_enabled(session.x11_forwarding_enabled);
+                w.set_dialog_x11_display(session.x11_display.clone().into());
+                w.set_dialog_x11_xauthority(session.x11_xauthority.clone().into());
                 w.set_jump_choices(jump_labels);
                 w.set_jump_ids(jump_ids);
                 w.set_dialog_group(session.group.clone().into());
@@ -1763,6 +1772,11 @@ pub(crate) fn wire_session_callbacks(
                     None => return,
                 }
             };
+            // Recent connections (welcome page / empty main area). RDP counts
+            // too: it is a connection, just in the system client's window.
+            if let Some(w) = weak.upgrade() {
+                super::recents::record(&w, &store, &id);
+            }
             // ── RDP: hand the saved account to the system client, open no tab ──
             // FinalShell does the same thing: meatshell stores host / port /
             // user / password and starts the operating system's own remote

@@ -1,4 +1,5 @@
 import { Theme } from "theme.slint";
+import { JumpCombo } from "jump_combo.slint";
 import { ModalLayer } from "modal.slint";
 import { ComboBox, CheckBox } from "std-widgets.slint";
 import { LabeledInput, PrimaryButton, GhostButton, IconButton } from "widgets.slint";
@@ -90,6 +91,11 @@ export struct SessionDraft {
     allow-secret-reveal: bool,
     // Expose this session to MCP clients (#432).
     allow-mcp-access: bool,
+    // X11 forwarding
+    x11-forwarding-enabled: bool,
+    x11-display: string, // ":0.0" | ":0" | "host:display_number.screen_number"
+    // Environment variable representing the location of the .Xauthority file
+    x11-xauthority: string,
 }
 
 // A single segment in a segmented selector (auth toggle, baud presets, …).
@@ -420,100 +426,6 @@ component GroupCombo inherits VerticalLayout {
     }
 }
 
-// Read-only dropdown picking an SSH jump host from a fixed list of saved
-// sessions (#211). Index-based: `choices[0]` is the unselected entry, and
-// `selected-index` maps into the parallel `ids` list held by the caller.
-component JumpCombo inherits VerticalLayout {
-    in property <string> label;
-    in property <[string]> choices;      // display labels; index 0 = unselected
-    in-out property <int> selected-index: 0;
-    callback selected(int);
-    spacing: 4px;
-
-    Text {
-        text: root.label;
-        color: Theme.text-secondary;
-        font-size: Theme.fs-sm;
-    }
-
-    Rectangle {
-        height: 32px;
-        border-radius: Theme.radius-sm;
-        border-width: 1px;
-    border-color: jump-ta.has-hover ? Theme.accent : Theme.border-strong;
-    background: Theme.bg-elevated;
-
-        jump-ta := TouchArea {
-            mouse-cursor: pointer;
-            clicked => { jump-popup.show(); }
-        }
-
-        Text {
-            x: 10px;
-            width: parent.width - 44px;
-            height: parent.height;
-            text: (root.selected-index >= 0 && root.selected-index < root.choices.length)
-                ? root.choices[root.selected-index] : "";
-            color: root.selected-index > 0 ? Theme.text-primary : Theme.text-muted;
-            font-size: Theme.fs-md;
-            vertical-alignment: center;
-            overflow: elide;
-        }
-
-        Rectangle {
-            x: parent.width - 36px;
-            width: 28px;
-            height: 28px;
-            border-radius: Theme.radius-sm;
-            background: jump-ta.has-hover ? Theme.bg-hover : transparent;
-            Text {
-                text: "▼";
-                color: Theme.text-secondary;
-                font-size: Theme.fs-xs;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
-        }
-
-        jump-popup := PopupWindow {
-            x: 0;
-            y: parent.height + 3px;
-            width: parent.width;
-            Rectangle {
-                background: Theme.popup-bg-alt;
-                border-radius: Theme.radius-sm;
-                border-width: 1px;
-                border-color: Theme.border-subtle;
-                VerticalLayout {
-                    padding: 4px;
-                    spacing: 1px;
-                    for c[idx] in root.choices : Rectangle {
-                        height: 28px;
-                        border-radius: Theme.radius-sm;
-                        background: c-ta.has-hover ? Theme.bg-hover : transparent;
-                        c-ta := TouchArea {
-                            mouse-cursor: pointer;
-                            // Report the choice BEFORE closing: statements after
-                            // close() in a popup's own handler never run, so the
-                            // hop showed as picked but saved empty (#509).
-                            clicked => { root.selected-index = idx; root.selected(idx); jump-popup.close(); }
-                        }
-                        Text {
-                            x: 10px;
-                            width: parent.width - 20px;
-                            text: c;
-                            color: Theme.text-primary;
-                            font-size: Theme.fs-md;
-                            vertical-alignment: center;
-                            overflow: elide;
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 // SerialPort field with an editable text box + a dropdown of existing serial ports.
 // Type to input a serial port, or click the ▾ to pick one already in use.
 component SerialPortCombo inherits VerticalLayout {
@@ -830,6 +742,9 @@ export component SessionDialog inherits ModalLayer {
     callback update-jump(int, int);
     callback delete-jump(int);
     callback move-jump(int, int);
+    in-out property <bool> draft-x11-forwarding-enabled;
+    in-out property <string> draft-x11-display;
+    in-out property <string> draft-x11-xauthority;
     in-out property <string> draft-serial-port;
     in property <[string]> session-serial-ports;   // existing serial-ports for the dropdown
     in-out property <string> draft-baud: "115200";
@@ -888,6 +803,9 @@ export component SessionDialog inherits ModalLayer {
     changed draft-credential-id => { root.connection-draft-changed(); }
     changed draft-proxy-type => { root.connection-draft-changed(); }
     changed draft-proxy-hostport => { root.connection-draft-changed(); }
+    changed draft-x11-forwarding-enabled => { root.connection-draft-changed(); }
+    changed draft-x11-display => { root.connection-draft-changed(); }
+    changed draft-x11-xauthority => { root.connection-draft-changed(); }
     changed draft-serial-port => { root.connection-draft-changed(); }
     changed draft-baud => { root.connection-draft-changed(); }
     changed draft-data-bits => { root.connection-draft-changed(); }
@@ -967,6 +885,9 @@ export component SessionDialog inherits ModalLayer {
             jumps: root.jumps,
             allow-secret-reveal: root.allow-secret-reveal,
             allow-mcp-access: root.allow-mcp-access,
+            x11-forwarding-enabled: root.draft-x11-forwarding-enabled,
+            x11-display: root.draft-x11-display,
+            x11-xauthority: root.draft-x11-xauthority,
         };
     }
 
@@ -1012,7 +933,10 @@ export component SessionDialog inherits ModalLayer {
         // the body scrolls (the dialog grows with the advanced section / many
         // port forwards) (#56). Header (52px + 1px divider) and the pinned
         // action footer (1px divider + its row) stay outside the scroll (#525).
-        height: min(body.preferred-height + 54px + footer.preferred-height, parent.height - 40px);
+        // `body-end.y + 8px` reflects the true laid-out height after conditional
+        // sections wrap text at the 440px card width (Slint queries conditional
+        // sub-layouts without a cross-width constraint for `preferred-height`).
+        height: min(max(body.preferred-height, body-end.y + 8px) + 54px + footer.preferred-height, parent.height - 40px);
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         background: Theme.popup-bg;
@@ -1082,16 +1006,25 @@ export component SessionDialog inherits ModalLayer {
             background: Theme.border-subtle;
         }
 
-        Flickable {
+        flick := Flickable {
             // Keep mouse grabs with text selections and jump handles. Wheel
             // scrolling still works, as in the terminal tab strip (#408).
             interactive: false;
             width: 100%;
             vertical-stretch: 1;
             content-width: self.width;
-            content-height: body.preferred-height;
+            content-height: max(self.height, body.preferred-height, body-end.y + 8px);
             body := VerticalLayout {
-                padding: 20px;
+                x: 0px;
+                y: 0px;
+                width: flick.width;
+                height: self.preferred-height;
+                alignment: start;
+                padding-left: 20px;
+                padding-right: 20px;
+                padding-top: 20px;
+                // `body-end` adds 12px spacing before itself; 8px here keeps 20px total bottom padding.
+                padding-bottom: 8px;
                 spacing: 12px;
 
             // Connection type selector (always shown).
@@ -1782,7 +1715,7 @@ export component SessionDialog inherits ModalLayer {
                 HorizontalLayout {
                     spacing: 4px;
                     Text {
-                        text: @tr("Advanced (encoding, proxy, tunnels)");
+                        text: @tr("Advanced (encoding, proxy, tunnels, X11 forwarding)");
                         color: adv-ta.has-hover ? Theme.text-primary : Theme.text-secondary;
                         font-size: Theme.fs-sm;
                         vertical-alignment: center;
@@ -2057,6 +1990,63 @@ export component SessionDialog inherits ModalLayer {
                     color: Theme.text-muted; font-size: Theme.fs-xs; wrap: word-wrap;
                 }
             }
+
+            // ── X11 forwarding (SSH only) ──────────────────
+            if root.show-advanced && root.draft-kind == "ssh" : VerticalLayout {
+                spacing: 6px;
+
+                Text {
+                    text: @tr("X11 forwarding");
+                    color: Theme.text-secondary;
+                    font-size: Theme.fs-sm;
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Rectangle {
+                        width: 18px; height: 18px; y: 1px;
+                        border-radius: 4px;
+                        border-width: 1px;
+                        border-color: root.draft-x11-forwarding-enabled ? Theme.accent : Theme.border-strong;
+                        background: root.draft-x11-forwarding-enabled ? Theme.accent : transparent;
+                        Text {
+                            text: root.draft-x11-forwarding-enabled ? "\u{E5CA}" : "";
+                            font-family: "Material Icons"; color: white; font-size: 14px;
+                            width: 100%; height: 100%;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.draft-x11-forwarding-enabled = !root.draft-x11-forwarding-enabled; }
+                        }
+                    }
+                    Text {
+                        text: @tr("Enable X11 forwarding");
+                        color: Theme.text-primary; font-size: Theme.fs-sm;
+                        vertical-alignment: center; horizontal-stretch: 1;
+                    }
+                }
+
+                LabeledInput {
+                    input-background: Theme.bg-elevated;
+                    idle-border: Theme.border-strong;
+                    label: @tr("DISPLAY");
+                    placeholder: @tr(":0.0 (Leave blank to use environment variables)");
+                    value <=> root.draft-x11-display;
+                    horizontal-stretch: 1;
+                }
+
+                LabeledInput {
+                    input-background: Theme.bg-elevated;
+                    idle-border: Theme.border-strong;
+                    label: @tr("XAUTHORITY");
+                    placeholder: @tr(".Xauthority (Leave blank to use environment variables)");
+                    value <=> root.draft-x11-xauthority;
+                    horizontal-stretch: 1;
+                }
+            }
+
+            body-end := Rectangle { height: 0px; }
         }
         }
 

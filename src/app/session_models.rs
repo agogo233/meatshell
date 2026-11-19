@@ -382,7 +382,7 @@ pub(super) fn sync_sessions_to_model(store: &ConfigStore, model: &VecModel<Sessi
 
 /// Generated rows at the top of Quick connect: the "system" shells, then the
 /// "agents" group of detected and custom agent CLIs (#427).
-fn quick_connect_builtin_sessions(store: &ConfigStore) -> Vec<Session> {
+pub(super) fn quick_connect_builtin_sessions(store: &ConfigStore) -> Vec<Session> {
     let mut sessions = system_shell_sessions(store);
     sessions.extend(super::agents::agent_sessions(store));
     sessions
@@ -710,6 +710,9 @@ pub(super) fn session_from_draft(
             Vec::new()
         },
         mcp_access: draft.allow_mcp_access,
+        x11_forwarding_enabled: draft.x11_forwarding_enabled,
+        x11_display: draft.x11_display.to_string(),
+        x11_xauthority: draft.x11_xauthority.to_string(),
         rdp_domain: draft.rdp_domain.to_string(),
         rdp_fullscreen,
         rdp_width,
