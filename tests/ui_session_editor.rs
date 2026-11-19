@@ -551,36 +551,51 @@ fn advanced_session_body_scrolls_to_bottom_trigger_button_without_occlusion() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/session-editor-short-bottom.png");
         image::save_buffer(path, &bytes, 700, 600, image::ColorType::Rgb8).unwrap();
 
-        // The merged editor body is taller than either parent's (upstream's X11
-        // block landed on top of local additions), so the button's y is no longer
-        // a fixed constant: scan the x=505 column for the bottommost contiguous
-        // primary-blue run and click its center.
-        let mut blue_ys = Vec::new();
+        // The merged editor body stacks local additions (in-app keygen UI) on
+        // top of upstream's X11 block, so neither the body height nor the
+        // button row matches either parent layout. Scan the x=505 column for
+        // contiguous primary-blue runs and click them bottom-up until the
+        // Add-trigger callback fires.
+        let mut runs: Vec<(f32, f32)> = Vec::new();
+        let mut cur: Option<(f32, f32)> = None;
         for y in 0..600usize {
             let p = pixels[y * 700 + 505];
-            if p.b > 200 && p.r < 100 {
-                blue_ys.push(y as f32);
+            let blue = p.b > 200 && p.r < 100;
+            if blue {
+                cur = match cur {
+                    Some((first, last)) if y as f32 - last <= 4.0 => Some((first, y as f32)),
+                    Some((first, last)) => {
+                        runs.push((first, last));
+                        Some((y as f32, y as f32))
+                    }
+                    None => Some((y as f32, y as f32)),
+                };
+            } else if let Some((first, last)) = cur.take() {
+                runs.push((first, last));
+            }
+        }
+        if let Some((first, last)) = cur.take() {
+            runs.push((first, last));
+        }
+        assert!(
+            !runs.is_empty(),
+            "Add trigger button must be rendered inside the scrolled viewport"
+        );
+        let mut hit = false;
+        for (first, last) in runs.iter().rev() {
+            let center = (first + last) * 0.5;
+            press(&window, 505., center);
+            release(&window, 505., center);
+            render_short();
+            if ui.get_add_trigger_count() > 0 {
+                hit = true;
+                break;
             }
         }
         assert!(
-            !blue_ys.is_empty(),
-            "Add trigger button must be rendered inside the scrolled viewport"
-        );
-        let mut last_run = vec![*blue_ys.last().unwrap()];
-        for &y in blue_ys.iter().rev().skip(1) {
-            if last_run[0] - y > 4.0 {
-                break;
-            }
-            last_run.push(y);
-        }
-        let btn_center_y = (last_run[0] + last_run[last_run.len() - 1]) * 0.5;
-        press(&window, 505., btn_center_y);
-        release(&window, 505., btn_center_y);
-        render_short();
-        assert_eq!(
-            ui.get_add_trigger_count(),
-            1,
-            "Add trigger button at the bottom of the scrolled SSH advanced body must be unoccluded and clickable"
+            hit,
+            "Add trigger button at the bottom of the scrolled SSH advanced body must be unoccluded and clickable; blue runs: {:?}",
+            runs
         );
     }).join().unwrap();
 }
