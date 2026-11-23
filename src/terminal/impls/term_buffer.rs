@@ -995,9 +995,6 @@ impl TermBuffer {
             self.history.clear();
             self.prev.clear();
             self.view_offset = 0;
-            self.sel_anchor = None;
-            self.sel_focus = None;
-            self.sel_ranges.clear();
             // Stored positions are absolute scrollback rows: with the history
             // gone they point at lines that no longer exist, so the index is
             // dropped too (a stale count would show on screen for one frame).
