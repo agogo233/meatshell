@@ -461,7 +461,17 @@ export component EditorPane inherits Rectangle {
                                 }
                                 edited => {
                                     root.content-changed();
-                                    root.highlight-pending = true;
+                                    // Small documents recolour synchronously so typing never
+                                    // flashes plain text (the renderer drops spans while
+                                    // syntax-source != text). Large documents keep the
+                                    // debounced refresh in the timer below.
+                                    if (root.editor-content.character-count <= 16384) {
+                                        root.highlight-pending = false;
+                                        root.editor-highlight(root.editor-content);
+                                        root.editor-bracket-check(edit-input.cursor-position-byte-offset);
+                                    } else {
+                                        root.highlight-pending = true;
+                                    }
                                     root.editor-match-count = root.editor-count-matches(
                                         root.editor-content, root.editor-find-query);
                                 }
