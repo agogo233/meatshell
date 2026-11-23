@@ -160,7 +160,7 @@ pub(crate) fn handle_file_drop_at(
         return;
     };
     if let Ok(handles) = sftp_handles.lock() {
-        if let Some(h) = handles.get(active) {
+        if let Some(h) = handles.get(&active) {
             win.set_download_open(true);
             for (path, decision) in paths.iter().zip(decisions) {
                 h.upload(path.clone(), dir.clone(), decision);
