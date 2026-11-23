@@ -1228,6 +1228,7 @@ fn classic_right_dock() -> (AppWindow, Rc<MinimalSoftwareWindow>, f32) {
         .last()
         .map(|(start, end)| (*start + *end) as f32 / 2.0)
         .expect("no checked remote row");
+    eprintln!("DIAG classic panel=({},{},{},{}) bands={:?} row_y={}", panel.x, panel.y, panel.w, panel.h, bands, row_y);
     (ui, window, row_y)
 }
 
@@ -1274,6 +1275,11 @@ fn context_menu_delete_on_a_checked_row_deletes_the_whole_selection() {
         )
         .unwrap();
         let (x, y) = find_delete_item(&menu, 1400, 900, row_y);
+        let red = menu
+            .iter()
+            .filter(|p| p.r.abs_diff(216) < 24 && p.g.abs_diff(108) < 24 && p.b.abs_diff(108) < 24)
+            .count();
+        eprintln!("DIAG after-menu red_pixels={} selected={}", red, ui.get_sftp_selected_count());
         press(&window, x, y);
         release(&window, x, y);
         assert!(ui.get_confirm_delete_open(), "Delete must ask for confirmation");
