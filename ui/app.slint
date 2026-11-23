@@ -3574,8 +3574,11 @@ export component AppWindow inherits Window {
                     dock-drag-cancelled => { root.panel-dragging = false; }
                 }
                 if gp.kind == "ai" : AIPanel {
-                    width: parent.width;
-                    height: parent.height;
+                    x: 10px;
+                    y: 10px;
+                    width: parent.width - 20px;
+                    height: parent.height - 20px;
+                    border-radius: Theme.radius-md;
                     messages: root.ai-messages;
                     busy: root.ai-busy;
                     dock-edge: gp.edge;
@@ -3615,8 +3618,11 @@ export component AppWindow inherits Window {
                 // so remote listings stay live. The panel is only ever rendered
                 // expanded — collapsing swaps it for the tool strip below.
                 if gp.kind == "sftp" : SftpPanel {
-                    width: parent.width;
-                    height: parent.height;
+                    x: 10px;
+                    y: 10px;
+                    width: parent.width - 20px;
+                    height: parent.height - 20px;
+                    border-radius: Theme.radius-md;
                     current-tab-id: root.sftp-current-tab-id;
                     current-path: root.sftp-path;
                     entries: root.sftp-entries;
