@@ -236,7 +236,10 @@ pub(crate) fn active_terminal_panel_rects(win: &AppWindow) -> Option<(String, Lo
         return None;
     }
 
-    let area = app_content_area(win);
+    let mut area = app_content_area(win);
+    // The panes live in the central card, inset from the central rect (#560).
+    area.x += win.get_central_inset_left();
+    area.y += win.get_central_inset_top();
     let panes = win.get_panes();
     let pane = (0..panes.row_count())
         .filter_map(|i| panes.row_data(i))
@@ -338,6 +341,16 @@ pub(super) fn active_sftp_local_pane_rect(win: &AppWindow) -> Option<(String, Lo
             h: content_h,
         },
     ))
+}
+
+/// `(tab id, local folder)` when `(x, y)` is over the split view's local pane.
+pub(super) fn sftp_local_pane_hit(win: &AppWindow, x: f32, y: f32) -> Option<(String, String)> {
+    let (tab, rect) = active_sftp_local_pane_rect(win)?;
+    if !contains_logical(rect, x, y) {
+        return None;
+    }
+    let dir = super::sftp_local::current_path(win, &tab);
+    (!dir.is_empty()).then_some((tab, dir))
 }
 
 /// The dock area's frame in logical client coordinates (below the title bar).

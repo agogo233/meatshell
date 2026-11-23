@@ -784,6 +784,7 @@ pub(crate) fn open_window(
         // shares that edge's strip band with the others.
         window.set_collapse_sidebar_default(collapse_sidebar);
         window.set_collapse_sftp_default(collapse_sftp);
+        window.set_auto_collapse_home(s.auto_collapse_home());
         // Restore the persisted panel docking layout (#dock).
         window.set_sidebar_width(s.sidebar_width());
         window.set_sidebar_height(s.sidebar_height());
@@ -920,6 +921,14 @@ pub(crate) fn open_window(
         window.on_set_collapse_sftp_default(move |v| {
             let mut s = store.borrow_mut();
             s.set_collapse_sftp_default(v);
+            let _ = s.save();
+        });
+    }
+    {
+        let store = store.clone();
+        window.on_set_auto_collapse_home(move |v| {
+            let mut s = store.borrow_mut();
+            s.set_auto_collapse_home(v);
             let _ = s.save();
         });
     }
@@ -3041,6 +3050,8 @@ pub(crate) fn open_window(
         let ev_registry = registry.clone();
         let ev_core = core.clone();
         let ev_ds = dock_stacks.clone();
+        // Items of one OS drop, gathered so the drop is handled once (#572).
+        let ev_pending_drop = Rc::new(RefCell::new(PendingDrop::default()));
         let ev_window_size_tracking_ready = window_size_tracking_ready.clone();
         let ev_pending_window_size_restore = pending_window_size_restore.clone();
         // A file drag is in flight (Windows): the hover highlight re-hits the
@@ -3154,18 +3165,21 @@ pub(crate) fn open_window(
                                 ev_file_hover.set(false);
                                 win.set_file_drop_hl(false);
                             }
-                            // On Windows the handler queries the OS cursor
-                            // position itself (see `cursor_pos`), since OLE
+                            // On Windows the drop point is computed from the
+                            // OS cursor (see `cursor_pos`), since OLE
                             // drag-and-drop hover suppresses WM_MOUSEMOVE.
                             // On macOS/X11/Wayland the compositor delivers
                             // pointer motion during drag-hover as ordinary
                             // CursorMoved events, so the last one we saw is
-                            // the drop point (#356).
-                            handle_file_drop(
+                            // the drop point (#356). A multi-item drop arrives
+                            // as one event per item: queue them, so the whole
+                            // drop asks about name conflicts once (#572).
+                            queue_file_drop(
                                 &win,
                                 &sh,
-                                path.clone(),
+                                &ev_pending_drop,
                                 &ev_ds,
+                                path.clone(),
                                 last_cursor_logical,
                             );
                         }

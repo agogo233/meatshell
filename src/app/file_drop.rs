@@ -24,86 +24,123 @@ pub(crate) fn cursor_pos() -> Option<(i32, i32)> {
     }
 }
 
-/// Handle an OS file drop: if it landed over the active session's terminal
-/// pane or over the docked SFTP panel, upload the file to that session's
-/// current remote directory (#drag-onto-shell, #file-drop-sftp).
-///
-/// `hovered_pos` is the caller's best guess at the drop point in logical
-/// window-client coordinates, taken from the most recent `CursorMoved` event
-/// (see the `WEvent::DroppedFile` handler). Windows ignores it and queries
-/// the OS cursor directly instead: Win32 suppresses `WM_MOUSEMOVE` for the
-/// window while an OLE drag-and-drop is in progress, so `CursorMoved` can be
-/// stale by the time the drop lands. macOS and X11/Wayland do deliver real
-/// pointer motion during drag-hover as ordinary `CursorMoved` events, so the
-/// last one seen is accurate there — this is what previously left
-/// drag-and-drop upload a no-op on every non-Windows platform (#356).
-#[cfg(windows)]
-pub(crate) fn handle_file_drop(
+/// The OS delivers a drop of several files / folders as one `DroppedFile`
+/// event per item, all in the same burst. They are collected here and handled
+/// together once the burst is over, so the drop asks its name-conflict
+/// question once instead of once per item (#572).
+#[derive(Default)]
+pub(crate) struct PendingDrop {
+    paths: Vec<std::path::PathBuf>,
+    /// Drop point of the burst's first item, logical client coordinates.
+    at: Option<(f32, f32)>,
+}
+
+/// How long after the first item of a drop the rest are waited for. The items
+/// arrive back to back within one event-loop pass; this only has to outlast it.
+const DROP_BURST: std::time::Duration = std::time::Duration::from_millis(60);
+
+/// Queue one dropped path; the first of a burst schedules the batch.
+pub(crate) fn queue_file_drop(
     win: &AppWindow,
     sftp_handles: &SftpHandles,
-    path: std::path::PathBuf,
+    pending: &Rc<RefCell<PendingDrop>>,
     dock_stacks: &Rc<RefCell<DockStacks>>,
-    _hovered_pos: Option<(f32, f32)>,
+    path: std::path::PathBuf,
+    hovered_pos: Option<(f32, f32)>,
 ) {
+    let first = {
+        let mut batch = pending.borrow_mut();
+        let first = batch.paths.is_empty();
+        if first {
+            batch.at = drop_point(win, hovered_pos);
+        }
+        batch.paths.push(path);
+        first
+    };
+    if !first {
+        return;
+    }
+    let weak = win.as_weak();
+    let sftp_handles = sftp_handles.clone();
+    let pending = pending.clone();
+    let dock_stacks = dock_stacks.clone();
+    slint::Timer::single_shot(DROP_BURST, move || {
+        let batch = std::mem::take(&mut *pending.borrow_mut());
+        let (Some(win), Some((x, y))) = (weak.upgrade(), batch.at) else {
+            return;
+        };
+        handle_file_drop_at(&win, &sftp_handles, &dock_stacks, batch.paths, x, y);
+    });
+}
+
+/// Where a drop landed, in logical window-client coordinates.
+///
+/// `hovered_pos` is the caller's best guess, taken from the most recent
+/// `CursorMoved` event (see the `WEvent::DroppedFile` handler). Windows ignores
+/// it and queries the OS cursor directly instead: Win32 suppresses
+/// `WM_MOUSEMOVE` for the window while an OLE drag-and-drop is in progress, so
+/// `CursorMoved` can be stale by the time the drop lands. macOS and
+/// X11/Wayland do deliver real pointer motion during drag-hover as ordinary
+/// `CursorMoved` events, so the last one seen is accurate there — this is what
+/// previously left drag-and-drop upload a no-op on every non-Windows platform
+/// (#356).
+#[cfg(windows)]
+fn drop_point(win: &AppWindow, _hovered_pos: Option<(f32, f32)>) -> Option<(f32, f32)> {
+    let w = win.window();
+    let scale = w.scale_factor().max(0.01);
+    let inner = w.with_winit_window(|ww| ww.inner_position().ok()).flatten()?;
+    let (cx, cy) = cursor_pos()?;
+    Some(((cx - inner.x) as f32 / scale, (cy - inner.y) as f32 / scale))
+}
+
+/// `None` when no CursorMoved was ever observed for this drag (e.g. the file
+/// was dropped the instant it entered the window): without a position we
+/// cannot tell which panel it landed on, so the drop is ignored rather than
+/// uploaded to the wrong place.
+#[cfg(not(windows))]
+fn drop_point(_win: &AppWindow, hovered_pos: Option<(f32, f32)>) -> Option<(f32, f32)> {
+    hovered_pos
+}
+
+/// Handle one drop burst of any number of items at the recorded drop point.
+///
+/// Local behaviour kept: drops are accepted over the terminal panel *and* the
+/// docked SFTP panel (#drag-onto-shell, #file-drop-sftp), and session-sync
+/// mirrors each upload to every other online session (#sync). Upstream
+/// behaviour adopted: the whole burst asks its name-conflict question once
+/// (#572), and dropping onto the split view's local pane copies the files into
+/// that local folder instead of uploading them.
+pub(crate) fn handle_file_drop_at(
+    win: &AppWindow,
+    sftp_handles: &SftpHandles,
+    dock_stacks: &Rc<RefCell<DockStacks>>,
+    paths: Vec<std::path::PathBuf>,
+    client_x: f32,
+    client_y: f32,
+) {
+    if paths.is_empty() {
+        return;
+    }
     let active = win.get_active_tab_id().to_string();
     if active == "welcome" {
         return;
     }
-    let w = win.window();
-    let scale = w.scale_factor().max(0.01);
-    let Some(inner) = w.with_winit_window(|ww| ww.inner_position().ok()).flatten() else {
+    // Split view: dropping onto the *local* half copies the files into the
+    // local folder that half is showing instead of uploading them to the
+    // remote one.
+    if let Some((tab, dir)) = sftp_local_pane_hit(win, client_x, client_y) {
+        for path in &paths {
+            copy_into(win, &tab, std::path::PathBuf::from(&dir), path.clone());
+        }
         return;
-    };
-    let Some((cx, cy)) = cursor_pos() else {
-        return;
-    };
-    // Drop point in logical client coordinates.
-    let client_x = (cx - inner.x) as f32 / scale;
-    let client_y = (cy - inner.y) as f32 / scale;
+    }
     // Accept drops anywhere over the whole terminal panel ("shell page") *and*
     // over the docked SFTP panel, so dragging a file onto either uploads it to
     // the session's current directory.
     if file_drop_target(win, dock_stacks, client_x, client_y).is_none() {
         return; // dropped outside both panels — ignore
     }
-    upload_dropped_file(win, sftp_handles, path, &active);
-}
-
-#[cfg(not(windows))]
-pub(crate) fn handle_file_drop(
-    win: &AppWindow,
-    sftp_handles: &SftpHandles,
-    path: std::path::PathBuf,
-    dock_stacks: &Rc<RefCell<DockStacks>>,
-    hovered_pos: Option<(f32, f32)>,
-) {
-    let active = win.get_active_tab_id().to_string();
-    if active == "welcome" {
-        return;
-    }
-    let Some((client_x, client_y)) = hovered_pos else {
-        // No CursorMoved was ever observed for this drag (e.g. the file was
-        // dropped the instant it entered the window). Without a position we
-        // cannot tell which panel it landed on, so do nothing rather than
-        // guess — matches the previous no-op rather than uploading to the
-        // wrong place.
-        return;
-    };
-    // Same target rule as Windows: terminal panel or docked SFTP panel.
-    if file_drop_target(win, dock_stacks, client_x, client_y).is_none() {
-        return; // dropped outside both panels — ignore
-    }
-    upload_dropped_file(win, sftp_handles, path, &active);
-}
-
-/// Shared drop-upload body for both platform front-ends above.
-pub(crate) fn upload_dropped_file(
-    win: &AppWindow,
-    sftp_handles: &SftpHandles,
-    path: std::path::PathBuf,
-    active: &str,
-) {
-    let dir = active_sftp_path(win, active);
+    let dir = active_sftp_path(win, &active);
     if dir.is_empty() {
         return;
     }
@@ -116,25 +153,30 @@ pub(crate) fn upload_dropped_file(
     } else {
         HashMap::new()
     };
-    // The duplicate prompt mirrors the upload button's behaviour; a dropped
-    // folder merges on the worker side, so it never prompts.
-    let dedup = configured_dedup_policy(&win.as_weak());
-    let known = terminal_sftp_entry_names(win, active);
-    let decision = upload_decision(&path, &known, dedup, path.is_dir());
+    // Ask once, for the whole drop, about names that are already taken
+    // remotely (#572). Returns one decision per path; `None` = cancelled.
+    let Some(decisions) = resolve_upload_conflict(win, &active, &paths) else {
+        set_sftp_status(win, &active, t("已取消上传", "Upload cancelled"));
+        return;
+    };
     if let Ok(handles) = sftp_handles.lock() {
         if let Some(h) = handles.get(active) {
             win.set_download_open(true);
-            h.upload(path.clone(), dir, decision);
+            for (path, decision) in paths.iter().zip(decisions) {
+                h.upload(path.clone(), dir.clone(), decision);
+            }
         }
         if sync {
-            // The decision was made against the active tab's listing; mirrors
-            // get their own live check in the worker instead.
+            // The decisions were made against the active tab's listing;
+            // mirrors get their own live check in the worker instead.
             for (id, h) in handles.iter() {
                 if id.as_str() == active {
                     continue;
                 }
                 if let Some(d) = other_dirs.get(id).filter(|d| !d.is_empty()) {
-                    h.upload(path.clone(), d.clone(), UploadDecision::Proceed);
+                    for path in &paths {
+                        h.upload(path.clone(), d.clone(), UploadDecision::Proceed);
+                    }
                 }
             }
         }
@@ -202,4 +244,3 @@ pub(crate) fn update_file_drop_highlight(win: &AppWindow, dock_stacks: &Rc<RefCe
 
 #[cfg(not(windows))]
 pub(crate) fn update_file_drop_highlight(_win: &AppWindow, _dock_stacks: &Rc<RefCell<DockStacks>>) {}
-

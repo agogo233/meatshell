@@ -4,6 +4,17 @@
 
 use super::*;
 
+/// Return the Home sidebar to its icon strip once a connection has opened.
+pub(super) fn collapse_home_after_connect(window: &AppWindow) {
+    if window.get_auto_collapse_home()
+        && window.get_welcome_as_sidebar()
+        && !window.get_welcome_collapsed()
+    {
+        window.set_welcome_collapsed(true);
+        window.invoke_set_welcome_collapsed(true);
+        window.invoke_dock_layout_changed();
+    }
+}
 
 /// Resolve a session's configured SSH jump host to the saved session it points
 /// at, ignoring a missing / dangling / self reference (#211).
@@ -505,6 +516,7 @@ pub(crate) fn refresh_dock_inner(
         w.set_dock_central_y(0.0);
         w.set_dock_central_w(cw);
         w.set_dock_central_h(ch);
+        set_central_insets(&w, [0.0; 4]);
         return;
     }
     let saved = dock_stacks.borrow().clone();
@@ -584,6 +596,31 @@ pub(crate) fn refresh_dock_inner(
     w.set_dock_central_y(geom.central.y);
     w.set_dock_central_w(geom.central.w);
     w.set_dock_central_h(geom.central.h);
+    let edges: Vec<&str> = geom.panels.iter().map(|p| p.edge).collect();
+    set_central_insets(&w, central_insets(&edges));
+}
+
+/// Gap around every floating card: the docked panels draw their card this far
+/// inside their own rect, and the central tab/terminal card keeps the same
+/// distance from the window edges (#560).
+pub(super) const CARD_GAP: f32 = 10.0;
+
+/// Insets of the central card inside the central rect, `[left, top, right,
+/// bottom]`. Next to a docked panel the panel's own inset already makes the
+/// gap, so that side gets none; toward a window edge (or a flush collapsed
+/// tool strip) it gets `CARD_GAP`. `edges` are the docked panels' edges.
+pub(super) fn central_insets(edges: &[&str]) -> [f32; 4] {
+    let gap = |edge: &str| if edges.contains(&edge) { 0.0 } else { CARD_GAP };
+    [gap("left"), gap("top"), gap("right"), gap("bottom")]
+}
+
+/// Published to Slint, which places the card, and read back by the terminal
+/// hit tests, so both always agree on where the panes are.
+fn set_central_insets(w: &AppWindow, [left, top, right, bottom]: [f32; 4]) {
+    w.set_central_inset_left(left);
+    w.set_central_inset_top(top);
+    w.set_central_inset_right(right);
+    w.set_central_inset_bottom(bottom);
 }
 
 /// Hit-test a drag point (pane-area coords) to a target pane + drop zone, plus

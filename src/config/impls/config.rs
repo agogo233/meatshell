@@ -2467,6 +2467,14 @@ impl ConfigStore {
         self.cache.window_scale = s;
     }
 
+    pub fn auto_collapse_home(&self) -> bool {
+        self.cache.auto_collapse_home
+    }
+
+    pub fn set_auto_collapse_home(&mut self, v: bool) {
+        self.cache.auto_collapse_home = v;
+    }
+
     /// Collapse the SFTP panel on startup (default false) (#78).
     pub fn collapse_sftp_default(&self) -> bool {
         self.cache.collapse_sftp_default

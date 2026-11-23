@@ -124,7 +124,7 @@ export component QuickDockPanel inherits Rectangle {
     // without committing a move.
     callback dock-drag-cancelled();
 
-    background: Theme.bg-panel;
+    background: Theme.card-bg;
     border-width: 1px;
     border-color: Theme.border-subtle;
     clip: true;
@@ -700,6 +700,7 @@ export component TerminalView inherits Rectangle {
     callback sftp-delete(string);
     in property <int> sftp-selected-count;          // checked-entry count (#100)
     callback sftp-toggle-select(int);               // toggle a row's checkbox (#100)
+    callback sftp-check-all(bool);                  // check / clear every row (#566)
     callback sftp-select-range(int, int);           // Shift+click range select
     // Path bookmarks + recent folders (#500).
     in property <[string]> sftp-recent;
@@ -747,6 +748,7 @@ export component TerminalView inherits Rectangle {
         callback sftp-local-refresh();
         callback sftp-local-open(string);
         callback sftp-local-toggle-select(int);
+        callback sftp-local-check-all(bool);
         callback sftp-local-select-range(int, int);
         callback sftp-local-copy-path(string);
         callback sftp-local-upload(string);

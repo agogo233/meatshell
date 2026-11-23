@@ -982,6 +982,8 @@ export component AppWindow inherits Window {
     // Welcome sidebar collapsed to the edge icon strip (IDEA-style), persisted.
     in-out property <bool> welcome-collapsed: false;
     callback set-welcome-collapsed(bool);          // apply + persist
+    in-out property <bool> auto-collapse-home: false;
+    callback set-auto-collapse-home(bool);
     in-out property <bool> collapse-sftp-default: false;
     callback set-collapse-sftp-default(bool);      // apply + persist
     in-out property <bool> sftp-collapsed: false;       // (legacy global; per-tab now)
@@ -1271,9 +1273,6 @@ export component AppWindow inherits Window {
     property <length> dock-right-gap: root.width - root.dock-central-x - root.dock-central-w;
     property <length> dock-top-gap: root.dock-central-y;
     property <length> dock-bottom-gap: root.height - root.dock-central-y - root.dock-central-h;
-    callback stack-split-drag(string /* edge */, int /* index */, float /* pos */,
-                              float /* axis-start */, float /* axis-len */);
-    callback stack-split-done();
     // OS file drag-in target highlight (Windows): Rust reports the hovered
     // drop target in dock-area coordinates while a file drag is in flight,
     // and clears it when the drop lands or the drag leaves the window.
@@ -1282,6 +1281,17 @@ export component AppWindow inherits Window {
     in property <length> file-drop-hl-y: 0px;
     in property <length> file-drop-hl-w: 0px;
     in property <length> file-drop-hl-h: 0px;
+    // The tab/terminal area is a floating card like the docked panels (#560):
+    // inset from the central rect toward window edges, flush where a docked
+    // panel's own inset already makes the gap. Set by Rust (panes.rs), which
+    // also uses them to hit-test the terminals.
+    in-out property <length> central-inset-left: 10px;
+    in-out property <length> central-inset-top: 10px;
+    in-out property <length> central-inset-right: 10px;
+    in-out property <length> central-inset-bottom: 10px;
+    callback stack-split-drag(string /* edge */, int /* index */, float /* pos */,
+                              float /* axis-start */, float /* axis-len */);
+    callback stack-split-done();
     // Reports the real dock-area size (window minus title bar): the Rust dock
     // engine must measure in THIS frame, not the window frame, or every panel
     // sits ~43px too low at the bottom edge (#dock-stack).
@@ -1575,6 +1585,7 @@ export component AppWindow inherits Window {
     callback sftp-tree-expand(string /* tab-id */, string /* path */);
     callback sftp-delete(string /* tab-id */, string /* path */);
     callback sftp-toggle-select(string /* tab-id */, int /* row */);   // (#100)
+    callback sftp-check-all(string /* tab-id */, bool /* check */);    // (#566)
     callback sftp-select-range(string /* tab-id */, int /* from */, int /* to */); // Shift+click
     callback sftp-select-single(string /* tab-id */, int /* row */);  // row click selects only this entry
     // SFTP path bookmarks + recent folders (#500), stored per session.
@@ -1626,6 +1637,7 @@ export component AppWindow inherits Window {
     callback sftp-local-refresh(string /* tab-id */);
     callback sftp-local-open(string /* tab-id */, string /* local-path */);  // OS default app
     callback sftp-local-toggle-select(string /* tab-id */, int /* row */);
+    callback sftp-local-check-all(string /* tab-id */, bool /* check */);
     callback sftp-local-select-range(string /* tab-id */, int /* from */, int /* to */);
     callback sftp-local-select-single(string /* tab-id */, int /* row */);
     callback sftp-local-copy-path(string /* local-path */);
@@ -2601,6 +2613,17 @@ export component AppWindow inherits Window {
                     - (!parent.quick-horizontal ? parent.quick-h + parent.quick-sp : 0px)
                     - (!parent.ai-horizontal ? parent.ai-h + parent.ai-sp : 0px);
                 clip: true;
+                // The central card (#560): rounded and outlined like the docked
+                // panels' cards, the same 10px from the window edges, so every
+                // top edge lines up. Zen mode / terminal fullscreen keep the
+                // terminal edge to edge (Rust sets the insets to 0 there).
+                central-card := Rectangle {
+                    x: root.central-inset-left;
+                    y: root.central-inset-top;
+                    width: parent.width - root.central-inset-left - root.central-inset-right;
+                    height: parent.height - root.central-inset-top - root.central-inset-bottom;
+                    border-radius: root.hide-panels ? 0px : Theme.radius-md;
+                    clip: true;
                 // Split-pane area (v0.5): panes tile this rect; each pane has its own
                 // tab strip + active terminal / welcome. Rust flattens the split tree
                 // into `panes` for the size we report here.
@@ -2709,18 +2732,12 @@ export component AppWindow inherits Window {
                     }
 
                     // Welcome-sidebar layout with nothing open: recent
-                    // connections float over the wallpaper, centred in the
-                    // area and scaled with it (1.0 up to ~900×700, at most
-                    // 1.3× on large windows). A short area shows fewer rows.
+                    // connections fill the empty area, as many rows as fit.
                     if pane.tabs.length == 0 && root.welcome-as-sidebar
                         && root.recent-sessions.length > 0 : RecentsCard {
-                        property <length> margin: 24px;
-                        property <int> fit-rows: floor((parent.height - 2 * self.margin
-                            - self.chrome-height) / self.row-height);
-                        max-rows: max(1, min(6, self.fit-rows));
-                        width: min(400px, parent.width - 2 * self.margin);
-                        x: (parent.width - self.width) / 2;
-                        y: max(self.margin, (parent.height - self.height) / 2);
+                        width: parent.width;
+                        height: parent.height;
+                        max-rows: max(1, floor((parent.height - self.chrome-height) / self.row-height));
                         items: root.recent-sessions;
                         connect(id) => { root.connect-session(id); }
                         remove(id) => { root.remove-recent(id); }
@@ -2975,6 +2992,7 @@ export component AppWindow inherits Window {
                         sftp-refresh(path) => { root.sftp-refresh(term.id, path); }
                         sftp-tree-expand(path) => { root.sftp-tree-expand(term.id, path); }
                         sftp-toggle-select(i) => { root.sftp-toggle-select(term.id, i); }
+                        sftp-check-all(on) => { root.sftp-check-all(term.id, on); }
                         sftp-select-range(a, b) => { root.sftp-select-range(term.id, a, b); }
                         sftp-bookmarks: term.sftp-bookmarks;
                         sftp-recent: term.sftp-recent;
@@ -3034,6 +3052,7 @@ export component AppWindow inherits Window {
                         sftp-local-refresh() => { root.sftp-local-refresh(term.id); }
                         sftp-local-open(path) => { root.sftp-local-open(term.id, path); }
                         sftp-local-toggle-select(i) => { root.sftp-local-toggle-select(term.id, i); }
+                        sftp-local-check-all(on) => { root.sftp-local-check-all(term.id, on); }
                         sftp-local-select-range(a, b) => { root.sftp-local-select-range(term.id, a, b); }
                         sftp-local-copy-path(path) => { root.sftp-local-copy-path(path); }
                         sftp-local-upload(path) => { root.sftp-local-upload(term.id, path); }
@@ -3172,6 +3191,14 @@ export component AppWindow inherits Window {
                     border-width: 2px;
                     border-color: Theme.accent;
                     border-radius: Theme.radius-sm;
+                }
+                }
+                // The card's hairline, drawn over the panes so a terminal's own
+                // background cannot cover it.
+                if !root.hide-panels : Rectangle {
+                    border-radius: Theme.radius-md;
+                    border-width: 1px;
+                    border-color: Theme.border-subtle;
                 }
                 }
             }
@@ -3366,7 +3393,10 @@ export component AppWindow inherits Window {
                 width: gp.w;
                 height: gp.h;
                 clip: true;
-                background: Theme.bg-panel;
+                // No fill of its own: each panel draws a card inset 10px inside
+                // this rect, so the gaps around it show the window like the
+                // gaps around the central card (#560).
+                background: transparent;
 
                 if gp.kind == "sidebar" : Sidebar {
                     width: parent.width;
@@ -3495,8 +3525,12 @@ export component AppWindow inherits Window {
                     remove-session(id) => { root.remove-session(id); }
                 }
                 if gp.kind == "quick" : QuickDockPanel {
-                    width: parent.width;
-                    height: parent.height;
+                    // Inset card, like the resource and session panels (#560).
+                    x: 10px;
+                    y: 10px;
+                    width: parent.width - 20px;
+                    height: parent.height - 20px;
+                    border-radius: Theme.radius-md;
                     commands: root.quick-commands;
                     dock-edge: gp.edge;
                     activate(command, send-enter) => {
@@ -3652,7 +3686,8 @@ export component AppWindow inherits Window {
                     local-open(path)       => { root.sftp-local-open(root.sftp-current-tab-id, path); }
                     local-toggle-select(i) => { root.sftp-local-toggle-select(root.sftp-current-tab-id, i); }
                     local-select-range(a, b) => { root.sftp-local-select-range(root.sftp-current-tab-id, a, b); }
-                    local-select-single(i) => { root.sftp-local-select-single(root.sftp-current-tab-id, i); }
+                     local-select-single(i) => { root.sftp-local-select-single(root.sftp-current-tab-id, i); }
+                     local-check-all(on) => { root.sftp-local-check-all(root.sftp-current-tab-id, on); }
                     local-copy-path(path)  => { root.sftp-local-copy-path(path); }
                     local-upload(path)     => { root.sftp-local-upload(root.sftp-current-tab-id, path); }
                     local-upload-selected() => { root.sftp-local-upload-selected(root.sftp-current-tab-id); }
@@ -3709,7 +3744,8 @@ export component AppWindow inherits Window {
                     tree-expand(path) => { root.sftp-tree-expand(root.sftp-current-tab-id, path); }
                     toggle-select(i) => { root.sftp-toggle-select(root.sftp-current-tab-id, i); }
                     select-range(a, b) => { root.sftp-select-range(root.sftp-current-tab-id, a, b); }
-                    select-single(i) => { root.sftp-select-single(root.sftp-current-tab-id, i); }
+                     select-single(i) => { root.sftp-select-single(root.sftp-current-tab-id, i); }
+                     check-all(on) => { root.sftp-check-all(root.sftp-current-tab-id, on); }
                     paste-upload(dir) => { root.sftp-paste-upload(root.sftp-current-tab-id, dir); }
                     match-shortcut(text, control, meta, alt, shift) => {
                         root.match-shortcut(text, control, meta, alt, shift, false);
@@ -3792,7 +3828,8 @@ export component AppWindow inherits Window {
                     // half of the grab area and leave a 2px target.
                     x: parent.width - 4px; y: 0px;
                     width: 4px; height: parent.height;
-                    background: rr-l.has-hover ? Theme.accent : Theme.border-subtle;
+                    // Invisible until hovered: the 10px gap is the separation (#560).
+                    background: rr-l.has-hover || rr-l.pressed ? Theme.accent : transparent;
                     rr-l := TouchArea {
                         mouse-cursor: ew-resize;
                         moved => {
@@ -3807,7 +3844,8 @@ export component AppWindow inherits Window {
                 if gp.edge == "right" : Rectangle {
                     x: 0px; y: 0px;
                     width: 4px; height: parent.height;
-                    background: rr-r.has-hover ? Theme.accent : Theme.border-subtle;
+                    // Invisible until hovered: the 10px gap is the separation (#560).
+                    background: rr-r.has-hover || rr-r.pressed ? Theme.accent : transparent;
                     rr-r := TouchArea {
                         mouse-cursor: ew-resize;
                         moved => {
@@ -3824,7 +3862,8 @@ export component AppWindow inherits Window {
                     // Same reasoning as the left edge: keep the whole 4px inside.
                     x: 0px; y: parent.height - 4px;
                     width: parent.width; height: 4px;
-                    background: rr-t.has-hover ? Theme.accent : Theme.border-subtle;
+                    // Invisible until hovered: the 10px gap is the separation (#560).
+                    background: rr-t.has-hover || rr-t.pressed ? Theme.accent : transparent;
                     rr-t := TouchArea {
                         mouse-cursor: ns-resize;
                         moved => {
@@ -3839,7 +3878,8 @@ export component AppWindow inherits Window {
                 if gp.edge == "bottom" : Rectangle {
                     x: 0px; y: 0px;
                     width: parent.width; height: 4px;
-                    background: rr-b.has-hover ? Theme.accent : Theme.border-subtle;
+                    // Invisible until hovered: the 10px gap is the separation (#560).
+                    background: rr-b.has-hover || rr-b.pressed ? Theme.accent : transparent;
                     rr-b := TouchArea {
                         mouse-cursor: ns-resize;
                         moved => {
@@ -3862,7 +3902,7 @@ export component AppWindow inherits Window {
                 y: dd.y;
                 width: dd.w;
                 height: dd.h;
-                background: dd-ta.pressed ? Theme.accent : Theme.border-strong;
+                background: dd-ta.pressed ? Theme.accent : (dd-ta.has-hover ? Theme.border-strong : transparent);
                 animate background { duration: 100ms; }
                 dd-ta := TouchArea {
                     x: dd.vertical ? 0px : -5px;
@@ -6329,6 +6369,8 @@ export component AppWindow inherits Window {
                     external-editor-args <=> root.external-editor-args;
                     is-mac: root.is-mac;
                     collapse-sidebar-default <=> root.collapse-sidebar-default;
+                    auto-collapse-home <=> root.auto-collapse-home;
+                    set-auto-collapse-home(v) => { root.set-auto-collapse-home(v); }
                     collapse-sftp-default <=> root.collapse-sftp-default;
                     sync-upload-enabled <=> root.sync-upload-enabled;
                     webdav-enabled <=> root.webdav-enabled;
