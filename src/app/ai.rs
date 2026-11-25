@@ -72,8 +72,8 @@ const AI_AGENT_TOOLS: &[&str] = &[
     "download_file",
 ];
 
-const AGENT_SUFFIX_ZH: &str = "\n\n你还可以调用工具直接操作用户的服务器：查询会话、执行命令、浏览/读取远端文件、上传/下载。规则：先简述要做什么，再调用工具；一步一步来，根据结果调整；执行命令、上传、下载等改动性操作会先请求用户确认，被拒绝时不要重试同一操作；绝不编造工具结果。";
-const AGENT_SUFFIX_EN: &str = "\n\nYou can also call tools to operate on the user's servers: list sessions, run commands, browse/read remote files, upload/download. Rules: briefly say what you will do, then call the tool; work step by step and adapt to results; state-changing calls (run_command, upload_file, download_file) ask the user for approval first — if denied, do not retry the same operation; never fabricate tool results.";
+const AGENT_SUFFIX_ZH: &str = "\n\n你还可以调用工具直接操作用户的服务器：查询会话、执行命令、浏览/读取远端文件、上传/下载。规则：先简述要做什么，再调用工具；调用会话相关工具前，先用 list_sessions 查询会话，把返回的 id 作为 session_id 传入；一步一步来，根据结果调整；执行命令、上传、下载等改动性操作会先请求用户确认，被拒绝时不要重试同一操作；绝不编造工具结果。";
+const AGENT_SUFFIX_EN: &str = "\n\nYou can also call tools to operate on the user's servers: list sessions, run commands, browse/read remote files, upload/download. Rules: briefly say what you will do, then call the tool; before any session-scoped tool, list sessions with list_sessions and pass one returned id as session_id; work step by step and adapt to results; state-changing calls (run_command, upload_file, download_file) ask the user for approval first — if denied, do not retry the same operation; never fabricate tool results.";
 
 const SYSTEM_PROMPT_ZH: &str = "你是一个 SSH 终端客户端里的 AI 助手。用户可能粘贴终端输出或命令行内容。请用简洁的 Markdown 回答：先给结论，再给解释；涉及命令时给出可直接复制的命令。";
 const SYSTEM_PROMPT_EN: &str = "You are an AI assistant inside an SSH terminal client. Users may paste terminal output or shell commands. Answer concisely in Markdown: conclusion first, then explanation; when commands are involved, provide copy-pasteable commands.";
@@ -304,6 +304,21 @@ fn agent_tools_json() -> Option<serde_json::Value> {
         }
         if let Some(required) = schema["required"].as_array_mut() {
             required.retain(|key| key.as_str() != Some("saved_session_id"));
+        }
+        // The alias is hidden from the model, so `session_id` is simply
+        // required again. Restate it (and drop the alias wording) so weak
+        // models keep passing the argument instead of dropping it.
+        if schema["properties"]["session_id"].is_object() {
+            if let Some(required) = schema["required"].as_array_mut() {
+                if !required.iter().any(|key| key.as_str() == Some("session_id")) {
+                    required.push(serde_json::json!("session_id"));
+                }
+            } else {
+                schema["required"] = serde_json::json!(["session_id"]);
+            }
+            schema["properties"]["session_id"]["description"] = serde_json::json!(
+                "Required. ID of a saved session, as returned by list_sessions."
+            );
         }
         tools.push(serde_json::json!({
             "type": "function",

@@ -454,16 +454,21 @@ fn session_id_arg(arguments: &Value) -> Result<&str> {
 
 /// Error for a missing required argument. Lists the argument *names* that did
 /// arrive (never values) so a client or bridge that renames or drops keys is
-/// diagnosable from the error alone.
+/// diagnosable from the error alone. Session tools also get a self-correction
+/// hint, so an agent that dropped `session_id` can recover on the next call.
 fn missing_argument(arguments: &Value, key: &str) -> anyhow::Error {
     let received: Vec<&str> = arguments
         .as_object()
         .map(|object| object.keys().map(String::as_str).collect())
         .unwrap_or_default();
-    anyhow!(
+    let mut message = format!(
         "missing or invalid string argument: {key} (received argument keys: [{}])",
         received.join(", ")
-    )
+    );
+    if key == "session_id" {
+        message.push_str("; call list_sessions first to obtain valid session ids");
+    }
+    anyhow!(message)
 }
 
 fn timeout_arg(arguments: &Value, default_seconds: u64) -> Result<Duration> {
