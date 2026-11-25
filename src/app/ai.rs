@@ -414,7 +414,7 @@ fn execute_automation_tool(
 /// Push one tool-call card row into the conversation model.
 fn push_tool_card(
     weak: &slint::Weak<AppWindow>,
-    generation: &Arc<AtomicU64>,
+    generation: Arc<AtomicU64>,
     my_gen: u64,
     name: &str,
     summary: &str,
@@ -442,7 +442,7 @@ fn push_tool_card(
 /// `note` keeps the current detail text.
 fn set_last_tool_card(
     weak: &slint::Weak<AppWindow>,
-    generation: &Arc<AtomicU64>,
+    generation: Arc<AtomicU64>,
     my_gen: u64,
     status: &str,
     note: &str,
@@ -473,7 +473,7 @@ fn set_last_tool_card(
 /// tool round without any closing text).
 fn drop_trailing_blank_assistant(
     weak: &slint::Weak<AppWindow>,
-    generation: &Arc<AtomicU64>,
+    generation: Arc<AtomicU64>,
     my_gen: u64,
 ) {
     let _ = weak.upgrade_in_event_loop(move |w| {
@@ -499,7 +499,7 @@ fn drop_trailing_blank_assistant(
 /// placeholder to land in (the trailing row is a tool card after a round).
 fn push_assistant_placeholder(
     weak: &slint::Weak<AppWindow>,
-    generation: &Arc<AtomicU64>,
+    generation: Arc<AtomicU64>,
     my_gen: u64,
 ) {
     let _ = weak.upgrade_in_event_loop(move |w| {
@@ -533,7 +533,7 @@ enum ApprovalDecision {
 fn request_approval(
     weak: &slint::Weak<AppWindow>,
     slot: &Arc<Mutex<Option<mpsc::Sender<bool>>>>,
-    generation: &Arc<AtomicU64>,
+    generation: Arc<AtomicU64>,
     my_gen: u64,
     summary: &str,
     cancel: &Arc<AtomicBool>,
@@ -541,6 +541,7 @@ fn request_approval(
     let (tx, rx) = mpsc::channel::<bool>();
     {
         let slot = slot.clone();
+        let generation = generation.clone();
         let summary = summary.to_string();
         let _ = weak.upgrade_in_event_loop(move |w| {
             if generation.load(Ordering::Relaxed) != my_gen {
@@ -569,6 +570,7 @@ fn request_approval(
     };
     {
         let slot = slot.clone();
+        let generation = generation.clone();
         let _ = weak.upgrade_in_event_loop(move |w| {
             if generation.load(Ordering::Relaxed) != my_gen {
                 return;
@@ -629,7 +631,7 @@ fn stream_chat(
         other => other,
     };
     if matches!(outcome, AiTurnOutcome::Done) {
-        drop_trailing_blank_assistant(&weak, &generation, my_gen);
+        drop_trailing_blank_assistant(&weak, generation.clone(), my_gen);
     }
     finish_stream(
         &weak,
@@ -903,7 +905,7 @@ fn run_agent_turn(
                     };
                     failing = Some((call.name.clone(), streak));
                     let note = format!("{}: {}", t("参数解析失败", "invalid tool arguments"), err);
-                    push_tool_card(&weak, &generation, my_gen, &call.name, &note, "error");
+                    push_tool_card(&weak, generation.clone(), my_gen, &call.name, &note, "error");
                     messages.push(serde_json::json!({
                         "role": "tool",
                         "tool_call_id": call.id,
@@ -925,7 +927,7 @@ fn run_agent_turn(
             }
 
             let summary = tool_summary(&call.name, &args);
-            push_tool_card(&weak, &generation, my_gen, &call.name, &summary, "running");
+            push_tool_card(&weak, generation.clone(), my_gen, &call.name, &summary, "running");
 
             // Approval gate: state-changing calls and sensitive-file reads.
             let gated = matches!(
@@ -939,8 +941,14 @@ fn run_agent_turn(
                 } else {
                     format!("{} · {}", call.name, summary)
                 };
-                match request_approval(&weak, &approval_slot, &generation, my_gen, &ask, &cancel)
-                {
+                match request_approval(
+                    &weak,
+                    &approval_slot,
+                    generation.clone(),
+                    my_gen,
+                    &ask,
+                    &cancel,
+                ) {
                     ApprovalDecision::Approved => {}
                     ApprovalDecision::Cancelled => {
                         aborted = true;
@@ -949,7 +957,7 @@ fn run_agent_turn(
                     ApprovalDecision::Denied => {
                         set_last_tool_card(
                             &weak,
-                            &generation,
+                            generation.clone(),
                             my_gen,
                             "denied",
                             &t("已拒绝或确认超时", "denied or approval timed out"),
@@ -969,7 +977,7 @@ fn run_agent_turn(
                 Ok(_) => {
                     failing = None;
                     // Keep the call summary as the card detail on success.
-                    set_last_tool_card(&weak, &generation, my_gen, "ok", "");
+                    set_last_tool_card(&weak, generation.clone(), my_gen, "ok", "");
                 }
                 Err(err) => {
                     let streak = match &failing {
@@ -977,7 +985,7 @@ fn run_agent_turn(
                         _ => 1,
                     };
                     failing = Some((call.name.clone(), streak));
-                    set_last_tool_card(&weak, &generation, my_gen, "error", err);
+                    set_last_tool_card(&weak, generation.clone(), my_gen, "error", err);
                 }
             }
             let tool_content = match result {
@@ -997,7 +1005,7 @@ fn run_agent_turn(
         }
         // Circuit breaker: the same tool failing three times in a row stops
         // the loop instead of letting the model spin.
-        if failing.map_or(false, |(_, count)| count >= 3) {
+        if failing.as_ref().map_or(false, |(_, count)| *count >= 3) {
             outcome = AiTurnOutcome::Error(t(
                 "工具连续失败，已停止",
                 "tool kept failing; stopped",
@@ -1005,11 +1013,11 @@ fn run_agent_turn(
             break;
         }
         // Fresh placeholder so the next streamed segment has a row to land in.
-        push_assistant_placeholder(&weak, &generation, my_gen);
+        push_assistant_placeholder(&weak, generation.clone(), my_gen);
     }
 
     if matches!(outcome, AiTurnOutcome::Done) {
-        drop_trailing_blank_assistant(&weak, &generation, my_gen);
+        drop_trailing_blank_assistant(&weak, generation.clone(), my_gen);
     }
     finish_stream(
         &weak,
