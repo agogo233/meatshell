@@ -110,6 +110,14 @@ mod client_config_tests {
     }
 }
 
+/// JSON schemas of the gated automation tools, shared by the protocol
+/// adapters (stdio / HTTP) and the in-app AI agent loop so both advertise
+/// exactly the same surface.
+#[cfg_attr(feature = "headless", allow(dead_code))]
+pub(crate) fn tool_definitions() -> serde_json::Value {
+    tools::definitions()
+}
+
 pub(crate) fn run(args: &[String]) -> anyhow::Result<()> {
     if let Some(index) = args.iter().position(|arg| arg == "--http-config") {
         anyhow::ensure!(index + 2 == args.len(), "--http-config requires one config path and must be last");

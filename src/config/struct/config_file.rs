@@ -127,6 +127,12 @@ pub(crate) fn default_ai_panel_width() -> f32 {
     320.0
 }
 
+/// AI agent mode asks before every state-changing tool call by default
+/// (fail-safe: the user confirms what the AI does to their servers).
+pub(crate) fn default_ai_require_tool_approval() -> bool {
+    true
+}
+
 pub(crate) fn default_ai_panel_height() -> f32 {
     420.0
 }
@@ -547,6 +553,17 @@ pub struct ConfigFile {
     pub ai_panel_height: f32,
     #[serde(default)]
     pub ai_panel_dock: String,
+    /// AI agent mode: the chat panel may call the same permission-gated
+    /// SSH/SFTP tools the MCP server exposes (run_command, SFTP browse /
+    /// read / upload / download). Master switch only — every call still goes
+    /// through the automation permission gates. Default off.
+    #[serde(default)]
+    pub ai_agent_enabled: bool,
+    /// Ask in the chat panel before every state-changing tool call
+    /// (run_command / upload_file / download_file) and before reading
+    /// sensitive remote files. Default on.
+    #[serde(default = "default_ai_require_tool_approval")]
+    pub ai_require_tool_approval: bool,
     /// Per-edge stacks of simultaneously-expanded docked panels (#dock-stack),
     /// e.g. session list + Quick shared on the left edge, split vertically.
     /// Empty (or <2 slots on a valid edge) → the legacy single-panel-per-edge

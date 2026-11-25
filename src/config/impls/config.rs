@@ -2616,6 +2616,25 @@ impl ConfigStore {
         self.cache.ai_panel_dock = dock;
     }
 
+    /// AI agent mode master switch (chat panel may call gated SSH/SFTP tools).
+    pub fn ai_agent_enabled(&self) -> bool {
+        self.cache.ai_agent_enabled
+    }
+
+    pub fn set_ai_agent_enabled(&mut self, enabled: bool) {
+        self.cache.ai_agent_enabled = enabled;
+    }
+
+    /// Whether state-changing AI tool calls (and sensitive reads) prompt the
+    /// user in the chat panel before executing.
+    pub fn ai_require_tool_approval(&self) -> bool {
+        self.cache.ai_require_tool_approval
+    }
+
+    pub fn set_ai_require_tool_approval(&mut self, required: bool) {
+        self.cache.ai_require_tool_approval = required;
+    }
+
     /// Per-edge stacks of simultaneously-expanded docked panels (#dock-stack).
     /// The stored value is sanitised (unknown kinds dropped, repeated kinds
     /// collapsed, ratios renormalised to sum to 1) before it is handed out.

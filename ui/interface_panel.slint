@@ -800,6 +800,8 @@ export component InterfacePanel inherits Rectangle {
     in-out property <string> ai-api-key;
     in-out property <string> ai-model;
     in-out property <bool> ai-panel-enabled: false;
+    in-out property <bool> ai-agent-enabled: false;
+    in-out property <bool> ai-require-tool-approval: true;
     in property <[string]> ai-discovered-models;
     in property <string> ai-discover-state;   // "" | "busy" | "ok" | "error"
     in property <string> ai-discover-error;
@@ -937,6 +939,7 @@ export component InterfacePanel inherits Rectangle {
     callback save-ai-settings(string /* base-url */, string /* api-key */, string /* model */);
     callback discover-ai-models(string /* base-url */, string /* api-key */);
     callback set-ai-panel-enabled(bool);
+    callback set-ai-agent-settings(bool /* agent-enabled */, bool /* require-approval */);
     callback set-download-always-ask(bool);
     callback set-session-log-enabled(bool);
     callback pick-session-log-dir();
@@ -3009,6 +3012,32 @@ export component InterfacePanel inherits Rectangle {
                     Switch {
                         on: root.ai-panel-enabled;
                         toggled(v) => { root.set-ai-panel-enabled(v); }
+                    }
+                }
+                SettingRow {
+                    label: root.lang-en ? "AI tools (agent mode)" : "AI 工具（Agent 模式）";
+                    desc: root.lang-en
+                        ? "Let the AI assistant run commands and transfer files on saved SSH sessions, through the same permission gates as MCP. Chat content and tool results are sent to the configured AI service."
+                        : "允许 AI 助手在已保存的 SSH 会话上执行命令与传输文件，走与 MCP 相同的权限门控。注意：对话内容与工具结果会发送给所配置的 AI 服务。";
+                    Switch {
+                        on: root.ai-agent-enabled;
+                        toggled(v) => {
+                            root.ai-agent-enabled = v;
+                            root.set-ai-agent-settings(root.ai-agent-enabled, root.ai-require-tool-approval);
+                        }
+                    }
+                }
+                if root.ai-agent-enabled : SettingRow {
+                    label: root.lang-en ? "Confirm before executing" : "执行前需要确认";
+                    desc: root.lang-en
+                        ? "Ask in the panel before every command / file transfer and before reading sensitive files (recommended)."
+                        : "每次执行命令、传输文件以及读取敏感文件前，先在对话面板中确认（建议开启）。";
+                    Switch {
+                        on: root.ai-require-tool-approval;
+                        toggled(v) => {
+                            root.ai-require-tool-approval = v;
+                            root.set-ai-agent-settings(root.ai-agent-enabled, root.ai-require-tool-approval);
+                        }
                     }
                 }
                 LabeledInput {

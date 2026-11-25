@@ -1139,6 +1139,13 @@ export component AppWindow inherits Window {
     in-out property <string> ai-api-key;
     in-out property <string> ai-model;
     in-out property <bool> ai-panel-enabled: false;
+    // Agent mode: the chat panel may call gated SSH/SFTP tools.
+    in-out property <bool> ai-agent-enabled: false;
+    in-out property <bool> ai-require-tool-approval: true;
+    in-out property <bool> ai-awaiting-approval: false;
+    in-out property <string> ai-pending-tool-summary;
+    callback ai-tool-decision(bool /* allowed */);
+    callback set-ai-agent-settings(bool /* agent-enabled */, bool /* require-approval */);
     callback send-ai-message(string);
     callback stop-ai-message();
     callback clear-ai-messages();
@@ -3304,6 +3311,10 @@ export component AppWindow inherits Window {
                 messages: root.ai-messages;
                 busy: root.ai-busy;
                 dock-edge: root.ai-panel-dock;
+                lang-en: root.lang-en;
+                awaiting: root.ai-awaiting-approval;
+                pending-tool-summary: root.ai-pending-tool-summary;
+                tool-decision(v) => { root.ai-tool-decision(v); }
                 draft <=> root.ai-draft;
                 draft-revision: root.ai-draft-revision;
                 send => { root.send-ai-message(root.ai-draft); }
@@ -3582,6 +3593,10 @@ export component AppWindow inherits Window {
                     messages: root.ai-messages;
                     busy: root.ai-busy;
                     dock-edge: gp.edge;
+                    lang-en: root.lang-en;
+                    awaiting: root.ai-awaiting-approval;
+                    pending-tool-summary: root.ai-pending-tool-summary;
+                    tool-decision(v) => { root.ai-tool-decision(v); }
                     draft <=> root.ai-draft;
                     draft-revision: root.ai-draft-revision;
                     send => { root.send-ai-message(root.ai-draft); }
@@ -6519,6 +6534,11 @@ export component AppWindow inherits Window {
                     }
                     discover-ai-models(base-url, api-key) => {
                         root.discover-ai-models(base-url, api-key);
+                    }
+                    ai-agent-enabled <=> root.ai-agent-enabled;
+                    ai-require-tool-approval <=> root.ai-require-tool-approval;
+                    set-ai-agent-settings(enabled, confirm) => {
+                        root.set-ai-agent-settings(enabled, confirm);
                     }
                     set-ai-panel-enabled(v) => {
                         // The settings toggle doubles as the panel's open/close:

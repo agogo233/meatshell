@@ -20,10 +20,14 @@ use std::cell::RefCell;
 use std::io::{BufRead, Read};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use super::*;
+use crate::automation::{call as automation_call, Frontend};
 use crate::i18n::t;
+use crate::resource::TabStatuses;
 
 use regex::Regex;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
@@ -43,6 +47,33 @@ const AI_STREAM_READ_TIMEOUT: Duration = Duration::from_secs(120);
 /// a stall; a server that drips one byte at a time would never trip it.
 const AI_STREAM_TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
 const AI_MODELS_READ_TIMEOUT: Duration = Duration::from_secs(15);
+
+// ── Agent mode (chat panel → gated SSH/SFTP tools) ───────────────────────
+
+/// Max tool-call rounds per user message before the loop is stopped.
+const AI_AGENT_MAX_ROUNDS: usize = 8;
+/// Hard wall-clock budget for one agent turn (streaming + tool execution).
+const AI_AGENT_DEADLINE: Duration = Duration::from_secs(600);
+/// Cap on one tool result handed back to the model. Tools already bound their
+/// own raw output; this keeps the chat context small.
+const AI_TOOL_RESULT_CAP_BYTES: usize = 64 * 1024;
+/// How long the user has to answer an approval request before it counts as a
+/// denial.
+const AI_APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
+/// Tools the chat panel may call. `import_sessions` is deliberately not
+/// offered (config import stays a CLI / MCP-server operation).
+const AI_AGENT_TOOLS: &[&str] = &[
+    "list_sessions",
+    "get_session",
+    "run_command",
+    "list_remote_files",
+    "read_remote_text_file",
+    "upload_file",
+    "download_file",
+];
+
+const AGENT_SUFFIX_ZH: &str = "\n\n你还可以调用工具直接操作用户的服务器：查询会话、执行命令、浏览/读取远端文件、上传/下载。规则：先简述要做什么，再调用工具；一步一步来，根据结果调整；执行命令、上传、下载等改动性操作会先请求用户确认，被拒绝时不要重试同一操作；绝不编造工具结果。";
+const AGENT_SUFFIX_EN: &str = "\n\nYou can also call tools to operate on the user's servers: list sessions, run commands, browse/read remote files, upload/download. Rules: briefly say what you will do, then call the tool; work step by step and adapt to results; state-changing calls (run_command, upload_file, download_file) ask the user for approval first — if denied, do not retry the same operation; never fabricate tool results.";
 
 const SYSTEM_PROMPT_ZH: &str = "你是一个 SSH 终端客户端里的 AI 助手。用户可能粘贴终端输出或命令行内容。请用简洁的 Markdown 回答：先给结论，再给解释；涉及命令时给出可直接复制的命令。";
 const SYSTEM_PROMPT_EN: &str = "You are an AI assistant inside an SSH terminal client. Users may paste terminal output or shell commands. Answer concisely in Markdown: conclusion first, then explanation; when commands are involved, provide copy-pasteable commands.";
@@ -159,6 +190,8 @@ fn push_ai_message(window: &AppWindow, role: &str, content: &str) {
         vm.push(AiMessage {
             role: role.into(),
             content: content.into(),
+            tool_name: "".into(),
+            tool_status: "".into(),
         });
     });
 }
@@ -230,6 +263,339 @@ fn flush_delta(
     });
 }
 
+// ── Agent mode: tool schemas, cards, approvals, execution ────────────────
+
+/// One tool call aggregated from a streamed `delta.tool_calls` sequence.
+struct AiToolCall {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+/// Outcome of one streamed chat request.
+enum AiTurnOutcome {
+    /// Plain reply finished (already streamed into the assistant row).
+    Done,
+    /// The model requests tool calls; `content` is any text streamed alongside.
+    ToolCalls { calls: Vec<AiToolCall>, content: String },
+    /// The user pressed stop (or cleared the conversation).
+    Cancelled,
+    /// Request / parse failure.
+    Error(String),
+}
+
+/// Convert the shared MCP tool schemas into the OpenAI `tools` parameter,
+/// filtered to the chat-panel allowlist. `None` when nothing may be offered
+/// (agent mode off, MCP off, or no schemas).
+fn agent_tools_json() -> Option<serde_json::Value> {
+    let defs = crate::mcp::tool_definitions();
+    let arr = defs.as_array()?;
+    let mut tools = Vec::new();
+    for tool in arr {
+        let Some(name) = tool["name"].as_str() else { continue };
+        if !AI_AGENT_TOOLS.contains(&name) {
+            continue;
+        }
+        let mut schema = tool["inputSchema"].clone();
+        // `saved_session_id` is an alias for external MCP bridges; the chat
+        // panel always sends a plain session_id, so hide it from the model.
+        if let Some(props) = schema["properties"].as_object_mut() {
+            props.remove("saved_session_id");
+        }
+        if let Some(required) = schema["required"].as_array_mut() {
+            required.retain(|key| key.as_str() != Some("saved_session_id"));
+        }
+        tools.push(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": tool["description"].as_str().unwrap_or(""),
+                "parameters": schema,
+            },
+        }));
+    }
+    (!tools.is_empty()).then(|| serde_json::Value::Array(tools))
+}
+
+/// Heuristic: remote paths whose contents should not be read without asking
+/// (credentials, keys, secrets). Fails safe: borderline names ask.
+fn sensitive_remote_path(path: &str) -> bool {
+    const NEEDLES: &[&str] = &[
+        "passwd", "shadow", "/.ssh/", "id_rsa", "id_ed25519", "id_ecdsa", ".pem", ".p12",
+        ".pfx", "keystore", ".env", "credential", "secret", "private_key", "privatekey",
+    ];
+    let lower = path.to_ascii_lowercase();
+    NEEDLES.iter().any(|needle| lower.contains(needle))
+}
+
+/// One-line human summary of a tool call for the chat card / approval bar.
+fn tool_summary(name: &str, args: &serde_json::Value) -> String {
+    let text = match name {
+        "run_command" => args["command"].as_str().unwrap_or("").to_string(),
+        "list_remote_files" => args["path"].as_str().unwrap_or(".").to_string(),
+        "read_remote_text_file" => args["path"].as_str().unwrap_or("").to_string(),
+        "upload_file" => format!(
+            "{} → {}",
+            args["local_path"].as_str().unwrap_or(""),
+            args["remote_directory"].as_str().unwrap_or("")
+        ),
+        "download_file" => format!(
+            "{} → {}",
+            args["remote_path"].as_str().unwrap_or(""),
+            args["local_directory"].as_str().unwrap_or("")
+        ),
+        "get_session" => args["session_id"].as_str().unwrap_or("").to_string(),
+        _ => String::new(),
+    };
+    truncate_str(text.trim(), 160)
+}
+
+/// Serialize a tool result for the model, bounded so one verbose tool cannot
+/// flood the chat context.
+fn truncate_tool_result(value: &serde_json::Value) -> String {
+    let text = serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string());
+    if text.len() <= AI_TOOL_RESULT_CAP_BYTES {
+        return text;
+    }
+    let mut cut = AI_TOOL_RESULT_CAP_BYTES;
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}…[truncated]", &text[..cut])
+}
+
+/// The SSH session behind the currently active terminal tab, if any. Anchors
+/// "the current server" in agent prompts and provides the session_id
+/// fallback when the model omits one.
+fn active_ssh_session_context(
+    window: &AppWindow,
+    statuses: &TabStatuses,
+    store: &ConfigStore,
+) -> Option<(String, String)> {
+    let tab_id = window.get_active_tab_id().to_string();
+    let statuses = lock_or_recover(statuses);
+    let session_id = statuses.get(&tab_id)?.session_id.trim().to_string();
+    if session_id.is_empty() {
+        return None;
+    }
+    let session = store.get(&session_id)?;
+    if session.kind.as_str() != "ssh" {
+        return None;
+    }
+    let label = format!("{} ({}@{})", session.name, session.user, session.host);
+    Some((session_id, label))
+}
+
+/// Run one gated automation tool in-process. The chat panel uses the exact
+/// same permission path as the external MCP server (`Frontend::Mcp`); config
+/// import is never allowed from here.
+fn execute_automation_tool(
+    name: &str,
+    args: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    let runtime = RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("tokio runtime for AI agent tools")
+    });
+    let frontend = Frontend::Mcp {
+        allow_config_import: false,
+    };
+    let name = name.to_string();
+    let args = args.clone();
+    runtime
+        .block_on(async move { automation_call(&name, &args, frontend).await })
+        .map_err(|err| truncate_str(&err.to_string(), 500))
+}
+
+/// Push one tool-call card row into the conversation model.
+fn push_tool_card(
+    weak: &slint::Weak<AppWindow>,
+    generation: &Arc<AtomicU64>,
+    my_gen: u64,
+    name: &str,
+    summary: &str,
+    status: &str,
+) {
+    let name = name.to_string();
+    let summary = summary.to_string();
+    let status = status.to_string();
+    let _ = weak.upgrade_in_event_loop(move |w| {
+        if generation.load(Ordering::Relaxed) != my_gen {
+            return;
+        }
+        with_ai_model(&w, |vm| {
+            vm.push(AiMessage {
+                role: "tool".into(),
+                content: summary.into(),
+                tool_name: name.into(),
+                tool_status: status.into(),
+            });
+        });
+    });
+}
+
+/// Update the most recent tool card (running → ok / error / denied). An empty
+/// `note` keeps the current detail text.
+fn set_last_tool_card(
+    weak: &slint::Weak<AppWindow>,
+    generation: &Arc<AtomicU64>,
+    my_gen: u64,
+    status: &str,
+    note: &str,
+) {
+    let status = status.to_string();
+    let note = note.to_string();
+    let _ = weak.upgrade_in_event_loop(move |w| {
+        if generation.load(Ordering::Relaxed) != my_gen {
+            return;
+        }
+        with_ai_model(&w, |vm| {
+            for i in (0..vm.row_count()).rev() {
+                let Some(mut row) = vm.row_data(i) else { continue };
+                if row.role.as_str() == "tool" {
+                    row.tool_status = status.into();
+                    if !note.is_empty() {
+                        row.content = note.into();
+                    }
+                    vm.set_row_data(i, row);
+                    break;
+                }
+            }
+        });
+    });
+}
+
+/// Remove a trailing blank assistant placeholder (e.g. the turn ended after a
+/// tool round without any closing text).
+fn drop_trailing_blank_assistant(
+    weak: &slint::Weak<AppWindow>,
+    generation: &Arc<AtomicU64>,
+    my_gen: u64,
+) {
+    let _ = weak.upgrade_in_event_loop(move |w| {
+        if generation.load(Ordering::Relaxed) != my_gen {
+            return;
+        }
+        with_ai_model(&w, |vm| {
+            let Some(last) = vm.row_count().checked_sub(1) else {
+                return;
+            };
+            let blank = vm
+                .row_data(last)
+                .map(|r| r.role.as_str() == "assistant" && r.content.is_empty())
+                .unwrap_or(false);
+            if blank {
+                vm.remove(last);
+            }
+        });
+    });
+}
+
+/// Push a fresh empty assistant row so the next streamed segment has a
+/// placeholder to land in (the trailing row is a tool card after a round).
+fn push_assistant_placeholder(
+    weak: &slint::Weak<AppWindow>,
+    generation: &Arc<AtomicU64>,
+    my_gen: u64,
+) {
+    let _ = weak.upgrade_in_event_loop(move |w| {
+        if generation.load(Ordering::Relaxed) != my_gen {
+            return;
+        }
+        with_ai_model(&w, |vm| {
+            vm.push(AiMessage {
+                role: "assistant".into(),
+                content: "".into(),
+                tool_name: "".into(),
+                tool_status: "".into(),
+            });
+        });
+    });
+}
+
+/// What the user decided about a gated tool call.
+#[derive(Debug, PartialEq, Eq)]
+enum ApprovalDecision {
+    Approved,
+    Denied,
+    /// Stop / clear pressed while waiting: abort the whole turn.
+    Cancelled,
+}
+
+/// Ask the user to approve one tool call. Blocks the worker thread until the
+/// user answers, the timer runs out (denial), or stop/clear is pressed
+/// (cancellation). The channel sender is parked in `slot` on the UI thread;
+/// the decision callback (and stop/clear) pop it to wake this worker.
+fn request_approval(
+    weak: &slint::Weak<AppWindow>,
+    slot: &Arc<Mutex<Option<mpsc::Sender<bool>>>>,
+    generation: &Arc<AtomicU64>,
+    my_gen: u64,
+    summary: &str,
+    cancel: &Arc<AtomicBool>,
+) -> ApprovalDecision {
+    let (tx, rx) = mpsc::channel::<bool>();
+    {
+        let slot = slot.clone();
+        let summary = summary.to_string();
+        let _ = weak.upgrade_in_event_loop(move |w| {
+            if generation.load(Ordering::Relaxed) != my_gen {
+                return;
+            }
+            *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
+            w.set_ai_pending_tool_summary(summary.into());
+            w.set_ai_awaiting_approval(true);
+        });
+    }
+    let deadline = Instant::now() + AI_APPROVAL_TIMEOUT;
+    let decision = loop {
+        if cancel.load(Ordering::Relaxed) {
+            break ApprovalDecision::Cancelled;
+        }
+        if Instant::now() >= deadline {
+            break ApprovalDecision::Denied;
+        }
+        match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(true) => break ApprovalDecision::Approved,
+            Ok(false) => break ApprovalDecision::Denied,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            // The decision / stop / clear callback consumed the sender.
+            Err(mpsc::RecvTimeoutError::Disconnected) => break ApprovalDecision::Denied,
+        }
+    };
+    {
+        let slot = slot.clone();
+        let _ = weak.upgrade_in_event_loop(move |w| {
+            if generation.load(Ordering::Relaxed) != my_gen {
+                return;
+            }
+            slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+            w.set_ai_awaiting_approval(false);
+        });
+    }
+    decision
+}
+
+/// Append the endpoint-compatibility hint to a tool-related request error.
+fn with_tools_hint(err: String) -> String {
+    let lower = err.to_lowercase();
+    if lower.contains("tool") || lower.contains("function") {
+        format!(
+            "{err}\n{}",
+            t(
+                "提示：当前模型或接口可能不支持工具调用，可在设置中关闭「AI 工具」后重试。",
+                "Hint: the model or endpoint may not support tool calling; turn off AI tools in Settings and retry.",
+            )
+        )
+    } else {
+        err
+    }
+}
+
 // ── Streaming request (worker thread) ────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -240,11 +606,13 @@ fn stream_chat(
     model: String,
     history: Vec<(String, String)>,
     user_text: String,
+    system_suffix: String,
     cancel: Arc<AtomicBool>,
     generation: Arc<AtomicU64>,
     my_gen: u64,
 ) {
-    let system_prompt = t(SYSTEM_PROMPT_ZH, SYSTEM_PROMPT_EN);
+    let mut system_prompt = t(SYSTEM_PROMPT_ZH, SYSTEM_PROMPT_EN).to_string();
+    system_prompt.push_str(&system_suffix);
     let mut messages = vec![serde_json::json!({
         "role": "system",
         "content": system_prompt,
@@ -253,15 +621,55 @@ fn stream_chat(
         messages.push(serde_json::json!({ "role": role, "content": content }));
     }
     messages.push(serde_json::json!({ "role": "user", "content": user_text }));
-    let body = serde_json::json!({
+    let outcome = post_chat_stream(
+        &weak, &base_url, &api_key, &model, &messages, None, &cancel, &generation, my_gen,
+    );
+    let outcome = match outcome {
+        AiTurnOutcome::Error(err) => AiTurnOutcome::Error(with_tools_hint(err)),
+        other => other,
+    };
+    if matches!(outcome, AiTurnOutcome::Done) {
+        drop_trailing_blank_assistant(&weak, &generation, my_gen);
+    }
+    finish_stream(
+        &weak,
+        match outcome {
+            AiTurnOutcome::Error(err) => Some(err),
+            _ => None,
+        },
+        generation,
+        my_gen,
+    );
+}
+
+/// One streamed `/chat/completions` request. Content deltas stream into the
+/// trailing assistant row; `delta.tool_calls` fragments are aggregated by
+/// index (id / name arrive on the first fragment, arguments accumulate).
+#[allow(clippy::too_many_arguments)]
+fn post_chat_stream(
+    weak: &slint::Weak<AppWindow>,
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+    messages: &[serde_json::Value],
+    tools: Option<&serde_json::Value>,
+    cancel: &Arc<AtomicBool>,
+    generation: &Arc<AtomicU64>,
+    my_gen: u64,
+) -> AiTurnOutcome {
+    let mut body = serde_json::json!({
         "model": model,
         "stream": true,
         "messages": messages,
-    })
-    .to_string();
+    });
+    if let Some(tools) = tools {
+        body["tools"] = tools.clone();
+        body["tool_choice"] = serde_json::json!("auto");
+    }
+    let body = body.to_string();
 
     let agent = ai_agent(AI_STREAM_READ_TIMEOUT);
-    let url = chat_completions_url(&base_url);
+    let url = chat_completions_url(base_url);
     let mut req = agent.post(url.as_str()).set("Content-Type", "application/json");
     if !api_key.is_empty() {
         req = req.set("Authorization", &format!("Bearer {api_key}"));
@@ -270,18 +678,9 @@ fn stream_chat(
     let resp = match req.send_string(&body) {
         Ok(resp) => resp,
         Err(ureq::Error::Status(code, resp)) => {
-            finish_stream(
-                &weak,
-                Some(format!("HTTP {code}: {}", response_error(resp))),
-                generation,
-                my_gen,
-            );
-            return;
+            return AiTurnOutcome::Error(format!("HTTP {code}: {}", response_error(resp)));
         }
-        Err(e) => {
-            finish_stream(&weak, Some(truncate_str(&e.to_string(), 200)), generation, my_gen);
-            return;
-        }
+        Err(e) => return AiTurnOutcome::Error(truncate_str(&e.to_string(), 200)),
     };
 
     // Bound the raw stream too, not just the decoded deltas: `lines()` would
@@ -290,13 +689,20 @@ fn stream_chat(
     let reader =
         std::io::BufReader::new(resp.into_reader().take((AI_STREAM_CAP_BYTES * 4) as u64));
     let mut pending = String::new();
+    let mut content = String::new();
     let mut total: usize = 0;
     let mut last_flush = Instant::now();
     let started = Instant::now();
     let mut stream_err: Option<String> = None;
+    let mut cancelled = false;
+    let mut finish_reason: Option<String> = None;
+    let mut call_ids: Vec<Option<String>> = Vec::new();
+    let mut call_names: Vec<Option<String>> = Vec::new();
+    let mut call_args: Vec<String> = Vec::new();
 
     for line in reader.lines() {
         if cancel.load(Ordering::Relaxed) {
+            cancelled = true;
             break;
         }
         if started.elapsed() > AI_STREAM_TOTAL_TIMEOUT {
@@ -322,28 +728,298 @@ fn stream_chat(
             stream_err = Some(err_msg.to_string());
             break;
         }
-        let Some(delta) = v["choices"][0]["delta"]["content"].as_str() else {
-            continue;
-        };
-        if delta.is_empty() {
-            continue;
+        if let Some(reason) = v["choices"][0]["finish_reason"].as_str() {
+            finish_reason = Some(reason.to_string());
         }
-        total += delta.len();
-        pending.push_str(delta);
-        if total > AI_STREAM_CAP_BYTES {
-            stream_err =
-                Some(t("回复过长，已截断", "reply too long, truncated").to_string());
-            break;
+        if let Some(delta) = v["choices"][0]["delta"]["content"].as_str() {
+            if !delta.is_empty() {
+                total += delta.len();
+                pending.push_str(delta);
+                content.push_str(delta);
+                if total > AI_STREAM_CAP_BYTES {
+                    stream_err =
+                        Some(t("回复过长，已截断", "reply too long, truncated").to_string());
+                    break;
+                }
+                if last_flush.elapsed() >= AI_FLUSH_INTERVAL {
+                    flush_delta(weak, &mut pending, generation.clone(), my_gen);
+                    last_flush = Instant::now();
+                }
+            }
         }
-        if last_flush.elapsed() >= AI_FLUSH_INTERVAL {
-            flush_delta(&weak, &mut pending, generation.clone(), my_gen);
-            last_flush = Instant::now();
+        if let Some(deltas) = v["choices"][0]["delta"]["tool_calls"].as_array() {
+            for delta in deltas {
+                let index = delta["index"].as_u64().unwrap_or(0) as usize;
+                while call_args.len() <= index {
+                    call_ids.push(None);
+                    call_names.push(None);
+                    call_args.push(String::new());
+                }
+                if let Some(id) = delta["id"].as_str().filter(|id| !id.is_empty()) {
+                    call_ids[index] = Some(id.to_string());
+                }
+                if let Some(name) = delta["function"]["name"].as_str().filter(|n| !n.is_empty()) {
+                    call_names[index] = Some(name.to_string());
+                }
+                if let Some(args) = delta["function"]["arguments"].as_str() {
+                    call_args[index].push_str(args);
+                }
+            }
         }
     }
     // The final batch always lands, even on cancel / error, so partial text
     // the user already "paid for" is kept visible.
-    flush_delta(&weak, &mut pending, generation.clone(), my_gen);
-    finish_stream(&weak, stream_err, generation, my_gen);
+    flush_delta(weak, &mut pending, generation.clone(), my_gen);
+    if cancelled {
+        return AiTurnOutcome::Cancelled;
+    }
+    if let Some(err) = stream_err {
+        return AiTurnOutcome::Error(err);
+    }
+    let calls: Vec<AiToolCall> = call_names
+        .iter()
+        .enumerate()
+        .filter_map(|(index, name)| {
+            let name = name.as_ref()?;
+            Some(AiToolCall {
+                id: call_ids[index].clone().unwrap_or_else(|| format!("call_{index}")),
+                name: name.clone(),
+                arguments: call_args[index].clone(),
+            })
+        })
+        .collect();
+    if !calls.is_empty() && finish_reason.as_deref() != Some("stop") {
+        return AiTurnOutcome::ToolCalls { calls, content };
+    }
+    AiTurnOutcome::Done
+}
+
+/// The agent loop: stream a reply; when the model requests tools, run them
+/// through the gated automation layer and feed the results back. Bounded by
+/// a round limit, a wall-clock deadline, and a consecutive-failure breaker.
+#[allow(clippy::too_many_arguments)]
+fn run_agent_turn(
+    weak: slint::Weak<AppWindow>,
+    base_url: String,
+    api_key: String,
+    model: String,
+    history: Vec<(String, String)>,
+    user_text: String,
+    system_suffix: String,
+    tools: Option<serde_json::Value>,
+    require_approval: bool,
+    default_session_id: Option<String>,
+    approval_slot: Arc<Mutex<Option<mpsc::Sender<bool>>>>,
+    cancel: Arc<AtomicBool>,
+    generation: Arc<AtomicU64>,
+    my_gen: u64,
+) {
+    let mut system_prompt = t(SYSTEM_PROMPT_ZH, SYSTEM_PROMPT_EN).to_string();
+    system_prompt.push_str(&system_suffix);
+    let mut messages = vec![serde_json::json!({
+        "role": "system",
+        "content": system_prompt,
+    })];
+    for (role, content) in history {
+        messages.push(serde_json::json!({ "role": role, "content": content }));
+    }
+    messages.push(serde_json::json!({ "role": "user", "content": user_text }));
+
+    let deadline = Instant::now() + AI_AGENT_DEADLINE;
+    let mut rounds = 0usize;
+    let mut failing: Option<(String, u32)> = None;
+    let mut outcome;
+
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            outcome = AiTurnOutcome::Cancelled;
+            break;
+        }
+        if Instant::now() > deadline {
+            outcome = AiTurnOutcome::Error(t(
+                "AI 工具操作总时长超限，已停止",
+                "AI tool time budget exceeded; stopped",
+            ).to_string());
+            break;
+        }
+        outcome = match post_chat_stream(
+            &weak, &base_url, &api_key, &model, &messages, tools.as_ref(), &cancel,
+            &generation, my_gen,
+        ) {
+            AiTurnOutcome::Error(err) => AiTurnOutcome::Error(with_tools_hint(err)),
+            other => other,
+        };
+        let AiTurnOutcome::ToolCalls { calls, content } = outcome else {
+            break;
+        };
+
+        rounds += 1;
+        if rounds > AI_AGENT_MAX_ROUNDS {
+            outcome = AiTurnOutcome::Error(t(
+                "达到工具调用轮数上限，已停止",
+                "tool-call round limit reached; stopped",
+            ).to_string());
+            break;
+        }
+
+        // Echo the assistant tool_calls message back exactly as the API
+        // expects: streamed text (or null) + the reconstructed call array.
+        let mut assistant = serde_json::json!({
+            "role": "assistant",
+            "content": if content.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::json!(content)
+            },
+        });
+        assistant["tool_calls"] = serde_json::Value::Array(
+            calls.iter().map(|call| serde_json::json!({
+                "id": call.id,
+                "type": "function",
+                "function": { "name": call.name, "arguments": call.arguments },
+            })).collect(),
+        );
+        messages.push(assistant);
+
+        let mut aborted = false;
+        for call in &calls {
+            if cancel.load(Ordering::Relaxed) {
+                aborted = true;
+                break;
+            }
+            // Parse the arguments first: the card summary needs them.
+            let parsed = if call.arguments.trim().is_empty() {
+                Ok(serde_json::json!({}))
+            } else {
+                serde_json::from_str::<serde_json::Value>(call.arguments.trim())
+                    .map_err(|err| truncate_str(&err.to_string(), 200))
+            };
+            let mut args = match parsed {
+                Ok(value) => value,
+                Err(err) => {
+                    let streak = match &failing {
+                        Some((name, count)) if name == &call.name => count + 1,
+                        _ => 1,
+                    };
+                    failing = Some((call.name.clone(), streak));
+                    let note = format!("{}: {}", t("参数解析失败", "invalid tool arguments"), err);
+                    push_tool_card(&weak, &generation, my_gen, &call.name, &note, "error");
+                    messages.push(serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": serde_json::to_string(&serde_json::json!({ "error": note }))
+                            .unwrap_or_else(|_| "{\"error\":\"invalid tool arguments\"}".to_string()),
+                    }));
+                    continue;
+                }
+            };
+            // Fill in the active tab's session when the model omitted it.
+            if call.name != "list_sessions"
+                && args["session_id"].as_str().map_or(true, |s| s.is_empty())
+            {
+                if let Some(session_id) = &default_session_id {
+                    if let Some(obj) = args.as_object_mut() {
+                        obj.insert("session_id".into(), serde_json::json!(session_id));
+                    }
+                }
+            }
+
+            let summary = tool_summary(&call.name, &args);
+            push_tool_card(&weak, &generation, my_gen, &call.name, &summary, "running");
+
+            // Approval gate: state-changing calls and sensitive-file reads.
+            let gated = matches!(
+                call.name.as_str(),
+                "run_command" | "upload_file" | "download_file"
+            ) || (call.name == "read_remote_text_file"
+                && sensitive_remote_path(args["path"].as_str().unwrap_or("")));
+            if require_approval && gated {
+                let ask = if summary.is_empty() {
+                    call.name.clone()
+                } else {
+                    format!("{} · {}", call.name, summary)
+                };
+                match request_approval(&weak, &approval_slot, &generation, my_gen, &ask, &cancel)
+                {
+                    ApprovalDecision::Approved => {}
+                    ApprovalDecision::Cancelled => {
+                        aborted = true;
+                        break;
+                    }
+                    ApprovalDecision::Denied => {
+                        set_last_tool_card(
+                            &weak,
+                            &generation,
+                            my_gen,
+                            "denied",
+                            &t("已拒绝或确认超时", "denied or approval timed out"),
+                        );
+                        messages.push(serde_json::json!({
+                            "role": "tool",
+                            "tool_call_id": call.id,
+                            "content": "{\"error\":\"denied by user\"}",
+                        }));
+                        continue;
+                    }
+                }
+            }
+
+            let result = execute_automation_tool(&call.name, &args);
+            match &result {
+                Ok(_) => {
+                    failing = None;
+                    // Keep the call summary as the card detail on success.
+                    set_last_tool_card(&weak, &generation, my_gen, "ok", "");
+                }
+                Err(err) => {
+                    let streak = match &failing {
+                        Some((name, count)) if name == &call.name => count + 1,
+                        _ => 1,
+                    };
+                    failing = Some((call.name.clone(), streak));
+                    set_last_tool_card(&weak, &generation, my_gen, "error", err);
+                }
+            }
+            let tool_content = match result {
+                Ok(value) => truncate_tool_result(&value),
+                Err(err) => serde_json::to_string(&serde_json::json!({ "error": err }))
+                    .unwrap_or_else(|_| "{\"error\":\"tool failed\"}".to_string()),
+            };
+            messages.push(serde_json::json!({
+                "role": "tool",
+                "tool_call_id": call.id,
+                "content": tool_content,
+            }));
+        }
+        if aborted {
+            outcome = AiTurnOutcome::Cancelled;
+            break;
+        }
+        // Circuit breaker: the same tool failing three times in a row stops
+        // the loop instead of letting the model spin.
+        if failing.map_or(false, |(_, count)| count >= 3) {
+            outcome = AiTurnOutcome::Error(t(
+                "工具连续失败，已停止",
+                "tool kept failing; stopped",
+            ).to_string());
+            break;
+        }
+        // Fresh placeholder so the next streamed segment has a row to land in.
+        push_assistant_placeholder(&weak, &generation, my_gen);
+    }
+
+    if matches!(outcome, AiTurnOutcome::Done) {
+        drop_trailing_blank_assistant(&weak, &generation, my_gen);
+    }
+    finish_stream(
+        &weak,
+        match outcome {
+            AiTurnOutcome::Error(err) => Some(err),
+            _ => None,
+        },
+        generation,
+        my_gen,
+    );
 }
 
 /// Clear the busy flag and surface `err` (if any) as an error bubble — but
@@ -453,6 +1129,7 @@ pub(super) fn wire_ai_callbacks(
     window: &AppWindow,
     store: &Rc<RefCell<ConfigStore>>,
     bufs: &TermBuffers,
+    tab_statuses: &TabStatuses,
 ) {
     let cancel_flag = Arc::new(AtomicBool::new(false));
     // Warn about a plain http:// endpoint (cleartext Bearer key) once per
@@ -461,6 +1138,9 @@ pub(super) fn wire_ai_callbacks(
     // Bumped on every send: late finish/flush hops from a cancelled stream are
     // validated against this counter so they cannot corrupt a newer request.
     let generation = Arc::new(AtomicU64::new(0));
+    // Pending tool-approval channel: the agent worker parks the sender here
+    // on the UI thread; the decision / stop / clear callbacks pop it.
+    let approval_slot: Arc<Mutex<Option<mpsc::Sender<bool>>>> = Arc::new(Mutex::new(None));
 
     // Settings › AI: persist base URL / key / model.
     {
@@ -514,6 +1194,8 @@ pub(super) fn wire_ai_callbacks(
         let cancel = cancel_flag.clone();
         let generation = generation.clone();
         let http_warned = http_warned.clone();
+        let approval_slot = approval_slot.clone();
+        let tab_statuses = tab_statuses.clone();
         let weak = window.as_weak();
         window.on_send_ai_message(move |text: SharedString| {
             let Some(w) = weak.upgrade() else { return };
@@ -559,6 +1241,38 @@ pub(super) fn wire_ai_callbacks(
                     ),
                 );
             }
+            // Agent mode: offer the gated SSH/SFTP tools only when both the
+            // AI-agent switch and MCP are enabled.
+            let tools = {
+                let s = store.borrow();
+                if s.ai_agent_enabled() && s.mcp_enabled() {
+                    agent_tools_json()
+                } else {
+                    None
+                }
+            };
+            let require_approval = store.borrow().ai_require_tool_approval();
+            let session_ctx = if tools.is_some() {
+                active_ssh_session_context(&w, &tab_statuses, &store.borrow())
+            } else {
+                None
+            };
+            let mut system_suffix = String::new();
+            if tools.is_some() {
+                system_suffix.push_str(t(AGENT_SUFFIX_ZH, AGENT_SUFFIX_EN));
+                if let Some((session_id, label)) = &session_ctx {
+                    system_suffix.push_str(&format!(
+                        "{}{} — session_id=\"{}\"{}",
+                        t("\n\n当前打开的会话：", "\n\nCurrently open session: "),
+                        label,
+                        session_id,
+                        t(
+                            "（用户说“当前服务器 / 这个会话”时即指它）",
+                            " (what the user means by \"the current server/session\")"
+                        ),
+                    ));
+                }
+            }
             // Show the redacted text: what the user sees is what is sent.
             let user_text = redact_sensitive_text(text);
             let history = ai_history(&w, AI_HISTORY_MESSAGES);
@@ -575,27 +1289,63 @@ pub(super) fn wire_ai_callbacks(
             let weak = weak.clone();
             let generation = generation.clone();
             let cancel = cancel.clone();
+            let approval_slot = approval_slot.clone();
             std::thread::spawn(move || {
-                stream_chat(
-                    weak,
-                    base_url,
-                    api_key,
-                    model,
-                    history,
-                    user_text,
-                    cancel,
-                    generation,
-                    my_gen,
-                );
+                if let Some(tools) = tools {
+                    run_agent_turn(
+                        weak,
+                        base_url,
+                        api_key,
+                        model,
+                        history,
+                        user_text,
+                        system_suffix,
+                        Some(tools),
+                        require_approval,
+                        session_ctx.map(|(session_id, _)| session_id),
+                        approval_slot,
+                        cancel,
+                        generation,
+                        my_gen,
+                    );
+                } else {
+                    stream_chat(
+                        weak,
+                        base_url,
+                        api_key,
+                        model,
+                        history,
+                        user_text,
+                        system_suffix,
+                        cancel,
+                        generation,
+                        my_gen,
+                    );
+                }
             });
         });
     }
 
-    // Stop button: flip the flag; the stream loop exits after the current line.
+    // Stop button: flip the flag; the stream loop exits after the current
+    // line. A pending tool approval is denied so the worker wakes at once.
     {
         let cancel = cancel_flag.clone();
+        let approval_slot = approval_slot.clone();
         window.on_stop_ai_message(move || {
             cancel.store(true, Ordering::Relaxed);
+            if let Some(tx) = approval_slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                let _ = tx.send(false);
+            }
+        });
+    }
+
+    // Approval bar verdict: wake the waiting agent worker with the answer.
+    {
+        let approval_slot = approval_slot.clone();
+        window.on_ai_tool_decision(move |allowed: bool| {
+            if let Some(tx) = approval_slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                let _ = tx.send(allowed);
+            }
         });
     }
 
@@ -605,8 +1355,12 @@ pub(super) fn wire_ai_callbacks(
         let weak = window.as_weak();
         let cancel = cancel_flag.clone();
         let generation = generation.clone();
+        let approval_slot = approval_slot.clone();
         window.on_clear_ai_messages(move || {
             cancel.store(true, Ordering::Relaxed);
+            if let Some(tx) = approval_slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                let _ = tx.send(false);
+            }
             // Retire the generation too: the aborted stream's late finish hop
             // is only suppressed while the generation still matches, so
             // without this a straggling error bubble lands in the fresh

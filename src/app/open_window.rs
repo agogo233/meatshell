@@ -412,6 +412,17 @@ pub(crate) fn open_window(
         });
     }
 
+    // Settings › AI: agent-mode switches (tool access + approval prompt).
+    {
+        let store = store.clone();
+        window.on_set_ai_agent_settings(move |agent_enabled, require_approval| {
+            let mut settings = store.borrow_mut();
+            settings.set_ai_agent_enabled(agent_enabled);
+            settings.set_ai_require_tool_approval(require_approval);
+            let _ = settings.save();
+        });
+    }
+
     // Colour theme preset + the immersive-colours switch. Applied before the
     // wallpaper so a built-in wallpaper can still override light/dark.
     color_theme::apply_color_theme(&window, &store.borrow());
@@ -820,6 +831,8 @@ pub(crate) fn open_window(
         window.set_ai_base_url(s.ai_base_url().into());
         window.set_ai_api_key(s.ai_api_key().into());
         window.set_ai_model(s.ai_model().into());
+        window.set_ai_agent_enabled(s.ai_agent_enabled());
+        window.set_ai_require_tool_approval(s.ai_require_tool_approval());
         window.set_welcome_sidebar_width(s.welcome_sidebar_width());
         window.set_welcome_sidebar_dock(welcome_sidebar_dock.into());
         window.set_welcome_collapsed(welcome_collapsed);
@@ -2862,7 +2875,7 @@ pub(crate) fn open_window(
     // AI chat panel: install the (empty) conversation model before wiring the
     // send/stream callbacks, which push into it via downcast.
     window.set_ai_messages(ModelRc::from(Rc::new(VecModel::<AiMessage>::default())));
-    wire_ai_callbacks(&window, &store, &bufs);
+    wire_ai_callbacks(&window, &store, &bufs, &tab_statuses);
     let connect_ctx = ConnectCtx {
         weak: window.as_weak(),
         editor: editor_win.as_weak(),
@@ -3848,6 +3861,8 @@ pub(crate) fn sync_settings_for_window(window: &slint::Weak<AppWindow>, store: &
     window.set_ai_base_url(store.ai_base_url().into());
     window.set_ai_api_key(store.ai_api_key().into());
     window.set_ai_model(store.ai_model().into());
+    window.set_ai_agent_enabled(store.ai_agent_enabled());
+    window.set_ai_require_tool_approval(store.ai_require_tool_approval());
     window.set_download_dir(store.download_dir().to_string().into());
     window.set_sync_upload_enabled(store.sync_upload());
 }
