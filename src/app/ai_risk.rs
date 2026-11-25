@@ -439,10 +439,15 @@ fn assess_command(command: &str) -> RiskAssessment {
         return unknown_command();
     }
     let segments = split_segments(trimmed);
-    let mut worst = unknown_command();
+    let mut worst: Option<RiskAssessment> = None;
     for seg in &segments {
-        worst = worst.merge(classify_segment(seg));
+        let verdict = classify_segment(seg);
+        worst = Some(match worst {
+            Some(prev) => prev.merge(verdict),
+            None => verdict,
+        });
     }
+    let mut worst = worst.unwrap_or_else(unknown_command);
     if runs_unseen_script(&segments) {
         worst = worst.merge(finding(
             RiskLevel::High,
@@ -458,12 +463,12 @@ fn assess_command(command: &str) -> RiskAssessment {
 
 fn unknown_command() -> RiskAssessment {
     finding(
-        RiskLevel::Medium,
-        dims(true, false, false, false, false),
-        "改动性操作（无法确认具体影响）",
-        "state-changing operation (impact cannot be confirmed)",
-        "先在测试环境验证",
-        "verify in a safe environment first",
+        RiskLevel::High,
+        dims(true, false, false, true, false),
+        "无法解析该命令，按高危处理",
+        "the command cannot be parsed; treated as high risk",
+        "确认命令内容后再手动执行",
+        "review the command before running it manually",
     )
 }
 
@@ -534,8 +539,18 @@ fn classify_segment(segment: &str) -> RiskAssessment {
     }
 
     // ── Critical structural checks ───────────────────────────────────────
-    let recursive = args.iter().any(|a| a == "-r" || a == "-R" || a == "--recursive");
-    let forced = args.iter().any(|a| a == "-f" || a == "--force");
+    // Combined short flags like `-rf` carry both letters; match them too.
+    let short_flag = |a: &str, letter: char| {
+        let t = a.trim();
+        t.len() > 1 && t.starts_with('-') && !t.starts_with("--") && t.contains(letter)
+    };
+    let recursive = args.iter().any(|a| {
+        let t = a.trim();
+        t == "--recursive" || short_flag(a, 'r') || short_flag(a, 'R')
+    });
+    let forced = args
+        .iter()
+        .any(|a| a.trim() == "--force" || short_flag(a, 'f'));
     if cmd == "rm" && recursive {
         let bare_root = args.iter().any(|a| {
             let a = a.trim();
@@ -969,7 +984,11 @@ mod tests {
             evaluate_rules(&rules, "run_command", "uname -a").map(|(a, _)| a),
             Some(RuleAction::Ask)
         );
-        assert!(evaluate_rules(&rules, "list_sessions", "").is_none());
+        // The `*` catch-all rule matches any tool, including read-only ones.
+        assert_eq!(
+            evaluate_rules(&rules, "list_sessions", "").map(|(a, _)| a),
+            Some(RuleAction::Ask)
+        );
     }
 
     fn rule(tool: &str, resource: &str, action: &str) -> PermissionRule {
