@@ -4852,6 +4852,7 @@ fn read_config_snapshot(path: &Path) -> Result<Option<String>> {
 #[cfg(test)]
 mod profile_safety_tests {
     use super::*;
+    use crate::config::config::tests::temp_store;
 
     #[test]
     fn stale_writer_cannot_erase_new_connections() {
