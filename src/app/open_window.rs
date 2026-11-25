@@ -3103,6 +3103,14 @@ pub(crate) fn open_window(
         }
         let mut last_cursor_logical: Option<(f32, f32)> = None;
         let mut macos_wheel_accum = 0.0_f32;
+        let hovered_terminal = Rc::new(HoveredTerminal::default());
+        {
+            let hovered = hovered_terminal.clone();
+            window.on_terminal_output_hover(move |tab_id: SharedString, on: bool| {
+                hovered.set(tab_id.as_str(), on);
+            });
+        }
+        let wheel_hover = hovered_terminal.clone();
         // Track the inputs that make up WinActivity; recompute on each change.
         let mut focused = true;
         let mut minimized = false;
@@ -3237,9 +3245,13 @@ pub(crate) fn open_window(
                         let Some(win) = weak.upgrade() else {
                             return EventResult::Propagate;
                         };
-                        if !macos_terminal_wheel_can_target_terminal(win.get_interface_open()) {
+                        if !macos_terminal_wheel_can_target_terminal(win.get_modal_open()) {
                             // Do not carry a partially accumulated settings gesture
                             // into the terminal after the modal closes.
+                            macos_wheel_accum = 0.0;
+                            return EventResult::Propagate;
+                        }
+                        if !wheel_hover.is(win.get_active_tab_id().as_str()) {
                             macos_wheel_accum = 0.0;
                             return EventResult::Propagate;
                         }

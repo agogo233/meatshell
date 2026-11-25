@@ -952,6 +952,7 @@ export component TerminalView inherits Rectangle {
     /// (row, col) and returns true when it was handled (link opened / command
     /// filled), so the terminal skips starting a drag-selection.
     callback link-clicked(int /* row */, int /* col */) -> bool;
+    callback output-hover(bool /* hovered */);
     callback select-update(int, int);       // extend drag-selection to (row, col)
     callback select-end();                  // finish selection → copy to clipboard
     callback select-clear();                // drop the local selection, no copy (#542)
@@ -1407,6 +1408,7 @@ export component TerminalView inherits Rectangle {
                             width: parent.width;
                             height: parent.height;
                             mouse-cursor: text;
+                            changed has-hover => { root.output-hover(self.has-hover); }
                             pointer-event(ev) => {
                                 if (ev.kind == PointerEventKind.down) {
                                     ime-input.focus();

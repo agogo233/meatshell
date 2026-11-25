@@ -1586,6 +1586,7 @@ export component AppWindow inherits Window {
     callback send-key(string /* tab-id */, string /* key */, bool /* ctrl */, bool /* alt */, bool /* shift */);
     callback terminal-scrollback-key(string /* tab-id */, string /* key */) -> bool;
     callback diagnose-key-event(string /* tab-id */, string /* key */, bool /* raw control */, bool /* raw meta */, bool /* alt */, bool /* shift */);
+    callback terminal-output-hover(string /* tab-id */, bool /* hovered */);
     // Notifies Rust of a PTY resize (pixel dimensions; Rust converts to cols/rows).
     callback terminal-resize(string /* tab-id */, float /* width-px */, float /* height-px */);
 
@@ -2847,6 +2848,7 @@ export component AppWindow inherits Window {
                         action-links-enabled: root.action-links-enabled;
                         link-clicked(row, col) => { return root.action-link-click(term.id, row, col); }
                         find-navigate(reverse) => { root.find-navigate(term.id, reverse); }
+                        output-hover(h) => { root.terminal-output-hover(term.id, h); }
                         set-search-history-mode(v) => { root.set-search-history-mode(v); }
                         find-current: term.find-current;
                         selection: term.selection;
