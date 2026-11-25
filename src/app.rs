@@ -116,7 +116,7 @@ use self::window::*;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 /// Max bytes merged into one Output event before starting a fresh chunk (#209).
 /// The upstream perf fix lowered this from 64 KiB to 16 KiB; the pump-side
