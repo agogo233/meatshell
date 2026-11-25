@@ -398,6 +398,16 @@ export component AIPanel inherits Rectangle {
             ai-scroll := Flickable {
                 content-width: self.width;
                 content-height: max(self.height, ai-list.preferred-height);
+                // Streaming follow: while the view is still near the bottom,
+                // keep snapping to it as the trailing row grows; once the user
+                // scrolled up (beyond the tolerance), stop yanking the view.
+                // A new row (changed msg-count above) always re-anchors.
+                changed content-height => {
+                    if (self.content-y >= root.prev-bottom - 48px) {
+                        self.content-y = max(0px, self.content-height - self.height);
+                        root.prev-bottom = self.content-height - self.height;
+                    }
+                }
                 ai-list := VerticalLayout {
                     padding: 8px; spacing: 8px; alignment: start;
                     if root.messages.length == 0 : Text {
@@ -593,12 +603,6 @@ export component AIPanel inherits Rectangle {
     changed msg-count => {
         ai-scroll.content-y = max(0px, ai-scroll.content-height - ai-scroll.height);
         root.prev-bottom = ai-scroll.content-height - ai-scroll.height;
-    }
-    changed content-height => {
-        if (ai-scroll.content-y >= root.prev-bottom - 48px) {
-            ai-scroll.content-y = max(0px, ai-scroll.content-height - ai-scroll.height);
-            root.prev-bottom = ai-scroll.content-height - ai-scroll.height;
-        }
     }
     // busy true→(reply starting/ending) also re-anchors the view so freshly
     // pushed rows (user message, error bubbles) stay visible.

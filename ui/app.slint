@@ -3603,6 +3603,7 @@ export component AppWindow inherits Window {
                     send => { root.send-ai-message(root.ai-draft); }
                     stop => { root.stop-ai-message(); }
                     clear => { root.clear-ai-messages(); }
+                    copy-ai-message(text) => { root.copy-ai-message(text); }
                     collapse => { root.ai-panel-collapsed = true; root.dock-layout-changed(); }
                     dock-drag-move(ax, ay) => {
                         root.panel-dragging = true;
@@ -6541,7 +6542,6 @@ export component AppWindow inherits Window {
                     set-ai-agent-settings(enabled, confirm) => {
                         root.set-ai-agent-settings(enabled, confirm);
                     }
-                    copy-ai-message(text) => { root.copy-ai-message(text); }
                     set-ai-panel-enabled(v) => {
                         // The settings toggle doubles as the panel's open/close:
                         // persist + open it expanded (no same-edge squeeze — panels
