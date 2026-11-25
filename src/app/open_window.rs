@@ -803,6 +803,9 @@ pub(crate) fn open_window(
         window.set_sftp_panel_width(s.sftp_panel_width());
         window.set_sftp_panel_height(s.sftp_panel_height());
         window.set_sftp_tree_width(s.sftp_tree_width());
+        window.set_sftp_split_enabled(s.sftp_split_enabled());
+        window.set_sftp_local_split(s.sftp_local_split());
+        window.set_sftp_last_local_dir(s.sftp_local_dir().into());
         window.set_sftp_local_show_hidden(s.sftp_local_show_hidden());
         window.set_sftp_local_sort_key(s.sftp_local_sort_key().into());
         window.set_sftp_local_sort_dir(s.sftp_local_sort_dir());
@@ -911,6 +914,14 @@ pub(crate) fn open_window(
         window.on_persist_welcome_sidebar_dock(move |dock| {
             let mut s = store.borrow_mut();
             s.set_welcome_sidebar_dock(dock.to_string());
+            let _ = s.save();
+        });
+    }
+    {
+        let store = store.clone();
+        window.on_persist_sidebar_dock(move |dock| {
+            let mut s = store.borrow_mut();
+            s.set_sidebar_dock(dock.to_string());
             let _ = s.save();
         });
     }

@@ -35,6 +35,9 @@ pub(crate) fn save_layout(
     s.set_sftp_panel_width(win.get_sftp_panel_width());
     s.set_sftp_panel_height(win.get_sftp_panel_height());
     s.set_sftp_dock(win.get_sftp_dock().to_string());
+    s.set_sftp_split_enabled(win.get_sftp_split_enabled());
+    s.set_sftp_local_split(win.get_sftp_local_split());
+    s.set_sftp_local_dir(&win.get_sftp_last_local_dir());
     s.set_sftp_local_show_hidden(win.get_sftp_local_show_hidden());
     s.set_sftp_local_sort_key(&win.get_sftp_local_sort_key().to_string());
     s.set_sftp_local_sort_dir(win.get_sftp_local_sort_dir());

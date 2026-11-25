@@ -400,7 +400,11 @@ fn download_into_local_pane(
 
 /// Wire the split (dual-pane) SFTP view: local folder browsing plus the two
 /// transfer directions. The remote side keeps using the existing SFTP worker.
-fn wire_sftp_split_callbacks(window: &AppWindow, sftp_handles: &SftpHandles) {
+fn wire_sftp_split_callbacks(
+    window: &AppWindow,
+    sftp_handles: &SftpHandles,
+    store: &Rc<RefCell<ConfigStore>>,
+) {
     // Toggle the split view; the first open reads the local folder.
     {
         let weak = window.as_weak();
@@ -435,6 +439,11 @@ fn wire_sftp_split_callbacks(window: &AppWindow, sftp_handles: &SftpHandles) {
             w.invoke_refresh_sidebar();
             // Remember the choice so the next launch opens the same view (#532).
             w.set_sftp_split_enabled(enable);
+            {
+                let mut s = store.borrow_mut();
+                s.set_sftp_split_enabled(enable);
+                let _ = s.save();
+            }
             if enable {
                 refresh_places(&w, &tab);
             }
@@ -1693,7 +1702,7 @@ pub(super) fn wire_sftp_callbacks(
     }
 
     // Split (dual-pane) view: local browsing + two-way transfers.
-    wire_sftp_split_callbacks(window, &sftp_handles);
+    wire_sftp_split_callbacks(window, &sftp_handles, &store);
 
     // Built-in editor (#70), detached-window mode. Editor tabs (#494) are
     // wired in editor_tabs::wire_editor_tabs.
