@@ -1311,7 +1311,6 @@ export component AppWindow inherits Window {
     in-out property <length> central-inset-bottom: 10px;
     callback stack-split-drag(string /* edge */, int /* index */, float /* pos */,
                               float /* axis-start */, float /* axis-len */);
-    callback stack-split-done();
     // Reports the real dock-area size (window minus title bar): the Rust dock
     // engine must measure in THIS frame, not the window frame, or every panel
     // sits ~43px too low at the bottom edge (#dock-stack).
@@ -1496,9 +1495,6 @@ export component AppWindow inherits Window {
     callback update-trigger(int /* index */, TriggerDraft);
     callback delete-trigger(int /* index */);
 
-    callback tab-selected(string);
-    callback tab-closed(string);
-    callback new-tab-clicked();
     callback new-window-clicked();   // open another application window (#multi-window)
     // Per-pane tab actions (v0.5): the int is the pane (leaf) id.
     callback pane-tab-selected(int /* pane-id */, string /* tab-id */);
@@ -2307,142 +2303,8 @@ export component AppWindow inherits Window {
 
             // Welcome / session list, to the right of the icon strip. Hidden when
             // collapsed — its icon stays in the strip; clicking it re-opens.
-            if false : Rectangle {
-                x: root.welcome-sidebar-dock == "right"
-                    ? parent.width - parent.ai-right - parent.quick-right - parent.sidebar-outside-strip - parent.welcome-size
-                  : root.welcome-sidebar-dock == "left"
-                    ? parent.ai-left + parent.quick-left + parent.sidebar-outside-strip
-                  : parent.ai-left + parent.quick-left;
-                y: root.welcome-sidebar-dock == "bottom"
-                    ? parent.height - parent.ai-bottom - parent.quick-bottom - parent.sidebar-outside-strip - parent.welcome-size
-                  : root.welcome-sidebar-dock == "top"
-                    ? parent.ai-top + parent.quick-top + parent.sidebar-outside-strip
-                  : parent.ai-top + parent.quick-top;
-                width: parent.welcome-horizontal ? parent.welcome-size
-                    : parent.width - parent.ai-left - parent.ai-right - parent.quick-left - parent.quick-right;
-                height: parent.welcome-horizontal
-                    ? parent.height - parent.ai-top - parent.ai-bottom - parent.quick-top - parent.quick-bottom
-                    : parent.welcome-size;
-                background: Theme.bg-panel;
-                clip: true;
-                Welcome {
-                    width: parent.width;
-                    height: parent.height;
-                    compact: true;
-                    dock-edge: root.welcome-sidebar-dock;
-                    sessions: root.sessions;
-                    import-hint: root.ssh-import-hint;
-                    search-query <=> root.host-search-query;
-                    sessions-revision: root.sessions-revision;
-                    search-changed(query) => { root.host-search-changed(query); }
-                    collapse => {
-                        root.welcome-collapsed = true;
-                        root.set-welcome-collapsed(true);
-                    }
-                    dock-drag-move(ax, ay) => {
-                        root.panel-dragging = true;
-                        root.drag-nx = (ax - dock-area.absolute-position.x) / dock-area.width;
-                        root.drag-ny = (ay - dock-area.absolute-position.y) / dock-area.height;
-                    }
-                    dock-drag-end() => {
-                        if (root.dock-target != "") {
-                            root.welcome-sidebar-dock = root.dock-target;
-                            if (root.sidebar-dock == root.dock-target) {
-                                root.sidebar-collapsed = true;
-                                root.set-sidebar-collapsed(true);
-                            }
-                            if (root.quick-panel-open && root.quick-panel-dock == root.dock-target) {
-                                root.quick-panel-collapsed = true;
-                            }
-                            if (root.ai-panel-open && root.ai-panel-dock == root.dock-target) {
-                                root.ai-panel-collapsed = true;
-                            }
-                            root.persist-welcome-sidebar-dock(root.welcome-sidebar-dock);
-                        }
-                        root.panel-dragging = false;
-                    }
-                    // Grab cancelled: drop the preview without committing.
-                    dock-drag-cancelled() => { root.panel-dragging = false; }
-                    new-session => { root.new-session-clicked(); }
-                    import-ssh-config => { root.import-ssh-config(); }
-                    connect-session(id) => { root.connect-session(id); }
-                    edit-session(id) => { root.edit-session(id); }
-                    duplicate-session(id) => { root.duplicate-session(id); }
-                    move-session(id, group) => { root.move-session(id, group); }
-                    reorder-session(id, dir) => { return root.reorder-session(id, dir); }
-                    reorder-end => { root.reorder-session-end(); }
-                    toggle-group(group) => { root.toggle-group(group); }
-                    new-group => {
-                        root.group-dialog-orig = "";
-                        root.group-dialog-name = "";
-                        root.group-dialog-error = "";
-                        root.group-dialog-open = true;
-                    }
-                    edit-group(name) => {
-                        root.group-dialog-orig = name;
-                        root.group-dialog-name = name;
-                        root.group-dialog-error = "";
-                        root.group-dialog-open = true;
-                    }
-                    delete-group(name) => { root.delete-group(name); }
-                    remove-session(id) => { root.remove-session(id); }
-                }
-                Rectangle {
-                    x: root.welcome-sidebar-dock == "left" ? parent.width - 1px : 0px;
-                    y: root.welcome-sidebar-dock == "top" ? parent.height - 1px : 0px;
-                    width: root.welcome-sidebar-horizontal ? 1px : parent.width;
-                    height: root.welcome-sidebar-horizontal ? parent.height : 1px;
-                    background: Theme.border-subtle;
-                }
-            }
 
             // Drag the welcome sidebar's right edge to resize it (v0.5 M3b).
-            if false : Rectangle {
-                x: root.welcome-sidebar-dock == "left" ? parent.ai-left + parent.quick-left + parent.sidebar-outside-strip + parent.welcome-size - 2px
-                  : root.welcome-sidebar-dock == "right" ? parent.width - parent.ai-right - parent.quick-right - parent.sidebar-outside-strip - parent.welcome-size - 2px
-                  : parent.ai-left + parent.quick-left;
-                y: root.welcome-sidebar-dock == "top" ? parent.ai-top + parent.quick-top + parent.sidebar-outside-strip + parent.welcome-size - 2px
-                  : root.welcome-sidebar-dock == "bottom" ? parent.height - parent.ai-bottom - parent.quick-bottom - parent.sidebar-outside-strip - parent.welcome-size - 2px
-                  : parent.ai-top + parent.quick-top;
-                width: parent.welcome-horizontal ? 4px
-                    : parent.width - parent.ai-left - parent.ai-right - parent.quick-left - parent.quick-right;
-                height: parent.welcome-horizontal
-                    ? parent.height - parent.ai-top - parent.ai-bottom - parent.quick-top - parent.quick-bottom : 4px;
-                background: ws-split-ta.has-hover || dock-area.welcome-sidebar-dragging
-                    ? Theme.accent : transparent;
-                ws-split-ta := TouchArea {
-                    mouse-cursor: dock-area.welcome-horizontal ? ew-resize : ns-resize;
-                    pointer-event(ev) => {
-                        if (ev.kind == PointerEventKind.down) {
-                            dock-area.welcome-sidebar-dragging = true;
-                        } else if (ev.kind == PointerEventKind.up) {
-                            dock-area.welcome-sidebar-dragging = false;
-                            root.persist-welcome-sidebar-width(root.welcome-sidebar-width / 1px);
-                        }
-                    }
-                    moved => {
-                        if (dock-area.welcome-sidebar-dragging) {
-                            if (dock-area.welcome-horizontal) {
-                                root.welcome-sidebar-width = clamp(
-                                    root.welcome-sidebar-dock == "right"
-                                        ? dock-area.absolute-position.x + dock-area.width
-                                            - (self.absolute-position.x + self.mouse-x)
-                                        : self.absolute-position.x + self.mouse-x
-                                            - dock-area.absolute-position.x,
-                                    160px, 480px);
-                            } else {
-                                root.welcome-sidebar-width = clamp(
-                                    root.welcome-sidebar-dock == "bottom"
-                                        ? dock-area.absolute-position.y + dock-area.height
-                                            - (self.absolute-position.y + self.mouse-y)
-                                        : self.absolute-position.y + self.mouse-y
-                                            - dock-area.absolute-position.y,
-                                    120px, 360px);
-                            }
-                        }
-                    }
-                }
-            }
 
             // Everything except the welcome strip/sidebar — the resource panel,
             // splitter and the central tab/pane content — sits to the right of them.
@@ -2468,79 +2330,6 @@ export component AppWindow inherits Window {
             // Only shown while expanded; collapsing swaps it for the ToolStrip icon
             // bar below (mirrors the welcome sidebar), so no clipped widgets bleed
             // through the 36px strip (#resource-collapse).
-            if false : Rectangle {
-                x: root.sidebar-dock == "right" ? parent.width - parent.sb-w
-                 : 0px;
-                y: root.sidebar-dock == "bottom" ? parent.height - parent.sb-h
-                 : 0px;
-                width: root.sidebar-horizontal ? parent.sb-w : parent.width;
-                height: root.sidebar-horizontal ? parent.height : parent.sb-h;
-                clip: true;
-                Sidebar {
-                width: parent.width;
-                height: parent.height;
-                // Docked top/bottom → lay the resource widgets out in a row.
-                lay-horizontal: !root.sidebar-horizontal;
-                dock-edge: root.sidebar-dock;
-                animate width, height { duration: root.sidebar-dragging ? 0ms : 150ms; easing: ease-out; }
-                connection-state: root.connection-state;
-                conn-host: root.conn-host;
-                conn-state: root.conn-state;
-                resource-title: root.resource-title;
-                cpu-percent: root.cpu-percent;
-                mem-percent: root.mem-percent;
-                swap-percent: root.swap-percent;
-                mem-detail: root.mem-detail;
-                swap-detail: root.swap-detail;
-                net-top-up: root.net-top-up;
-                net-top-down: root.net-top-down;
-                net-top-history: root.net-top-history;
-                net-bot-up: root.net-bot-up;
-                net-bot-down: root.net-bot-down;
-                net-bot-history: root.net-bot-history;
-                net-ifaces: root.net-ifaces;
-                net-selected: root.net-selected;
-                net-show-selector: root.net-show-selector;
-                disks: root.disks;
-                system-info-available: root.system-info-available;
-                proc-available: root.proc-available;
-                app-version: root.app-version;
-                select-net-iface(i) => { root.select-net-iface(i); }
-                show-system-info() => { root.open-system-info(); }
-                show-processes() => { root.open-processes(); }
-                copy-host(h) => { root.copy-text(h); }   // reuse the clipboard helper (#192)
-                // Drag the sidebar header to dock it to another edge. Coordinates
-                // arrive in window space; convert to dock-area-relative fractions.
-                dock-drag-move(ax, ay) => {
-                    root.panel-dragging = true;
-                    root.drag-nx = (ax - dock-area.absolute-position.x) / dock-area.width;
-                    root.drag-ny = (ay - dock-area.absolute-position.y) / dock-area.height;
-                }
-                dock-drag-end() => {
-                    if (root.dock-target != "") {
-                        root.sidebar-dock = root.dock-target;
-                        if (root.welcome-as-sidebar && root.welcome-sidebar-dock == root.dock-target) {
-                            root.welcome-collapsed = true;
-                            root.set-welcome-collapsed(true);
-                        }
-                        if (root.quick-panel-open && root.quick-panel-dock == root.dock-target) {
-                            root.quick-panel-collapsed = true;
-                        }
-                        if (root.ai-panel-open && root.ai-panel-dock == root.dock-target) {
-                            root.ai-panel-collapsed = true;
-                        }
-                        root.persist-sidebar-dock(root.sidebar-dock);
-                    }
-                    root.panel-dragging = false;
-                }
-                // Grab cancelled: drop the preview without committing.
-                dock-drag-cancelled() => { root.panel-dragging = false; }
-                toggle-collapse() => {
-                    root.sidebar-collapsed = !root.sidebar-collapsed;
-                    root.set-sidebar-collapsed(root.sidebar-collapsed);
-                }
-                }
-            }
 
             // Splitter — drag to resize the sidebar. Orientation + which dimension it
             // adjusts follow the dock edge. Hidden while collapsed.
@@ -3225,54 +3014,6 @@ export component AppWindow inherits Window {
                 }
             }
 
-            if false : QuickDockPanel {
-                x: root.quick-panel-dock == "right" ? parent.width - parent.quick-w : 0px;
-                y: root.quick-panel-dock == "bottom" ? parent.height - parent.quick-h : 0px;
-                width: parent.quick-horizontal ? parent.quick-w : parent.width;
-                height: parent.quick-horizontal ? parent.height : parent.quick-h;
-                commands: root.quick-commands;
-                dock-edge: root.quick-panel-dock;
-                activate(command, send-enter) => {
-                    root.quick-external-command = command;
-                    root.quick-external-send-enter = send-enter;
-                    root.quick-external-sequence += 1;
-                }
-                toggle-group(group) => { root.toggle-quick-group(group); }
-                manage => {
-                    root.qcm-name = "";
-                    root.qcm-command = "";
-                    root.qcm-group = "";
-                    root.qcm-edit-index = -1;
-                    root.qcm-io-hint = "";
-                    root.quick-cmd-manage-open = true;
-                }
-                close => { root.quick-panel-collapsed = true; }
-                dock-drag-move(ax, ay) => {
-                    root.panel-dragging = true;
-                    root.drag-nx = (ax - dock-area.absolute-position.x) / dock-area.width;
-                    root.drag-ny = (ay - dock-area.absolute-position.y) / dock-area.height;
-                }
-                dock-drag-end => {
-                    if (root.dock-target != "") {
-                        root.quick-panel-dock = root.dock-target;
-                        if (root.sidebar-dock == root.dock-target) {
-                            root.sidebar-collapsed = true;
-                            root.set-sidebar-collapsed(true);
-                        }
-                        if (root.welcome-as-sidebar
-                                && root.welcome-sidebar-dock == root.dock-target) {
-                            root.welcome-collapsed = true;
-                            root.set-welcome-collapsed(true);
-                        }
-                        if (root.ai-panel-open && root.ai-panel-dock == root.dock-target) {
-                            root.ai-panel-collapsed = true;
-                        }
-                    }
-                    root.panel-dragging = false;
-                }
-                // Grab cancelled: drop the preview without committing.
-                dock-drag-cancelled => { root.panel-dragging = false; }
-            }
 
             Rectangle {
                 visible: false;
@@ -3315,56 +3056,6 @@ export component AppWindow inherits Window {
                 }
             }
 
-            if false : AIPanel {
-                // Collapsed → shrink to the edge strip below; keep the element
-                // alive so the draft/scroll state survives the round trip.
-                visible: !root.ai-panel-collapsed;
-                x: root.ai-panel-dock == "right" ? parent.width - parent.ai-w : 0px;
-                y: root.ai-panel-dock == "bottom" ? parent.height - parent.ai-h : 0px;
-                width: parent.ai-horizontal ? parent.ai-w : parent.width;
-                height: parent.ai-horizontal ? parent.height : parent.ai-h;
-                messages: root.ai-messages;
-                busy: root.ai-busy;
-                dock-edge: root.ai-panel-dock;
-                lang-en: root.lang-en;
-                awaiting: root.ai-awaiting-approval;
-                pending-tool-summary: root.ai-pending-tool-summary;
-                pending-tool-risk: root.ai-pending-tool-risk;
-                tool-decision(v, r) => { root.ai-tool-decision(v, r); }
-                draft <=> root.ai-draft;
-                draft-revision: root.ai-draft-revision;
-                send => { root.send-ai-message(root.ai-draft); }
-                stop => { root.stop-ai-message(); }
-                clear => { root.clear-ai-messages(); }
-                collapse => { root.ai-panel-collapsed = true; }
-                dock-drag-move(ax, ay) => {
-                    root.panel-dragging = true;
-                    root.drag-nx = (ax - dock-area.absolute-position.x) / dock-area.width;
-                    root.drag-ny = (ay - dock-area.absolute-position.y) / dock-area.height;
-                }
-                dock-drag-end => {
-                    if (root.dock-target != "") {
-                        root.ai-panel-dock = root.dock-target;
-                        root.set-ai-panel-dock(root.dock-target);
-                        // Same-edge squeeze: only one docked panel per edge.
-                        if (root.sidebar-dock == root.dock-target) {
-                            root.sidebar-collapsed = true;
-                            root.set-sidebar-collapsed(true);
-                        }
-                        if (root.welcome-as-sidebar
-                                && root.welcome-sidebar-dock == root.dock-target) {
-                            root.welcome-collapsed = true;
-                            root.set-welcome-collapsed(true);
-                        }
-                        if (root.quick-panel-open && root.quick-panel-dock == root.dock-target) {
-                            root.quick-panel-collapsed = true;
-                        }
-                    }
-                    root.panel-dragging = false;
-                }
-                // Grab cancelled: drop the preview without committing.
-                dock-drag-cancelled => { root.panel-dragging = false; }
-            }
 
             Rectangle {
                 visible: false;
@@ -3412,8 +3103,7 @@ export component AppWindow inherits Window {
             // Stacked docked panels (#dock-stack): every expanded panel is
             // placed here at the absolute rect Rust computed, so multiple
             // panels can share one edge (split by the dividers below). `if`
-            // branches select the panel component; the old per-panel geometry
-            // blocks above use `if false` and are kept for reference.
+            // branches select the panel component.
             for gp[gi] in root.dock-panels : Rectangle {
                 x: gp.x;
                 y: gp.y;
