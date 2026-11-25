@@ -58,8 +58,8 @@ pub(crate) fn save_layout(
     // property can lag during startup/shutdown on frameless Windows (#234).
     let native_maximized = win
         .window()
-        .with_winit_window(|ww| ww.is_maximized())
-        .unwrap_or_else(|| win.get_window_maximized());
+        .with_winit_window(|ww| ww.is_maximized() || ww.fullscreen().is_some())
+        .unwrap_or_else(|| win.get_window_maximized() || win.get_term_fullscreen());
     // Windows reports (-32000,-32000) for a minimized window; persisting
     // that sentinel would make the next launch open off-screen (#save-position).
     let native_minimized = win

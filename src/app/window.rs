@@ -381,7 +381,7 @@ pub(super) fn term_fullscreen_allowed<'a>(
     !active_tab.is_empty() && active_tab != "welcome" && terminal_ids.any(|id| id == active_tab)
 }
 
-fn active_tab_is_terminal(win: &AppWindow) -> bool {
+pub(super) fn active_tab_is_terminal(win: &AppWindow) -> bool {
     let active = win.get_active_tab_id();
     let terms = win.get_terminals();
     let ids: Vec<SharedString> = (0..terms.row_count())

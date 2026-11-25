@@ -3554,6 +3554,25 @@ pub(crate) fn open_window(
             }
         });
     }
+    // --- Terminal fullscreen (#495) ----------------------------------------
+    {
+        let weak = window.as_weak();
+        window.on_toggle_term_fullscreen(move || {
+            if let Some(w) = weak.upgrade() {
+                set_term_fullscreen(&w, !w.get_term_fullscreen());
+            }
+        });
+    }
+    {
+        let weak = window.as_weak();
+        window.on_term_fullscreen_check(move || {
+            if let Some(w) = weak.upgrade() {
+                if w.get_term_fullscreen() && !active_tab_is_terminal(&w) {
+                    set_term_fullscreen(&w, false);
+                }
+            }
+        });
+    }
     {
         let weak = window.as_weak();
         let close_handles = handles.clone();
@@ -3568,6 +3587,11 @@ pub(crate) fn open_window(
         let wc_core = core.clone();
         window.on_win_close(move || {
             if let Some(w) = weak.upgrade() {
+                if tray::available() {
+                    save_layout(&w, &wc_store, &wc_ds);
+                    tray::hide_window(&wc_core, window_id, &w);
+                    return;
+                }
                 // Mirror the native-X behaviour: confirm if sessions are open.
                 if !should_block_close(wc_exit_confirmed.get(), !close_handles.borrow().is_empty())
                 {
