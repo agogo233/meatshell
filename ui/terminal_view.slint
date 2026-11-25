@@ -477,7 +477,7 @@ export component AIPanel inherits Rectangle {
                                 color: m.role == "error" ? Theme.danger
                                     : m.role == "user" ? Theme.text-secondary
                                     : m.role == "tool" && m.tool-status == "error" ? Theme.danger
-                                    : m.role == "tool" && risk-label != "" && m.tool-status == "running" ? root.risk-color
+                                    : m.role == "tool" && risk-label != "" && m.tool-status == "running" ? risk-color
                                     : Theme.text-primary;
                                 font-family: Theme.ui-font-family;
                                 font-size: Theme.fs-sm;
