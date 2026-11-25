@@ -1146,6 +1146,7 @@ export component AppWindow inherits Window {
     in-out property <string> ai-pending-tool-summary;
     callback ai-tool-decision(bool /* allowed */);
     callback set-ai-agent-settings(bool /* agent-enabled */, bool /* require-approval */);
+    callback copy-ai-message(string /* text */);
     callback send-ai-message(string);
     callback stop-ai-message();
     callback clear-ai-messages();
@@ -6540,6 +6541,7 @@ export component AppWindow inherits Window {
                     set-ai-agent-settings(enabled, confirm) => {
                         root.set-ai-agent-settings(enabled, confirm);
                     }
+                    copy-ai-message(text) => { root.copy-ai-message(text); }
                     set-ai-panel-enabled(v) => {
                         // The settings toggle doubles as the panel's open/close:
                         // persist + open it expanded (no same-edge squeeze — panels

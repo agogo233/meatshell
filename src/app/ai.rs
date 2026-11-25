@@ -1398,6 +1398,17 @@ pub(super) fn wire_ai_callbacks(
         });
     }
 
+    // Copy a chat message to the clipboard (Slint Text cannot host a text
+    // selection, so the panel offers one-click whole-message copy instead).
+    // arboard's Linux backend waits for the clipboard owner, so keep it off
+    // the UI thread — same pattern as the process-window copy button.
+    {
+        window.on_copy_ai_message(move |text: SharedString| {
+            let text = text.to_string();
+            std::thread::spawn(move || super::helpers::clipboard_set_text(text));
+        });
+    }
+
     // Settings › AI: discover models via GET {base}/models. Takes the fields
     // as they currently appear in the settings page (not the persisted store),
     // so users can probe an endpoint before hitting Save.

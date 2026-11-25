@@ -303,6 +303,7 @@ export component AIPanel inherits Rectangle {
     callback stop();
     callback clear();
     callback tool-decision(bool /* allowed */);
+    callback copy-ai-message(string /* text */);
     callback collapse();
     callback dock-drag-move(length, length);
     callback dock-drag-end();
@@ -452,6 +453,28 @@ export component AIPanel inherits Rectangle {
                                 wrap: word-wrap;
                                 vertical-alignment: top;
                             }
+                            // One-click copy of the whole message (Slint Text
+                            // cannot host a text selection).
+                            if (m.content != "" || m.role == "tool") : Rectangle {
+                                width: 18px;
+                                background: copy-ta.has-hover ? Theme.bg-hover : transparent;
+                                border-radius: Theme.radius-sm;
+                                copy-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        root.copy-ai-message(m.role == "tool"
+                                            ? (m.tool-name + (m.content == "" ? "" : "\n" + m.content))
+                                            : m.content);
+                                    }
+                                }
+                                Text {
+                                    text: "\u{E14D}";
+                                    font-family: "Material Icons";
+                                    font-size: Theme.fs-sm;
+                                    color: copy-ta.has-hover ? Theme.text-primary : Theme.text-secondary;
+                                    horizontal-alignment: center; vertical-alignment: center;
+                                }
+                            }
                         }
                     }
                 }
@@ -560,15 +583,20 @@ export component AIPanel inherits Rectangle {
         }
     }
 
-    // Stream auto-follow: every 250ms while busy, jump to the bottom only when
-    // the view was still near the bottom at the previous tick.
-    Timer {
-        interval: 250ms;
-        running: root.busy;
-        triggered => {
-            if (ai-scroll.content-y >= root.prev-bottom - 8px) {
-                ai-scroll.content-y = ai-scroll.content-height - ai-scroll.height;
-            }
+    // Auto-follow, two channels: a new row (user message, tool card, error,
+    // placeholder) always snaps the view to the bottom; while streaming, the
+    // growing last row keeps following only while the view is still near the
+    // bottom, so scrolling up to read history is never yanked back. The old
+    // 250ms poll missed whenever one flush grew the content by more than its
+    // 8px tolerance and never recovered — property changes are exact.
+    property <int> msg-count: root.messages.length;
+    changed msg-count => {
+        ai-scroll.content-y = max(0px, ai-scroll.content-height - ai-scroll.height);
+        root.prev-bottom = ai-scroll.content-height - ai-scroll.height;
+    }
+    changed content-height => {
+        if (ai-scroll.content-y >= root.prev-bottom - 48px) {
+            ai-scroll.content-y = max(0px, ai-scroll.content-height - ai-scroll.height);
             root.prev-bottom = ai-scroll.content-height - ai-scroll.height;
         }
     }
