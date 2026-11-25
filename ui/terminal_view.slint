@@ -67,12 +67,16 @@ export struct QuickCmd {
 
 // One chat row in the AI panel. `role` is "user", "assistant", "error",
 // or "tool" (a tool-call card: tool-name + tool-status drive the styling;
-// errors are surfaced inline and never sent back to the API).
+// errors are surfaced inline and never sent back to the API). Tool cards
+// carry the risk verdict: `risk-level` drives the badge colour, `risk-reason`
+// explains it (reason + how to roll back).
 export struct AiMessage {
     role: string,
     content: string,
     tool-name: string,
     tool-status: string,
+    risk-level: string,
+    risk-reason: string,
 }
 
 // --- MenuItem --------------------------------------------------------------
@@ -297,12 +301,15 @@ export component AIPanel inherits Rectangle {
     // Agent mode: a gated tool call waits for the user's verdict.
     in property <bool> awaiting;
     in property <string> pending-tool-summary;
+    in property <string> pending-tool-risk;
+    // "Remember this approval for the rest of the session" checkbox state.
+    in-out property <bool> approval-remember: false;
     in-out property <string> draft;
     in property <int> draft-revision;   // bumped when terminal text lands in the draft
     callback send();
     callback stop();
     callback clear();
-    callback tool-decision(bool /* allowed */);
+    callback tool-decision(bool /* allowed */, bool /* remember */);
     callback copy-ai-message(string /* text */);
     callback collapse();
     callback dock-drag-move(length, length);
@@ -417,6 +424,16 @@ export component AIPanel inherits Rectangle {
                         horizontal-alignment: center;
                     }
                     for m in root.messages : Rectangle {
+                        // Risk badge helpers for tool cards ("" = no badge).
+                        property <string> risk-label: m.risk-level == "low" ? (root.lang-en ? "LOW" : "低")
+                            : m.risk-level == "medium" ? (root.lang-en ? "MEDIUM" : "中")
+                            : m.risk-level == "high" ? (root.lang-en ? "HIGH" : "高")
+                            : m.risk-level == "critical" ? (root.lang-en ? "CRITICAL" : "危险")
+                            : "";
+                        property <color> risk-color: m.risk-level == "low" ? Theme.success
+                            : m.risk-level == "medium" ? Theme.warning
+                            : m.risk-level == "high" ? Theme.danger.with-alpha(0.75)
+                            : Theme.danger;
                         height: max(30px, ai-msg-txt.preferred-height + 14px);
                         border-radius: Theme.radius-sm;
                         border-width: m.role == "tool" ? 1px : 0px;
@@ -452,11 +469,15 @@ export component AIPanel inherits Rectangle {
                                 horizontal-stretch: 1;
                                 // Empty trailing assistant row = reply still streaming.
                                 text: m.content == "" && m.role == "assistant" && root.busy ? "…"
-                                    : m.role == "tool" ? (m.tool-name + (m.content == "" ? "" : "\n" + m.content))
+                                    : m.role == "tool" ? (m.tool-name
+                                        + (risk-label == "" ? "" : "  [" + risk-label + "]")
+                                        + (m.content == "" ? "" : "\n" + m.content)
+                                        + (m.risk-reason == "" ? "" : "\n" + m.risk-reason))
                                     : m.content;
                                 color: m.role == "error" ? Theme.danger
                                     : m.role == "user" ? Theme.text-secondary
                                     : m.role == "tool" && m.tool-status == "error" ? Theme.danger
+                                    : m.role == "tool" && risk-label != "" && m.tool-status == "running" ? root.risk-color
                                     : Theme.text-primary;
                                 font-family: Theme.ui-font-family;
                                 font-size: Theme.fs-sm;
@@ -506,14 +527,41 @@ export component AIPanel inherits Rectangle {
                     wrap: word-wrap;
                     overflow: elide;
                 }
+                if root.pending-tool-risk != "" : Text {
+                    text: root.pending-tool-risk;
+                    color: Theme.danger;
+                    font-size: Theme.fs-xs;
+                    wrap: word-wrap;
+                    overflow: elide;
+                }
                 HorizontalLayout {
                     spacing: 8px;
                     alignment: end;
+                    // Remember-for-this-session checkbox (opencode-style saved
+                    // approval, session-scoped: dropped when the app restarts).
+                    remember-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.approval-remember = !root.approval-remember; }
+                    }
+                    Text {
+                        text: root.approval-remember ? "\u{E834}" : "\u{E835}";
+                        font-family: "Material Icons";
+                        font-size: Theme.fs-md;
+                        color: root.approval-remember ? Theme.accent : Theme.text-secondary;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: root.lang-en ? "Remember for this session" : "本会话内记住此批准";
+                        color: Theme.text-secondary;
+                        font-size: Theme.fs-xs;
+                        vertical-alignment: center;
+                    }
+                    Rectangle { width: 8px; }
                     Rectangle {
                         width: 64px; height: 26px;
                         border-radius: Theme.radius-sm;
                         background: allow-ta.has-hover ? Theme.accent-hover : Theme.accent;
-                        allow-ta := TouchArea { mouse-cursor: pointer; clicked => { root.tool-decision(true); } }
+                        allow-ta := TouchArea { mouse-cursor: pointer; clicked => { root.tool-decision(true, root.approval-remember); } }
                         Text {
                             text: root.lang-en ? "Allow" : "允许";
                             color: white; font-size: Theme.fs-xs;
@@ -524,7 +572,7 @@ export component AIPanel inherits Rectangle {
                         width: 64px; height: 26px;
                         border-radius: Theme.radius-sm;
                         background: deny-ta.has-hover ? Theme.bg-hover : Theme.bg-panel-alt;
-                        deny-ta := TouchArea { mouse-cursor: pointer; clicked => { root.tool-decision(false); } }
+                        deny-ta := TouchArea { mouse-cursor: pointer; clicked => { root.tool-decision(false, false); } }
                         Text {
                             text: root.lang-en ? "Deny" : "拒绝";
                             color: Theme.text-secondary; font-size: Theme.fs-xs;

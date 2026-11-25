@@ -833,6 +833,7 @@ pub(crate) fn open_window(
         window.set_ai_model(s.ai_model().into());
         window.set_ai_agent_enabled(s.ai_agent_enabled());
         window.set_ai_require_tool_approval(s.ai_require_tool_approval());
+        ai::push_ai_policy(window, s);
         window.set_welcome_sidebar_width(s.welcome_sidebar_width());
         window.set_welcome_sidebar_dock(welcome_sidebar_dock.into());
         window.set_welcome_collapsed(welcome_collapsed);
@@ -3863,6 +3864,7 @@ pub(crate) fn sync_settings_for_window(window: &slint::Weak<AppWindow>, store: &
     window.set_ai_model(store.ai_model().into());
     window.set_ai_agent_enabled(store.ai_agent_enabled());
     window.set_ai_require_tool_approval(store.ai_require_tool_approval());
+    ai::push_ai_policy(window, store);
     window.set_download_dir(store.download_dir().to_string().into());
     window.set_sync_upload_enabled(store.sync_upload());
 }

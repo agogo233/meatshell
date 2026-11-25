@@ -9,6 +9,8 @@ mod agents;
 mod auth_dialogs;
 mod aux_windows;
 mod ai;
+mod ai_audit;
+mod ai_risk;
 mod color_theme;
 mod credentials;
 mod terminal_scheme;
@@ -77,6 +79,8 @@ mod window;
 // drag_out 暂缓、editor/tests 仍待显式决策取用。
 
 use self::ai::*;
+use self::ai_audit::*;
+use self::ai_risk::*;
 use self::auth_dialogs::*;
 use self::editor_host::*;
 use self::editor_tabs::*;

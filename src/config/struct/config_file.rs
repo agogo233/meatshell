@@ -133,6 +133,20 @@ pub(crate) fn default_ai_require_tool_approval() -> bool {
     true
 }
 
+/// Smart mode only auto-executes read-only calls by default; anything above
+/// `low` asks.
+pub(crate) fn default_ai_auto_execute_max_risk() -> String {
+    "low".to_string()
+}
+
+pub(crate) fn default_ai_max_agent_steps() -> u16 {
+    8
+}
+
+pub(crate) fn default_ai_context_line_limit() -> u32 {
+    50
+}
+
 pub(crate) fn default_ai_panel_height() -> f32 {
     420.0
 }
@@ -564,12 +578,53 @@ pub struct ConfigFile {
     /// sensitive remote files. Default on.
     #[serde(default = "default_ai_require_tool_approval")]
     pub ai_require_tool_approval: bool,
+    /// How the agent decides between running and asking:
+    /// `confirm_each` (ask for every gated call) / `smart` (auto-run at or
+    /// below `ai_auto_execute_max_risk`) / `auto` (run everything; Critical
+    /// still asks). `None` on configs written before this field: derive from
+    /// the legacy `ai_require_tool_approval` boolean (true → confirm_each,
+    /// false → auto) instead of defaulting blindly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_command_execution_mode: Option<String>,
+    /// Smart-mode ceiling: calls graded at or below this level auto-run.
+    #[serde(default = "default_ai_auto_execute_max_risk")]
+    pub ai_auto_execute_max_risk: String,
+    /// Tool-call rounds per message before the forced wrap-up summary.
+    #[serde(default = "default_ai_max_agent_steps")]
+    pub ai_max_agent_steps: u16,
+    /// Terminal lines handed to the assistant as context per message.
+    #[serde(default = "default_ai_context_line_limit")]
+    pub ai_context_line_limit: u32,
+    /// User permission rules over tool calls (opencode-style): wildcard
+    /// patterns on tool name and resource mapped to allow / ask / deny.
+    /// Evaluated before risk grading; deny is monotone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ai_permission_rules: Vec<PermissionRuleSer>,
+    /// Intent-aware relaxation: when the user's message clearly asks for the
+    /// operation, smart mode relaxes the verdict one level. Default off.
+    #[serde(default)]
+    pub ai_intent_aware_execute: bool,
     /// Per-edge stacks of simultaneously-expanded docked panels (#dock-stack),
     /// e.g. session list + Quick shared on the left edge, split vertically.
     /// Empty (or <2 slots on a valid edge) → the legacy single-panel-per-edge
     /// layout.
     #[serde(default)]
     pub dock_stacks: Vec<DockEdgeSer>,
+}
+
+/// One user-authored AI permission rule: wildcard patterns over the tool
+/// name and the call's resource (command text or remote path) mapped to an
+/// effect — `allow` (run without asking, Critical still asks), `ask` (always
+/// ask) or `deny` (refuse outright, cannot be undone). Matching semantics
+/// live in `app::ai_risk`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PermissionRuleSer {
+    #[serde(default)]
+    pub tool: String,
+    #[serde(default)]
+    pub resource: String,
+    #[serde(default)]
+    pub action: String,
 }
 
 /// Portable quick-commands export (#55 companion): names, commands and group

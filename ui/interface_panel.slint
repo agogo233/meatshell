@@ -802,6 +802,15 @@ export component InterfacePanel inherits Rectangle {
     in-out property <bool> ai-panel-enabled: false;
     in-out property <bool> ai-agent-enabled: false;
     in-out property <bool> ai-require-tool-approval: true;
+    // Agent execution policy (risk grading + permission rules).
+    in-out property <string> ai-execution-mode: "confirm_each";
+    in-out property <string> ai-auto-max-risk: "low";
+    in-out property <string> ai-max-steps: "8";
+    in-out property <string> ai-context-lines: "50";
+    in-out property <string> ai-rules-text: "";
+    in-out property <bool> ai-intent-aware: false;
+    callback save-ai-agent-policy(string /* mode */, string /* max-risk */, string /* steps */,
+                                   string /* context-lines */, string /* rules */, bool /* intent */);
     in property <[string]> ai-discovered-models;
     in property <string> ai-discover-state;   // "" | "busy" | "ok" | "error"
     in property <string> ai-discover-error;
@@ -3028,15 +3037,107 @@ export component InterfacePanel inherits Rectangle {
                     }
                 }
                 if root.ai-agent-enabled : SettingRow {
-                    label: root.lang-en ? "Confirm before executing" : "执行前需要确认";
+                    label: root.lang-en ? "Execution mode" : "执行模式";
                     desc: root.lang-en
-                        ? "Ask in the panel before every command / file transfer and before reading sensitive files (recommended)."
-                        : "每次执行命令、传输文件以及读取敏感文件前，先在对话面板中确认（建议开启）。";
+                        ? "confirm_each: ask for every risky call · smart: auto-run at or below the risk ceiling · auto: run everything (critical still asks)."
+                        : "confirm_each：风险操作逐一确认 · smart：不超过风险上限的自动执行 · auto：全部自动（灾难级仍需确认）。";
+                    ComboBox {
+                        width: 220px;
+                        model: [
+                            "confirm_each",
+                            "smart",
+                            "auto",
+                        ];
+                        current-value: root.ai-execution-mode;
+                        selected(v) => { root.ai-execution-mode = v; }
+                    }
+                }
+                if root.ai-agent-enabled && root.ai-execution-mode == "smart" : SettingRow {
+                    label: root.lang-en ? "Auto-execute risk ceiling" : "自动执行风险上限";
+                    desc: root.lang-en
+                        ? "Calls graded at or below this level run without asking (low = read-only)."
+                        : "不高于该等级的操作将自动执行（low = 仅只读）。";
+                    ComboBox {
+                        width: 220px;
+                        model: [
+                            "low",
+                            "medium",
+                            "high",
+                        ];
+                        current-value: root.ai-auto-max-risk;
+                        selected(v) => { root.ai-auto-max-risk = v; }
+                    }
+                }
+                if root.ai-agent-enabled : LabeledInput {
+                    label: root.lang-en ? "Max tool steps per message" : "单条消息最大工具步数";
+                    placeholder: "8";
+                    value <=> root.ai-max-steps;
+                }
+                if root.ai-agent-enabled : LabeledInput {
+                    label: root.lang-en ? "Terminal context lines" : "终端上下文行数";
+                    placeholder: "50";
+                    value <=> root.ai-context-lines;
+                }
+                if root.ai-agent-enabled : VerticalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: root.lang-en
+                            ? "Permission rules — one per line: tool | resource | action (allow/ask/deny). Wildcards: * any run, ? one char. deny always wins; deny cannot be undone."
+                            : "权限规则——每行一条：工具 | 资源 | 动作（allow/ask/deny）。通配符：* 任意、? 单字符。deny 永远优先且不可解除。";
+                        color: Theme.text-muted;
+                        font-size: 11px * Theme.panel-font;
+                        wrap: word-wrap;
+                    }
+                    Rectangle {
+                        height: 72px;
+                        border-radius: Theme.radius-sm;
+                        border-width: 1px;
+                        border-color: Theme.border-subtle;
+                        background: Theme.bg-root;
+                        clip: true;
+                        Flickable {
+                            content-width: self.width;
+                            content-height: max(self.height, rules-input.preferred-height + 10px);
+                            rules-input := TextInput {
+                                x: 8px; y: 5px;
+                                width: parent.width - 16px;
+                                text <=> root.ai-rules-text;
+                                color: Theme.text-primary;
+                                font-family: Theme.ui-font-family;
+                                font-size: Theme.fs-sm;
+                                single-line: false;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                    Text {
+                        text: root.lang-en
+                            ? "e.g.  run_command | git * | allow      run_command | rm -rf * | deny"
+                            : "示例：  run_command | git * | allow      run_command | rm -rf * | deny";
+                        color: Theme.text-muted;
+                        font-size: 11px * Theme.panel-font;
+                        wrap: word-wrap;
+                    }
+                }
+                if root.ai-agent-enabled : SettingRow {
+                    label: root.lang-en ? "Intent-aware relaxation" : "意图感知放宽";
+                    desc: root.lang-en
+                        ? "When your message clearly asks for the operation, smart mode relaxes the verdict by one level. Critical calls always ask."
+                        : "当你的消息明确要求执行该操作时，smart 模式将风险判定放宽一档。灾难级操作仍始终需要确认。";
                     Switch {
-                        on: root.ai-require-tool-approval;
-                        toggled(v) => {
-                            root.ai-require-tool-approval = v;
-                            root.set-ai-agent-settings(root.ai-agent-enabled, root.ai-require-tool-approval);
+                        on: root.ai-intent-aware;
+                        toggled(v) => { root.ai-intent-aware = v; }
+                    }
+                }
+                if root.ai-agent-enabled : HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+                    PrimaryButton {
+                        text: root.lang-en ? "Save policy" : "保存策略";
+                        clicked => {
+                            root.save-ai-agent-policy(root.ai-execution-mode, root.ai-auto-max-risk,
+                                root.ai-max-steps, root.ai-context-lines, root.ai-rules-text,
+                                root.ai-intent-aware);
                         }
                     }
                 }

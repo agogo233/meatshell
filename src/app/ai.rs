@@ -50,8 +50,6 @@ const AI_MODELS_READ_TIMEOUT: Duration = Duration::from_secs(15);
 
 // ── Agent mode (chat panel → gated SSH/SFTP tools) ───────────────────────
 
-/// Max tool-call rounds per user message before the loop is stopped.
-const AI_AGENT_MAX_ROUNDS: usize = 8;
 /// Hard wall-clock budget for one agent turn (streaming + tool execution).
 const AI_AGENT_DEADLINE: Duration = Duration::from_secs(600);
 /// Cap on one tool result handed back to the model. Tools already bound their
@@ -138,6 +136,38 @@ pub(super) fn redact_sensitive_text(input: &str) -> String {
     output
 }
 
+/// Terminal context for the agent: the live screen text, redacted and
+/// truncated to the last `max_lines` lines. Returns (context, total_lines) so
+/// the model can tell when it is looking at a truncated tail.
+pub(super) fn terminal_context(
+    bufs: &TermBuffers,
+    tab_id: &str,
+    max_lines: usize,
+) -> (String, usize) {
+    let Some(handle) = term_buf(bufs, tab_id) else {
+        return (String::new(), 0);
+    };
+    let buf = lock_or_recover(&handle);
+    let text = buf.parser.screen().contents().to_string();
+    let lines: Vec<&str> = text.lines().collect();
+    let total = lines.len();
+    let start = total.saturating_sub(max_lines);
+    let mut out = String::new();
+    if start > 0 {
+        out.push_str(&t(
+            "（终端输出过长，仅保留最后 ",
+            "(terminal output truncated; showing the last ",
+        ));
+        out.push_str(&max_lines.to_string());
+        out.push_str(&t(" 行）\n", " lines)\n"));
+    }
+    for line in &lines[start..] {
+        out.push_str(&redact_sensitive_text(line));
+        out.push('\n');
+    }
+    (out, total)
+}
+
 // ── URL / agent helpers ──────────────────────────────────────────────────
 
 fn chat_completions_url(base_url: &str) -> String {
@@ -192,6 +222,8 @@ fn push_ai_message(window: &AppWindow, role: &str, content: &str) {
             content: content.into(),
             tool_name: "".into(),
             tool_status: "".into(),
+            risk_level: "".into(),
+            risk_reason: "".into(),
         });
     });
 }
@@ -332,17 +364,6 @@ fn agent_tools_json() -> Option<serde_json::Value> {
     (!tools.is_empty()).then(|| serde_json::Value::Array(tools))
 }
 
-/// Heuristic: remote paths whose contents should not be read without asking
-/// (credentials, keys, secrets). Fails safe: borderline names ask.
-fn sensitive_remote_path(path: &str) -> bool {
-    const NEEDLES: &[&str] = &[
-        "passwd", "shadow", "/.ssh/", "id_rsa", "id_ed25519", "id_ecdsa", ".pem", ".p12",
-        ".pfx", "keystore", ".env", "credential", "secret", "private_key", "privatekey",
-    ];
-    let lower = path.to_ascii_lowercase();
-    NEEDLES.iter().any(|needle| lower.contains(needle))
-}
-
 /// One-line human summary of a tool call for the chat card / approval bar.
 fn tool_summary(name: &str, args: &serde_json::Value) -> String {
     let text = match name {
@@ -426,7 +447,8 @@ fn execute_automation_tool(
         .map_err(|err| truncate_str(&err.to_string(), 500))
 }
 
-/// Push one tool-call card row into the conversation model.
+/// Push one tool-call card row into the conversation model. `risk_level` /
+/// `risk_reason` drive the risk badge (empty = no badge for read-only calls).
 fn push_tool_card(
     weak: &slint::Weak<AppWindow>,
     generation: Arc<AtomicU64>,
@@ -434,10 +456,14 @@ fn push_tool_card(
     name: &str,
     summary: &str,
     status: &str,
+    risk_level: &str,
+    risk_reason: &str,
 ) {
     let name = name.to_string();
     let summary = summary.to_string();
     let status = status.to_string();
+    let risk_level = risk_level.to_string();
+    let risk_reason = risk_reason.to_string();
     let _ = weak.upgrade_in_event_loop(move |w| {
         if generation.load(Ordering::Relaxed) != my_gen {
             return;
@@ -448,6 +474,8 @@ fn push_tool_card(
                 content: summary.into(),
                 tool_name: name.into(),
                 tool_status: status.into(),
+                risk_level: risk_level.into(),
+                risk_reason: risk_reason.into(),
             });
         });
     });
@@ -527,6 +555,8 @@ fn push_assistant_placeholder(
                 content: "".into(),
                 tool_name: "".into(),
                 tool_status: "".into(),
+                risk_level: "".into(),
+                risk_reason: "".into(),
             });
         });
     });
@@ -536,6 +566,9 @@ fn push_assistant_placeholder(
 #[derive(Debug, PartialEq, Eq)]
 enum ApprovalDecision {
     Approved,
+    /// Approved with "remember for this session" ticked: the exact call is
+    /// auto-approved for the rest of the conversation.
+    ApprovedRemembered,
     Denied,
     /// Stop / clear pressed while waiting: abort the whole turn.
     Cancelled,
@@ -547,23 +580,26 @@ enum ApprovalDecision {
 /// the decision callback (and stop/clear) pop it to wake this worker.
 fn request_approval(
     weak: &slint::Weak<AppWindow>,
-    slot: &Arc<Mutex<Option<mpsc::Sender<bool>>>>,
+    slot: &Arc<Mutex<Option<mpsc::Sender<(bool, bool)>>>>,
     generation: Arc<AtomicU64>,
     my_gen: u64,
     summary: &str,
+    risk_line: &str,
     cancel: &Arc<AtomicBool>,
 ) -> ApprovalDecision {
-    let (tx, rx) = mpsc::channel::<bool>();
+    let (tx, rx) = mpsc::channel::<(bool, bool)>();
     {
         let slot = slot.clone();
         let generation = generation.clone();
         let summary = summary.to_string();
+        let risk_line = risk_line.to_string();
         let _ = weak.upgrade_in_event_loop(move |w| {
             if generation.load(Ordering::Relaxed) != my_gen {
                 return;
             }
             *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
             w.set_ai_pending_tool_summary(summary.into());
+            w.set_ai_pending_tool_risk(risk_line.into());
             w.set_ai_awaiting_approval(true);
         });
     }
@@ -576,8 +612,12 @@ fn request_approval(
             break ApprovalDecision::Denied;
         }
         match rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(true) => break ApprovalDecision::Approved,
-            Ok(false) => break ApprovalDecision::Denied,
+            Ok((true, remember)) => break if remember {
+                ApprovalDecision::ApprovedRemembered
+            } else {
+                ApprovalDecision::Approved
+            },
+            Ok((false, _)) => break ApprovalDecision::Denied,
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             // The decision / stop / clear callback consumed the sender.
             Err(mpsc::RecvTimeoutError::Disconnected) => break ApprovalDecision::Denied,
@@ -812,8 +852,9 @@ fn post_chat_stream(
 }
 
 /// The agent loop: stream a reply; when the model requests tools, run them
-/// through the gated automation layer and feed the results back. Bounded by
-/// a round limit, a wall-clock deadline, and a consecutive-failure breaker.
+/// through the permission-rule table + risk grading and feed the results
+/// back. Bounded by a step limit (with a wrap-up summary), a wall-clock
+/// deadline, and a consecutive-failure breaker.
 #[allow(clippy::too_many_arguments)]
 fn run_agent_turn(
     weak: slint::Weak<AppWindow>,
@@ -824,9 +865,9 @@ fn run_agent_turn(
     user_text: String,
     system_suffix: String,
     tools: Option<serde_json::Value>,
-    require_approval: bool,
+    policy: AgentPolicy,
     default_session_id: Option<String>,
-    approval_slot: Arc<Mutex<Option<mpsc::Sender<bool>>>>,
+    approval_slot: Arc<Mutex<Option<mpsc::Sender<(bool, bool)>>>>,
     cancel: Arc<AtomicBool>,
     generation: Arc<AtomicU64>,
     my_gen: u64,
@@ -846,6 +887,10 @@ fn run_agent_turn(
     let mut rounds = 0usize;
     let mut failing: Option<(String, u32)> = None;
     let mut outcome;
+    // Approvals the user asked to remember for the rest of this conversation:
+    // exact (tool, resource) pairs, dropped when the app restarts.
+    let mut remembered: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
 
     loop {
         if cancel.load(Ordering::Relaxed) {
@@ -871,11 +916,22 @@ fn run_agent_turn(
         };
 
         rounds += 1;
-        if rounds > AI_AGENT_MAX_ROUNDS {
-            outcome = AiTurnOutcome::Error(t(
-                "达到工具调用轮数上限，已停止",
-                "tool-call round limit reached; stopped",
-            ).to_string());
+        if rounds > policy.max_steps {
+            // Wrap-up summary instead of a hard error (oli-style): one plain
+            // completion lets the model report what it achieved so far. The
+            // wall-clock deadline still bounds this final request.
+            push_assistant_placeholder(&weak, generation.clone(), my_gen);
+            messages.push(serde_json::json!({
+                "role": "user",
+                "content": t(
+                    "（系统提示）工具调用步数已达上限，请基于以上结果给出最终总结，不要继续请求调用工具。",
+                    "(system) the tool-call step limit is reached; summarise the progress and results now, do not request more tool calls.",
+                ),
+            }));
+            let _ = post_chat_stream(
+                &weak, &base_url, &api_key, &model, &messages, None, &cancel, &generation, my_gen,
+            );
+            outcome = AiTurnOutcome::Done;
             break;
         }
 
@@ -920,7 +976,7 @@ fn run_agent_turn(
                     };
                     failing = Some((call.name.clone(), streak));
                     let note = format!("{}: {}", t("参数解析失败", "invalid tool arguments"), err);
-                    push_tool_card(&weak, generation.clone(), my_gen, &call.name, &note, "error");
+                    push_tool_card(&weak, generation.clone(), my_gen, &call.name, &note, "error", "", "");
                     messages.push(serde_json::json!({
                         "role": "tool",
                         "tool_call_id": call.id,
@@ -942,55 +998,150 @@ fn run_agent_turn(
             }
 
             let summary = tool_summary(&call.name, &args);
-            push_tool_card(&weak, generation.clone(), my_gen, &call.name, &summary, "running");
+            let resource = rule_resource(&call.name, &args);
+            let assessment = assess(&call.name, &args);
+            let hit = evaluate_rules(&policy.rules, &call.name, &resource);
+            let risk_reason = assessment.detail();
+            push_tool_card(
+                &weak,
+                generation.clone(),
+                my_gen,
+                &call.name,
+                &summary,
+                "running",
+                assessment.level.as_str(),
+                &risk_reason,
+            );
+            let mut audit = AiAuditEntry {
+                action: call.name.clone(),
+                command: if resource.is_empty() { summary.clone() } else { resource.clone() },
+                risk_level: assessment.level.as_str(),
+                hit_rule: hit.as_ref().map(|(_, label)| label.clone()).unwrap_or_default(),
+                approval: "none",
+                executed: false,
+                blocked: false,
+                success: false,
+                duration_ms: 0,
+                session_id: args["session_id"].as_str().unwrap_or("").to_string(),
+                error: String::new(),
+            };
 
-            // Approval gate: state-changing calls and sensitive-file reads.
-            let gated = matches!(
-                call.name.as_str(),
-                "run_command" | "upload_file" | "download_file"
-            ) || (call.name == "read_remote_text_file"
-                && sensitive_remote_path(args["path"].as_str().unwrap_or("")));
-            if require_approval && gated {
-                let ask = if summary.is_empty() {
-                    call.name.clone()
-                } else {
-                    format!("{} · {}", call.name, summary)
+            // Gate order: deny rule → Critical floor (even an allow rule
+            // cannot wave it through) → allow rule → ask rule → remembered
+            // approval → risk grading (confirm_each / smart / auto).
+            enum Gate {
+                Reject,
+                Ask,
+                Run(&'static str),
+            }
+            let gate = if hit.as_ref().map(|(action, _)| *action) == Some(RuleAction::Deny) {
+                Gate::Reject
+            } else if assessment.level == RiskLevel::Critical {
+                Gate::Ask
+            } else if hit.as_ref().map(|(action, _)| *action) == Some(RuleAction::Allow) {
+                Gate::Run("rule-allow")
+            } else if hit.as_ref().map(|(action, _)| *action) == Some(RuleAction::Ask) {
+                Gate::Ask
+            } else if remembered.contains(&(call.name.clone(), resource.clone())) {
+                Gate::Run("remembered")
+            } else {
+                let mut effective = assessment.level;
+                if policy.intent_aware && user_requested(&user_text) {
+                    effective = effective.relax_one();
+                }
+                let auto_run = match policy.mode.as_str() {
+                    "auto" => true,
+                    "smart" => effective <= policy.auto_max_risk,
+                    _ => false,
                 };
-                match request_approval(
-                    &weak,
-                    &approval_slot,
-                    generation.clone(),
-                    my_gen,
-                    &ask,
-                    &cancel,
-                ) {
-                    ApprovalDecision::Approved => {}
-                    ApprovalDecision::Cancelled => {
-                        aborted = true;
-                        break;
+                if auto_run {
+                    Gate::Run("none")
+                } else {
+                    Gate::Ask
+                }
+            };
+
+            match gate {
+                Gate::Reject => {
+                    audit.approval = "rule-deny";
+                    audit.blocked = true;
+                    audit.error = t("命中禁止规则", "blocked by a permission rule").to_string();
+                    set_last_tool_card(
+                        &weak,
+                        generation.clone(),
+                        my_gen,
+                        "denied",
+                        &t("命中禁止规则，已拒绝执行", "blocked by a permission rule; refused"),
+                    );
+                    record(audit);
+                    messages.push(serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": "{\"error\":\"blocked by a permission rule\"}",
+                    }));
+                    continue;
+                }
+                Gate::Ask => {
+                    let ask = if summary.is_empty() {
+                        call.name.clone()
+                    } else {
+                        format!("{} · {}", call.name, summary)
+                    };
+                    match request_approval(
+                        &weak,
+                        &approval_slot,
+                        generation.clone(),
+                        my_gen,
+                        &ask,
+                        &risk_reason,
+                        &cancel,
+                    ) {
+                        ApprovalDecision::Approved => {
+                            audit.approval = "approved";
+                        }
+                        ApprovalDecision::ApprovedRemembered => {
+                            audit.approval = "approved";
+                            remembered.insert((call.name.clone(), resource.clone()));
+                        }
+                        ApprovalDecision::Cancelled => {
+                            aborted = true;
+                            break;
+                        }
+                        ApprovalDecision::Denied => {
+                            audit.approval = "denied";
+                            audit.blocked = true;
+                            audit.error =
+                                t("已拒绝或确认超时", "denied or approval timed out").to_string();
+                            set_last_tool_card(
+                                &weak,
+                                generation.clone(),
+                                my_gen,
+                                "denied",
+                                &t("已拒绝或确认超时", "denied or approval timed out"),
+                            );
+                            record(audit);
+                            messages.push(serde_json::json!({
+                                "role": "tool",
+                                "tool_call_id": call.id,
+                                "content": "{\"error\":\"denied by user\"}",
+                            }));
+                            continue;
+                        }
                     }
-                    ApprovalDecision::Denied => {
-                        set_last_tool_card(
-                            &weak,
-                            generation.clone(),
-                            my_gen,
-                            "denied",
-                            &t("已拒绝或确认超时", "denied or approval timed out"),
-                        );
-                        messages.push(serde_json::json!({
-                            "role": "tool",
-                            "tool_call_id": call.id,
-                            "content": "{\"error\":\"denied by user\"}",
-                        }));
-                        continue;
-                    }
+                }
+                Gate::Run(how) => {
+                    audit.approval = how;
                 }
             }
 
+            let started = Instant::now();
             let result = execute_automation_tool(&call.name, &args);
+            audit.duration_ms = started.elapsed().as_millis() as u64;
+            audit.executed = true;
             match &result {
                 Ok(_) => {
                     failing = None;
+                    audit.success = true;
                     // Keep the call summary as the card detail on success.
                     set_last_tool_card(&weak, generation.clone(), my_gen, "ok", "");
                 }
@@ -1000,9 +1151,11 @@ fn run_agent_turn(
                         _ => 1,
                     };
                     failing = Some((call.name.clone(), streak));
+                    audit.error = err.clone();
                     set_last_tool_card(&weak, generation.clone(), my_gen, "error", err);
                 }
             }
+            record(audit);
             let tool_content = match result {
                 Ok(value) => truncate_tool_result(&value),
                 Err(err) => serde_json::to_string(&serde_json::json!({ "error": err }))
@@ -1148,6 +1301,47 @@ fn squeeze_same_edge_panels(w: &AppWindow, dock: &str) {
     }
 }
 
+/// Serialize permission rules into the settings-page text format: one
+/// `tool | resource | action` per line.
+pub(super) fn rules_to_text(rules: &[crate::config::PermissionRuleSer]) -> String {
+    rules
+        .iter()
+        .map(|r| format!("{} | {} | {}", r.tool, r.resource, r.action))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Parse the settings-page rules text back into rules. Malformed lines are
+/// skipped; the config store sanitises again on the way in.
+fn parse_rules_text(text: &str) -> Vec<crate::config::PermissionRuleSer> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split('|').map(str::trim).collect();
+            if parts.len() != 3 {
+                return None;
+            }
+            Some(crate::config::PermissionRuleSer {
+                tool: parts[0].to_string(),
+                resource: parts[1].to_string(),
+                action: parts[2].to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Push the resolved agent policy onto the window so the settings page shows
+/// the stored values (called on window setup and whenever settings reopen).
+pub(super) fn push_ai_policy(window: &AppWindow, store: &ConfigStore) {
+    window.set_ai_execution_mode(store.ai_command_execution_mode().into());
+    window.set_ai_auto_max_risk(store.ai_auto_execute_max_risk().into());
+    window.set_ai_max_steps(store.ai_max_agent_steps().to_string().into());
+    window.set_ai_context_lines(store.ai_context_line_limit().to_string().into());
+    window.set_ai_rules_text(rules_to_text(&store.ai_permission_rules()).into());
+    window.set_ai_intent_aware(store.ai_intent_aware_execute());
+}
+
 pub(super) fn wire_ai_callbacks(
     window: &AppWindow,
     store: &Rc<RefCell<ConfigStore>>,
@@ -1162,8 +1356,10 @@ pub(super) fn wire_ai_callbacks(
     // validated against this counter so they cannot corrupt a newer request.
     let generation = Arc::new(AtomicU64::new(0));
     // Pending tool-approval channel: the agent worker parks the sender here
-    // on the UI thread; the decision / stop / clear callbacks pop it.
-    let approval_slot: Arc<Mutex<Option<mpsc::Sender<bool>>>> = Arc::new(Mutex::new(None));
+    // on the UI thread; the decision / stop / clear callbacks pop it. The
+    // bool pair is (allowed, remember-for-this-session).
+    let approval_slot: Arc<Mutex<Option<mpsc::Sender<(bool, bool)>>>> =
+        Arc::new(Mutex::new(None));
 
     // Settings › AI: persist base URL / key / model.
     {
@@ -1175,6 +1371,32 @@ pub(super) fn wire_ai_callbacks(
                     base_url.to_string(),
                     api_key.to_string(),
                     model.to_string(),
+                );
+                let _ = s.save();
+            },
+        );
+    }
+
+    // Settings › AI: persist the agent execution policy — mode, smart ceiling,
+    // step cap, context lines, permission rules and intent relaxation.
+    {
+        let store = store.clone();
+        window.on_save_ai_agent_policy(
+            move |mode: SharedString,
+                  max_risk: SharedString,
+                  steps: SharedString,
+                  lines: SharedString,
+                  rules_text: SharedString,
+                  intent: bool| {
+                let rules = parse_rules_text(&rules_text);
+                let mut s = store.borrow_mut();
+                s.set_ai_agent_policy(
+                    mode.to_string(),
+                    max_risk.to_string(),
+                    steps.trim().parse().unwrap_or(8),
+                    lines.trim().parse().unwrap_or(50),
+                    rules,
+                    intent,
                 );
                 let _ = s.save();
             },
@@ -1219,6 +1441,7 @@ pub(super) fn wire_ai_callbacks(
         let http_warned = http_warned.clone();
         let approval_slot = approval_slot.clone();
         let tab_statuses = tab_statuses.clone();
+        let bufs = bufs.clone();
         let weak = window.as_weak();
         window.on_send_ai_message(move |text: SharedString| {
             let Some(w) = weak.upgrade() else { return };
@@ -1274,7 +1497,25 @@ pub(super) fn wire_ai_callbacks(
                     None
                 }
             };
-            let require_approval = store.borrow().ai_require_tool_approval();
+            let policy = {
+                let s = store.borrow();
+                AgentPolicy {
+                    mode: s.ai_command_execution_mode(),
+                    auto_max_risk: RiskLevel::parse(&s.ai_auto_execute_max_risk())
+                        .unwrap_or(RiskLevel::Low),
+                    max_steps: s.ai_max_agent_steps(),
+                    rules: s
+                        .ai_permission_rules()
+                        .into_iter()
+                        .map(|r| PermissionRule {
+                            tool: r.tool,
+                            resource: r.resource,
+                            action: RuleAction::parse(&r.action).unwrap_or(RuleAction::Ask),
+                        })
+                        .collect(),
+                    intent_aware: s.ai_intent_aware_execute(),
+                }
+            };
             let session_ctx = if tools.is_some() {
                 active_ssh_session_context(&w, &tab_statuses, &store.borrow())
             } else {
@@ -1297,7 +1538,22 @@ pub(super) fn wire_ai_callbacks(
                 }
             }
             // Show the redacted text: what the user sees is what is sent.
-            let user_text = redact_sensitive_text(text);
+            let mut user_text = redact_sensitive_text(text);
+            // Agent mode: attach the live terminal tail so the model reasons
+            // about what is actually on screen instead of guessing.
+            if tools.is_some() {
+                if let Some((session_id, _)) = &session_ctx {
+                    let max_lines = store.borrow().ai_context_line_limit();
+                    let (ctx, _) = terminal_context(&bufs, session_id, max_lines);
+                    if !ctx.is_empty() {
+                        user_text.push_str(&t(
+                            "\n\n[当前终端画面]\n",
+                            "\n\n[Current terminal screen]\n",
+                        ));
+                        user_text.push_str(&ctx);
+                    }
+                }
+            }
             let history = ai_history(&w, AI_HISTORY_MESSAGES);
             push_ai_message(&w, "user", &user_text);
             push_ai_message(&w, "assistant", "");
@@ -1324,7 +1580,7 @@ pub(super) fn wire_ai_callbacks(
                         user_text,
                         system_suffix,
                         Some(tools),
-                        require_approval,
+                        policy,
                         session_ctx.map(|(session_id, _)| session_id),
                         approval_slot,
                         cancel,
@@ -1357,17 +1613,18 @@ pub(super) fn wire_ai_callbacks(
         window.on_stop_ai_message(move || {
             cancel.store(true, Ordering::Relaxed);
             if let Some(tx) = approval_slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                let _ = tx.send(false);
+                let _ = tx.send((false, false));
             }
         });
     }
 
-    // Approval bar verdict: wake the waiting agent worker with the answer.
+    // Approval bar verdict: wake the waiting agent worker with the answer
+    // (allowed + whether to remember the approval for this session).
     {
         let approval_slot = approval_slot.clone();
-        window.on_ai_tool_decision(move |allowed: bool| {
+        window.on_ai_tool_decision(move |allowed: bool, remember: bool| {
             if let Some(tx) = approval_slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                let _ = tx.send(allowed);
+                let _ = tx.send((allowed, remember));
             }
         });
     }
@@ -1382,7 +1639,7 @@ pub(super) fn wire_ai_callbacks(
         window.on_clear_ai_messages(move || {
             cancel.store(true, Ordering::Relaxed);
             if let Some(tx) = approval_slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                let _ = tx.send(false);
+                let _ = tx.send((false, false));
             }
             // Retire the generation too: the aborted stream's late finish hop
             // is only suppressed while the generation still matches, so

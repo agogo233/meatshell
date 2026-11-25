@@ -1144,8 +1144,20 @@ export component AppWindow inherits Window {
     in-out property <bool> ai-require-tool-approval: true;
     in-out property <bool> ai-awaiting-approval: false;
     in-out property <string> ai-pending-tool-summary;
-    callback ai-tool-decision(bool /* allowed */);
+    in-out property <string> ai-pending-tool-risk;
+    callback ai-tool-decision(bool /* allowed */, bool /* remember */);
     callback set-ai-agent-settings(bool /* agent-enabled */, bool /* require-approval */);
+    // Agent execution policy (Settings › AI): mode, smart ceiling, step cap,
+    // context lines, permission rules (one "tool | resource | action" per
+    // line) and the intent-aware relaxation switch.
+    in-out property <string> ai-execution-mode: "confirm_each";
+    in-out property <string> ai-auto-max-risk: "low";
+    in-out property <string> ai-max-steps: "8";
+    in-out property <string> ai-context-lines: "50";
+    in-out property <string> ai-rules-text: "";
+    in-out property <bool> ai-intent-aware: false;
+    callback save-ai-agent-policy(string /* mode */, string /* max-risk */, string /* steps */,
+                                   string /* context-lines */, string /* rules */, bool /* intent */);
     callback copy-ai-message(string /* text */);
     callback send-ai-message(string);
     callback stop-ai-message();
@@ -3315,7 +3327,8 @@ export component AppWindow inherits Window {
                 lang-en: root.lang-en;
                 awaiting: root.ai-awaiting-approval;
                 pending-tool-summary: root.ai-pending-tool-summary;
-                tool-decision(v) => { root.ai-tool-decision(v); }
+                pending-tool-risk: root.ai-pending-tool-risk;
+                tool-decision(v, r) => { root.ai-tool-decision(v, r); }
                 draft <=> root.ai-draft;
                 draft-revision: root.ai-draft-revision;
                 send => { root.send-ai-message(root.ai-draft); }
@@ -3597,7 +3610,8 @@ export component AppWindow inherits Window {
                     lang-en: root.lang-en;
                     awaiting: root.ai-awaiting-approval;
                     pending-tool-summary: root.ai-pending-tool-summary;
-                    tool-decision(v) => { root.ai-tool-decision(v); }
+                    pending-tool-risk: root.ai-pending-tool-risk;
+                    tool-decision(v, r) => { root.ai-tool-decision(v, r); }
                     draft <=> root.ai-draft;
                     draft-revision: root.ai-draft-revision;
                     send => { root.send-ai-message(root.ai-draft); }
@@ -6541,6 +6555,15 @@ export component AppWindow inherits Window {
                     ai-require-tool-approval <=> root.ai-require-tool-approval;
                     set-ai-agent-settings(enabled, confirm) => {
                         root.set-ai-agent-settings(enabled, confirm);
+                    }
+                    ai-execution-mode <=> root.ai-execution-mode;
+                    ai-auto-max-risk <=> root.ai-auto-max-risk;
+                    ai-max-steps <=> root.ai-max-steps;
+                    ai-context-lines <=> root.ai-context-lines;
+                    ai-rules-text <=> root.ai-rules-text;
+                    ai-intent-aware <=> root.ai-intent-aware;
+                    save-ai-agent-policy(mode, risk, steps, lines, rules, intent) => {
+                        root.save-ai-agent-policy(mode, risk, steps, lines, rules, intent);
                     }
                     set-ai-panel-enabled(v) => {
                         // The settings toggle doubles as the panel's open/close:

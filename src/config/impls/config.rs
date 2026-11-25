@@ -52,6 +52,25 @@ static PINNED_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// The single directory holding all user data (sessions, encryption key,
 /// known_hosts, error.log). Resolved once and cached; any one-time migration
+/// Drop invalid AI permission rules and normalise the rest: unknown actions
+/// and empty patterns must never widen access, so they are removed outright.
+fn sanitize_permission_rules(rules: Vec<PermissionRuleSer>) -> Vec<PermissionRuleSer> {
+    rules
+        .into_iter()
+        .filter(|r| {
+            matches!(
+                r.action.trim().to_ascii_lowercase().as_str(),
+                "allow" | "ask" | "deny"
+            ) && !(r.tool.trim().is_empty() && r.resource.trim().is_empty())
+        })
+        .map(|r| PermissionRuleSer {
+            tool: r.tool.trim().to_string(),
+            resource: r.resource.trim().to_string(),
+            action: r.action.trim().to_ascii_lowercase(),
+        })
+        .collect()
+}
+
 /// from the legacy per-user dir runs exactly once.
 ///
 /// Portable-first: prefers a `config/` folder beside the executable, falling
@@ -2635,6 +2654,84 @@ impl ConfigStore {
         self.cache.ai_require_tool_approval = required;
     }
 
+    /// Resolved execution mode. Migrates the legacy boolean: configs written
+    /// before the mode field existed derive it from `ai_require_tool_approval`
+    /// (true → confirm_each, false → auto), so "never ask" users keep their
+    /// behaviour except for the new Critical-asks floor.
+    pub fn ai_command_execution_mode(&self) -> String {
+        match self.cache.ai_command_execution_mode.as_deref() {
+            Some(mode @ ("confirm_each" | "smart" | "auto")) => mode.to_string(),
+            Some(_) => "confirm_each".to_string(),
+            None if self.cache.ai_require_tool_approval => "confirm_each".to_string(),
+            None => "auto".to_string(),
+        }
+    }
+
+    /// Smart-mode auto-execute ceiling, sanitised to a known level.
+    pub fn ai_auto_execute_max_risk(&self) -> String {
+        let risk = self.cache.ai_auto_execute_max_risk.trim().to_ascii_lowercase();
+        match risk.as_str() {
+            "low" | "medium" | "high" | "critical" => risk,
+            _ => default_ai_auto_execute_max_risk(),
+        }
+    }
+
+    /// Tool-call rounds per message, clamped to a sane range.
+    pub fn ai_max_agent_steps(&self) -> usize {
+        let steps = self.cache.ai_max_agent_steps as usize;
+        if steps == 0 {
+            default_ai_max_agent_steps() as usize
+        } else {
+            steps.min(64)
+        }
+    }
+
+    /// Terminal lines handed to the assistant as context, clamped.
+    pub fn ai_context_line_limit(&self) -> usize {
+        let lines = self.cache.ai_context_line_limit as usize;
+        if lines == 0 {
+            default_ai_context_line_limit() as usize
+        } else {
+            lines.min(500)
+        }
+    }
+
+    pub fn ai_intent_aware_execute(&self) -> bool {
+        self.cache.ai_intent_aware_execute
+    }
+
+    /// Permission rules, sanitised: unknown actions and empty patterns are
+    /// dropped so a corrupt entry can never widen access.
+    pub fn ai_permission_rules(&self) -> Vec<PermissionRuleSer> {
+        sanitize_permission_rules(self.cache.ai_permission_rules.clone())
+    }
+
+    /// Persist the whole agent policy in one go (Settings › AI).
+    pub fn set_ai_agent_policy(
+        &mut self,
+        mode: String,
+        auto_max_risk: String,
+        max_steps: usize,
+        context_lines: usize,
+        rules: Vec<PermissionRuleSer>,
+        intent_aware: bool,
+    ) {
+        self.cache.ai_command_execution_mode = Some(match mode.trim() {
+            "smart" => "smart".to_string(),
+            "auto" => "auto".to_string(),
+            _ => "confirm_each".to_string(),
+        });
+        let risk = auto_max_risk.trim().to_ascii_lowercase();
+        self.cache.ai_auto_execute_max_risk = match risk.as_str() {
+            "low" | "medium" | "high" | "critical" => risk,
+            _ => default_ai_auto_execute_max_risk(),
+        };
+        self.cache.ai_max_agent_steps = (max_steps as u16).clamp(1, 64);
+        self.cache.ai_context_line_limit = (context_lines as u32).clamp(1, 500);
+        self.cache.ai_permission_rules = sanitize_permission_rules(rules);
+        self.cache.ai_intent_aware_execute = intent_aware;
+    }
+
     /// Per-edge stacks of simultaneously-expanded docked panels (#dock-stack).
     /// The stored value is sanitised (unknown kinds dropped, repeated kinds
     /// collapsed, ratios renormalised to sum to 1) before it is handed out.
@@ -4829,5 +4926,59 @@ mod profile_safety_tests {
             assert_eq!(fs::read_to_string(dir.join("sessions.json")).unwrap(), raw);
         }
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ai_mode_migrates_from_the_legacy_approval_boolean() {
+        // Legacy "ask before everything" → confirm_each.
+        let mut s = temp_store();
+        s.cache.ai_require_tool_approval = true;
+        s.cache.ai_command_execution_mode = None;
+        assert_eq!(s.ai_command_execution_mode(), "confirm_each");
+        // Legacy "never ask" → auto (keeps the behaviour; Critical still asks).
+        s.cache.ai_require_tool_approval = false;
+        assert_eq!(s.ai_command_execution_mode(), "auto");
+        // An explicit mode always wins over the legacy boolean.
+        s.cache.ai_command_execution_mode = Some("smart".into());
+        assert_eq!(s.ai_command_execution_mode(), "smart");
+        // Corrupt values fall back to the safe default.
+        s.cache.ai_command_execution_mode = Some("yolo".into());
+        assert_eq!(s.ai_command_execution_mode(), "confirm_each");
+    }
+
+    #[test]
+    fn ai_agent_policy_round_trips_and_sanitises() {
+        let mut s = temp_store();
+        let rules = vec![
+            PermissionRuleSer {
+                tool: "run_command".into(),
+                resource: "git *".into(),
+                action: "allow".into(),
+            },
+            PermissionRuleSer {
+                tool: "run_command".into(),
+                resource: "rm -rf *".into(),
+                action: "obliterate".into(), // invalid → dropped
+            },
+            PermissionRuleSer {
+                tool: "  ".into(),
+                resource: "  ".into(),
+                action: "deny".into(), // empty pattern → dropped
+            },
+        ];
+        s.set_ai_agent_policy("smart".into(), "Medium".into(), 0, 0, rules, true);
+        assert_eq!(s.ai_command_execution_mode(), "smart");
+        assert_eq!(s.ai_auto_execute_max_risk(), "medium");
+        assert_eq!(s.ai_max_agent_steps(), 1); // 0 clamps to 1
+        assert_eq!(s.ai_context_line_limit(), 1);
+        assert!(s.ai_intent_aware_execute());
+        let kept = s.ai_permission_rules();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].resource, "git *");
+        assert_eq!(kept[0].action, "allow");
+        // Unknown levels fall back to the safe default.
+        s.set_ai_agent_policy("weird".into(), "extreme".into(), 8, 50, vec![], false);
+        assert_eq!(s.ai_command_execution_mode(), "confirm_each");
+        assert_eq!(s.ai_auto_execute_max_risk(), "low");
     }
 }
