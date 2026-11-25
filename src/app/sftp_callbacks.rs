@@ -408,6 +408,7 @@ fn wire_sftp_split_callbacks(
     // Toggle the split view; the first open reads the local folder.
     {
         let weak = window.as_weak();
+        let store = store.clone();
         window.on_sftp_toggle_dual(move |tab_id: SharedString| {
             let Some(w) = weak.upgrade() else { return };
             let terminals = w.get_terminals();
