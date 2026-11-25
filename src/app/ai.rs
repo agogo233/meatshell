@@ -752,7 +752,6 @@ fn post_chat_stream(
     let started = Instant::now();
     let mut stream_err: Option<String> = None;
     let mut cancelled = false;
-    let mut finish_reason: Option<String> = None;
     let mut call_ids: Vec<Option<String>> = Vec::new();
     let mut call_names: Vec<Option<String>> = Vec::new();
     let mut call_args: Vec<String> = Vec::new();
@@ -784,9 +783,6 @@ fn post_chat_stream(
         if let Some(err_msg) = v["error"]["message"].as_str() {
             stream_err = Some(err_msg.to_string());
             break;
-        }
-        if let Some(reason) = v["choices"][0]["finish_reason"].as_str() {
-            finish_reason = Some(reason.to_string());
         }
         if let Some(delta) = v["choices"][0]["delta"]["content"].as_str() {
             if !delta.is_empty() {
@@ -845,7 +841,7 @@ fn post_chat_stream(
             })
         })
         .collect();
-    if !calls.is_empty() && finish_reason.as_deref() != Some("stop") {
+    if !calls.is_empty() {
         return AiTurnOutcome::ToolCalls { calls, content };
     }
     AiTurnOutcome::Done
@@ -1541,17 +1537,15 @@ pub(super) fn wire_ai_callbacks(
             let mut user_text = redact_sensitive_text(text);
             // Agent mode: attach the live terminal tail so the model reasons
             // about what is actually on screen instead of guessing.
-            if tools.is_some() {
-                if let Some((session_id, _)) = &session_ctx {
-                    let max_lines = store.borrow().ai_context_line_limit();
-                    let (ctx, _) = terminal_context(&bufs, session_id, max_lines);
-                    if !ctx.is_empty() {
-                        user_text.push_str(&t(
-                            "\n\n[当前终端画面]\n",
-                            "\n\n[Current terminal screen]\n",
-                        ));
-                        user_text.push_str(&ctx);
-                    }
+            if tools.is_some() && session_ctx.is_some() {
+                let max_lines = store.borrow().ai_context_line_limit();
+                let (ctx, _) = terminal_context(&bufs, w.get_active_tab_id().as_str(), max_lines);
+                if !ctx.is_empty() {
+                    user_text.push_str(&t(
+                        "\n\n[当前终端画面]\n",
+                        "\n\n[Current terminal screen]\n",
+                    ));
+                    user_text.push_str(&ctx);
                 }
             }
             let history = ai_history(&w, AI_HISTORY_MESSAGES);
