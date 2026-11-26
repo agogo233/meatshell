@@ -28,7 +28,7 @@ use ssh_key::PublicKey;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::config::{AuthMethod, Session};
-use crate::i18n::t;
+use crate::i18n::{is_en, t};
 use crate::ssh::{
     format_mtime, format_size, RemoteEntry, RemoteTreeNode, SessionEvent, UploadConflictReply,
     UploadConflictResponder,
@@ -974,6 +974,7 @@ async fn run_sftp(
                                 t("空文件夹", "Empty folder"),
                                 dirname
                             )));
+                            lock_or_recover(&cancels_done).remove(&file_id);
                             return;
                         }
                         let _ = events.send(SessionEvent::SftpStatus(format!(
@@ -987,17 +988,16 @@ async fn run_sftp(
                             &remote,
                             &local_dir,
                             &events,
+                            &cancels_done,
                             rate_kbps,
                             preserve_mtime,
                         )
                         .await
                         {
-                            Ok(_) => {
-                                let _ = events.send(SessionEvent::SftpStatus(format!(
-                                    "{}: {}",
-                                    t("下载完成", "Downloaded"),
-                                    dirname
-                                )));
+                            Ok(outcome) => {
+                                let _ = events.send(SessionEvent::SftpStatus(
+                                    batch_status_text(&outcome, &dirname, false),
+                                ));
                             }
                             Err(e) => {
                                 let _ = events.send(SessionEvent::SftpStatus(format!(
@@ -1061,6 +1061,7 @@ async fn run_sftp(
                             rate_kbps,
                             preserve_mtime,
                             conflict == DownloadConflict::Fail,
+                            false,
                         )
                         .await
                         {
@@ -1109,9 +1110,11 @@ async fn run_sftp(
                 local_dir,
                 conflict,
             } => {
-                // Dual-pane "← 下载": write every selected entry into the local
-                // folder the pane is showing, one after another (no remote tar —
-                // the user expects plain files, not an archive).
+                // Dual-pane "← 下载": pre-enumerate every selected entry (folders
+                // expand into per-file jobs), reveal the whole queue in the
+                // transfer panel, then run the jobs concurrently through the
+                // shared batch scheduler (no remote tar — the user expects plain
+                // files, not an archive).
                 let sftp = sftp.clone();
                 let handle = handle.clone();
                 let events = events.clone();
@@ -1119,79 +1122,92 @@ async fn run_sftp(
                 let rate_kbps = queue.rate_limit_kbps;
                 let preserve_mtime = queue.preserve_mtime;
                 transfers.spawn(async move {
-                    let total = remotes.len();
-                    let mut ok = 0usize;
-                    let mut failed = 0usize;
+                    let mut jobs = Vec::new();
+                    // Entries whose metadata/listing failed before a job existed.
+                    let mut enumerate_failed = 0usize;
                     for remote in &remotes {
-                        let id = Uuid::new_v4().to_string();
-                        let cancel = Arc::new(AtomicBool::new(false));
-                        cancels_done
-                            .lock()
-                            .unwrap()
-                            .insert(id.clone(), cancel.clone());
-                        let name = base_name(remote);
-                        let _ = events.send(SessionEvent::SftpStatus(format!(
-                            "{} {}...",
-                            t("下载", "Downloading"),
-                            name
-                        )));
-                        match download_one_into(
-                            &sftp,
-                            &handle,
-                            remote,
-                            &local_dir,
-                            conflict,
-                            &events,
-                            &cancel,
-                            &id,
-                            rate_kbps,
-                            preserve_mtime,
-                        )
-                        .await
-                        {
-                            Ok(true) => {
-                                ok += 1;
-                                let _ = events.send(SessionEvent::SftpStatus(format!(
-                                    "{}: {}",
-                                    t("下载完成", "Downloaded"),
-                                    name
-                                )));
+                        let is_dir = sftp
+                            .metadata(remote)
+                            .await
+                            .ok()
+                            .map(|m| (m.permissions.unwrap_or(0) & 0o170_000) == 0o040_000)
+                            .unwrap_or(false);
+                        if is_dir {
+                            let root_name = sanitize_filename(&base_name(remote));
+                            let root_local =
+                                format!("{}/{}", local_dir.trim_end_matches('/'), root_name);
+                            // Enumerate into a scratch vec: a mid-tree listing
+                            // failure must not leave half the folder queued.
+                            let mut sub_jobs = Vec::new();
+                            match collect_download_jobs(&sftp, remote, &root_local, &mut sub_jobs)
+                                .await
+                            {
+                                Ok(()) => jobs.extend(sub_jobs),
+                                Err(e) => {
+                                    enumerate_failed += 1;
+                                    let id = Uuid::new_v4().to_string();
+                                    emit_transfer(
+                                        &events,
+                                        &id,
+                                        &root_name,
+                                        false,
+                                        0,
+                                        0,
+                                        2,
+                                        &e.to_string(),
+                                    );
+                                    let _ = events.send(SessionEvent::SftpStatus(format!(
+                                        "{}: {e}",
+                                        t("下载失败", "Download failed")
+                                    )));
+                                }
                             }
-                            Ok(false) => {
-                                let _ = events.send(SessionEvent::SftpStatus(format!(
-                                    "{}: {}",
-                                    t("已取消", "Cancelled"),
-                                    name
-                                )));
-                            }
-                            Err(e) => {
-                                failed += 1;
-                                emit_transfer(&events, &id, &name, false, 0, 0, 2, &e.to_string());
-                                let _ = events.send(SessionEvent::SftpStatus(format!(
-                                    "{}: {e}",
-                                    t("下载失败", "Download failed")
-                                )));
-                            }
-                        }
-                        cancels_done.lock().unwrap().remove(&id);
-                    }
-                    if total > 1 {
-                        let _ = events.send(SessionEvent::SftpStatus(if failed == 0 {
-                            format!(
-                                "{}: {} {}",
-                                t("下载完成", "Downloaded"),
-                                ok,
-                                t("项", "items")
-                            )
                         } else {
-                            format!(
-                                "{}: {}/{} {}",
-                                t("下载失败", "Download failed"),
-                                failed,
-                                total,
-                                t("项", "items")
-                            )
-                        }));
+                            // The server controls the name, so sanitize it before
+                            // it becomes a local path (#26). Resolve keep-both
+                            // names during enumeration so concurrent jobs can't
+                            // race for the same `(n)` filename.
+                            let filename = sanitize_filename(&base_name(remote));
+                            let requested = download_target_path(remote, &local_dir);
+                            let local_path = match conflict {
+                                DownloadConflict::KeepBoth => available_download_path(&requested),
+                                _ => requested,
+                            };
+                            jobs.push(TransferJob {
+                                id: Uuid::new_v4().to_string(),
+                                display_name: filename,
+                                cancel: Arc::new(AtomicBool::new(false)),
+                                source: TransferSource::Download {
+                                    remote: remote.clone(),
+                                    local: local_path.to_string_lossy().into_owned(),
+                                    fail_if_exists: conflict == DownloadConflict::Fail,
+                                },
+                            });
+                        }
+                    }
+                    let single_name = if remotes.len() == 1 {
+                        sanitize_filename(&base_name(&remotes[0]))
+                    } else {
+                        String::new()
+                    };
+                    let mut outcome = run_transfer_batch(
+                        jobs,
+                        &cancels_done,
+                        &events,
+                        &handle,
+                        &sftp,
+                        BatchKind::Download,
+                        rate_kbps,
+                        preserve_mtime,
+                    )
+                    .await;
+                    outcome.failed += enumerate_failed;
+                    if outcome.total() > 0 {
+                        let _ = events.send(SessionEvent::SftpStatus(batch_status_text(
+                            &outcome,
+                            &single_name,
+                            false,
+                        )));
                     }
                     // Let the local pane pick up the new files.
                     let _ = events.send(SessionEvent::LocalFilesChanged {
@@ -1284,6 +1300,7 @@ async fn run_sftp(
                             &cancel,
                             rate_kbps,
                             preserve_mtime,
+                            false,
                             false,
                         )
                         .await
@@ -1407,6 +1424,7 @@ async fn run_sftp(
                             &remote_dir,
                             &remote_name,
                             &events,
+                            &cancels_done,
                             rate_kbps,
                             preserve_mtime,
                         )
@@ -1423,11 +1441,10 @@ async fn run_sftp(
                             .await;
                         }
                         match res {
-                            Ok(_) => {
+                            Ok(outcome) => {
                                 let _ = events.send(SessionEvent::SftpStatus(format!(
-                                    "{}: {}{}",
-                                    t("上传完成", "Uploaded"),
-                                    remote_name,
+                                    "{}{}",
+                                    batch_status_text(&outcome, &remote_name, true),
                                     if existed {
                                         t("（已覆盖）", " (overwritten)")
                                     } else {
@@ -1500,6 +1517,7 @@ async fn run_sftp(
                             rate_kbps,
                             preserve_mtime,
                             no_clobber,
+                            false,
                         )
                         .await
                         {
@@ -1607,6 +1625,7 @@ async fn run_sftp(
                         rate_kbps,
                         preserve_mtime,
                         false,
+                        false,
                     )
                     .await;
                     match result {
@@ -1647,6 +1666,7 @@ async fn run_sftp(
                 let sftp = sftp.clone();
                 let handle = handle.clone();
                 let events = events.clone();
+                let cancels_done = cancels.clone();
                 transfers.spawn(async move {
                     let label = format!("{} {}", remotes.len(), t("项", "items"));
                     let _ = events.send(SessionEvent::SftpStatus(format!(
@@ -1655,7 +1675,11 @@ async fn run_sftp(
                         label
                     )));
                     for remote in remotes {
-                        match stage_remote_for_copy(&sftp, &handle, &remote, &events).await {
+                        match stage_remote_for_copy(
+                            &sftp, &handle, &remote, &events, &cancels_done,
+                        )
+                        .await
+                        {
                             Ok((local, cleanup_root)) => {
                                 let _ = target.send(SftpCommand::Upload {
                                     local,
@@ -1920,6 +1944,7 @@ async fn run_sftp(
                     &no_cancel,
                     queue.rate_limit_kbps,
                     queue.preserve_mtime,
+                    false,
                     false,
                 )
                 .await
@@ -5427,6 +5452,255 @@ mod transfer_slot_tests {
 }
 
 #[cfg(test)]
+mod transfer_batch_tests {
+    use super::*;
+    use tokio::sync::mpsc;
+
+    fn upload_job(id: &str) -> TransferJob {
+        TransferJob {
+            id: id.to_string(),
+            display_name: format!("{id}.txt"),
+            cancel: Arc::new(AtomicBool::new(false)),
+            source: TransferSource::Upload {
+                local: PathBuf::from(format!("{id}.txt")),
+                remote: format!("/remote/{id}.txt"),
+            },
+        }
+    }
+
+    fn transfer_states(rx: &mut mpsc::UnboundedReceiver<SessionEvent>) -> Vec<u8> {
+        let mut states = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let SessionEvent::SftpTransfer { state, .. } = event {
+                states.push(state);
+            }
+        }
+        states
+    }
+
+    #[tokio::test]
+    async fn registration_reveals_the_whole_queue_and_tally_isolates_failures() {
+        let cancels: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let jobs = vec![
+            upload_job("ok1"),
+            upload_job("bad"),
+            upload_job("stop"),
+            upload_job("ok2"),
+        ];
+
+        // Up-front registration: every job is cancellable and has a Queued row
+        // before any per-file transfer runs.
+        register_queued_jobs(&jobs, &cancels, &tx, true);
+        assert_eq!(lock_or_recover(&cancels).len(), 4);
+        let queued: Vec<_> = transfer_states(&mut rx);
+        assert_eq!(queued, vec![3, 3, 3, 3]);
+
+        // Results fold in independently; a failure never aborts the rest.
+        let mut outcome = BatchOutcome::default();
+        tally_job_result(&mut outcome, &jobs[0], Ok(true), &tx, true);
+        tally_job_result(
+            &mut outcome,
+            &jobs[1],
+            Err(anyhow!("disk on fire")),
+            &tx,
+            true,
+        );
+        tally_job_result(&mut outcome, &jobs[2], Ok(false), &tx, true);
+        tally_job_result(&mut outcome, &jobs[3], Ok(true), &tx, true);
+        assert_eq!(
+            outcome,
+            BatchOutcome {
+                ok: 2,
+                failed: 1,
+                cancelled: 1
+            }
+        );
+        let states = transfer_states(&mut rx);
+        assert_eq!(
+            states.iter().filter(|s| **s == 2).count(),
+            1,
+            "failure gets a failed row"
+        );
+        assert!(
+            !states.iter().any(|s| *s == 1),
+            "success rows belong to the pipelined impl"
+        );
+
+        // End-of-job cleanup leaves the registry empty.
+        for job in &jobs {
+            lock_or_recover(&cancels).remove(&job.id);
+        }
+        assert!(lock_or_recover(&cancels).is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_empty_batch_registers_nothing() {
+        let cancels: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        register_queued_jobs(&[], &cancels, &tx, true);
+        assert!(lock_or_recover(&cancels).is_empty());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn upload_enumeration_lists_relative_paths_and_all_dirs() {
+        let root = std::env::temp_dir().join(format!("meatshell-upload-enum-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("sub/inner")).unwrap();
+        std::fs::create_dir_all(root.join("empty")).unwrap();
+        std::fs::write(root.join("a.txt"), b"a").unwrap();
+        std::fs::write(root.join("sub/b.txt"), b"b").unwrap();
+        std::fs::write(root.join("sub/inner/c.txt"), b"c").unwrap();
+
+        let plan = enumerate_upload_jobs(&root, "/remote/root").await.unwrap();
+
+        let mut displays: Vec<_> = plan.jobs.iter().map(|j| j.display_name.clone()).collect();
+        displays.sort();
+        assert_eq!(
+            displays,
+            vec![
+                "a.txt".to_string(),
+                "sub/b.txt".to_string(),
+                "sub/inner/c.txt".to_string()
+            ]
+        );
+        for expected in [
+            "/remote/root",
+            "/remote/root/sub",
+            "/remote/root/sub/inner",
+            "/remote/root/empty",
+        ] {
+            assert!(
+                plan.remote_dirs.contains(&expected.to_string()),
+                "missing mirrored dir {expected}"
+            );
+        }
+        for job in &plan.jobs {
+            match &job.source {
+                TransferSource::Upload { local, remote } => {
+                    assert!(local.is_file());
+                    assert!(remote.starts_with("/remote/root/"));
+                }
+                other => panic!("upload enumeration only yields upload jobs, got {other:?}"),
+            }
+        }
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn upload_enumeration_skips_symlinks() {
+        let root =
+            std::env::temp_dir().join(format!("meatshell-upload-symlink-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("real.txt"), b"x").unwrap();
+        std::os::unix::fs::symlink(root.join("real.txt"), root.join("link.txt")).unwrap();
+
+        let plan = enumerate_upload_jobs(&root, "/remote/root").await.unwrap();
+
+        assert_eq!(plan.jobs.len(), 1);
+        assert_eq!(plan.jobs[0].display_name, "real.txt");
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    fn remote_entry(name: &str, full_path: &str, is_dir: bool) -> RemoteEntry {
+        RemoteEntry {
+            name: name.to_string(),
+            full_path: full_path.to_string(),
+            is_dir,
+            size: if is_dir { 0 } else { 1 },
+            modified: 0,
+            mode: 0,
+            permissions_mode: 0,
+            uid: None,
+            gid: None,
+            owner: None,
+            group: None,
+            file_type: if is_dir { "directory" } else { "file" }.to_string(),
+        }
+    }
+
+    #[test]
+    fn download_listing_expands_into_jobs_and_child_dirs() {
+        let entries = vec![
+            remote_entry("a.txt", "/r/a.txt", false),
+            remote_entry("sub", "/r/sub", true),
+        ];
+
+        let mut jobs = Vec::new();
+        let children = expand_download_listing(&entries, "/local/r", "", &mut jobs);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].display_name, "a.txt");
+        match &jobs[0].source {
+            TransferSource::Download { remote, local, .. } => {
+                assert_eq!(remote, "/r/a.txt");
+                assert_eq!(local, "/local/r/a.txt");
+            }
+            other => panic!("expected download job, got {other:?}"),
+        }
+        assert_eq!(
+            children,
+            vec![(
+                "/r/sub".to_string(),
+                "/local/r/sub".to_string(),
+                "sub".to_string()
+            )]
+        );
+
+        // A non-empty prefix is prepended to display names and child prefixes.
+        let mut nested = Vec::new();
+        let nested_children =
+            expand_download_listing(&entries, "/local/r/sub", "sub", &mut nested);
+        assert_eq!(nested[0].display_name, "sub/a.txt");
+        assert_eq!(nested_children[0].2, "sub/sub");
+    }
+
+    #[test]
+    fn batch_status_text_covers_every_outcome_shape() {
+        let name = "dir";
+        assert_eq!(
+            batch_status_text(
+                &BatchOutcome {
+                    ok: 3,
+                    failed: 0,
+                    cancelled: 0
+                },
+                name,
+                true
+            ),
+            format!("{}: {name}（3 {}）", t("上传完成", "Uploaded"), t("项", "items"))
+        );
+        assert_eq!(
+            batch_status_text(
+                &BatchOutcome {
+                    ok: 1,
+                    failed: 0,
+                    cancelled: 0
+                },
+                "one.txt",
+                false
+            ),
+            format!("{}: one.txt", t("下载完成", "Downloaded"))
+        );
+        let mixed = batch_status_text(
+            &BatchOutcome {
+                ok: 2,
+                failed: 1,
+                cancelled: 1,
+            },
+            name,
+            true,
+        );
+        assert!(mixed.contains(&format!("1/4 {}", t("项", "items"))));
+        assert!(mixed.contains(t("已取消", "Cancelled")));
+    }
+}
+
+#[cfg(test)]
 mod external_editor_tests {
     use super::editor_argv;
 
@@ -5712,6 +5986,7 @@ async fn stage_remote_for_copy(
     handle: &SftpLink,
     remote: &str,
     events: &UnboundedSender<SessionEvent>,
+    cancels: &Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
 ) -> Result<(PathBuf, PathBuf)> {
     let cleanup_root =
         std::env::temp_dir().join(format!("meatshell-remote-copy-{}", Uuid::new_v4()));
@@ -5744,12 +6019,22 @@ async fn stage_remote_for_copy(
             .map(|entries| entries.is_empty())
             .unwrap_or(false);
         if !empty {
-            download_dir(sftp, handle, remote, &local_parent, events, 0, false).await?;
+            // A staging copy must be complete before it is forwarded to the
+            // target session: batch failures/cancels are errors here, not tallies.
+            let outcome =
+                download_dir(sftp, handle, remote, &local_parent, events, cancels, 0, false).await?;
+            if outcome.failed > 0 || outcome.cancelled > 0 {
+                anyhow::bail!(
+                    "folder copy incomplete: {} failed, {} cancelled",
+                    outcome.failed,
+                    outcome.cancelled
+                );
+            }
         }
     } else {
         let local = local_path.to_string_lossy().to_string();
         download_impl(
-            handle, remote, &local, &name, &id, events, &no_cancel, 0, false, false,
+            handle, remote, &local, &name, &id, events, &no_cancel, 0, false, false, false,
         )
         .await?;
     }
@@ -6323,6 +6608,7 @@ async fn download_impl(
     rate_kbps: u32,
     preserve_mtime: bool,
     fail_if_exists: bool,
+    already_queued: bool,
 ) -> Result<bool> {
     use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
@@ -6330,7 +6616,12 @@ async fn download_impl(
     const MAX_INFLIGHT: usize = 32; // ~1 MB outstanding hides the RTT
 
     // At most MAX_PARALLEL_TRANSFERS channels at once; the rest wait (#554).
-    let Some(_slot) = handle.transfer_slot(events, id, name, false, cancel).await else {
+    // Folder batches already emitted their Queued rows during enumeration.
+    let Some(_slot) = (if already_queued {
+        handle.acquire_slot(events, id, name, false, cancel).await
+    } else {
+        handle.transfer_slot(events, id, name, false, cancel).await
+    }) else {
         return Ok(false);
     };
     let stream = handle
@@ -6522,127 +6813,319 @@ async fn download_impl(
     Ok(true)
 }
 
-/// Download one remote entry (a file or a whole folder) into an existing local
-/// folder — the dual-pane view's "download to the folder on the left".
-///
-/// Unlike the single-entry `Download` command above, an empty folder is still
-/// created locally (the pane shows what is on the server, and "the folder moved
-/// over" is the expected result there), and the conflict policy applies to
-/// every entry of a multi-selection in the same way.
-#[allow(clippy::too_many_arguments)]
-async fn download_one_into(
-    sftp: &SftpSession,
-    handle: &SftpLink,
-    remote: &str,
-    local_dir: &str,
-    conflict: DownloadConflict,
+/// One file-sized unit of a pre-enumerated folder transfer. Every job gets a
+/// transfer-panel row ("Queued") before any bytes move, so the panel shows the
+/// whole queue instead of revealing files one by one as serial transfers start.
+struct TransferJob {
+    id: String,
+    /// Path relative to the transfer root, `/`-joined (`subdir/a.txt`); a
+    /// top-level file shows its bare name.
+    display_name: String,
+    cancel: Arc<AtomicBool>,
+    source: TransferSource,
+}
+
+#[derive(Debug)]
+enum TransferSource {
+    /// Local file → remote absolute path.
+    Upload { local: PathBuf, remote: String },
+    /// Remote absolute path → local file. `fail_if_exists` carries the
+    /// automation caller's "refuse to overwrite" policy into the per-file hop.
+    Download {
+        remote: String,
+        local: String,
+        fail_if_exists: bool,
+    },
+}
+
+/// Per-batch tallies for the status line shown once every job has settled.
+#[derive(Default, Debug, PartialEq, Eq)]
+struct BatchOutcome {
+    ok: usize,
+    failed: usize,
+    cancelled: usize,
+}
+
+impl BatchOutcome {
+    fn total(&self) -> usize {
+        self.ok + self.failed + self.cancelled
+    }
+}
+
+/// Which pipelined per-file implementation a batch drives.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BatchKind {
+    Upload,
+    Download,
+}
+
+/// Register every job for cancellation and reveal the whole queue in the
+/// transfer panel before any bytes move.
+fn register_queued_jobs(
+    jobs: &[TransferJob],
+    cancels: &Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     events: &UnboundedSender<SessionEvent>,
-    cancel: &Arc<AtomicBool>,
-    id: &str,
+    is_upload: bool,
+) {
+    for job in jobs {
+        lock_or_recover(cancels)
+            .insert(job.id.clone(), job.cancel.clone());
+        emit_transfer(
+            events,
+            &job.id,
+            &job.display_name,
+            is_upload,
+            0,
+            0,
+            3,
+            t("排队等待中", "Queued"),
+        );
+    }
+}
+
+/// Fold one settled job into the batch tally and emit the terminal failed-row
+/// event. The pipelined impls emit their own progress/success/cancel events
+/// but return `Err` without emitting a failure row, so the batch owns that.
+fn tally_job_result(
+    outcome: &mut BatchOutcome,
+    job: &TransferJob,
+    result: Result<bool>,
+    events: &UnboundedSender<SessionEvent>,
+    is_upload: bool,
+) {
+    match result {
+        Ok(true) => outcome.ok += 1,
+        Ok(false) => outcome.cancelled += 1,
+        Err(e) => {
+            outcome.failed += 1;
+            emit_transfer(
+                events,
+                &job.id,
+                &job.display_name,
+                is_upload,
+                0,
+                0,
+                2,
+                &e.to_string(),
+            );
+        }
+    }
+}
+
+/// Run pre-enumerated transfer jobs concurrently, bounded by the connection's
+/// `transfer_slots` semaphore. Every job is registered for cancellation and
+/// shows a Queued row before it starts; failures are isolated and tallied, not
+/// propagated, so one bad file never abandons the remaining queue.
+#[allow(clippy::too_many_arguments)]
+async fn run_transfer_batch(
+    jobs: Vec<TransferJob>,
+    cancels: &Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    events: &UnboundedSender<SessionEvent>,
+    handle: &SftpLink,
+    sftp: &SftpSession,
+    kind: BatchKind,
     rate_kbps: u32,
     preserve_mtime: bool,
-) -> Result<bool> {
-    let is_dir = sftp
-        .metadata(remote)
-        .await
-        .ok()
-        .map(|m| (m.permissions.unwrap_or(0) & 0o170_000) == 0o040_000)
-        .unwrap_or(false);
-    if is_dir {
-        let dirname = base_name(remote);
-        let _ = events.send(SessionEvent::SftpStatus(format!(
-            "{} {}/...",
-            t("下载文件夹", "Downloading folder"),
-            dirname
-        )));
-        download_dir(
-            sftp,
-            handle,
-            remote,
-            local_dir,
-            events,
-            rate_kbps,
-            preserve_mtime,
-        )
-        .await?;
-        return Ok(true);
+) -> BatchOutcome {
+    let is_upload = kind == BatchKind::Upload;
+    register_queued_jobs(&jobs, cancels, events, is_upload);
+
+    // All futures exist at once, but each blocks on the fair transfer-slots
+    // semaphore inside the pipelined impl, so actual channel concurrency stays
+    // capped at MAX_PARALLEL_TRANSFERS.
+    let mut pending: FuturesUnordered<_> = jobs
+        .iter()
+        .map(|job| async move {
+            let result = match (kind, &job.source) {
+                (BatchKind::Upload, TransferSource::Upload { local, remote }) => {
+                    upload_pipelined(
+                        handle,
+                        sftp,
+                        local,
+                        remote,
+                        &job.display_name,
+                        &job.id,
+                        events,
+                        &job.cancel,
+                        rate_kbps,
+                        preserve_mtime,
+                        false,
+                        true,
+                    )
+                    .await
+                }
+                (
+                    BatchKind::Download,
+                    TransferSource::Download {
+                        remote,
+                        local,
+                        fail_if_exists,
+                    },
+                ) => {
+                    download_impl(
+                        handle,
+                        remote,
+                        local,
+                        &job.display_name,
+                        &job.id,
+                        events,
+                        &job.cancel,
+                        rate_kbps,
+                        preserve_mtime,
+                        *fail_if_exists,
+                        true,
+                    )
+                    .await
+                }
+                _ => unreachable!("job source does not match its batch kind"),
+            };
+            (job, result)
+        })
+        .collect();
+
+    let mut outcome = BatchOutcome::default();
+    while let Some((job, result)) = pending.next().await {
+        lock_or_recover(cancels).remove(&job.id);
+        tally_job_result(&mut outcome, job, result, events, is_upload);
     }
-    // The server controls the name, so sanitize it before it becomes a local
-    // path (#26) — same rule as the regular download path.
-    let filename = sanitize_filename(&base_name(remote));
-    let requested = download_target_path(remote, local_dir);
-    let local_path = match conflict {
-        DownloadConflict::Absent => requested,
-        DownloadConflict::Replace => requested,
-        DownloadConflict::KeepBoth => available_download_path(&requested),
-        // Refuse-if-exists is enforced by download_impl's fail_if_exists flag.
-        DownloadConflict::Fail => requested,
+    outcome
+}
+
+/// Status-line summary once a folder batch settles. `name` is the root's own
+/// name, used on the all-success paths.
+fn batch_status_text(outcome: &BatchOutcome, name: &str, is_upload: bool) -> String {
+    let done_word = if is_upload {
+        t("上传完成", "Uploaded")
+    } else {
+        t("下载完成", "Downloaded")
     };
-    download_impl(
-        handle,
-        remote,
-        &local_path.to_string_lossy(),
-        &filename,
-        id,
-        events,
-        cancel,
-        rate_kbps,
-        preserve_mtime,
-        conflict == DownloadConflict::Fail,
-    )
-    .await
+    let fail_word = if is_upload {
+        t("上传失败", "Upload failed")
+    } else {
+        t("下载失败", "Download failed")
+    };
+    let items = t("项", "items");
+    let sep = if is_en() { ", " } else { "，" };
+    let (open, close) = if is_en() { (" (", ")") } else { ("（", "）") };
+    if outcome.failed > 0 {
+        let mut text = format!("{fail_word}: {}/{} {items}", outcome.failed, outcome.total());
+        if outcome.cancelled > 0 {
+            text.push_str(&format!(
+                "{sep}{} {} {items}",
+                t("已取消", "Cancelled"),
+                outcome.cancelled
+            ));
+        }
+        text
+    } else if outcome.cancelled > 0 {
+        format!(
+            "{}: {}/{} {items}",
+            t("已取消", "Cancelled"),
+            outcome.cancelled,
+            outcome.total()
+        )
+    } else if outcome.total() == 1 && !name.is_empty() {
+        format!("{done_word}: {name}")
+    } else {
+        format!("{done_word}: {name}{open}{} {items}{close}", outcome.ok)
+    }
+}
+
+/// Turn one listed remote directory into download jobs and child-directory
+/// stack entries. Pure (no SFTP / filesystem I/O) so folder expansion is unit
+/// testable with synthetic entries. Names are sanitized (#26) before becoming
+/// local paths.
+fn expand_download_listing(
+    entries: &[RemoteEntry],
+    ldir: &str,
+    prefix: &str,
+    jobs: &mut Vec<TransferJob>,
+) -> Vec<(String, String, String)> {
+    let mut child_dirs = Vec::new();
+    for entry in entries {
+        let name = sanitize_filename(&entry.name);
+        let lchild = format!("{}/{}", ldir, name);
+        let display = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        if entry.is_dir {
+            child_dirs.push((entry.full_path.clone(), lchild, display));
+        } else {
+            jobs.push(TransferJob {
+                id: Uuid::new_v4().to_string(),
+                display_name: display,
+                cancel: Arc::new(AtomicBool::new(false)),
+                source: TransferSource::Download {
+                    remote: entry.full_path.clone(),
+                    local: lchild,
+                    fail_if_exists: false,
+                },
+            });
+        }
+    }
+    child_dirs
+}
+
+/// Enumerate a remote directory tree into download jobs, mirroring every
+/// directory to a sanitized local name (#26) so a hostile server can't escape
+/// the chosen folder.
+async fn collect_download_jobs(
+    sftp: &SftpSession,
+    remote_root: &str,
+    local_root: &str,
+    jobs: &mut Vec<TransferJob>,
+) -> Result<()> {
+    tokio::fs::create_dir_all(local_root)
+        .await
+        .with_context(|| format!("create local dir {local_root}"))?;
+    // (remote dir, local dir, display prefix relative to the transfer root).
+    let mut stack = vec![(
+        remote_root.trim_end_matches('/').to_string(),
+        local_root.to_string(),
+        String::new(),
+    )];
+    while let Some((rdir, ldir, prefix)) = stack.pop() {
+        tokio::fs::create_dir_all(&ldir)
+            .await
+            .with_context(|| format!("create local dir {ldir}"))?;
+        let entries = list_dir_impl(sftp, &rdir).await?;
+        stack.extend(expand_download_listing(&entries, &ldir, &prefix, jobs));
+    }
+    Ok(())
 }
 
 /// Recursively download a remote directory tree under `local_parent` (#50).
-/// Iterative (work-stack) rather than a boxed async recursion: each remote dir
-/// is mirrored to a sanitized local name, then its files are downloaded with the
-/// same per-file pipeline used for single downloads. Names are sanitized (#26)
-/// so a hostile server can't escape the chosen folder.
+/// Files are pre-enumerated into queued jobs and then run concurrently through
+/// the shared batch scheduler (capped by `transfer_slots`).
+#[allow(clippy::too_many_arguments)]
 async fn download_dir(
     sftp: &SftpSession,
     handle: &SftpLink,
     remote_root: &str,
     local_parent: &str,
     events: &UnboundedSender<SessionEvent>,
+    cancels: &Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     rate_kbps: u32,
     preserve_mtime: bool,
-) -> Result<()> {
-    // Folder transfers aren't individually cancellable from the UI; a throwaway
-    // never-set flag satisfies download_impl's signature.
-    let no_cancel = Arc::new(AtomicBool::new(false));
+) -> Result<BatchOutcome> {
     let root_name = sanitize_filename(&base_name(remote_root));
     let root_local = format!("{}/{}", local_parent.trim_end_matches('/'), root_name);
-    // (remote_dir, local_dir) pairs still to mirror.
-    let mut stack = vec![(remote_root.trim_end_matches('/').to_string(), root_local)];
-    while let Some((rdir, ldir)) = stack.pop() {
-        tokio::fs::create_dir_all(&ldir)
-            .await
-            .with_context(|| format!("create local dir {ldir}"))?;
-        for entry in list_dir_impl(sftp, &rdir).await? {
-            if entry.is_dir {
-                let child_local = format!("{}/{}", ldir, sanitize_filename(&entry.name));
-                stack.push((entry.full_path, child_local));
-            } else {
-                let fname = sanitize_filename(&entry.name);
-                let lpath = format!("{}/{}", ldir, fname);
-                let id = Uuid::new_v4().to_string();
-                download_impl(
-                    handle,
-                    &entry.full_path,
-                    &lpath,
-                    &fname,
-                    &id,
-                    events,
-                    &no_cancel,
-                    rate_kbps,
-                    preserve_mtime,
-                    false,
-                )
-                .await?;
-            }
-        }
-    }
-    Ok(())
+    let mut jobs = Vec::new();
+    collect_download_jobs(sftp, remote_root, &root_local, &mut jobs).await?;
+    let outcome = run_transfer_batch(
+        jobs,
+        cancels,
+        events,
+        handle,
+        sftp,
+        BatchKind::Download,
+        rate_kbps,
+        preserve_mtime,
+    )
+    .await;
+    Ok(outcome)
 }
 
 /// Recursively remove a remote directory tree (#50 follow-up).
@@ -6675,11 +7158,6 @@ async fn remove_dir_recursive(sftp: &SftpSession, root: &str) -> Result<()> {
     Ok(())
 }
 
-/// Recursively upload a local directory tree into `remote_parent` (#50).
-///
-/// Iterative work-stack: mirror each local dir to the remote (create_dir, whose
-/// "already exists" error is ignored), then upload its files with the pipelined
-/// path. Symlinks and other special files are skipped.
 /// First remote name that does not exist yet in `dir`: the name itself when it
 /// is free, otherwise `name (1)`, `name (2)`, … (the "keep both" upload policy).
 async fn available_remote_name(sftp: &SftpSession, dir: &str, name: &str) -> String {
@@ -6694,24 +7172,24 @@ async fn available_remote_name(sftp: &SftpSession, dir: &str, name: &str) -> Str
     candidate
 }
 
-async fn upload_dir(
-    handle: &SftpLink,
-    sftp: &SftpSession,
-    local_root: &Path,
-    remote_parent: &str,
-    remote_name: &str,
-    events: &UnboundedSender<SessionEvent>,
-    rate_kbps: u32,
-    preserve_mtime: bool,
-) -> Result<()> {
-    // Folder uploads aren't individually cancellable from the UI; a throwaway
-    // never-set flag satisfies upload_pipelined's signature.
-    let no_cancel = Arc::new(AtomicBool::new(false));
-    let remote_root = format!("{}/{}", remote_parent.trim_end_matches('/'), remote_name);
-    let mut stack = vec![(local_root.to_path_buf(), remote_root)];
-    while let Some((ldir, rdir)) = stack.pop() {
-        // Best-effort mkdir; an error usually just means the dir already exists.
-        let _ = sftp.create_dir(&rdir).await;
+/// Pre-enumerated local tree: the file jobs and every remote directory that
+/// must exist before their uploads start.
+struct UploadPlan {
+    jobs: Vec<TransferJob>,
+    remote_dirs: Vec<String>,
+}
+
+/// Walk a local directory tree without touching SFTP, producing one upload
+/// job per regular file and the mirror list of remote directories. Symlinks
+/// and other special files are skipped, matching the previous serial
+/// implementation. Display names are relative to the transfer root
+/// (`subdir/a.txt`; a top-level file shows its bare name).
+async fn enumerate_upload_jobs(local_root: &Path, remote_root: &str) -> Result<UploadPlan> {
+    let mut jobs = Vec::new();
+    let mut remote_dirs = vec![remote_root.to_string()];
+    // (local dir, remote dir, display prefix relative to the transfer root).
+    let mut stack = vec![(local_root.to_path_buf(), remote_root.to_string(), String::new())];
+    while let Some((ldir, rdir, prefix)) = stack.pop() {
         let mut rd = tokio::fs::read_dir(&ldir)
             .await
             .with_context(|| format!("read local dir {}", ldir.display()))?;
@@ -6719,29 +7197,66 @@ async fn upload_dir(
             let lpath = entry.path();
             let name = local_file_name_utf8(&lpath)?;
             let rchild = format!("{}/{}", rdir, name);
+            let display = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}/{name}")
+            };
             let ft = entry.file_type().await.context("file type")?;
             if ft.is_dir() {
-                stack.push((lpath, rchild));
+                remote_dirs.push(rchild.clone());
+                stack.push((lpath, rchild, display));
             } else if ft.is_file() {
-                let id = Uuid::new_v4().to_string();
-                upload_pipelined(
-                    handle,
-                    sftp,
-                    &lpath,
-                    &rchild,
-                    &name,
-                    &id,
-                    events,
-                    &no_cancel,
-                    rate_kbps,
-                    preserve_mtime,
-                    false,
-                )
-                .await?;
+                jobs.push(TransferJob {
+                    id: Uuid::new_v4().to_string(),
+                    display_name: display,
+                    cancel: Arc::new(AtomicBool::new(false)),
+                    source: TransferSource::Upload {
+                        local: lpath,
+                        remote: rchild,
+                    },
+                });
             }
         }
     }
-    Ok(())
+    Ok(UploadPlan { jobs, remote_dirs })
+}
+
+/// Recursively upload a local directory tree. Files are pre-enumerated into
+/// queued jobs (each gets a panel row before any bytes move) and then run
+/// concurrently through the shared batch scheduler, capped by
+/// `transfer_slots`. Remote directories are created first so every queued
+/// upload's parent already exists.
+#[allow(clippy::too_many_arguments)]
+async fn upload_dir(
+    handle: &SftpLink,
+    sftp: &SftpSession,
+    local_root: &Path,
+    remote_parent: &str,
+    remote_name: &str,
+    events: &UnboundedSender<SessionEvent>,
+    cancels: &Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    rate_kbps: u32,
+    preserve_mtime: bool,
+) -> Result<BatchOutcome> {
+    let remote_root = format!("{}/{}", remote_parent.trim_end_matches('/'), remote_name);
+    let plan = enumerate_upload_jobs(local_root, &remote_root).await?;
+    // Best-effort mkdir; an error usually just means the dir already exists.
+    for dir in &plan.remote_dirs {
+        let _ = sftp.create_dir(dir).await;
+    }
+    let outcome = run_transfer_batch(
+        plan.jobs,
+        cancels,
+        events,
+        handle,
+        sftp,
+        BatchKind::Upload,
+        rate_kbps,
+        preserve_mtime,
+    )
+    .await;
+    Ok(outcome)
 }
 
 /// Create the remote end of an upload and return its handle and the final
@@ -6830,6 +7345,7 @@ async fn upload_pipelined(
     rate_kbps: u32,
     preserve_mtime: bool,
     no_clobber: bool,
+    already_queued: bool,
 ) -> Result<bool> {
     use tokio::io::AsyncReadExt;
 
@@ -6837,7 +7353,12 @@ async fn upload_pipelined(
     const MAX_INFLIGHT: usize = 32; // ~1 MB of outstanding writes hides the RTT
 
     // At most MAX_PARALLEL_TRANSFERS channels at once; the rest wait (#554).
-    let Some(_slot) = handle.transfer_slot(events, id, name, true, cancel).await else {
+    // Folder batches already emitted their Queued rows during enumeration.
+    let Some(_slot) = (if already_queued {
+        handle.acquire_slot(events, id, name, true, cancel).await
+    } else {
+        handle.transfer_slot(events, id, name, true, cancel).await
+    }) else {
         return Ok(false);
     };
     // Upload-side mtime would need a remote SETSTAT; the raw SFTP API for it is
@@ -7019,6 +7540,23 @@ impl SftpLink {
         wait_for_slot(&self.transfer_slots, cancel, || {
             emit_transfer(events, id, name, is_upload, 0, 0, 3, t("排队等待中", "Queued"));
         }, || {
+            emit_transfer(events, id, name, is_upload, 0, 0, 4, t("已取消", "Cancelled"));
+        })
+        .await
+    }
+
+    /// Wait for a transfer slot without re-emitting a Queued row. Folder
+    /// batches reveal every row up front during pre-enumeration; only a cancel
+    /// while still waiting marks that row Cancelled.
+    async fn acquire_slot(
+        &self,
+        events: &UnboundedSender<SessionEvent>,
+        id: &str,
+        name: &str,
+        is_upload: bool,
+        cancel: &AtomicBool,
+    ) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        wait_for_slot(&self.transfer_slots, cancel, || {}, || {
             emit_transfer(events, id, name, is_upload, 0, 0, 4, t("已取消", "Cancelled"));
         })
         .await
