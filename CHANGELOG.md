@@ -51,6 +51,28 @@ All notable changes are documented here. 本文件记录所有重要变更。
 - **修复拖选时反向滚动把选区往错误方向继续拉长。** 拖选文字时用滚轮翻页，此前滚轮向任何方向滚都会把选区两端分别向上下各自抻长，反向滚回时选区顶部也跟着向上延长、无法收回。现在改为“橡皮筋”模型：拖选起点（锚点）固定，只有活动端随滚动伸缩——正向滚动继续扩选，反向滚动把选区收回来，收到锚点后先收成空，余量在下一帧再从另一侧长出（一帧内不会整段跳过锚点），锚点字段全程不被改写、选区不会整体漂移；拖住不动（未拖出选区）时滚轮只翻页、不产生选区。
 - **Fix the wheel extending the wrong end when scrolling back during a drag-selection.** Wheeling to flip pages mid-drag used to stretch both ends of the selection in their own directions, so scrolling back kept growing the top end instead of pulling the selection in. The selection is now rubber-banded around the drag anchor: the anchor stays fixed and only the live end follows the scrolls — rolling fore keeps growing it, rolling back pulls it in, and once it reaches the anchor the band empties first, with the remainder growing out of the other side on the next frame instead of jumping across in one. The anchor field is never rewritten, so the selection can no longer drift as a whole; wheeling while holding the button without dragging only scrolls, it never invents a selection.
 
+## [0.8.5] - 2026-11-25
+
+- **设置搜索。** 设置侧栏顶部新增搜索框，可搜索所有页面的设置项：名称、说明、分组标题、页面名称以及下拉选项 / 按钮文字，中英文均可搜索，与界面语言无关；多个词同时匹配。输入时右侧显示结果列表，每条标注所在页面；点击结果或按回车打开第一条，会跳转到对应页面、滚动到该设置并短暂高亮。
+- **Search in Settings.** A search box at the top of the Settings sidebar finds any setting on any page by its name, description, section heading, page name or option / button text, in English or Chinese whatever the UI language; several words must all match. Results replace the page while you type, each tagged with its page; click one, or press Enter for the first, to jump to that page with the setting scrolled into view and briefly highlighted.
+
+- **壁纸显示模式：透明 / 毛玻璃。** 壁纸与主题 › 沉浸式 中新增“壁纸显示模式”。“透明”（默认）保持壁纸清晰，透过半透明面板显示；“毛玻璃”将整个窗口背后的壁纸模糊，并按浅色 / 深色主题叠加对应色调，亮色壁纸不再在面板间隙处刺眼。模糊副本在加载壁纸时一次生成（约 200 KB），不增加渲染开销；独立的编辑器、进程和系统信息窗口同样生效。
+- **Wallpaper display mode: Transparency / Frosted glass.** Wallpaper & theme › Immersive gains a "Wallpaper display mode". Transparency (the default) keeps the wallpaper sharp behind the translucent panels; Frosted glass blurs it behind the whole window and tints it light or dark to match the theme, so a bright wallpaper no longer glares between panels. The blurred copy is made once when the wallpaper loads (about 200 KB), so drawing costs nothing extra, and the detached editor, process and system info windows follow the mode too.
+
+- **底层遮罩不透明度。** 透明模式下新增“底层遮罩不透明度”滑块（0–80%，默认 40%）：在所有面板下方铺一层与主题背景同色、覆盖整个窗口的遮罩，面板保持原有透明度。调高可压住与主题不搭的壁纸，例如深色模式下的浅色壁纸。
+- **Backdrop layer opacity.** In Transparency mode a new "Backdrop layer opacity" slider (0–80%, default 40%) lays one layer in the theme's background colour under all panels, across the whole window, while the panels keep their own transparency. Raise it to tone down a wallpaper that clashes with the theme, such as a light wallpaper in dark mode.
+
+- **扁平面板布局（#584）。** 壁纸与主题 › 面板 中新增“扁平面板”开关：关闭时保持圆角悬浮卡片和卡片间距；开启后去掉圆角和间距，面板之间改用 1px 细线分隔，侧栏、终端和欢迎页都会随之调整。默认关闭。感谢 @zcz-09。
+- **Flat panel layout (#584).** A "Flat panels" switch in Wallpaper & theme › Panels: off keeps the rounded floating cards with gaps between them; on drops the rounding and gaps and divides the panels with 1px lines, across the sidebars, the terminal and the welcome page. Off by default. Thanks @zcz-09.
+
+- **文件夹上传 / 下载改为并发传输（#580）。** 传输文件夹时先列出全部文件，所有文件立即以“排队中”出现在传输面板，再最多 4 个同时传输，大量小文件的文件夹明显更快。每个文件可单独取消，单个文件失败不会中断其余文件，结束后汇总结果。感谢 @MyMaskKing。
+- **Folder uploads and downloads transfer files concurrently (#580).** A folder transfer now lists every file first, shows them all as queued rows in the transfer panel straight away, then moves up to 4 at a time, so folders full of small files finish much faster. Each file can be cancelled on its own, one failed file no longer stops the rest, and the results are summed up at the end. Thanks @MyMaskKing.
+
+- **右上角工具栏图标统一，不再有常亮的按下状态（#579）。** 设置、传输、主题、会话同步、命令栏、置顶、更新七个图标统一为 16px 和同一套中性色：深色模式下不再有孤立的琥珀色太阳图标，命令栏按钮也不会因为命令栏默认开启而一直显示成按下的灰块（隐藏时图标变暗）。悬停与弹窗打开改用淡强调色底，并带 120ms 过渡。感谢 @A-noble。
+- **macOS 上右上角图标不再偏高（#579）。** 有原生标题栏时，标签栏上方还留着悬浮卡片的 10px 内边距，之前只按标题栏高度计算，七个图标比标签栏中线高出 10px、压在标签栏上沿。现在按卡片内边距一起计算，图标与标签文字同一条中线，设置 / 传输弹窗也随之下移对齐。
+- **Consistent top-right toolbar icons, no permanently pressed button (#579).** The seven icons (settings, transfers, theme, session sync, command bar, pin, updates) now share one 16px size and one neutral colour: the lone amber sun is gone, and the command bar button no longer looks pressed just because the bar is on by default (its glyph dims while the bar is hidden). Hover and open-popup states use a faint accent wash with a 120ms fade. Thanks @A-noble.
+- **The top-right icons no longer sit too high on macOS (#579).** With a native title bar the tab strip is another 10px down — the floating-card inset above it — but the icons were placed from the title-bar height alone, so all seven rode 10px above the strip's centre line and crossed its top edge. They are now centred on the strip, and the Settings / Transfers popups follow them down.
+
 ## [0.8.4] - 2026-11-22
 
 - **最近连接。** 欢迎页的会话列表上方显示最近连接过的会话；Home 以侧栏显示时，没有打开任何标签的主区域会显示最近连接列表，一键重连。每行显示会话类型、地址和相对时间（如“3 分钟前”），悬停出现 × 可单独移除，也可清空全部；最多保留 20 条。面板透明度跟随 壁纸与主题 中的面板不透明度。

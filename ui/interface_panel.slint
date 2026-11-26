@@ -322,6 +322,25 @@ component SectionHeader inherits Text {
     vertical-alignment: center;
 }
 
+// One settings-search result (Rust fills these from an index of this file).
+export struct SettingsHit {
+    page: string,        // ifd-page id to open
+    page-title: string,  // nav title, in the current language
+    label: string,       // row / section / page label
+    detail: string,      // row description ("" if none)
+    focus: string,       // SettingRow label to scroll to + highlight ("" = top)
+}
+
+// Search → row hand-off: the panel sets `label` (and bumps `request`) when a
+// result is opened; the matching SettingRow highlights itself and, once laid
+// out, reports its absolute y so the panel can scroll it into view.
+global SettingsFocus {
+    in-out property <string> label;
+    in-out property <int> request;
+    in-out property <length> target-y;
+    in-out property <int> reported;
+}
+
 // A settings row: label (+ optional description) on the left, a control slot on
 // the right via @children. Right-aligned and vertically centered.
 component SettingRow inherits Rectangle {
@@ -330,6 +349,28 @@ component SettingRow inherits Rectangle {
     in property <bool> show-divider: true;
     in property <bool> enabled: true;
     opacity: root.enabled ? 1.0 : 0.45;
+    // Settings search: highlight + scroll into view when this row was opened.
+    property <bool> search-hit: SettingsFocus.label != "" && root.label == SettingsFocus.label;
+    property <int> handled-request: -1;
+    // Drawn a little wider than the row so the text isn't flush with its edge.
+    Rectangle {
+        x: -8px;
+        width: parent.width + 16px;
+        height: parent.height;
+        border-radius: 6px;
+        background: root.search-hit ? Theme.accent.with-alpha(0.16) : transparent;
+        animate background { duration: 250ms; }
+    }
+    Timer {
+        // A short delay so the freshly opened page has its final layout.
+        interval: 40ms;
+        running: root.search-hit && root.handled-request != SettingsFocus.request;
+        triggered => {
+            root.handled-request = SettingsFocus.request;
+            SettingsFocus.target-y = root.absolute-position.y;
+            SettingsFocus.reported = SettingsFocus.request;
+        }
+    }
     VerticalLayout {
         HorizontalLayout {
             spacing: 14px;
@@ -840,6 +881,12 @@ export component InterfacePanel inherits Rectangle {
     callback copy-text(string);
     property <bool> mcp-json-copied: false;
     in-out property <float> wallpaper-overlay;   // frosted-panel opacity 0.30-1.00
+    in-out property <float> wallpaper-gap-dim;   // transparency-mode gap dimming 0-0.8
+    callback persist-wallpaper-gap-dim(float);
+    // Panel layout style: false = rounded floating cards with gaps, true =
+    // square flush panels divided by 1px lines.
+    in property <bool> flat-panels;
+    callback set-flat-panels(bool);
     // Active wallpaper id: "" / "builtin:light" / "builtin:dark" / a file path.
     in property <string> current-wallpaper;
     in property <string> custom-wallpaper-name;   // basename for the file row
@@ -848,6 +895,7 @@ export component InterfacePanel inherits Rectangle {
     in property <string> color-theme: "default";
     in-out property <string> color-theme-custom: "#4A90E2";
     in property <bool> immersive-colors: true;
+    in property <bool> wallpaper-frost: false;     // display mode: frosted glass (true) / transparency
     callback set-color-theme(string);
     callback set-color-theme-custom(string) -> bool;
     // Terminal colours page: one scheme for dark mode, one for light.
@@ -865,6 +913,7 @@ export component InterfacePanel inherits Rectangle {
     callback import-term-scheme(bool);
     callback remove-term-scheme(string);
     callback set-immersive-colors(bool);
+    callback set-wallpaper-frost(bool);
     in property <[WslProfileInfo]> wsl-profiles;
     in-out property <string> wsl-new-name: "WSL";
     in-out property <string> wsl-new-distribution;
@@ -874,6 +923,46 @@ export component InterfacePanel inherits Rectangle {
     // bar's launch menu (#427).
     in property <string> start-page: "font";
     property <string> ifd-page: root.start-page;
+
+    // --- Settings search ----------------------------------------------------
+    // Rust searches an index built from this file (labels, descriptions,
+    // section headers, option text — both languages).
+    callback search-settings(string /* query */, bool /* lang-en */) -> [SettingsHit];
+    property <string> settings-query;
+    property <[SettingsHit]> settings-hits;
+    function run-settings-search(q: string) {
+        root.settings-query = q;
+        root.settings-hits = q == "" ? [] : root.search-settings(q, root.lang-en);
+    }
+    // Nav click: leave search mode before switching pages, otherwise the
+    // results list keeps covering the page the user just picked.
+    function go-page(page: string) {
+        search-box.text = "";
+        root.run-settings-search("");
+        root.ifd-page = page;
+    }
+    function open-settings-hit(h: SettingsHit) {
+        search-box.text = "";
+        root.run-settings-search("");
+        root.ifd-page = h.page;
+        settings-scroll.content-y = 0;
+        SettingsFocus.request += 1;
+        SettingsFocus.label = h.focus;
+    }
+    // A matching row reported its position → scroll it ~24px below the top.
+    property <int> focus-reported: SettingsFocus.reported;
+    changed focus-reported => {
+        let delta = SettingsFocus.target-y - settings-scroll.absolute-position.y - 24px;
+        settings-scroll.content-y = max(
+            min(0px, settings-scroll.content-y - delta),
+            min(0px, settings-scroll.visible-height - settings-scroll.content-height));
+    }
+    // Fade the highlight out after a moment.
+    Timer {
+        interval: 2200ms;
+        running: SettingsFocus.label != "";
+        triggered => { SettingsFocus.label = ""; }
+    }
     in property <[CustomAgentInfo]> custom-agents;
     in-out property <string> agent-new-name;
     in-out property <string> agent-new-command;
@@ -993,110 +1082,152 @@ export component InterfacePanel inherits Rectangle {
                 x: parent.width - 1px; width: 1px; height: parent.height;
                 background: Theme.border-subtle;
             }
+            // Settings search box (searches every page; see search-settings).
+            search-box := LineEdit {
+                x: 10px;
+                y: 10px;
+                width: parent.width - 21px;
+                height: 30px;
+                font-size: 12px * Theme.panel-font;
+                placeholder-text: root.lang-en ? "Search settings…" : "搜索设置…";
+                edited(text) => { root.run-settings-search(text); }
+                // Enter opens the top result.
+                accepted(text) => {
+                    if (root.settings-hits.length > 0) {
+                        root.open-settings-hit(root.settings-hits[0]);
+                    }
+                }
+            }
+            if root.settings-query != "" : Rectangle {
+                // Clear (×) inside the box's right edge.
+                x: search-box.x + search-box.width - 26px;
+                y: search-box.y + 4px;
+                width: 22px;
+                height: 22px;
+                border-radius: 11px;
+                background: clear-ta.has-hover ? Theme.bg-hover : transparent;
+                Text {
+                    text: "\u{E5CD}";
+                    font-family: "Material Icons";
+                    font-size: 14px;
+                    color: Theme.text-secondary;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                clear-ta := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        search-box.text = "";
+                        root.run-settings-search("");
+                    }
+                }
+            }
             nav-scroll := ScrollView {
+                y: 44px;
                 width: 100%;
-                height: 100%;
+                height: parent.height - 44px;
                 content-width: self.visible-width;
                 content-height: max(self.visible-height, nav-items.preferred-height);
                 nav-items := VerticalLayout {
                     width: nav-scroll.visible-width;
                     padding: 10px;
+                    padding-top: 2px;
                     spacing: 2px;
                     alignment: start;
                 NavItem {
                     icon: "\u{E167}"; label: root.lang-en ? "Font" : "字体";
                     active: root.ifd-page == "font";
-                    clicked => { root.ifd-page = "font"; }
+                    clicked => { root.go-page("font"); }
                 }
                 NavItem {
                     icon: "\u{E40A}"; label: root.lang-en ? "Terminal colors" : "终端配色";
                     active: root.ifd-page == "term-colors";
-                    clicked => { root.ifd-page = "term-colors"; }
+                    clicked => { root.go-page("term-colors"); }
                 }
                 NavItem {
                     icon: "\u{E312}"; label: root.lang-en ? "Input" : "输入";
                     active: root.ifd-page == "input";
-                    clicked => { root.ifd-page = "input"; }
+                    clicked => { root.go-page("input"); }
                 }
                 NavItem {
                     icon: "\u{E1B1}"; label: root.lang-en ? "Rendering" : "渲染";
                     active: root.ifd-page == "renderer";
-                    clicked => { root.ifd-page = "renderer"; }
+                    clicked => { root.go-page("renderer"); }
                 }
                 NavItem {
                     icon: "\u{E8D4}"; label: root.lang-en ? "Output" : "输出高亮";
                     active: root.ifd-page == "output";
-                    clicked => { root.ifd-page = "output"; }
+                    clicked => { root.go-page("output"); }
                 }
                 NavItem {
                     icon: "\u{E1BC}"; label: root.lang-en ? "Wallpaper & theme" : "壁纸与主题";
                     active: root.ifd-page == "wallpaper";
-                    clicked => { root.ifd-page = "wallpaper"; }
+                    clicked => { root.go-page("wallpaper"); }
                 }
                 NavItem {
                     icon: "\u{E8BE}"; label: root.lang-en ? "Connection" : "连接";
                     active: root.ifd-page == "connection";
-                    clicked => { root.ifd-page = "connection"; }
+                    clicked => { root.go-page("connection"); }
                 }
                 NavItem {
                     icon: "\u{E0DA}"; label: root.lang-en ? "Credentials" : "认证管理";
                     active: root.ifd-page == "credentials";
-                    clicked => { root.ifd-page = "credentials"; }
+                    clicked => { root.go-page("credentials"); }
                 }
                 NavItem {
                     icon: "\u{E2C7}"; label: "SFTP";
                     active: root.ifd-page == "sftp";
-                    clicked => { root.ifd-page = "sftp"; }
+                    clicked => { root.go-page("sftp"); }
                 }
                 NavItem {
                     icon: "\u{EB8E}"; label: root.lang-en ? "Local shells" : "本地终端";
                     active: root.ifd-page == "shells";
-                    clicked => { root.ifd-page = "shells"; }
+                    clicked => { root.go-page("shells"); }
                 }
                 if root.is-windows : NavItem {
                     icon: "\u{E30A}"; label: "WSL";
                     active: root.ifd-page == "wsl";
-                    clicked => { root.ifd-page = "wsl"; }
+                    clicked => { root.go-page("wsl"); }
                 }
                 NavItem {
                     icon: "\u{F06C}"; label: root.lang-en ? "AI agents" : "AI 智能体";
                     active: root.ifd-page == "agents";
-                    clicked => { root.ifd-page = "agents"; }
+                    clicked => { root.go-page("agents"); }
                 }
                 NavItem {
                     icon: "\u{E5CB}"; label: root.lang-en ? "Sidebars" : "侧栏";
                     active: root.ifd-page == "sidebar";
-                    clicked => { root.ifd-page = "sidebar"; }
+                    clicked => { root.go-page("sidebar"); }
                 }
                 NavItem {
                     icon: "\u{E627}"; label: root.lang-en ? "Session sync" : "会话同步";
                     active: root.ifd-page == "sync";
-                    clicked => { root.ifd-page = "sync"; }
+                    clicked => { root.go-page("sync"); }
                 }
                 NavItem {
                     icon: "\u{E2C2}"; label: "WebDAV";
                     active: root.ifd-page == "webdav";
-                    clicked => { root.ifd-page = "webdav"; }
+                    clicked => { root.go-page("webdav"); }
                 }
                 NavItem {
                     icon: "\u{E8BD}"; label: "AI";
                     active: root.ifd-page == "ai";
-                    clicked => { root.ifd-page = "ai"; }
+                    clicked => { root.go-page("ai"); }
                 }
                 NavItem {
                     icon: "\u{E2C4}"; label: root.lang-en ? "Download" : "下载";
                     active: root.ifd-page == "download";
-                    clicked => { root.ifd-page = "download"; }
+                    clicked => { root.go-page("download"); }
                 }
                 NavItem {
                     icon: "\u{E873}"; label: root.lang-en ? "Session log" : "会话日志";
                     active: root.ifd-page == "session-log";
-                    clicked => { root.ifd-page = "session-log"; }
+                    clicked => { root.go-page("session-log"); }
                 }
                 NavItem {
                     icon: "\u{E335}"; label: "MCP";
                     active: root.ifd-page == "mcp";
-                    clicked => { root.ifd-page = "mcp"; }
+                    clicked => { root.go-page("mcp"); }
                 }
                 }
             }
@@ -1109,7 +1240,77 @@ export component InterfacePanel inherits Rectangle {
             // wallpaper-opacity slider (items 6/7).
             background: transparent;
 
+            // --- Settings search results (replace the page while typing) ---
+            if root.settings-query != "" : results-scroll := ScrollView {
+                width: 100%;
+                height: 100%;
+                content-width: self.visible-width;
+                content-height: max(self.visible-height, results-list.preferred-height);
+                results-list := VerticalLayout {
+                    width: results-scroll.visible-width;
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    padding-top: 12px;
+                    padding-bottom: 16px;
+                    spacing: 2px;
+                    alignment: start;
+                    SectionHeader {
+                        height: 24px;
+                        text: root.settings-hits.length == 0
+                            ? (root.lang-en ? "NO MATCHING SETTINGS" : "没有匹配的设置")
+                            : (root.lang-en ? "\{root.settings-hits.length} RESULTS" : "\{root.settings-hits.length} 个结果");
+                    }
+                    for hit in root.settings-hits : Rectangle {
+                        height: hit-col.preferred-height;
+                        border-radius: 6px;
+                        background: hit-ta.has-hover ? Theme.bg-hover : transparent;
+                        hit-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.open-settings-hit(hit); }
+                        }
+                        hit-col := VerticalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            padding-top: 7px;
+                            padding-bottom: 7px;
+                            spacing: 2px;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    text: hit.label;
+                                    font-size: 13px * Theme.panel-font;
+                                    color: Theme.text-primary;
+                                    overflow: elide;
+                                    horizontal-stretch: 1;
+                                }
+                                // Which page it lives on.
+                                Rectangle {
+                                    width: page-chip.preferred-width + 14px;
+                                    height: 18px;
+                                    border-radius: 9px;
+                                    background: Theme.bg-active;
+                                    page-chip := Text {
+                                        text: hit.page-title;
+                                        font-size: 10px * Theme.panel-font;
+                                        color: Theme.text-secondary;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                            if hit.detail != "" : Text {
+                                text: hit.detail;
+                                font-size: 11px * Theme.panel-font;
+                                color: Theme.text-muted;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                }
+            }
+
             settings-scroll := ScrollView {
+                visible: root.settings-query == "";
                 width: 100%;
                 height: 100%;
                 content-width: self.visible-width;
@@ -1976,6 +2177,41 @@ export component InterfacePanel inherits Rectangle {
                         toggled(v) => { root.set-immersive-colors(v); }
                     }
                 }
+                SettingRow {
+                    label: root.lang-en ? "Wallpaper display mode" : "壁纸显示模式";
+                    desc: root.lang-en
+                        ? "Transparency keeps the wallpaper sharp behind translucent panels. Frosted glass blurs it and tints it light or dark to match the theme, so bright wallpapers don't glare between panels."
+                        : "透明：壁纸保持清晰，透过半透明面板显示。毛玻璃：将壁纸模糊，并按浅色 / 深色主题蒙上对应色调，避免亮色壁纸在面板间隙处过于刺眼。";
+                    show-divider: false;
+                    ComboBox {
+                        width: 150px;
+                        model: root.lang-en
+                            ? ["Frosted glass", "Transparency"]
+                            : ["毛玻璃", "透明"];
+                        current-index: root.wallpaper-frost ? 0 : 1;
+                        selected(v) => {
+                            let frost = v == "Frosted glass" || v == "毛玻璃";
+                            if (frost != root.wallpaper-frost) {
+                                root.set-wallpaper-frost(frost);
+                            }
+                        }
+                    }
+                }
+
+
+                Rectangle { height: 16px; }
+                SectionHeader { text: root.lang-en ? "PANELS" : "面板"; height: 22px; }
+                SettingRow {
+                    label: root.lang-en ? "Flat panels" : "扁平面板";
+                    desc: root.lang-en
+                        ? "Off keeps the rounded cards separated by gaps. On removes the rounding and gaps, dividing the panels with thin lines."
+                        : "关闭时保留圆角卡片和卡片间隔；开启后取消圆角与间隔，改用细线分隔各个面板。";
+                    show-divider: false;
+                    Switch {
+                        on: root.flat-panels;
+                        toggled(v) => { root.set-flat-panels(v); }
+                    }
+                }
 
                 Rectangle { height: 16px; }
                 SectionHeader { text: root.lang-en ? "OVERLAY" : "遮罩"; height: 22px; }
@@ -1998,6 +2234,33 @@ export component InterfacePanel inherits Rectangle {
                         }
                         Text {
                             text: "\{round((1.0 - root.wallpaper-overlay) * 100)}%";
+                            color: Theme.text-secondary;
+                            font-size: 12px * Theme.panel-font;
+                            vertical-alignment: center;
+                            width: 34px;
+                        }
+                    }
+                }
+                // The backdrop layer slider only applies in transparency mode
+                // (frosted glass has its own fixed wash), so hide it there.
+                if !root.wallpaper-frost : SettingRow {
+                    label: root.lang-en ? "Backdrop layer opacity" : "底层遮罩不透明度";
+                    desc: root.lang-en
+                        ? "A layer in the theme's background color under all panels, covering the whole window. Raise it to tone down a wallpaper that clashes with the theme (e.g. a light wallpaper in dark mode)."
+                        : "在所有面板下方铺一层与主题背景同色的遮罩，覆盖整个窗口。调高可压住与主题不搭的壁纸（如深色模式下的浅色壁纸）。";
+                    show-divider: false;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Slider {
+                            width: 150px;
+                            minimum: 0;
+                            maximum: 80;
+                            value: root.wallpaper-gap-dim * 100;
+                            changed(v) => { root.wallpaper-gap-dim = v / 100; }
+                            released(v) => { root.persist-wallpaper-gap-dim(v / 100); }
+                        }
+                        Text {
+                            text: "\{round(root.wallpaper-gap-dim * 100)}%";
                             color: Theme.text-secondary;
                             font-size: 12px * Theme.panel-font;
                             vertical-alignment: center;

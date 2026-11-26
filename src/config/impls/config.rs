@@ -2174,6 +2174,21 @@ impl ConfigStore {
     pub fn set_wallpaper_overlay(&mut self, v: f32) {
         self.cache.wallpaper_overlay = v.clamp(0.30, 1.0);
     }
+    /// Panel layout: false = rounded floating cards with gaps (default),
+    /// true = square flush panels divided by 1px lines.
+    pub fn flat_panels(&self) -> bool {
+        self.cache.flat_panels
+    }
+    pub fn set_flat_panels(&mut self, flat: bool) {
+        self.cache.flat_panels = flat;
+    }
+    /// Backdrop layer opacity in transparency mode (0.0–0.8, default 0.4).
+    pub fn wallpaper_gap_dim(&self) -> f32 {
+        self.cache.wallpaper_gap_dim.unwrap_or(0.4).clamp(0.0, 0.8)
+    }
+    pub fn set_wallpaper_gap_dim(&mut self, v: f32) {
+        self.cache.wallpaper_gap_dim = Some(v.clamp(0.0, 0.8));
+    }
     /// Colour theme preset id; "" = the default MeatShell palette.
     pub fn color_theme(&self) -> &str {
         &self.cache.color_theme
@@ -2194,6 +2209,14 @@ impl ConfigStore {
     }
     pub fn set_immersive_colors(&mut self, on: bool) {
         self.cache.immersive_colors_disabled = !on;
+    }
+    /// Whether the wallpaper display mode is "frosted-glass" (default is
+    /// "transparency", which keeps the wallpaper sharp).
+    pub fn wallpaper_frost(&self) -> bool {
+        self.cache.wallpaper_display_mode == "frosted-glass"
+    }
+    pub fn set_wallpaper_frost(&mut self, on: bool) {
+        self.cache.wallpaper_display_mode = if on { "frosted-glass".into() } else { String::new() };
     }
     /// Terminal colour scheme id for dark (`dark == true`) or light mode;
     /// "" = the default MeatShell terminal colours.

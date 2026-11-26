@@ -2239,6 +2239,8 @@ pub(super) fn listen_for_config_changes(ctx: &WinCtx, sessions_model: &Rc<VecMod
         registry,
         bufs,
         window,
+        proc_win,
+        sys_win,
         editor_win,
         ..
     } = ctx;
@@ -2252,6 +2254,8 @@ pub(super) fn listen_for_config_changes(ctx: &WinCtx, sessions_model: &Rc<VecMod
         let store = store.clone();
         let sessions_model = sessions_model.clone();
         let bufs = bufs.clone();
+        let proc_weak = proc_win.as_weak();
+        let sys_weak = sys_win.as_weak();
         let editor_weak = editor_win.as_weak();
         registry.add_config_listener(
             window_id,
@@ -2267,6 +2271,14 @@ pub(super) fn listen_for_config_changes(ctx: &WinCtx, sessions_model: &Rc<VecMod
                 apply_dark_mode(&w, &bufs, theme_pref_is_dark(&store.borrow()));
                 // Colour theme preset + immersive switch (Wallpaper & theme).
                 super::color_theme::apply_color_theme(&w, &store.borrow());
+                // Panel layout + backdrop dim changed in another window: mirror
+                // them, and recompute the central card's Rust-side insets.
+                let flat = store.borrow().flat_panels();
+                if w.get_flat_panels() != flat {
+                    w.set_flat_panels(flat);
+                    w.invoke_dock_layout_changed();
+                }
+                w.set_wallpaper_gap_dim(store.borrow().wallpaper_gap_dim());
                 // Language translations are process-global; refresh our flag only.
                 w.set_lang_en(crate::i18n::is_en());
                 // Local shells / WSL profiles / detected agents can change in
@@ -2284,6 +2296,14 @@ pub(super) fn listen_for_config_changes(ctx: &WinCtx, sessions_model: &Rc<VecMod
                 // Docked vs detached editor (#494) is a global preference.
                 w.set_editor_embedded(store.borrow().editor_embedded());
                 sync_external_editor(&w, &store.borrow());
+                // Detached windows own separate Theme globals: mirror wallpaper
+                // blur/frost/gap-dim so a cross-window backdrop change sticks.
+                if let Some(proc) = proc_weak.upgrade() {
+                    sync_proc_theme(&w, &proc);
+                }
+                if let Some(sys) = sys_weak.upgrade() {
+                    sync_system_info_theme(&w, &sys);
+                }
                 if let Some(editor) = editor_weak.upgrade() {
                     sync_editor_theme(&w, &editor);
                     if editor.get_editor_open() {

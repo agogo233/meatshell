@@ -223,6 +223,9 @@ pub(super) fn sync_proc_theme(main: &AppWindow, proc: &ProcWindow) {
     // Mirror the immersive wallpaper so the detached window shares the frosted
     // backdrop instead of a flat panel.
     proc.set_wallpaper_img(main.get_wallpaper_img());
+    proc.set_wallpaper_blurred(main.get_wallpaper_blurred());
+    proc.set_wallpaper_frost(main.get_wallpaper_frost());
+    proc.set_wallpaper_gap_dim(main.get_wallpaper_gap_dim());
     proc.set_wallpaper_active(main.get_wallpaper_active());
     proc.set_wp_accent(main.get_wp_accent());
     proc.set_wp_tint(main.get_wp_tint());
@@ -236,6 +239,9 @@ pub(super) fn sync_system_info_theme(main: &AppWindow, sys: &SystemInfoWindow) {
     sys.set_ui_scale(main.get_ui_scale());
     sys.set_ui_font_family(main.get_ui_font_family());
     sys.set_wallpaper_img(main.get_wallpaper_img());
+    sys.set_wallpaper_blurred(main.get_wallpaper_blurred());
+    sys.set_wallpaper_frost(main.get_wallpaper_frost());
+    sys.set_wallpaper_gap_dim(main.get_wallpaper_gap_dim());
     sys.set_wallpaper_active(main.get_wallpaper_active());
     sys.set_wp_accent(main.get_wp_accent());
     sys.set_wp_tint(main.get_wp_tint());
@@ -252,6 +258,9 @@ pub(super) fn sync_editor_theme(main: &AppWindow, editor: &EditorWindow) {
     editor.set_ui_scale(main.get_ui_scale());
     editor.set_ui_font_family(main.get_ui_font_family());
     editor.set_wallpaper_img(main.get_wallpaper_img());
+    editor.set_wallpaper_blurred(main.get_wallpaper_blurred());
+    editor.set_wallpaper_frost(main.get_wallpaper_frost());
+    editor.set_wallpaper_gap_dim(main.get_wallpaper_gap_dim());
     editor.set_wallpaper_active(main.get_wallpaper_active());
     editor.set_wp_accent(main.get_wp_accent());
     editor.set_wp_tint(main.get_wp_tint());

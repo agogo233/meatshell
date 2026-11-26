@@ -41,6 +41,7 @@ mod jump_picker;
 mod session_models;
 mod session_runtime;
 mod session_test;
+mod settings_search;
 mod shortcuts;
 mod sftp_callbacks;
 mod sftp_complete;

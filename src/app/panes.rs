@@ -600,7 +600,7 @@ pub(crate) fn refresh_dock_inner(
     w.set_dock_central_w(geom.central.w);
     w.set_dock_central_h(geom.central.h);
     let edges: Vec<&str> = geom.panels.iter().map(|p| p.edge).collect();
-    set_central_insets(&w, central_insets(&edges));
+    set_central_insets(&w, central_insets(&edges, w.get_flat_panels()));
 }
 
 /// Gap around every floating card: the docked panels draw their card this far
@@ -612,9 +612,12 @@ pub(super) const CARD_GAP: f32 = 10.0;
 /// bottom]`. Next to a docked panel the panel's own inset already makes the
 /// gap, so that side gets none; toward a window edge (or a flush collapsed
 /// tool strip) it gets `CARD_GAP`. `edges` are the docked panels' edges.
-pub(super) fn central_insets(edges: &[&str]) -> [f32; 4] {
-    let gap = |edge: &str| if edges.contains(&edge) { 0.0 } else { CARD_GAP };
-    [gap("left"), gap("top"), gap("right"), gap("bottom")]
+/// `flat` (the Settings › Wallpaper & theme panel style) removes the gap
+/// entirely: the central card then sits flush and its hairline is the divider.
+pub(super) fn central_insets(edges: &[&str], flat: bool) -> [f32; 4] {
+    let gap = if flat { 0.0 } else { CARD_GAP };
+    let gap_for = |edge: &str| if edges.contains(&edge) { 0.0 } else { gap };
+    [gap_for("left"), gap_for("top"), gap_for("right"), gap_for("bottom")]
 }
 
 /// Published to Slint, which places the card, and read back by the terminal

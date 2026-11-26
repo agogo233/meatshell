@@ -842,6 +842,8 @@ pub(crate) fn open_window(
         window.set_welcome_collapsed(welcome_collapsed);
         window.set_sidebar_collapsed(sidebar_collapsed);
         window.set_wallpaper_overlay(s.wallpaper_overlay());
+        window.set_flat_panels(s.flat_panels());
+        window.set_wallpaper_gap_dim(s.wallpaper_gap_dim());
         if collapse_sftp {
             window.set_sftp_collapsed(true);
             window.set_sftp_saved_height(s.sftp_panel_height());
@@ -939,6 +941,37 @@ pub(crate) fn open_window(
             let mut s = store.borrow_mut();
             s.set_wallpaper_overlay(v);
             let _ = s.save();
+        });
+    }
+    {
+        let weak = window.as_weak();
+        let store = store.clone();
+        let registry = registry.clone();
+        window.on_set_flat_panels(move |flat: bool| {
+            {
+                let mut s = store.borrow_mut();
+                s.set_flat_panels(flat);
+                let _ = s.save();
+            }
+            if let Some(w) = weak.upgrade() {
+                w.set_flat_panels(flat);
+                // The central card's insets are computed in Rust; recompute them
+                // for the new gap (the panels themselves re-layout in Slint).
+                w.invoke_dock_layout_changed();
+            }
+            registry.broadcast_config_changed();
+        });
+    }
+    {
+        let store = store.clone();
+        let registry = registry.clone();
+        window.on_persist_wallpaper_gap_dim(move |v| {
+            {
+                let mut s = store.borrow_mut();
+                s.set_wallpaper_gap_dim(v);
+                let _ = s.save();
+            }
+            registry.broadcast_config_changed();
         });
     }
     {
@@ -1538,6 +1571,7 @@ pub(crate) fn open_window(
         let store = store.clone();
         let bufs_wp = bufs.clone();
         let proc_weak = proc_win.as_weak();
+        let sys_weak = sys_win.as_weak();
         let editor_weak = editor_win.as_weak();
         let registry = registry.clone();
         window.on_set_wallpaper(move |id: SharedString| {
@@ -1556,6 +1590,9 @@ pub(crate) fn open_window(
                 }
                 if let Some(e) = editor_weak.upgrade() {
                     sync_editor_theme(&w, &e);
+                }
+                if let Some(s) = sys_weak.upgrade() {
+                    sync_system_info_theme(&w, &s);
                 }
             }
             {
@@ -1581,6 +1618,7 @@ pub(crate) fn open_window(
         let store = store.clone();
         let bufs_wp = bufs.clone();
         let proc_weak = proc_win.as_weak();
+        let sys_weak = sys_win.as_weak();
         let editor_weak = editor_win.as_weak();
         window.on_pick_wallpaper_file(move || {
             let picked = rfd::FileDialog::new()
@@ -1596,6 +1634,9 @@ pub(crate) fn open_window(
                     }
                     if let Some(e) = editor_weak.upgrade() {
                         sync_editor_theme(&w, &e);
+                    }
+                    if let Some(s) = sys_weak.upgrade() {
+                        sync_system_info_theme(&w, &s);
                     }
                 }
                 let mut s = store.borrow_mut();
@@ -1624,6 +1665,7 @@ pub(crate) fn open_window(
         pending_window_size_restore: pending_window_size_restore.clone(),
         window_size_tracking_ready: window_size_tracking_ready.clone(),
     };
+    super::settings_search::wire(&window);
     window.set_launch_shells(launch_shell_model(&store.borrow()));
     super::recents::publish(&window, &store.borrow());
     super::recents::wire(&window, store.clone());
@@ -2191,6 +2233,8 @@ pub(crate) fn open_window(
     // so closing the window stops them instead of leaking.
     let window_timers: Rc<RefCell<Vec<slint::Timer>>> = Rc::new(RefCell::new(Vec::new()));
     let transfer_speeds = super::transfer_speeds::TransferSpeeds::new(&window);
+    let transfer_row_index: Rc<RefCell<HashMap<String, usize>>> =
+        Rc::new(RefCell::new(HashMap::new()));
 
     // Bundle results computed on worker threads are applied here, on the UI
     // thread that owns the store. 250 ms is invisible behind a network round
@@ -2352,6 +2396,7 @@ pub(crate) fn open_window(
             splitters_model: splitters_model.clone(),
             timers: window_timers.clone(),
             transfer_speeds: transfer_speeds.clone(),
+            transfer_row_index: transfer_row_index.clone(),
             content_size: content_size.clone(),
             proc_win: proc_win.clone(),
             sys_win: sys_win.clone(),
@@ -2746,8 +2791,10 @@ pub(crate) fn open_window(
     window.set_transfers(ModelRc::from(transfers_model.clone()));
     {
         let tm = transfers_model.clone();
+        let row_index = transfer_row_index.clone();
         window.on_clear_transfers(move || {
             transfer_speeds.clear();
+            row_index.borrow_mut().clear();
             tm.set_vec(Vec::<TransferInfo>::new());
         });
     }
