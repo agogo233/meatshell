@@ -203,6 +203,10 @@ class Fixture:
             session("inner", "inner.invalid", 22, "outer"),
             session("target", "target.invalid", 22, "inner"),
         ]
+        # Explicit routes are flattened onto the target (outermost first); a
+        # hop's own legacy reference is kept but not re-expanded, otherwise the
+        # target would dial inner.invalid directly and skip outer.
+        self.sessions[2]["jump_session_ids"] = ["outer", "inner"]
         self.save()
         self.trust()
 
@@ -331,15 +335,18 @@ class Fixture:
             assert result.get("isError"), f"Untrusted host accepted: {host}"
         self.trust()
         print("PASS: host key verification is enforced at all three hosts")
-        original = self.sessions[0].get("jump_session_id", "")
+        # Explicit routes live on the target, so inject the bad hop there;
+        # outer's legacy field would not be read once inner has an explicit list.
         for invalid in ("target", "missing"):
-            self.sessions[0]["jump_session_id"] = invalid
+            self.sessions[2]["jump_session_ids"] = [invalid]
+            self.sessions[2]["jump_session_id"] = ""
             self.save()
             count = sum(len(n.forwarded) for n in self.nodes)
             result = self.mcp("run_command", session_id="target", command="fixture", timeout_seconds=5)
             assert result.get("isError"), result
             assert count == sum(len(n.forwarded) for n in self.nodes)
-        self.sessions[0]["jump_session_id"] = original
+        self.sessions[2]["jump_session_ids"] = []
+        self.sessions[2]["jump_session_id"] = "inner"
         self.save()
         print("PASS: cycles and missing ancestors fail before network activity")
         silent = socket.socket()
