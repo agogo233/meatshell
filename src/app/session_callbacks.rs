@@ -291,7 +291,8 @@ pub(crate) fn wire_session_callbacks(
                 );
                 return;
             }
-            let Some(path) = rfd::FileDialog::new()
+            let Some(path) = DialogOwner::of_weak(&weak)
+                .file()
                 .set_file_name("meatshell-connections.mpack")
                 .add_filter("MeatShell bundle", &["mpack"])
                 .save_file()
@@ -380,7 +381,8 @@ pub(crate) fn wire_session_callbacks(
         let sessions_model = sessions_model.clone();
         let registry = registry.clone();
         window.on_import_sessions(move || {
-            if let Some(path) = rfd::FileDialog::new()
+            if let Some(path) = DialogOwner::of_weak(&weak)
+                .file()
                 .add_filter("JSON", &["json"])
                 .add_filter("MobaXterm", &["mxtsessions", "moba"])
                 .pick_file()
@@ -422,7 +424,8 @@ pub(crate) fn wire_session_callbacks(
                 );
                 return;
             }
-            let Some(path) = rfd::FileDialog::new()
+            let Some(path) = DialogOwner::of_weak(&weak)
+                .file()
                 .set_file_name("meatshell.mpack")
                 .add_filter("MeatShell bundle", &["mpack"])
                 .save_file()
@@ -466,7 +469,8 @@ pub(crate) fn wire_session_callbacks(
                 );
                 return;
             }
-            let Some(path) = rfd::FileDialog::new()
+            let Some(path) = DialogOwner::of_weak(&weak)
+                .file()
                 .add_filter("MeatShell bundle", &["mpack"])
                 .pick_file()
             else {
@@ -1423,8 +1427,9 @@ pub(crate) fn wire_session_callbacks(
     {
         let weak = window.as_weak();
         window.on_session_dialog_pick_key(move || {
-            let mut dialog =
-                rfd::FileDialog::new().set_title(t("选择私钥文件", "Choose private key file"));
+            let mut dialog = DialogOwner::of_weak(&weak)
+                .file()
+                .set_title(t("选择私钥文件", "Choose private key file"));
             // OpenSSH's standard key names (id_ed25519, id_rsa, …) usually
             // have no extension. Extension filters hide or disable those files
             // in native pickers, so show every file on every platform (#393).

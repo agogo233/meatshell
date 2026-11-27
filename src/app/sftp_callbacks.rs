@@ -911,8 +911,12 @@ pub(super) fn wire_sftp_callbacks(
             // Read the policy on the UI thread; `Weak::upgrade` is not
             // thread-safe, so the spawned thread must not call it.
             let dedup = configured_dedup_policy(&weak);
+            // Parent the picker to the owning window (#450): an unowned native
+            // dialog never appears above a pinned window, so capture the owner
+            // on the UI thread before the blocking picker runs off-thread.
+            let owner = DialogOwner::of_weak(&weak);
             std::thread::spawn(move || {
-                if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                if let Some(dir) = owner.file().pick_folder() {
                     let local_dir = dir.to_string_lossy().to_string();
                     let mut dispatched = false;
                     if let Ok(handles) = sftp_handles.lock() {
@@ -960,17 +964,20 @@ pub(super) fn wire_sftp_callbacks(
                 // The thread reports the picked paths back to the UI thread,
                 // where the overwrite question can read the remote listing.
                 let weak = weak.clone();
+                // Parent the picker to the owning window (#450); capture the
+                // owner on the UI thread before the blocking picker off-thread.
+                let owner = DialogOwner::of_weak(&weak);
                 std::thread::spawn(move || {
                     // The remote SFTP upload handles a file or a whole directory;
                     // only the local picker differs (#85). Folder uploads one dir;
                     // file mode allows selecting several at once.
                     let locals: Vec<std::path::PathBuf> = if folder {
-                        rfd::FileDialog::new()
+                        owner.file()
                             .pick_folder()
                             .map(|p| vec![p])
                             .unwrap_or_default()
                     } else {
-                        rfd::FileDialog::new()
+                        owner.file()
                             .pick_files()
                             .map(|v| v.into_iter().collect())
                             .unwrap_or_default()
@@ -1404,8 +1411,10 @@ pub(super) fn wire_sftp_callbacks(
                 // Read the policy on the UI thread before spawning (Weak::upgrade
                 // is not thread-safe).
                 let dedup = configured_dedup_policy(&weak2);
+                // Parent the picker to the owning window (#450).
+                let owner = DialogOwner::of_weak(&weak2);
                 std::thread::spawn(move || {
-                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                    if let Some(dir) = owner.file().pick_folder() {
                         let dir = dir.to_string_lossy().to_string();
                         let mut dispatched = false;
                         if let Ok(handles) = sftp_handles.lock() {

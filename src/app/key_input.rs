@@ -471,7 +471,8 @@ pub(crate) fn wire_key_input(
         let store_rc = store.clone();
         let weak = window.as_weak();
         window.on_export_quick_commands(move || {
-            let Some(path) = rfd::FileDialog::new()
+            let Some(path) = DialogOwner::of_weak(&weak)
+                .file()
                 .set_file_name("meatshell-quick-commands.json")
                 .add_filter("JSON", &["json"])
                 .save_file()
@@ -496,7 +497,8 @@ pub(crate) fn wire_key_input(
         let weak = window.as_weak();
         let collapsed = collapsed_quick_groups.clone();
         window.on_import_quick_commands(move || {
-            let Some(path) = rfd::FileDialog::new()
+            let Some(path) = DialogOwner::of_weak(&weak)
+                .file()
                 .add_filter("JSON", &["json"])
                 .pick_file()
             else {

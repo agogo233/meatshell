@@ -61,26 +61,6 @@ pub(crate) struct WinCtx {
     pub(crate) window_size_tracking_ready: Rc<Cell<bool>>,
 }
 
-/// File-dialog helper. The upstream split wraps a native parent window handle
-/// so rfd dialogs stay modal to the owning frameless window; this single-file
-/// layout builds a plain dialog (rfd still inherits the app window), keeping
-/// the `DialogOwner::of_weak(&weak).file().pick_folder()` call sites intact.
-pub(crate) struct DialogOwner(rfd::FileDialog);
-
-impl DialogOwner {
-    pub(crate) fn of_weak(_weak: &slint::Weak<AppWindow>) -> Self {
-        DialogOwner(rfd::FileDialog::new())
-    }
-
-    pub(crate) fn file(self) -> rfd::FileDialog {
-        self.0
-    }
-
-    pub(crate) fn message(&self) -> rfd::MessageDialog {
-        rfd::MessageDialog::new()
-    }
-}
-
 /// Build and wire one application window. Called for the first window by
 /// `run()` and for every subsequent window by the new-window entry points.
 /// `at` pins the window to a physical screen position (tab detach); without
@@ -681,7 +661,11 @@ pub(crate) fn open_window(
         let weak = window.as_weak();
         window.on_pick_session_log_dir(move || {
             let start = store.borrow().session_log_dir();
-            let Some(folder) = rfd::FileDialog::new().set_directory(&start).pick_folder() else {
+            let Some(folder) = DialogOwner::of_weak(&weak)
+                .file()
+                .set_directory(&start)
+                .pick_folder()
+            else {
                 return;
             };
             let effective = {
@@ -1247,7 +1231,8 @@ pub(crate) fn open_window(
         let weak = window.as_weak();
         let store = store.clone();
         window.on_export_output_highlight_rules(move || {
-            let Some(path) = rfd::FileDialog::new()
+            let Some(path) = DialogOwner::of_weak(&weak)
+                .file()
                 .set_file_name("meatshell-highlights.json")
                 .add_filter("JSON", &["json"])
                 .save_file()
@@ -1276,7 +1261,8 @@ pub(crate) fn open_window(
         let store = store.clone();
         let bufs = bufs.clone();
         window.on_import_output_highlight_rules(move || {
-            let Some(path) = rfd::FileDialog::new()
+            let Some(path) = DialogOwner::of_weak(&weak)
+                .file()
                 .add_filter("JSON", &["json"])
                 .pick_file()
             else {
@@ -1621,7 +1607,8 @@ pub(crate) fn open_window(
         let sys_weak = sys_win.as_weak();
         let editor_weak = editor_win.as_weak();
         window.on_pick_wallpaper_file(move || {
-            let picked = rfd::FileDialog::new()
+            let picked = DialogOwner::of_weak(&weak)
+                .file()
                 .set_title("选择壁纸 / Choose wallpaper")
                 .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp"])
                 .pick_file();
@@ -2754,7 +2741,7 @@ pub(crate) fn open_window(
         let weak = window.as_weak();
         let store = store.clone();
         window.on_pick_download_dir(move || {
-            if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+            if let Some(folder) = DialogOwner::of_weak(&weak).file().pick_folder() {
                 let dir = folder.to_string_lossy().to_string();
                 {
                     let mut s = store.borrow_mut();

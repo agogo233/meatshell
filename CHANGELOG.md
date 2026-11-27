@@ -5,6 +5,9 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ## [Unreleased]
 
+- **修复 Windows 置顶窗口下文件选择框被主窗口挡住（#450）。** 窗口设为“总是置顶”后，点“浏览”等按钮弹出的原生文件/文件夹选择框会藏在主窗口后面，看起来像点了没反应。现在所有原生选择框都作为主窗口的子窗口（父句柄经 `DialogOwner` 传递），置顶时也能浮在窗口之上；非 Windows 平台保持原有行为不变。
+- **File pickers now stay above a pinned window on Windows (#450).** With the window set to "always on top", the native file / folder picker opened by "Browse" and similar buttons used to appear hidden behind the main window, so clicking looked like nothing happened. Every native picker is now opened as a child of the owning window (the parent HWND is passed through `DialogOwner`), so it floats above the window even when pinned. Non-Windows behaviour is unchanged.
+
 - **命令栏输入时给出 OneKey 式补全（#583）。** 在命令栏敲命令时，下拉提示除了历史记录，还会列出本机 `$PATH` 里以所输内容开头的已安装命令（输入 `cle` 会补到 `clear`），这些行左侧带一个终端图标以便区分；匹配大小写不敏感，只补全命令名本身（输入空格后不再混入命令），`$PATH` 索引在启动时后台建立一次，Tab 补全到高亮项。
 - **OneKey-style completion while typing in the command bar (#583).** The suggestion popup now lists installed `$PATH` commands that start with what you typed (`cle` → `clear`) next to matching history, marked with a terminal glyph on their row. Matching is case-insensitive, only the command word is completed (typing a space stops the command suggestions), the `$PATH` index is built once in the background at startup, and Tab completes the highlighted row.
 
