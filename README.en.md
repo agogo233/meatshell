@@ -118,10 +118,6 @@ Color emoji graphics are provided by [Twemoji](https://github.com/jdecked/twemoj
 under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). See
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the full attribution.
 
-### Planned
-
-- [ ] Store session passwords in the OS keychain
-
 ## Tech stack
 
 | Module        | Choice                                                            |
